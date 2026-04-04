@@ -1516,6 +1516,12 @@ WL_TEST(test_bulk_memory_ops) {
         emit_section(&mod, 11, sec.buf, sec.len);
     }
 
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 12, sec.buf, sec.len);
+    }
+
     /* Code */
     {
         wasm_builder_t sec = { 0 };
@@ -1948,6 +1954,12 @@ WL_TEST(test_bulk_memory_oob_traps) {
         emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
         emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
         emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 12, sec.buf, sec.len);
     }
 
     {
@@ -3115,6 +3127,13 @@ WL_TEST(test_prefixed_opcode_in_dead_branch) {
     }
     {
         wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+    {
+        wasm_builder_t sec = { 0 };
         wasm_builder_t body = { 0 };
 
         emit_leb128_u32(&sec, 1);
@@ -3934,6 +3953,499 @@ WL_TEST(test_trunc_sat_ops) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_feature_gate_sign_extension_disabled) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 255);
+        emit(&body, 0xC0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    wasm_disable_feature(&rt, WASM_FEATURE_SIGN_EXT);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled sign-extension feature to reject module load");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_duplicate_export_names) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'd');
+        emit(&sec, 'u');
+        emit(&sec, 'p');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'd');
+        emit(&sec, 'u');
+        emit(&sec, 'p');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected duplicate exports to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "duplicate export") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_invalid_start_signature) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 8, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x1A);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected invalid start signature to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "start function") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_stack_type_errors) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected stack type error to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "stack underflow") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_requires_data_count_for_memory_init) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 1 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_bytes(&sec, data_bytes, 1);
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFC);
+        emit_leb128_u32(&body, 0x08);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected missing data count section to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "data count section") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_code_body_count_mismatch) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected code/body count mismatch to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "code section count") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_data_count_mismatch) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 12, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 0xAA };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, 1);
+        emit_bytes(&sec, data_bytes, 1);
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected data count mismatch to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "data count section declares") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_call_indirect_on_externref_table) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x6F);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x11);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected call_indirect on externref table to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "funcref table") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_invalid_load_alignment) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x28);
+        emit_leb128_u32(&body, 3);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected invalid load alignment to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "alignment") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
 WL_TEST(test_bad_magic) {
@@ -4023,7 +4535,6 @@ WL_TEST(test_set_immutable_global_rejected) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
-    wasm_error_t err;
 
     emit_header(&mod);
 
@@ -4082,16 +4593,9 @@ WL_TEST(test_set_immutable_global_rejected) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
-    if (m == NULL) {
-        wasm_destroy(&rt);
-        return;
-    }
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected immutable global write rejection during load");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "immutable") != NULL, "%s", rt.error_msg);
 
-    err = wasm_call(m, "f", NULL, 0, NULL, 0);
-    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected immutable global write rejection");
-
-    wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
@@ -4128,6 +4632,15 @@ int main(void) {
         { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
+        { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
+        { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },
+        { "validation: invalid start signature is rejected at load", test_validation_rejects_invalid_start_signature },
+        { "validation: stack type errors are rejected at load", test_validation_rejects_stack_type_errors },
+        { "validation: memory.init requires a data count section", test_validation_requires_data_count_for_memory_init },
+        { "validation: code body count must match declared functions", test_validation_rejects_code_body_count_mismatch },
+        { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
+        { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
+        { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
