@@ -1077,7 +1077,7 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
     blocktype->param_arity = 0;
     blocktype->result_arity = 0;
 
-    if (lead =wasm__exec= 0x40) {
+    if (lead == 0x40) {
         r->ptr++;
         return WASM_OK;
     }

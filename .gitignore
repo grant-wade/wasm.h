@@ -1,2 +1,4 @@
 wl_test
 wasm_test
+wasm/build/
+wasm/out/

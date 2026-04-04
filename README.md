@@ -152,13 +152,23 @@ That builds and runs:
 
 The current `Makefile` enables `WL_ENABLE_PLATFORM=1` for the repo test build.
 
+There is also an `emcc`-driven harness under [wasm/README.md](wasm/README.md) for compiling fixture C files into real `.wasm` blobs and running them through `wasm.h`.
+
+Useful targets:
+
+- `make wasm-emcc-build` — build the native harness runner and compile the fixture `.wasm` files
+- `make wasm-emcc-run` — build and run the `emcc` fixture harness, but do not fail the target if cases fail inside `wasm.h`
+- `make wasm-emcc-run-strict` — same harness, but fail if any fixture fails to load, execute, or match its expected result
+
 ## Repository Layout
 
 - `wl.h` — foundation library for future projects in this repo
 - `wl_test.c` — test suite for `wl.h`
 - `wasm.h` — standalone WebAssembly runtime header
 - `wasm_test.c` — test suite for `wasm.h`
+- `wasm/` — `emcc` fixture harness for testing `wasm.h` against toolchain-produced modules
 - `PLAN.md` — design notes and longer-form planning for `wl.h`
+
 
 ## Goals
 
