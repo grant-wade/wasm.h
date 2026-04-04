@@ -131,6 +131,15 @@ static void emit_header(wasm_builder_t* b) {
     emit(b, 0x00);
 }
 
+static void emit_single_tag_section(wasm_builder_t* b, uint32_t type_index) {
+    wasm_builder_t sec = { 0 };
+
+    emit_leb128_u32(&sec, 1);
+    emit(&sec, 0x00);
+    emit_leb128_u32(&sec, type_index);
+    emit_section(b, 13, sec.buf, sec.len);
+}
+
 /* ── Test 1: add(a, b) -> a + b ─────────────────────────────────── */
 
 WL_TEST(test_add) {
@@ -4435,6 +4444,424 @@ WL_TEST(test_tail_call_indirect) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_exception_try_catch_payload) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[1];
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    emit_single_tag_section(&mod, 1);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 6);
+        emit(&sec, 'h');
+        emit(&sec, 'a');
+        emit(&sec, 'n');
+        emit(&sec, 'd');
+        emit(&sec, 'l');
+        emit(&sec, 'e');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x45);
+        emit(&body, 0x04);
+        emit(&body, 0x7F);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 42);
+        emit(&body, 0x05);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x08);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x07);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 5);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(0);
+    err = wasm_call(m, "handle", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
+
+    args[0] = wasm_i32(9);
+    err = wasm_call(m, "handle", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 14);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_exception_catch_all) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    emit_single_tag_section(&mod, 1);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 'c');
+        emit(&sec, 'a');
+        emit(&sec, 'l');
+        emit(&sec, 'l');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x08);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x19);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 55);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "call", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 55);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_exception_rethrow) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    emit_single_tag_section(&mod, 1);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 7);
+        emit(&sec, 'r');
+        emit(&sec, 'e');
+        emit(&sec, 't');
+        emit(&sec, 'h');
+        emit(&sec, 'r');
+        emit(&sec, 'o');
+        emit(&sec, 'w');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 9);
+        emit(&body, 0x08);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x07);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x09);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x07);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 100);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "rethrow", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 109);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_exception_delegate) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    emit_single_tag_section(&mod, 1);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 8);
+        emit(&sec, 'd');
+        emit(&sec, 'e');
+        emit(&sec, 'l');
+        emit(&sec, 'e');
+        emit(&sec, 'g');
+        emit(&sec, 'a');
+        emit(&sec, 't');
+        emit(&sec, 'e');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x06);
+        emit(&body, 0x7F);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0x08);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x18);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x07);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "delegate", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 8);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_feature_gate_exceptions_disabled) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    emit_single_tag_section(&mod, 0);
+
+    wasm_init(&rt);
+    wasm_disable_feature(&rt, WASM_FEATURE_EXCEPTIONS);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled exceptions feature to reject module load");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_feature_gate_tail_call_disabled) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -5152,6 +5579,11 @@ int main(void) {
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
+        { "exceptions: typed catch receives payload values", test_exception_try_catch_payload },
+        { "exceptions: catch_all handles unmatched tags", test_exception_catch_all },
+        { "exceptions: rethrow forwards to outer catches", test_exception_rethrow },
+        { "exceptions: delegate forwards to outer handlers", test_exception_delegate },
+        { "feature gate: disabled exceptions reject module load", test_feature_gate_exceptions_disabled },
         { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },

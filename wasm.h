@@ -32,9 +32,9 @@
  *   - Linear memories with bounds checks, indexed memory access, and memory.grow
  *   - Tables, call_indirect, and reference-type table operations
  *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
- *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, and tail calls
+ *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, tail calls, and exceptions
  *   - Load-time validation plus runtime-configurable feature gating
- *   - No SIMD, threads, GC, or exceptions
+ *   - No SIMD, threads, or GC
  */
 
 #ifndef WASM_H
@@ -243,7 +243,8 @@ typedef enum wasm_export_kind_t {
     WASM_EXPORT_FUNC = 0x00,
     WASM_EXPORT_TABLE = 0x01,
     WASM_EXPORT_MEM = 0x02,
-    WASM_EXPORT_GLOBAL = 0x03
+    WASM_EXPORT_GLOBAL = 0x03,
+    WASM_EXPORT_TAG = 0x04
 } wasm_export_kind_t;
 
 typedef struct wasm_export_t {
@@ -298,6 +299,17 @@ typedef struct wasm_memory_t {
     uint32_t max_pages;
 } wasm_memory_t;
 
+typedef struct wasm_tag_t {
+    uint32_t type_idx;
+} wasm_tag_t;
+
+typedef struct wasm__exception_state_t {
+    uint32_t tag_index;
+    wasm_value_t* values;
+    uint32_t num_values;
+    int is_pending;
+} wasm__exception_state_t;
+
 /* ── Module ───────────────────────────────────────────────────────── */
 struct wasm_module_t {
     wasm_runtime_t* rt;
@@ -309,6 +321,8 @@ struct wasm_module_t {
     uint32_t num_exports;
     wasm_global_t* globals;
     uint32_t num_globals;
+    wasm_tag_t* tags;
+    uint32_t num_tags;
     wasm_table_t* tables;
     uint32_t num_tables;
     wasm_memory_t* memories;
@@ -348,6 +362,7 @@ struct wasm_runtime_t {
     uint32_t enabled_features;
     wasm_error_t last_error;
     char error_msg[256];
+    wasm__exception_state_t pending_exception;
 };
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -558,7 +573,7 @@ static void wasm__store_le64(void* p, uint64_t v) {
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL)
+    WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -894,6 +909,47 @@ static wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count
     mod->globals = globals;
     memset(mod->globals + base, 0, count * sizeof(wasm_global_t));
     mod->num_globals = base + count;
+    return WASM_OK;
+}
+
+static void wasm__free_exception_state(wasm__exception_state_t* ex) {
+    free(ex->values);
+    memset(ex, 0, sizeof(*ex));
+}
+
+static wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
+                                              uint32_t tag_index,
+                                              const wasm_value_t* values,
+                                              uint32_t count) {
+    wasm_value_t* copy = NULL;
+
+    wasm__free_exception_state(ex);
+    if (count > 0) {
+        copy = (wasm_value_t*)malloc(count * sizeof(wasm_value_t));
+        if (!copy) return WASM_ERR_OOM;
+        memcpy(copy, values, count * sizeof(wasm_value_t));
+    }
+
+    ex->tag_index = tag_index;
+    ex->values = copy;
+    ex->num_values = count;
+    ex->is_pending = 1;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_tags;
+    wasm_tag_t* tags;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    tags = (wasm_tag_t*)realloc(mod->tags, (base + count) * sizeof(wasm_tag_t));
+    if (!tags) return WASM_ERR_OOM;
+
+    mod->tags = tags;
+    memset(mod->tags + base, 0, count * sizeof(wasm_tag_t));
+    mod->num_tags = base + count;
     return WASM_OK;
 }
 
@@ -1475,6 +1531,16 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             mod->globals[gi].import_value = gimp->value;
             mod->globals[gi].import_value->type = type;
             mod->num_global_imports++;
+        } else if (kind == 0x04) {
+            uint32_t tag_index;
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
+
+            if (err != WASM_OK) return err;
+            if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+            if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
+            mod->tags[tag_index].type_idx = wasm__read_leb128_u32(r);
+        } else {
+            return WASM_ERR_MALFORMED;
         }
     }
     return WASM_OK;
@@ -1561,6 +1627,22 @@ static wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader
         if (value.type != mod->globals[global_index].type) return WASM_ERR_TYPE_MISMATCH;
         wasm__global_set_value(&mod->globals[global_index], value);
     }
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t* r) {
+    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
+
+    if (err != WASM_OK) return err;
+    err = wasm__append_tags(mod, count, &base);
+    if (err != WASM_OK) return err;
+
+    for (i = 0; i < count; i++) {
+        if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+        mod->tags[base + i].type_idx = wasm__read_leb128_u32(r);
+    }
+
     return WASM_OK;
 }
 
@@ -1839,6 +1921,25 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
         }
     }
 
+    for (i = 0; i < mod->num_tags; i++) {
+        wasm_functype_t* tag_type;
+
+        if (mod->tags[i].type_idx >= mod->num_types) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "tag %u type index %u out of range (have %u types)",
+                                              (unsigned)i,
+                                              (unsigned)mod->tags[i].type_idx,
+                                              (unsigned)mod->num_types);
+        }
+
+        tag_type = &mod->types[mod->tags[i].type_idx];
+        if (tag_type->num_results != 0) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "tag %u type must not declare results",
+                                              (unsigned)i);
+        }
+    }
+
     for (i = 0; i < mod->num_tables; i++) {
         wasm_table_t* table = &mod->tables[i];
 
@@ -1889,6 +1990,9 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                 break;
             case WASM_EXPORT_GLOBAL:
                 limit = mod->num_globals;
+                break;
+            case WASM_EXPORT_TAG:
+                limit = mod->num_tags;
                 break;
             default:
                 return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
@@ -2015,6 +2119,9 @@ typedef struct wasm__val_frame_t {
     wasm_valtype_t inline_result;
     int unreachable;
     int seen_else;
+    int in_catch;
+    int seen_catch_all;
+    int seen_delegate;
 } wasm__val_frame_t;
 
 typedef struct wasm__validator_t {
@@ -2186,6 +2293,44 @@ static wasm_error_t wasm__validator_check_tail_results(wasm__validator_t* v,
                                      "tail call results must match the enclosing function results");
     }
     return WASM_OK;
+}
+
+static wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
+                                                   const uint8_t* at,
+                                                   wasm__val_frame_t* frame) {
+    wasm_error_t err;
+
+    if (!frame->unreachable) {
+        if (v->sp != frame->height + frame->num_results)
+            return wasm__validator_error(v, at, "try arm leaves wrong stack height");
+        err = wasm__validator_check_types(v, at, frame->result_types, frame->num_results);
+        if (err != WASM_OK) return err;
+    }
+
+    v->sp = frame->height;
+    frame->unreachable = 0;
+    frame->in_catch = 1;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__validator_find_rethrow_frame(wasm__validator_t* v,
+                                                       uint32_t depth,
+                                                       wasm__val_frame_t** out_frame) {
+    uint32_t i;
+
+    for (i = v->fp; i > 0; i--) {
+        wasm__val_frame_t* frame = &v->frames[i - 1];
+
+        if (frame->opcode == 0x06 && frame->in_catch) {
+            if (depth == 0) {
+                *out_frame = frame;
+                return WASM_OK;
+            }
+            depth--;
+        }
+    }
+
+    return WASM_ERR_MALFORMED;
 }
 
 static wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
@@ -2508,6 +2653,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     v.frames[0].num_params = 0;
     v.frames[0].result_types = ft->results;
     v.frames[0].num_results = ft->num_results;
+    v.frames[0].in_catch = 0;
+    v.frames[0].seen_catch_all = 0;
+    v.frames[0].seen_delegate = 0;
     v.fp = 1;
 
     while (v.r.ptr < v.r.end) {
@@ -2543,6 +2691,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].num_results = blocktype.result_arity;
                 v.frames[v.fp].unreachable = 0;
                 v.frames[v.fp].seen_else = 0;
+                v.frames[v.fp].in_catch = 0;
+                v.frames[v.fp].seen_catch_all = 0;
+                v.frames[v.fp].seen_delegate = 0;
                 v.fp++;
                 break;
             }
@@ -2569,6 +2720,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].num_results = blocktype.result_arity;
                 v.frames[v.fp].unreachable = 0;
                 v.frames[v.fp].seen_else = 0;
+                v.frames[v.fp].in_catch = 0;
+                v.frames[v.fp].seen_catch_all = 0;
+                v.frames[v.fp].seen_delegate = 0;
                 v.fp++;
                 break;
             }
@@ -2591,6 +2745,87 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 frame->unreachable = 0;
                 frame->seen_else = 1;
+                break;
+            }
+            case 0x06: {
+                wasm__blocktype_t blocktype;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                err = wasm__read_blocktype(mod, &v.r, &blocktype);
+                if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
+                err = wasm__validator_check_types(&v, at, blocktype.params, blocktype.param_arity);
+                if (err != WASM_OK) return err;
+                if (v.fp >= WASM__MAX_LABELS)
+                    return wasm__validator_error(&v, at, "control stack overflow");
+                v.frames[v.fp].opcode = op;
+                v.frames[v.fp].height = v.sp - blocktype.param_arity;
+                v.frames[v.fp].param_types = blocktype.params;
+                v.frames[v.fp].num_params = blocktype.param_arity;
+                v.frames[v.fp].inline_result = blocktype.inline_result;
+                v.frames[v.fp].result_types =
+                    (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
+                        ? &v.frames[v.fp].inline_result
+                        : blocktype.results;
+                v.frames[v.fp].num_results = blocktype.result_arity;
+                v.frames[v.fp].unreachable = 0;
+                v.frames[v.fp].seen_else = 0;
+                v.frames[v.fp].in_catch = 0;
+                v.frames[v.fp].seen_catch_all = 0;
+                v.frames[v.fp].seen_delegate = 0;
+                v.fp++;
+                break;
+            }
+            case 0x07: {
+                uint32_t tag_index = wasm__read_leb128_u32(&v.r);
+                wasm__val_frame_t* frame;
+                wasm_functype_t* tag_type;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                if (v.fp <= 1)
+                    return wasm__validator_error(&v, at, "catch without matching try");
+                frame = wasm__validator_frame(&v);
+                if (frame->opcode != 0x06 || frame->seen_catch_all || frame->seen_delegate)
+                    return wasm__validator_error(&v, at, "unexpected catch");
+                if (tag_index >= mod->num_tags)
+                    return wasm__validator_error(&v, at, "tag %u out of range", (unsigned)tag_index);
+                tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                err = wasm__validator_finish_try_arm(&v, at, frame);
+                if (err != WASM_OK) return err;
+                err = wasm__validator_push_many(&v, at, tag_type->params, tag_type->num_params);
+                if (err != WASM_OK) return err;
+                break;
+            }
+            case 0x08: {
+                uint32_t tag_index = wasm__read_leb128_u32(&v.r);
+                wasm_functype_t* tag_type;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                if (tag_index >= mod->num_tags)
+                    return wasm__validator_error(&v, at, "tag %u out of range", (unsigned)tag_index);
+                tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                err = wasm__validator_check_types(&v, at, tag_type->params, tag_type->num_params);
+                if (err != WASM_OK) return err;
+                v.sp -= tag_type->num_params;
+                wasm__validator_mark_unreachable(&v);
+                break;
+            }
+            case 0x09: {
+                uint32_t depth = wasm__read_leb128_u32(&v.r);
+                wasm__val_frame_t* target_frame;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                err = wasm__validator_find_rethrow_frame(&v, depth, &target_frame);
+                if (err != WASM_OK) {
+                    return wasm__validator_error(&v, at,
+                                                 "rethrow depth %u does not reference an active catch",
+                                                 (unsigned)depth);
+                }
+                (void)target_frame;
+                wasm__validator_mark_unreachable(&v);
                 break;
             }
             case 0x0B: {
@@ -2761,10 +2996,44 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm__validator_mark_unreachable(&v);
                 break;
             }
+            case 0x18: {
+                uint32_t depth = wasm__read_leb128_u32(&v.r);
+                wasm__val_frame_t* frame;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                if (v.fp <= 1)
+                    return wasm__validator_error(&v, at, "delegate without matching try");
+                frame = wasm__validator_frame(&v);
+                if (frame->opcode != 0x06 || frame->seen_delegate || frame->seen_catch_all)
+                    return wasm__validator_error(&v, at, "unexpected delegate");
+                if (depth >= v.fp - 1)
+                    return wasm__validator_error(&v, at, "delegate depth %u out of range", (unsigned)depth);
+                err = wasm__validator_finish_try_arm(&v, at, frame);
+                if (err != WASM_OK) return err;
+                frame->seen_delegate = 1;
+                wasm__validator_mark_unreachable(&v);
+                break;
+            }
             case 0x1A: {
                 wasm_valtype_t ignored;
                 err = wasm__validator_pop_any(&v, at, &ignored);
                 if (err != WASM_OK) return err;
+                break;
+            }
+            case 0x19: {
+                wasm__val_frame_t* frame;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                if (v.fp <= 1)
+                    return wasm__validator_error(&v, at, "catch_all without matching try");
+                frame = wasm__validator_frame(&v);
+                if (frame->opcode != 0x06 || frame->seen_catch_all || frame->seen_delegate)
+                    return wasm__validator_error(&v, at, "unexpected catch_all");
+                err = wasm__validator_finish_try_arm(&v, at, frame);
+                if (err != WASM_OK) return err;
+                frame->seen_catch_all = 1;
                 break;
             }
             case 0x1B: {
@@ -3285,6 +3554,9 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
             case 5:
                 err = wasm__decode_memory_section(mod, &sr);
                 break;
+            case 13:
+                err = wasm__decode_tag_section(mod, &sr);
+                break;
             case 6:
                 err = wasm__decode_global_section(mod, &sr);
                 break;
@@ -3305,9 +3577,6 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
                 break;
             case 12:
                 err = wasm__decode_data_count_section(mod, &sr);
-                break;
-            case 13:
-                err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
                 break;
             default:
                 WASM__SET_ERR(rt, WASM_ERR_INVALID_SECTION, "unknown section id %u", (unsigned)sid);
@@ -3389,6 +3658,7 @@ void wasm_free_module(wasm_module_t* mod) {
     free(mod->funcs);
     free(mod->exports);
     free(mod->globals);
+    free(mod->tags);
     for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(&mod->data_segments[i]);
     free(mod->data_segments);
     for (i = 0; i < mod->num_elem_segments; i++) wasm__free_elem_segment(&mod->elem_segments[i]);
@@ -3404,11 +3674,32 @@ void wasm_free_module(wasm_module_t* mod) {
 
 typedef struct wasm__label_t {
     const uint8_t* continuation;
+    const uint8_t* handler_ptr;
     uint32_t sp_base;
     uint32_t param_arity;
     uint32_t arity;
+    uint32_t caught_tag;
+    uint32_t caught_count;
+    wasm_value_t* caught_values;
+    uint32_t delegate_depth;
     uint8_t opcode;
+    uint8_t active_catch;
 } wasm__label_t;
+
+typedef struct wasm__try_clause_t {
+    uint8_t opcode;
+    uint32_t immediate;
+    const uint8_t* body_start;
+    const uint8_t* next_clause;
+} wasm__try_clause_t;
+
+static void wasm__clear_label(wasm__label_t* label) {
+    free(label->caught_values);
+    label->caught_values = NULL;
+    label->caught_count = 0;
+    label->active_catch = 0;
+    label->delegate_depth = UINT32_MAX;
+}
 
 static void wasm__skip_blocktype(wasm__reader_t* r) {
     uint8_t lead = *r->ptr;
@@ -3505,11 +3796,16 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x02:
         case 0x03:
         case 0x04:
+        case 0x06:
             wasm__skip_blocktype(r);
             break;
+        case 0x07:
+        case 0x08:
+        case 0x09:
         case 0x0C:
         case 0x0D:
         case 0x10:
+        case 0x18:
         case 0x20:
         case 0x21:
         case 0x22:
@@ -3578,6 +3874,7 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0xFC:
             wasm__skip_prefixed_immediates(r);
             break;
+        case 0x19:
         default:
             break;
     }
@@ -3591,7 +3888,7 @@ static const uint8_t* wasm__find_block_end(const uint8_t* start, const uint8_t* 
     if (else_ptr) *else_ptr = NULL;
     while (nest > 0 && scan.ptr < scan.end) {
         uint8_t b = wasm__read_u8(&scan);
-        if (b == 0x02 || b == 0x03 || b == 0x04) {
+        if (b == 0x02 || b == 0x03 || b == 0x04 || b == 0x06) {
             nest++;
             wasm__skip_immediates(b, &scan);
         } else if (b == 0x05 && nest == 1) {
@@ -3605,13 +3902,216 @@ static const uint8_t* wasm__find_block_end(const uint8_t* start, const uint8_t* 
     return scan.ptr;
 }
 
+static const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end) {
+    wasm__reader_t scan;
+    int nest = 1;
+
+    scan.ptr = start;
+    scan.end = code_end;
+    while (scan.ptr < scan.end) {
+        const uint8_t* at = scan.ptr;
+        uint8_t b = wasm__read_u8(&scan);
+
+        if (b == 0x02 || b == 0x03 || b == 0x04 || b == 0x06) {
+            nest++;
+            wasm__skip_immediates(b, &scan);
+        } else if ((b == 0x07 || b == 0x18 || b == 0x19) && nest == 1) {
+            return at;
+        } else if (b == 0x0B) {
+            nest--;
+            if (nest == 0) return at;
+        } else {
+            wasm__skip_immediates(b, &scan);
+        }
+    }
+
+    return code_end;
+}
+
+static const uint8_t* wasm__find_try_first_clause(const uint8_t* start, const uint8_t* code_end) {
+    const uint8_t* at = wasm__find_try_clause_boundary(start, code_end);
+
+    if (at >= code_end) return NULL;
+    if (*at == 0x07 || *at == 0x18 || *at == 0x19) return at;
+    return NULL;
+}
+
+static wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,
+                                          const uint8_t* code_end,
+                                          wasm__try_clause_t* out_clause) {
+    wasm__reader_t r;
+
+    if (!clause_ptr || clause_ptr >= code_end) return WASM_ERR_MALFORMED;
+
+    r.ptr = clause_ptr;
+    r.end = code_end;
+    out_clause->opcode = wasm__read_u8(&r);
+    out_clause->immediate = UINT32_MAX;
+
+    switch (out_clause->opcode) {
+        case 0x07:
+        case 0x18:
+            out_clause->immediate = wasm__read_leb128_u32(&r);
+            break;
+        case 0x19:
+            break;
+        default:
+            return WASM_ERR_MALFORMED;
+    }
+
+    out_clause->body_start = r.ptr;
+    out_clause->next_clause = wasm__find_try_clause_boundary(out_clause->body_start, code_end);
+    return WASM_OK;
+}
+
 /* ── Branch helper ────────────────────────────────────────────────── */
 
-static wasm_error_t wasm__do_branch(wasm_runtime_t* rt, wasm__label_t* target,
-                                    wasm__reader_t* r, uint32_t* label_sp, uint32_t depth_l) {
+static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
+                                                  const wasm__exception_state_t* ex) {
+    wasm_value_t* copy = NULL;
+
+    wasm__clear_label(label);
+    if (ex->num_values > 0) {
+        copy = (wasm_value_t*)malloc(ex->num_values * sizeof(wasm_value_t));
+        if (!copy) return WASM_ERR_OOM;
+        memcpy(copy, ex->values, ex->num_values * sizeof(wasm_value_t));
+    }
+
+    label->caught_tag = ex->tag_index;
+    label->caught_values = copy;
+    label->caught_count = ex->num_values;
+    label->active_catch = 1;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
+    WASM__SET_ERR(rt, WASM_ERR_TRAP, "uncaught exception tag %u", (unsigned)rt->pending_exception.tag_index);
+    wasm__free_exception_state(&rt->pending_exception);
+    return WASM_ERR_TRAP;
+}
+
+static int wasm__find_rethrow_label(const wasm__label_t* labels,
+                                    uint32_t lsp,
+                                    uint32_t depth,
+                                    uint32_t* out_index) {
+    uint32_t i;
+
+    for (i = lsp; i > 0; i--) {
+        const wasm__label_t* label = &labels[i - 1];
+
+        if (label->opcode == 0x06 && label->active_catch) {
+            if (depth == 0) {
+                *out_index = i - 1;
+                return 1;
+            }
+            depth--;
+        }
+    }
+
+    return 0;
+}
+
+static wasm_error_t wasm__handle_exception(wasm_module_t* mod,
+                                           wasm__label_t* labels,
+                                           uint32_t* label_sp,
+                                           wasm__reader_t* r,
+                                           uint32_t sp_base) {
+    wasm_runtime_t* rt = mod->rt;
+    uint32_t idx = *label_sp;
+
+    while (idx > 0) {
+        wasm__label_t* label = &labels[idx - 1];
+        int delegated = 0;
+
+        if (label->opcode == 0x06 && label->handler_ptr) {
+            const uint8_t* clause_ptr = label->handler_ptr;
+
+            while (clause_ptr && clause_ptr < label->continuation) {
+                wasm__try_clause_t clause;
+
+                if (wasm__read_try_clause(clause_ptr, label->continuation, &clause) != WASM_OK)
+                    return WASM_ERR_MALFORMED;
+
+                if (clause.opcode == 0x07 && clause.immediate == rt->pending_exception.tag_index) {
+                    wasm_error_t err;
+                    uint32_t i;
+
+                    while (*label_sp > idx) {
+                        wasm__clear_label(&labels[*label_sp - 1]);
+                        rt->sp = labels[*label_sp - 1].sp_base;
+                        (*label_sp)--;
+                    }
+                    rt->sp = label->sp_base;
+                    err = wasm__copy_exception_to_label(label, &rt->pending_exception);
+                    if (err != WASM_OK) return err;
+                    if (rt->sp + label->caught_count > WASM_MAX_STACK) return WASM_ERR_STACK_OVERFLOW;
+                    for (i = 0; i < label->caught_count; i++) rt->stack[rt->sp++] = label->caught_values[i];
+                    wasm__free_exception_state(&rt->pending_exception);
+                    *label_sp = idx;
+                    r->ptr = clause.body_start;
+                    return WASM_OK;
+                }
+
+                if (clause.opcode == 0x19) {
+                    wasm_error_t err;
+
+                    while (*label_sp > idx) {
+                        wasm__clear_label(&labels[*label_sp - 1]);
+                        rt->sp = labels[*label_sp - 1].sp_base;
+                        (*label_sp)--;
+                    }
+                    rt->sp = label->sp_base;
+                    err = wasm__copy_exception_to_label(label, &rt->pending_exception);
+                    if (err != WASM_OK) return err;
+                    wasm__free_exception_state(&rt->pending_exception);
+                    *label_sp = idx;
+                    r->ptr = clause.body_start;
+                    return WASM_OK;
+                }
+
+                if (clause.opcode == 0x18) {
+                    uint32_t extra = clause.immediate;
+
+                    wasm__clear_label(label);
+                    rt->sp = label->sp_base;
+                    idx--;
+                    while (extra > 0 && idx > 0) {
+                        wasm__clear_label(&labels[idx - 1]);
+                        rt->sp = labels[idx - 1].sp_base;
+                        idx--;
+                        extra--;
+                    }
+                    delegated = 1;
+                    break;
+                }
+
+                if (clause.next_clause >= label->continuation || *clause.next_clause == 0x0B) break;
+                clause_ptr = clause.next_clause;
+            }
+        }
+
+        if (delegated) continue;
+
+        wasm__clear_label(label);
+        rt->sp = label->sp_base;
+        idx--;
+    }
+
+    *label_sp = 0;
+    rt->sp = sp_base;
+    return (wasm_error_t)-1;
+}
+
+static wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
+                                    wasm__label_t* labels,
+                                    wasm__label_t* target,
+                                    wasm__reader_t* r,
+                                    uint32_t* label_sp,
+                                    uint32_t depth_l) {
     wasm_value_t branch_values_buf[8];
     wasm_value_t* branch_values = branch_values_buf;
     uint32_t branch_arity = (target->opcode == 0x03) ? target->param_arity : target->arity;
+    uint32_t pop_count = (target->opcode == 0x03) ? depth_l : depth_l + 1;
     uint32_t i;
 
     if (branch_arity > 8) {
@@ -3625,10 +4125,8 @@ static wasm_error_t wasm__do_branch(wasm_runtime_t* rt, wasm__label_t* target,
     r->ptr = target->continuation;
 
     if (branch_values != branch_values_buf) free(branch_values);
-    if (target->opcode == 0x03)
-        *label_sp -= depth_l;
-    else
-        *label_sp -= depth_l + 1;
+    for (i = 0; i < pop_count; i++) wasm__clear_label(&labels[*label_sp - 1 - i]);
+    *label_sp -= pop_count;
 
     return WASM_OK;
 }
@@ -3652,6 +4150,8 @@ static wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* l
 }
 
 /* ── Interpreter ──────────────────────────────────────────────────── */
+
+#define WASM__ERR_EXCEPTION ((wasm_error_t)-1)
 
 #define WASM__PUSH(rt, val)                \
     do {                                   \
@@ -3736,10 +4236,16 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
 
         /* Implicit function-level label */
         labels[lsp].continuation = r.end;
+        labels[lsp].handler_ptr = NULL;
         labels[lsp].sp_base = sp_base;
         labels[lsp].param_arity = 0;
         labels[lsp].arity = ft->num_results;
+        labels[lsp].caught_tag = UINT32_MAX;
+        labels[lsp].caught_count = 0;
+        labels[lsp].caught_values = NULL;
+        labels[lsp].delegate_depth = UINT32_MAX;
         labels[lsp].opcode = 0x02;
+        labels[lsp].active_catch = 0;
         lsp++;
 
         while (r.ptr < r.end) {
@@ -3759,10 +4265,16 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                         labels[lsp].continuation = be;
+                        labels[lsp].handler_ptr = NULL;
                         labels[lsp].sp_base = rt->sp - blocktype.param_arity;
                         labels[lsp].param_arity = blocktype.param_arity;
                         labels[lsp].arity = blocktype.result_arity;
+                        labels[lsp].caught_tag = UINT32_MAX;
+                        labels[lsp].caught_count = 0;
+                        labels[lsp].caught_values = NULL;
+                        labels[lsp].delegate_depth = UINT32_MAX;
                         labels[lsp].opcode = 0x02;
+                        labels[lsp].active_catch = 0;
                         lsp++;
                     }
                     break;
@@ -3777,10 +4289,16 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     wasm__find_block_end(r.ptr, r.end, NULL); /* skip past to register, but don't move r */
                     if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                     labels[lsp].continuation = ls;
+                    labels[lsp].handler_ptr = NULL;
                     labels[lsp].sp_base = rt->sp - blocktype.param_arity;
                     labels[lsp].param_arity = blocktype.param_arity;
                     labels[lsp].arity = blocktype.result_arity;
+                    labels[lsp].caught_tag = UINT32_MAX;
+                    labels[lsp].caught_count = 0;
+                    labels[lsp].caught_values = NULL;
+                    labels[lsp].delegate_depth = UINT32_MAX;
                     labels[lsp].opcode = 0x03;
+                    labels[lsp].active_catch = 0;
                     lsp++;
                     break;
                 }
@@ -3802,26 +4320,115 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         }
                         if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                         labels[lsp].continuation = be;
+                        labels[lsp].handler_ptr = NULL;
                         labels[lsp].sp_base = rt->sp - blocktype.param_arity;
                         labels[lsp].param_arity = blocktype.param_arity;
                         labels[lsp].arity = blocktype.result_arity;
+                        labels[lsp].caught_tag = UINT32_MAX;
+                        labels[lsp].caught_count = 0;
+                        labels[lsp].caught_values = NULL;
+                        labels[lsp].delegate_depth = UINT32_MAX;
                         labels[lsp].opcode = 0x04;
+                        labels[lsp].active_catch = 0;
                         lsp++;
                     }
+                    break;
+                }
+                case 0x06: { /* try */
+                    wasm__blocktype_t blocktype;
+                    const uint8_t* be;
+                    const uint8_t* first_clause;
+
+                    err = wasm__read_blocktype(mod, &r, &blocktype);
+                    if (err != WASM_OK) goto cleanup;
+                    be = wasm__find_block_end(r.ptr, r.end, NULL);
+                    first_clause = wasm__find_try_first_clause(r.ptr, be);
+                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                    if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+                    labels[lsp].continuation = be;
+                    labels[lsp].handler_ptr = first_clause;
+                    labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                    labels[lsp].param_arity = blocktype.param_arity;
+                    labels[lsp].arity = blocktype.result_arity;
+                    labels[lsp].caught_tag = UINT32_MAX;
+                    labels[lsp].caught_count = 0;
+                    labels[lsp].caught_values = NULL;
+                    labels[lsp].delegate_depth = UINT32_MAX;
+                    labels[lsp].opcode = 0x06;
+                    labels[lsp].active_catch = 0;
+                    lsp++;
                     break;
                 }
                 case 0x05:
                     if (lsp > 0) {
                         err = wasm__leave_label(rt, &labels[lsp - 1]);
                         if (err != WASM_OK) goto cleanup;
+                        wasm__clear_label(&labels[lsp - 1]);
                         r.ptr = labels[lsp - 1].continuation;
                         lsp--;
                     }
                     break;
+                case 0x07:
+                case 0x18:
+                case 0x19:
+                    if (lsp > 0 && labels[lsp - 1].opcode == 0x06) {
+                        err = wasm__leave_label(rt, &labels[lsp - 1]);
+                        if (err != WASM_OK) goto cleanup;
+                        wasm__clear_label(&labels[lsp - 1]);
+                        r.ptr = labels[lsp - 1].continuation;
+                        lsp--;
+                    } else {
+                        err = WASM_ERR_MALFORMED;
+                        goto cleanup;
+                    }
+                    break;
+                case 0x08: { /* throw */
+                    uint32_t tag_index = wasm__read_leb128_u32(&r);
+                    wasm_functype_t* tag_type;
+                    wasm_value_t payload_buf[8];
+                    wasm_value_t* payload = payload_buf;
+                    int j;
+
+                    if (tag_index >= mod->num_tags) WASM__TRAP(WASM_ERR_MALFORMED);
+                    tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                    if (tag_type->num_params > 8) {
+                        payload = (wasm_value_t*)malloc(tag_type->num_params * sizeof(wasm_value_t));
+                        if (!payload) WASM__TRAP(WASM_ERR_OOM);
+                    }
+                    for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = WASM__POP(rt);
+                    err = wasm__set_exception_state(&rt->pending_exception, tag_index, payload, tag_type->num_params);
+                    if (payload != payload_buf) free(payload);
+                    if (err != WASM_OK) goto cleanup;
+                    err = wasm__handle_exception(mod, labels, &lsp, &r, sp_base);
+                    if (err == WASM_OK) break;
+                    if (err == WASM__ERR_EXCEPTION) goto cleanup_frame;
+                    goto cleanup;
+                }
+                case 0x09: { /* rethrow */
+                    uint32_t depth_index = wasm__read_leb128_u32(&r);
+                    uint32_t target_index;
+
+                    if (!wasm__find_rethrow_label(labels, lsp, depth_index, &target_index)) WASM__TRAP(WASM_ERR_MALFORMED);
+                    err = wasm__set_exception_state(&rt->pending_exception,
+                                                    labels[target_index].caught_tag,
+                                                    labels[target_index].caught_values,
+                                                    labels[target_index].caught_count);
+                    if (err != WASM_OK) goto cleanup;
+                    while (lsp > target_index) {
+                        wasm__clear_label(&labels[lsp - 1]);
+                        rt->sp = labels[lsp - 1].sp_base;
+                        lsp--;
+                    }
+                    err = wasm__handle_exception(mod, labels, &lsp, &r, sp_base);
+                    if (err == WASM_OK) break;
+                    if (err == WASM__ERR_EXCEPTION) goto cleanup_frame;
+                    goto cleanup;
+                }
                 case 0x0B:
                     if (lsp > 0) {
                         err = wasm__leave_label(rt, &labels[lsp - 1]);
                         if (err != WASM_OK) goto cleanup;
+                        wasm__clear_label(&labels[lsp - 1]);
                         lsp--;
                     }
                     break;
@@ -3829,7 +4436,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 case 0x0C: {
                     uint32_t d = wasm__read_leb128_u32(&r);
                     if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                    err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                    err = wasm__do_branch(rt, labels, &labels[lsp - 1 - d], &r, &lsp, d);
                     if (err != WASM_OK) goto cleanup;
                     break;
                 }
@@ -3838,7 +4445,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     wasm_value_t c = WASM__POP(rt);
                     if (c.of.i32) {
                         if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                        err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                        err = wasm__do_branch(rt, labels, &labels[lsp - 1 - d], &r, &lsp, d);
                         if (err != WASM_OK) goto cleanup;
                     }
                     break;
@@ -3853,7 +4460,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     d = ((uint32_t)iv.of.i32 < nt) ? tgts[iv.of.i32] : tgts[nt];
                     free(tgts);
                     if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                    err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                    err = wasm__do_branch(rt, labels, &labels[lsp - 1 - d], &r, &lsp, d);
                     if (err != WASM_OK) goto cleanup;
                     break;
                 }
@@ -3889,6 +4496,10 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     if (call_args != call_args_buf) free(call_args);
                     if (err != WASM_OK) {
                         if (call_results != call_results_buf) free(call_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__handle_exception(mod, labels, &lsp, &r, sp_base);
+                            if (err == WASM_OK) break;
+                        }
                         goto cleanup;
                     }
                     for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
@@ -3932,6 +4543,10 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     if (call_args != call_args_buf) free(call_args);
                     if (err != WASM_OK) {
                         if (call_results != call_results_buf) free(call_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__handle_exception(mod, labels, &lsp, &r, sp_base);
+                            if (err == WASM_OK) break;
+                        }
                         goto cleanup;
                     }
                     for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
@@ -5331,6 +5946,10 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
         err = WASM_OK;
 
     cleanup_frame:
+        while (lsp > 0) {
+            wasm__clear_label(&labels[lsp - 1]);
+            lsp--;
+        }
         if (locals != locals_buf) free(locals);
         locals = NULL;
         if (restart) continue;
@@ -5338,6 +5957,10 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
     }
 
 cleanup:
+    while (lsp > 0) {
+        wasm__clear_label(&labels[lsp - 1]);
+        lsp--;
+    }
     if (current_args_owned && current_args) free(current_args);
     return err;
 }
@@ -5377,7 +6000,11 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
-    return wasm__exec(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results, 0);
+    {
+        wasm_error_t err = wasm__exec(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results, 0);
+        if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
+        return err;
+    }
 }
 
 /* ── Memory helpers ───────────────────────────────────────────────── */

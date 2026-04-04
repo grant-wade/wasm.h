@@ -76,6 +76,9 @@ static void print_exports(const wasm_module_t* mod) {
             case WASM_EXPORT_GLOBAL:
                 kind = "global";
                 break;
+            case WASM_EXPORT_TAG:
+                kind = "tag";
+                break;
         }
 
         printf("  %-24s kind=%s index=%u\n", exp->name, kind, (unsigned)exp->index);
