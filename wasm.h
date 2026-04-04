@@ -109,6 +109,8 @@ typedef enum wasm_error_t {
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
+    WASM_TYPE_EXTERNREF = 0x6F,
+    WASM_TYPE_FUNCREF = 0x70,
     WASM_TYPE_I32 = 0x7F,
     WASM_TYPE_I64 = 0x7E,
     WASM_TYPE_F32 = 0x7D,
@@ -166,8 +168,8 @@ typedef wasm_error_t (*wasm_host_func_t)(
 typedef struct wasm_functype_t {
     uint32_t num_params;
     uint32_t num_results;
-    wasm_valtype_t params[16];
-    wasm_valtype_t results[4];
+    wasm_valtype_t* params;
+    wasm_valtype_t* results;
 } wasm_functype_t;
 
 /* ── Import binding ───────────────────────────────────────────────── */
@@ -533,6 +535,61 @@ static void wasm__read_name(wasm__reader_t* r, char* buf, size_t bufsz) {
     r->ptr += len;
 }
 
+static int wasm__is_valtype_byte(uint8_t byte) {
+    switch (byte) {
+        case 0x6F:
+        case 0x70:
+        case 0x7C:
+        case 0x7D:
+        case 0x7E:
+        case 0x7F:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void wasm__free_functype(wasm_functype_t* ft) {
+    free(ft->params);
+    free(ft->results);
+    ft->params = NULL;
+    ft->results = NULL;
+    ft->num_params = 0;
+    ft->num_results = 0;
+}
+
+static wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src) {
+    memset(dst, 0, sizeof(*dst));
+    dst->num_params = src->num_params;
+    dst->num_results = src->num_results;
+
+    if (src->num_params > 0) {
+        dst->params = (wasm_valtype_t*)malloc(src->num_params * sizeof(wasm_valtype_t));
+        if (!dst->params) {
+            wasm__free_functype(dst);
+            return WASM_ERR_OOM;
+        }
+        if (src->params)
+            memcpy(dst->params, src->params, src->num_params * sizeof(wasm_valtype_t));
+        else
+            memset(dst->params, 0, src->num_params * sizeof(wasm_valtype_t));
+    }
+
+    if (src->num_results > 0) {
+        dst->results = (wasm_valtype_t*)malloc(src->num_results * sizeof(wasm_valtype_t));
+        if (!dst->results) {
+            wasm__free_functype(dst);
+            return WASM_ERR_OOM;
+        }
+        if (src->results)
+            memcpy(dst->results, src->results, src->num_results * sizeof(wasm_valtype_t));
+        else
+            memset(dst->results, 0, src->num_results * sizeof(wasm_valtype_t));
+    }
+
+    return WASM_OK;
+}
+
 /* ── Init / Destroy ───────────────────────────────────────────────── */
 
 wasm_error_t wasm_init(wasm_runtime_t* rt) {
@@ -541,11 +598,17 @@ wasm_error_t wasm_init(wasm_runtime_t* rt) {
 }
 
 void wasm_destroy(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->num_imports; i++) wasm__free_functype(&rt->imports[i].type);
     free(rt->imports);
     memset(rt, 0, sizeof(*rt));
 }
 
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) {
+    wasm_import_t copy;
+    wasm_error_t err;
+
     if (rt->num_imports >= rt->cap_imports) {
         uint32_t new_cap = rt->cap_imports ? rt->cap_imports * 2 : 16;
         wasm_import_t* a = (wasm_import_t*)realloc(rt->imports, new_cap * sizeof(wasm_import_t));
@@ -553,7 +616,16 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
         rt->imports = a;
         rt->cap_imports = new_cap;
     }
-    rt->imports[rt->num_imports++] = *imp;
+
+    memset(&copy, 0, sizeof(copy));
+    copy.module = imp->module;
+    copy.name = imp->name;
+    copy.func = imp->func;
+    copy.userdata = imp->userdata;
+    err = wasm__copy_functype(&copy.type, &imp->type);
+    if (err != WASM_OK) return err;
+
+    rt->imports[rt->num_imports++] = copy;
     return WASM_OK;
 }
 
@@ -562,16 +634,26 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
 static wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_leb128_u32(r);
     uint32_t i, p;
-    mod->types = (wasm_functype_t*)calloc(count, sizeof(wasm_functype_t));
-    if (!mod->types) return WASM_ERR_OOM;
+    if (count > 0) {
+        mod->types = (wasm_functype_t*)calloc(count, sizeof(wasm_functype_t));
+        if (!mod->types) return WASM_ERR_OOM;
+    }
     mod->num_types = count;
     for (i = 0; i < count; i++) {
         wasm_functype_t* ft = &mod->types[i];
         if (wasm__read_u8(r) != 0x60) return WASM_ERR_MALFORMED;
         ft->num_params = wasm__read_leb128_u32(r);
-        for (p = 0; p < ft->num_params && p < 16; p++) ft->params[p] = (wasm_valtype_t)wasm__read_u8(r);
+        if (ft->num_params > 0) {
+            ft->params = (wasm_valtype_t*)malloc(ft->num_params * sizeof(wasm_valtype_t));
+            if (!ft->params) return WASM_ERR_OOM;
+        }
+        for (p = 0; p < ft->num_params; p++) ft->params[p] = (wasm_valtype_t)wasm__read_u8(r);
         ft->num_results = wasm__read_leb128_u32(r);
-        for (p = 0; p < ft->num_results && p < 4; p++) ft->results[p] = (wasm_valtype_t)wasm__read_u8(r);
+        if (ft->num_results > 0) {
+            ft->results = (wasm_valtype_t*)malloc(ft->num_results * sizeof(wasm_valtype_t));
+            if (!ft->results) return WASM_ERR_OOM;
+        }
+        for (p = 0; p < ft->num_results; p++) ft->results[p] = (wasm_valtype_t)wasm__read_u8(r);
     }
     return WASM_OK;
 }
@@ -913,6 +995,7 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
 void wasm_free_module(wasm_module_t* mod) {
     uint32_t i;
     if (!mod) return;
+    for (i = 0; i < mod->num_types; i++) wasm__free_functype(&mod->types[i]);
     free(mod->types);
     for (i = 0; i < mod->num_funcs; i++) free(mod->funcs[i].locals);
     free(mod->funcs);
@@ -928,9 +1011,95 @@ void wasm_free_module(wasm_module_t* mod) {
 typedef struct wasm__label_t {
     const uint8_t* continuation;
     uint32_t sp_base;
+    uint32_t param_arity;
     uint32_t arity;
     uint8_t opcode;
 } wasm__label_t;
+
+typedef struct wasm__blocktype_t {
+    uint32_t param_arity;
+    uint32_t result_arity;
+} wasm__blocktype_t;
+
+static void wasm__skip_blocktype(wasm__reader_t* r) {
+    uint8_t lead = *r->ptr;
+
+    if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
+        r->ptr++;
+        return;
+    }
+
+    (void)wasm__read_leb128_i32(r);
+}
+
+static void wasm__skip_prefixed_immediates(wasm__reader_t* r) {
+    uint32_t subop = wasm__read_leb128_u32(r);
+
+    switch (subop) {
+        case 0x08:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x09:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0A:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0B:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0C:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0D:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0E:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0F:
+        case 0x10:
+        case 0x11:
+            wasm__read_leb128_u32(r);
+            break;
+        default:
+            break;
+    }
+}
+
+static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
+    uint8_t lead = *r->ptr;
+
+    blocktype->param_arity = 0;
+    blocktype->result_arity = 0;
+
+    if (lead =wasm__exec= 0x40) {
+        r->ptr++;
+        return WASM_OK;
+    }
+
+    if (wasm__is_valtype_byte(lead)) {
+        r->ptr++;
+        blocktype->result_arity = 1;
+        return WASM_OK;
+    }
+
+    {
+        int32_t type_idx = wasm__read_leb128_i32(r);
+        wasm_functype_t* ft;
+
+        if (type_idx < 0 || (uint32_t)type_idx >= mod->num_types) return WASM_ERR_MALFORMED;
+        ft = &mod->types[(uint32_t)type_idx];
+        blocktype->param_arity = ft->num_params;
+        blocktype->result_arity = ft->num_results;
+    }
+
+    return WASM_OK;
+}
 
 /* ── Block scanning ───────────────────────────────────────────────── */
 
@@ -939,7 +1108,7 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x02:
         case 0x03:
         case 0x04:
-            wasm__read_u8(r);
+            wasm__skip_blocktype(r);
             break;
         case 0x0C:
         case 0x0D:
@@ -998,6 +1167,9 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
             wasm__read_leb128_u32(r);
             wasm__read_u8(r);
             break;
+        case 0xFC:
+            wasm__skip_prefixed_immediates(r);
+            break;
         default:
             break;
     }
@@ -1027,16 +1199,30 @@ static const uint8_t* wasm__find_block_end(const uint8_t* start, const uint8_t* 
 
 /* ── Branch helper ────────────────────────────────────────────────── */
 
-static void wasm__do_branch(wasm_runtime_t* rt, wasm__label_t* target,
-                            wasm__reader_t* r, uint32_t* label_sp, uint32_t depth_l) {
-    wasm_value_t br_res[4];
+static wasm_error_t wasm__do_branch(wasm_runtime_t* rt, wasm__label_t* target,
+                                    wasm__reader_t* r, uint32_t* label_sp, uint32_t depth_l) {
+    wasm_value_t branch_values_buf[8];
+    wasm_value_t* branch_values = branch_values_buf;
+    uint32_t branch_arity = (target->opcode == 0x03) ? target->param_arity : target->arity;
     uint32_t i;
-    for (i = 0; i < target->arity && i < 4; i++)
-        br_res[i] = rt->stack[rt->sp - target->arity + i];
+
+    if (branch_arity > 8) {
+        branch_values = (wasm_value_t*)malloc(branch_arity * sizeof(wasm_value_t));
+        if (!branch_values) return WASM_ERR_OOM;
+    }
+
+    for (i = 0; i < branch_arity; i++) branch_values[i] = rt->stack[rt->sp - branch_arity + i];
     rt->sp = target->sp_base;
-    for (i = 0; i < target->arity; i++) rt->stack[rt->sp++] = br_res[i];
+    for (i = 0; i < branch_arity; i++) rt->stack[rt->sp++] = branch_values[i];
     r->ptr = target->continuation;
-    if (target->opcode != 0x03) *label_sp -= depth_l;
+
+    if (branch_values != branch_values_buf) free(branch_values);
+    if (target->opcode == 0x03)
+        *label_sp -= depth_l;
+    else
+        *label_sp -= depth_l + 1;
+
+    return WASM_OK;
 }
 
 /* ── Interpreter ──────────────────────────────────────────────────── */
@@ -1102,6 +1288,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
     /* Implicit function-level label */
     labels[lsp].continuation = r.end;
     labels[lsp].sp_base = sp_base;
+    labels[lsp].param_arity = 0;
     labels[lsp].arity = ft->num_results;
     labels[lsp].opcode = 0x02;
     lsp++;
@@ -1115,45 +1302,66 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 break;
 
             case 0x02: { /* block */
-                int8_t bt = (int8_t)wasm__read_u8(&r);
+                wasm__blocktype_t blocktype;
                 const uint8_t* be = wasm__find_block_end(r.ptr, r.end, NULL);
+                err = wasm__read_blocktype(mod, &r, &blocktype);
+                if (err != WASM_OK) goto cleanup;
+                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                 if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                 labels[lsp].continuation = be;
-                labels[lsp].sp_base = rt->sp;
-                labels[lsp].arity = (bt == 0x40) ? 0 : 1;
+                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                labels[lsp].param_arity = blocktype.param_arity;
+                labels[lsp].arity = blocktype.result_arity;
                 labels[lsp].opcode = 0x02;
                 lsp++;
                 break;
             }
             case 0x03: { /* loop */
+                wasm__blocktype_t blocktype;
                 const uint8_t* ls;
-                wasm__read_u8(&r);
+                err = wasm__read_blocktype(mod, &r, &blocktype);
+                if (err != WASM_OK) goto cleanup;
+                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                 ls = r.ptr;
                 wasm__find_block_end(r.ptr, r.end, NULL); /* skip past to register, but don't move r */
                 if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                 labels[lsp].continuation = ls;
-                labels[lsp].sp_base = rt->sp;
-                labels[lsp].arity = 0;
+                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                labels[lsp].param_arity = blocktype.param_arity;
+                labels[lsp].arity = blocktype.result_arity;
                 labels[lsp].opcode = 0x03;
                 lsp++;
                 break;
             }
             case 0x04: { /* if */
-                int8_t bt = (int8_t)wasm__read_u8(&r);
+                wasm__blocktype_t blocktype;
                 const uint8_t* ep = NULL;
                 const uint8_t* be = wasm__find_block_end(r.ptr, r.end, &ep);
                 wasm_value_t cond = WASM__POP(rt);
-                if (!cond.of.i32) r.ptr = ep ? ep : be;
+                err = wasm__read_blocktype(mod, &r, &blocktype);
+                if (err != WASM_OK) goto cleanup;
+                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                if (!cond.of.i32) {
+                    if (!ep) {
+                        r.ptr = be;
+                        break;
+                    }
+                    r.ptr = ep;
+                }
                 if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
                 labels[lsp].continuation = be;
-                labels[lsp].sp_base = rt->sp;
-                labels[lsp].arity = (bt == 0x40) ? 0 : 1;
+                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                labels[lsp].param_arity = blocktype.param_arity;
+                labels[lsp].arity = blocktype.result_arity;
                 labels[lsp].opcode = 0x04;
                 lsp++;
                 break;
             }
             case 0x05:
-                if (lsp > 0) r.ptr = labels[lsp - 1].continuation;
+                if (lsp > 0) {
+                    r.ptr = labels[lsp - 1].continuation;
+                    lsp--;
+                }
                 break;
             case 0x0B:
                 if (lsp > 0) lsp--;
@@ -1162,7 +1370,8 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             case 0x0C: {
                 uint32_t d = wasm__read_leb128_u32(&r);
                 if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                if (err != WASM_OK) goto cleanup;
                 break;
             }
             case 0x0D: {
@@ -1170,7 +1379,8 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 wasm_value_t c = WASM__POP(rt);
                 if (c.of.i32) {
                     if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                    wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                    err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                    if (err != WASM_OK) goto cleanup;
                 }
                 break;
             }
@@ -1184,30 +1394,53 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 d = ((uint32_t)iv.of.i32 < nt) ? tgts[iv.of.i32] : tgts[nt];
                 free(tgts);
                 if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                if (err != WASM_OK) goto cleanup;
                 break;
             }
             case 0x0F: /* return */
-                for (i = 0; i < ft->num_results && i < num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
+                for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
                 rt->sp = sp_base;
                 goto cleanup;
 
             case 0x10: { /* call */
                 uint32_t ci = wasm__read_leb128_u32(&r);
                 wasm_functype_t* cft = &mod->types[mod->funcs[ci].type_idx];
-                wasm_value_t ca[16], cr[4];
+                wasm_value_t call_args_buf[8], call_results_buf[8];
+                wasm_value_t* call_args = call_args_buf;
+                wasm_value_t* call_results = call_results_buf;
                 int j;
-                memset(cr, 0, sizeof(cr));
-                for (j = (int)cft->num_params - 1; j >= 0; j--) ca[j] = WASM__POP(rt);
-                err = wasm__exec(mod, ci, ca, cft->num_params, cr, cft->num_results, depth + 1);
-                if (err) goto cleanup;
-                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, cr[i]);
+
+                if (cft->num_params > 8) {
+                    call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
+                }
+                if (cft->num_results > 8) {
+                    call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
+                    if (!call_results) {
+                        if (call_args != call_args_buf) free(call_args);
+                        WASM__TRAP(WASM_ERR_OOM);
+                    }
+                }
+                if (cft->num_results > 0)
+                    memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
+                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
+                err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
+                if (call_args != call_args_buf) free(call_args);
+                if (err != WASM_OK) {
+                    if (call_results != call_results_buf) free(call_results);
+                    goto cleanup;
+                }
+                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
+                if (call_results != call_results_buf) free(call_results);
                 break;
             }
             case 0x11: { /* call_indirect */
                 uint32_t ti = wasm__read_leb128_u32(&r), tvi, ci;
                 wasm_functype_t* cft;
-                wasm_value_t ca[16], cr[4], iv;
+                wasm_value_t call_args_buf[8], call_results_buf[8], iv;
+                wasm_value_t* call_args = call_args_buf;
+                wasm_value_t* call_results = call_results_buf;
                 int j;
                 wasm__read_u8(&r);
                 iv = WASM__POP(rt);
@@ -1217,12 +1450,39 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 if (ci == UINT32_MAX) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
                 if (mod->funcs[ci].type_idx != ti) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 cft = &mod->types[ti];
-                memset(cr, 0, sizeof(cr));
-                for (j = (int)cft->num_params - 1; j >= 0; j--) ca[j] = WASM__POP(rt);
-                err = wasm__exec(mod, ci, ca, cft->num_params, cr, cft->num_results, depth + 1);
-                if (err) goto cleanup;
-                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, cr[i]);
+                if (cft->num_params > 8) {
+                    call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
+                }
+                if (cft->num_results > 8) {
+                    call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
+                    if (!call_results) {
+                        if (call_args != call_args_buf) free(call_args);
+                        WASM__TRAP(WASM_ERR_OOM);
+                    }
+                }
+                if (cft->num_results > 0)
+                    memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
+                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
+                err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
+                if (call_args != call_args_buf) free(call_args);
+                if (err != WASM_OK) {
+                    if (call_results != call_results_buf) free(call_results);
+                    goto cleanup;
+                }
+                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
+                if (call_results != call_results_buf) free(call_results);
                 break;
+            }
+
+            case 0xFC: {
+                uint32_t subop = wasm__read_leb128_u32(&r);
+                switch (subop) {
+                    default:
+                        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
+                        err = WASM_ERR_MALFORMED;
+                        goto cleanup;
+                }
             }
 
             /* Parametric */
@@ -2166,8 +2426,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
         }
     }
 
-    for (i = 0; i < ft->num_results && i < num_results; i++)
-        results[ft->num_results - 1 - i] = WASM__POP(rt);
+    for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
     rt->sp = sp_base;
 
 cleanup:
@@ -2193,6 +2452,23 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results) {
+    wasm_functype_t* ft;
+
+    if (func_idx >= mod->num_funcs) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);
+        return WASM_ERR_MALFORMED;
+    }
+
+    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    if (num_args != ft->num_params || num_results < ft->num_results ||
+        (ft->num_params > 0 && !args) || (ft->num_results > 0 && !results)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                      "call signature mismatch: expected %u args/%u results, got %u args/%u results",
+                      (unsigned)ft->num_params, (unsigned)ft->num_results,
+                      (unsigned)num_args, (unsigned)num_results);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
     return wasm__exec(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results, 0);
 }
 

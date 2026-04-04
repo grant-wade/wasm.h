@@ -584,6 +584,329 @@ static void test_loop(void) {
     wasm_destroy(&rt);
 }
 
+/* ── Test 6: large signatures and type-index blocks ─────────────── */
+
+static void test_large_param_call(void) {
+    TEST("call with 17 params survives dynamic signature storage");
+
+    wasm_builder_t mod = {0};
+    wasm_value_t args[17];
+    wasm_value_t result;
+    wasm_runtime_t rt;
+    wasm_module_t *m;
+    wasm_error_t err;
+    uint32_t index;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 17);
+        for (index = 0; index < 17; index++) emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 'c'); emit(&sec, 'a'); emit(&sec, 'l'); emit(&sec, 'l');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        wasm_builder_t body = {0};
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20); emit_leb128_u32(&body, 16);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        for (index = 0; index < 17; index++) {
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, index);
+        }
+        emit(&body, 0x10); emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    for (index = 0; index < 17; index++) args[index] = wasm_i32((int32_t)index + 1);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    if (!m) { FAIL(rt.error_msg); return; }
+
+    err = wasm_call(m, "call", args, 17, &result, 1);
+    if (err != WASM_OK) { FAIL(wasm_error_string(err)); }
+    else if (result.of.i32 != 17) { fail_i32_got(result.of.i32); }
+    else { PASS(); }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+static void test_multi_result_call(void) {
+    TEST("call with 5 results survives dynamic result storage");
+
+    wasm_builder_t mod = {0};
+    wasm_value_t results[5];
+    wasm_runtime_t rt;
+    wasm_module_t *m;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 'm'); emit(&sec, 'u'); emit(&sec, 'l'); emit(&sec, 't'); emit(&sec, 'i');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        wasm_builder_t body = {0};
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 1);
+        emit(&body, 0x41); emit_leb128_i32(&body, 2);
+        emit(&body, 0x41); emit_leb128_i32(&body, 3);
+        emit(&body, 0x41); emit_leb128_i32(&body, 4);
+        emit(&body, 0x41); emit_leb128_i32(&body, 5);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x10); emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    memset(results, 0, sizeof(results));
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    if (!m) { FAIL(rt.error_msg); return; }
+
+    err = wasm_call(m, "multi", NULL, 0, results, 5);
+    if (err != WASM_OK) { FAIL(wasm_error_string(err)); }
+    else if (results[0].of.i32 != 1 || results[1].of.i32 != 2 || results[2].of.i32 != 3 ||
+             results[3].of.i32 != 4 || results[4].of.i32 != 5) {
+        FAIL("unexpected multi-result values");
+    } else { PASS(); }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+static void test_loop_type_index_block(void) {
+    TEST("loop type index preserves block params on br_if");
+
+    wasm_builder_t mod = {0};
+    wasm_runtime_t rt;
+    wasm_module_t *m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 'l'); emit(&sec, 'o'); emit(&sec, 'o'); emit(&sec, 'p');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        wasm_builder_t body = {0};
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x7F);
+
+        emit(&body, 0x41); emit_leb128_i32(&body, 0);
+        emit(&body, 0x03); emit_leb128_i32(&body, 0);
+        emit(&body, 0x21); emit_leb128_u32(&body, 0);
+        emit(&body, 0x20); emit_leb128_u32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 1);
+        emit(&body, 0x6A);
+        emit(&body, 0x22); emit_leb128_u32(&body, 0);
+        emit(&body, 0x20); emit_leb128_u32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 5);
+        emit(&body, 0x48);
+        emit(&body, 0x0D); emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    if (!m) { FAIL(rt.error_msg); return; }
+
+    err = wasm_call(m, "loop", NULL, 0, &result, 1);
+    if (err != WASM_OK) { FAIL(wasm_error_string(err)); }
+    else if (result.of.i32 != 5) { fail_i32_got(result.of.i32); }
+    else { PASS(); }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+static void test_prefixed_opcode_in_dead_branch(void) {
+    TEST("0xFC immediates are skipped while scanning dead branches");
+
+    wasm_builder_t mod = {0};
+    wasm_runtime_t rt;
+    wasm_module_t *m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 's'); emit(&sec, 'k'); emit(&sec, 'i'); emit(&sec, 'p');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+    {
+        wasm_builder_t sec = {0};
+        wasm_builder_t body = {0};
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 0);
+        emit(&body, 0x04); emit(&body, 0x7F);
+        emit(&body, 0x41); emit_leb128_i32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 0);
+        emit(&body, 0xFC); emit(&body, 0x0B); emit(&body, 0x00);
+        emit(&body, 0x41); emit_leb128_i32(&body, 1);
+        emit(&body, 0x05);
+        emit(&body, 0x41); emit_leb128_i32(&body, 7);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    if (!m) { FAIL(rt.error_msg); return; }
+
+    err = wasm_call(m, "skip", NULL, 0, &result, 1);
+    if (err != WASM_OK) { FAIL(wasm_error_string(err)); }
+    else if (result.of.i32 != 7) { fail_i32_got(result.of.i32); }
+    else { PASS(); }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
 static void test_bad_magic(void) {
@@ -664,6 +987,10 @@ int main(void) {
     test_host_import();
     test_memory();
     test_loop();
+    test_large_param_call();
+    test_multi_result_call();
+    test_loop_type_index_block();
+    test_prefixed_opcode_in_dead_branch();
     test_bad_magic();
     test_div_by_zero();
 
