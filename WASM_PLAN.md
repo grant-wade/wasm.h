@@ -80,7 +80,7 @@ Key structural limitations that will affect almost every milestone:
 - Tables become typed (funcref or externref) and there can be multiple. Refactor `wasm_table_t` to store its reftype, and `mod->table` to `mod->tables[]` + `mod->num_tables`.
 - The table section and element section decoders need updates for the new element segment encodings (with explicit reftype, expr-based init, etc.).
 
-### Milestone 8: Multi-Memory
+### [DONE] Milestone 8: Multi-Memory
 
 **Goal:** Multiple linear memories with indexed access.
 

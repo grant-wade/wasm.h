@@ -26,13 +26,15 @@
  *   - Little-endian and big-endian
  *   - 32-bit and 64-bit
  *
- * Targets: Wasm MVP spec (1.0)
- *   - i32, i64, f32, f64 value types
- *   - Linear memory with bounds checking
- *   - Tables (funcref)
- *   - Imports/exports
- *   - Block/loop/br/br_if/br_table control flow
- *   - No SIMD, threads, GC, multi-memory, tail calls
+ * Targets: Wasm 1.0 plus selected post-MVP proposals
+ *   - i32, i64, f32, f64, funcref, and externref values
+ *   - Imports/exports, including imported and mutable globals
+ *   - Linear memories with bounds checks, indexed memory access, and memory.grow
+ *   - Tables, call_indirect, and reference-type table operations
+ *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
+ *   - Bulk memory, sign-extension ops, trunc_sat conversions, and extended const exprs
+ *   - Load-time validation plus runtime-configurable feature gating
+ *   - No SIMD, threads, GC, tail calls, or exceptions
  */
 
 #ifndef WASM_H
@@ -309,7 +311,7 @@ struct wasm_module_t {
     uint32_t num_globals;
     wasm_table_t* tables;
     uint32_t num_tables;
-    wasm_memory_t memory;
+    wasm_memory_t* memories;
     wasm_data_segment_t* data_segments;
     uint32_t num_data_segments;
     wasm_elem_segment_t* elem_segments;
@@ -364,6 +366,10 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results);
+uint32_t wasm_memory_count(wasm_module_t* mod);
+uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index);
+uint32_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
+int32_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint32_t delta_pages);
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint32_t wasm_memory_size(wasm_module_t* mod);
 int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages);
@@ -551,7 +557,8 @@ static void wasm__store_le64(void* p, uint64_t v) {
 #define WASM__IMPLEMENTED_FEATURES                                                     \
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
-     WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_EXTENDED_CONST)
+    WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
+    WASM_FEATURE_EXTENDED_CONST)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -900,6 +907,11 @@ static void wasm__free_table(wasm_table_t* table) {
     memset(table, 0, sizeof(*table));
 }
 
+static void wasm__free_memory(wasm_memory_t* memory) {
+    free(memory->data);
+    memset(memory, 0, sizeof(*memory));
+}
+
 static wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
     uint32_t base = mod->num_tables;
     wasm_table_t* tables;
@@ -913,6 +925,36 @@ static wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count, uint
     mod->tables = tables;
     memset(mod->tables + base, 0, count * sizeof(wasm_table_t));
     mod->num_tables = base + count;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_memories;
+    wasm_memory_t* memories;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    memories = (wasm_memory_t*)realloc(mod->memories, (base + count) * sizeof(wasm_memory_t));
+    if (!memories) return WASM_ERR_OOM;
+
+    mod->memories = memories;
+    memset(mod->memories + base, 0, count * sizeof(wasm_memory_t));
+    mod->num_memories = base + count;
+    return WASM_OK;
+}
+
+static wasm_memory_t* wasm__memory_at(wasm_module_t* mod, uint32_t memory_index) {
+    if (!mod || memory_index >= mod->num_memories) return NULL;
+    return &mod->memories[memory_index];
+}
+
+static wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
+    if (memory->pages == 0) return WASM_OK;
+    if (memory->data) return WASM_OK;
+
+    memory->data = (uint8_t*)calloc(memory->pages, WASM_PAGE_SIZE);
+    if (!memory->data) return WASM_ERR_OOM;
     return WASM_OK;
 }
 
@@ -983,18 +1025,39 @@ static int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t li
     return offset <= limit && size <= (limit - offset);
 }
 
+typedef struct wasm__memarg_t {
+    uint32_t align_log2;
+    uint32_t memory_index;
+    uint32_t offset;
+} wasm__memarg_t;
+
+static wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg) {
+    uint32_t flags = wasm__read_leb128_u32(r);
+
+    if ((flags & ~0x7Fu) != 0) return WASM_ERR_MALFORMED;
+
+    out_memarg->align_log2 = flags & 0x3Fu;
+    out_memarg->memory_index = 0;
+    if ((flags & 0x40u) != 0) out_memarg->memory_index = wasm__read_leb128_u32(r);
+    out_memarg->offset = wasm__read_leb128_u32(r);
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod) {
     uint32_t i;
-    uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
 
     for (i = 0; i < mod->num_data_segments; i++) {
         wasm_data_segment_t* segment = &mod->data_segments[i];
+        wasm_memory_t* memory;
+        uint64_t mem_size;
 
         if (segment->is_passive) continue;
-        if (segment->memory_index != 0) return WASM_ERR_MALFORMED;
+        memory = wasm__memory_at(mod, segment->memory_index);
+        if (!memory) return WASM_ERR_MALFORMED;
+        mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
         if (!wasm__range_in_bounds_u64(segment->offset, segment->size, mem_size)) return WASM_ERR_OUT_OF_BOUNDS;
         if (segment->size > 0)
-            memcpy(mod->memory.data + segment->offset, segment->bytes, segment->size);
+            memcpy(memory->data + segment->offset, segment->bytes, segment->size);
     }
 
     return WASM_OK;
@@ -1366,14 +1429,18 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             table->size = wasm__read_leb128_u32(r);
             table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
         } else if (kind == 0x02) {
+            uint32_t memory_index;
+            wasm_memory_t* memory;
             uint8_t lf = wasm__read_u8(r);
-            mod->num_memories++;
+
+            if (wasm__append_memories(mod, 1, &memory_index) != WASM_OK) return WASM_ERR_OOM;
             if (mod->num_memories > 1) {
                 wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
                 if (err != WASM_OK) return err;
             }
-            mod->memory.pages = wasm__read_leb128_u32(r);
-            mod->memory.max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
+            memory = &mod->memories[memory_index];
+            memory->pages = wasm__read_leb128_u32(r);
+            memory->max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
         } else if (kind == 0x03) {
             uint32_t gi;
             wasm_global_import_t* gimp;
@@ -1449,16 +1516,20 @@ static wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_
 }
 
 static wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
-    mod->num_memories += count;
+    uint32_t count = wasm__read_leb128_u32(r), i, base;
+
+    if (wasm__append_memories(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     if (mod->num_memories > 1) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
         if (err != WASM_OK) return err;
     }
-    if (count > 0) {
+
+    for (i = 0; i < count; i++) {
+        wasm_memory_t* memory = &mod->memories[base + i];
         uint8_t lf = wasm__read_u8(r);
-        mod->memory.pages = wasm__read_leb128_u32(r);
-        mod->memory.max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
+
+        memory->pages = wasm__read_leb128_u32(r);
+        memory->max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
     }
     return WASM_OK;
 }
@@ -1785,16 +1856,22 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
         }
     }
 
-    if (mod->memory.max_pages != 0 && mod->memory.pages > mod->memory.max_pages) {
-        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                          "memory min %u exceeds max %u",
-                                          (unsigned)mod->memory.pages,
-                                          (unsigned)mod->memory.max_pages);
-    }
-    if (mod->memory.max_pages > 65536u) {
-        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                          "memory max %u exceeds 65536 pages",
-                                          (unsigned)mod->memory.max_pages);
+    for (i = 0; i < mod->num_memories; i++) {
+        wasm_memory_t* memory = &mod->memories[i];
+
+        if (memory->max_pages != 0 && memory->pages > memory->max_pages) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "memory %u min %u exceeds max %u",
+                                              (unsigned)i,
+                                              (unsigned)memory->pages,
+                                              (unsigned)memory->max_pages);
+        }
+        if (memory->max_pages > 65536u) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "memory %u max %u exceeds 65536 pages",
+                                              (unsigned)i,
+                                              (unsigned)memory->max_pages);
+        }
     }
 
     for (i = 0; i < mod->num_exports; i++) {
@@ -1894,7 +1971,9 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                               (unsigned)segment->memory_index);
         }
         if (!segment->is_passive &&
-            !wasm__range_in_bounds_u64(segment->offset, segment->size, (uint64_t)mod->memory.pages * WASM_PAGE_SIZE)) {
+            !wasm__range_in_bounds_u64(segment->offset,
+                                       segment->size,
+                                       (uint64_t)mod->memories[segment->memory_index].pages * WASM_PAGE_SIZE)) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                               "data segment %u does not fit declared memory bounds",
                                               (unsigned)i);
@@ -2100,12 +2179,21 @@ static void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
 static wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
                                                 const uint8_t* at,
                                                 uint32_t max_align_log2) {
-    uint32_t align = wasm__read_leb128_u32(&v->r);
-    (void)wasm__read_leb128_u32(&v->r);
-    if (align > max_align_log2)
+    wasm__memarg_t memarg;
+    wasm_error_t err = wasm__read_memarg(&v->r, &memarg);
+
+    if (err != WASM_OK)
+        return wasm__validator_error(v, at, "malformed memarg");
+    if (memarg.align_log2 > max_align_log2)
         return wasm__validator_error(v, at, "alignment %u exceeds natural alignment %u",
-                                     (unsigned)align,
+                                     (unsigned)memarg.align_log2,
                                      (unsigned)max_align_log2);
+    if (memarg.memory_index != 0) {
+        err = wasm__validator_require_feature(v, at, WASM_FEATURE_MULTI_MEMORY);
+        if (err != WASM_OK) return err;
+    }
+    if (memarg.memory_index >= v->mod->num_memories)
+        return wasm__validator_error(v, at, "memory %u out of range", (unsigned)memarg.memory_index);
     return WASM_OK;
 }
 
@@ -2274,6 +2362,8 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             }
             if (v->mod->num_memories == 0)
                 return wasm__validator_error(v, at, "memory.init requires a memory");
+            if (mem_idx >= v->mod->num_memories)
+                return wasm__validator_error(v, at, "memory %u out of range", (unsigned)mem_idx);
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x09: {
@@ -2296,6 +2386,8 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             }
             if (v->mod->num_memories == 0)
                 return wasm__validator_error(v, at, "memory.copy requires a memory");
+            if (dst_mem_idx >= v->mod->num_memories || src_mem_idx >= v->mod->num_memories)
+                return wasm__validator_error(v, at, "memory.copy memory index out of range");
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x0B: {
@@ -2308,6 +2400,8 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             }
             if (v->mod->num_memories == 0)
                 return wasm__validator_error(v, at, "memory.fill requires a memory");
+            if (mem_idx >= v->mod->num_memories)
+                return wasm__validator_error(v, at, "memory %u out of range", (unsigned)mem_idx);
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x0C: {
@@ -2836,6 +2930,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     err = wasm__validator_require_feature(&v, at, WASM_FEATURE_MULTI_MEMORY);
                     if (err != WASM_OK) return err;
                 }
+                if (mem_idx >= mod->num_memories)
+                    return wasm__validator_error(&v, at, "memory %u out of range", (unsigned)mem_idx);
                 err = wasm__validator_push(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 break;
@@ -2848,6 +2944,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     err = wasm__validator_require_feature(&v, at, WASM_FEATURE_MULTI_MEMORY);
                     if (err != WASM_OK) return err;
                 }
+                if (mem_idx >= mod->num_memories)
+                    return wasm__validator_error(&v, at, "memory %u out of range", (unsigned)mem_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push(&v, at, WASM_TYPE_I32);
@@ -3185,11 +3283,15 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         return NULL;
     }
 
-    if (mod->memory.pages > 0) {
-        mod->memory.data = (uint8_t*)calloc(mod->memory.pages, WASM_PAGE_SIZE);
-        if (!mod->memory.data) {
-            wasm_free_module(mod);
-            return NULL;
+    if (mod->num_memories > 0) {
+        uint32_t mi;
+
+        for (mi = 0; mi < mod->num_memories; mi++) {
+            err = wasm__init_memory_storage(&mod->memories[mi]);
+            if (err != WASM_OK) {
+                wasm_free_module(mod);
+                return NULL;
+            }
         }
     }
     if (mod->num_tables > 0) {
@@ -3239,7 +3341,8 @@ void wasm_free_module(wasm_module_t* mod) {
     free(mod->elem_segments);
     for (i = 0; i < mod->num_tables; i++) wasm__free_table(&mod->tables[i]);
     free(mod->tables);
-    free(mod->memory.data);
+    for (i = 0; i < mod->num_memories; i++) wasm__free_memory(&mod->memories[i]);
+    free(mod->memories);
     free(mod);
 }
 
@@ -3397,8 +3500,13 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x3C:
         case 0x3D:
         case 0x3E:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
+            {
+                wasm__memarg_t memarg;
+                if (wasm__read_memarg(r, &memarg) != WASM_OK) {
+                    r->ptr = r->end;
+                    return;
+                }
+            }
             break;
         case 0x0E: {
             uint32_t n = wasm__read_leb128_u32(r), j;
@@ -3805,19 +3913,22 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         uint32_t len = (uint32_t)count.of.i32;
                         uint32_t src_offset = (uint32_t)src.of.i32;
                         uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                        wasm_memory_t* memory;
+                        uint64_t mem_size;
                         wasm_data_segment_t* segment;
 
-                        if (mem_idx != 0) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "memory.init memidx %u unsupported", (unsigned)mem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
-                        }
                         if (data_idx >= mod->num_data_segments) {
                             WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
                             err = WASM_ERR_MALFORMED;
                             goto cleanup;
                         }
+                        memory = wasm__memory_at(mod, mem_idx);
+                        if (!memory) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
 
                         segment = &mod->data_segments[data_idx];
                         if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
@@ -3825,7 +3936,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                             !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
                             WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         if (len > 0)
-                            memcpy(mod->memory.data + dst_offset, segment->bytes + src_offset, len);
+                            memcpy(memory->data + dst_offset, segment->bytes + src_offset, len);
                         break;
                     }
                     case 0x09: {
@@ -3849,20 +3960,25 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         uint32_t len = (uint32_t)count.of.i32;
                         uint32_t src_offset = (uint32_t)src.of.i32;
                         uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                        wasm_memory_t* dst_memory = wasm__memory_at(mod, dst_mem_idx);
+                        wasm_memory_t* src_memory = wasm__memory_at(mod, src_mem_idx);
+                        uint64_t dst_mem_size;
+                        uint64_t src_mem_size;
 
-                        if (dst_mem_idx != 0 || src_mem_idx != 0) {
+                        if (!dst_memory || !src_memory) {
                             WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
-                                          "memory.copy memidx %u,%u unsupported",
+                                          "unknown memory %u,%u",
                                           (unsigned)dst_mem_idx, (unsigned)src_mem_idx);
                             err = WASM_ERR_MALFORMED;
                             goto cleanup;
                         }
-                        if (!wasm__range_in_bounds_u64(src_offset, len, mem_size) ||
-                            !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
+                        dst_mem_size = (uint64_t)dst_memory->pages * WASM_PAGE_SIZE;
+                        src_mem_size = (uint64_t)src_memory->pages * WASM_PAGE_SIZE;
+                        if (!wasm__range_in_bounds_u64(src_offset, len, src_mem_size) ||
+                            !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
                             WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         if (len > 0)
-                            memmove(mod->memory.data + dst_offset, mod->memory.data + src_offset, len);
+                            memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, len);
                         break;
                     }
                     case 0x0B: {
@@ -3872,16 +3988,18 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         wasm_value_t dst = WASM__POP(rt);
                         uint32_t len = (uint32_t)count.of.i32;
                         uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                        wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
+                        uint64_t mem_size;
 
-                        if (mem_idx != 0) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "memory.fill memidx %u unsupported", (unsigned)mem_idx);
+                        if (!memory) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
                             err = WASM_ERR_MALFORMED;
                             goto cleanup;
                         }
+                        mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
                         if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         if (len > 0)
-                            memset(mod->memory.data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
+                            memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
                         break;
                     }
                     case 0x0C: {
@@ -4117,27 +4235,30 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             case 0x33:
             case 0x34:
             case 0x35: {
-                uint32_t al, off;
+                wasm__memarg_t memarg;
                 wasm_value_t base;
                 uint64_t addr, msz;
-                al = wasm__read_leb128_u32(&r);
-                (void)al;
-                off = wasm__read_leb128_u32(&r);
+                wasm_memory_t* memory;
+
+                err = wasm__read_memarg(&r, &memarg);
+                if (err != WASM_OK) goto cleanup;
                 base = WASM__POP(rt);
-                addr = (uint64_t)(uint32_t)base.of.i32 + off;
-                msz = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                memory = wasm__memory_at(mod, memarg.memory_index);
+                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
+                msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
                 switch (op) {
                     case 0x28: {
                         int32_t v;
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(mod->memory.data + addr);
+                        v = (int32_t)wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32(v));
                         break;
                     }
                     case 0x29: {
                         int64_t v;
                         if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int64_t)wasm__load_le64(mod->memory.data + addr);
+                        v = (int64_t)wasm__load_le64(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64(v));
                         break;
                     }
@@ -4145,7 +4266,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         uint32_t b;
                         float v;
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le32(mod->memory.data + addr);
+                        b = wasm__load_le32(memory->data + addr);
                         memcpy(&v, &b, 4);
                         WASM__PUSH(rt, wasm_f32(v));
                         break;
@@ -4154,66 +4275,66 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                         uint64_t b;
                         double v;
                         if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le64(mod->memory.data + addr);
+                        b = wasm__load_le64(memory->data + addr);
                         memcpy(&v, &b, 8);
                         WASM__PUSH(rt, wasm_f64(v));
                         break;
                     }
                     case 0x2C:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i32((int32_t)(int8_t)mod->memory.data[addr]));
+                        WASM__PUSH(rt, wasm_i32((int32_t)(int8_t)memory->data[addr]));
                         break;
                     case 0x2D:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i32((int32_t)mod->memory.data[addr]));
+                        WASM__PUSH(rt, wasm_i32((int32_t)memory->data[addr]));
                         break;
                     case 0x2E: {
                         int16_t v;
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(mod->memory.data + addr);
+                        v = (int16_t)wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32((int32_t)v));
                         break;
                     }
                     case 0x2F: {
                         uint16_t v;
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(mod->memory.data + addr);
+                        v = wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32((int32_t)v));
                         break;
                     }
                     case 0x30:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i64((int64_t)(int8_t)mod->memory.data[addr]));
+                        WASM__PUSH(rt, wasm_i64((int64_t)(int8_t)memory->data[addr]));
                         break;
                     case 0x31:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i64((int64_t)mod->memory.data[addr]));
+                        WASM__PUSH(rt, wasm_i64((int64_t)memory->data[addr]));
                         break;
                     case 0x32: {
                         int16_t v;
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(mod->memory.data + addr);
+                        v = (int16_t)wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x33: {
                         uint16_t v;
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(mod->memory.data + addr);
+                        v = wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x34: {
                         int32_t v;
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(mod->memory.data + addr);
+                        v = (int32_t)wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x35: {
                         uint32_t v;
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le32(mod->memory.data + addr);
+                        v = wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
@@ -4233,58 +4354,61 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             case 0x3C:
             case 0x3D:
             case 0x3E: {
-                uint32_t al, off;
+                wasm__memarg_t memarg;
                 wasm_value_t val, base;
                 uint64_t addr, msz;
-                al = wasm__read_leb128_u32(&r);
-                (void)al;
-                off = wasm__read_leb128_u32(&r);
+                wasm_memory_t* memory;
+
+                err = wasm__read_memarg(&r, &memarg);
+                if (err != WASM_OK) goto cleanup;
                 val = WASM__POP(rt);
                 base = WASM__POP(rt);
-                addr = (uint64_t)(uint32_t)base.of.i32 + off;
-                msz = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                memory = wasm__memory_at(mod, memarg.memory_index);
+                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
+                msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
                 switch (op) {
                     case 0x36:
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(mod->memory.data + addr, (uint32_t)val.of.i32);
+                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i32);
                         break;
                     case 0x37:
                         if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le64(mod->memory.data + addr, (uint64_t)val.of.i64);
+                        wasm__store_le64(memory->data + addr, (uint64_t)val.of.i64);
                         break;
                     case 0x38: {
                         uint32_t b;
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memcpy(&b, &val.of.f32, 4);
-                        wasm__store_le32(mod->memory.data + addr, b);
+                        wasm__store_le32(memory->data + addr, b);
                         break;
                     }
                     case 0x39: {
                         uint64_t b;
                         if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memcpy(&b, &val.of.f64, 8);
-                        wasm__store_le64(mod->memory.data + addr, b);
+                        wasm__store_le64(memory->data + addr, b);
                         break;
                     }
                     case 0x3A:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        mod->memory.data[addr] = (uint8_t)val.of.i32;
+                        memory->data[addr] = (uint8_t)val.of.i32;
                         break;
                     case 0x3B:
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(mod->memory.data + addr, (uint16_t)val.of.i32);
+                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i32);
                         break;
                     case 0x3C:
                         if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        mod->memory.data[addr] = (uint8_t)val.of.i64;
+                        memory->data[addr] = (uint8_t)val.of.i64;
                         break;
                     case 0x3D:
                         if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(mod->memory.data + addr, (uint16_t)val.of.i64);
+                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i64);
                         break;
                     case 0x3E:
                         if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(mod->memory.data + addr, (uint32_t)val.of.i64);
+                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i64);
                         break;
                     default:
                         break;
@@ -4292,16 +4416,20 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 break;
             }
 
-            case 0x3F:
-                wasm__read_u8(&r);
-                WASM__PUSH(rt, wasm_i32((int32_t)mod->memory.pages));
+            case 0x3F: {
+                uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
+
+                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                WASM__PUSH(rt, wasm_i32((int32_t)memory->pages));
                 break;
+            }
             case 0x40: {
                 wasm_value_t d;
                 int32_t res;
-                wasm__read_u8(&r);
+                uint32_t mem_idx = wasm__read_leb128_u32(&r);
                 d = WASM__POP(rt);
-                res = wasm_memory_grow(mod, (uint32_t)d.of.i32);
+                res = wasm_memory_grow_at(mod, mem_idx, (uint32_t)d.of.i32);
                 WASM__PUSH(rt, wasm_i32(res));
                 break;
             }
@@ -5109,23 +5237,48 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 
 /* ── Memory helpers ───────────────────────────────────────────────── */
 
+uint32_t wasm_memory_count(wasm_module_t* mod) {
+    return mod ? mod->num_memories : 0;
+}
+
+uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index) {
+    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    return memory ? memory->data : NULL;
+}
+
+uint32_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index) {
+    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    return memory ? memory->pages * WASM_PAGE_SIZE : 0;
+}
+
+int32_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint32_t delta_pages) {
+    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    uint32_t old, np;
+    uint8_t* nd;
+
+    if (!memory) return -1;
+
+    old = memory->pages;
+    np = old + delta_pages;
+    if (memory->max_pages && np > memory->max_pages) return -1;
+    nd = (uint8_t*)realloc(memory->data, (size_t)np * WASM_PAGE_SIZE);
+    if (!nd && np > 0) return -1;
+    if (delta_pages > 0)
+        memset(nd + (size_t)old * WASM_PAGE_SIZE, 0, (size_t)delta_pages * WASM_PAGE_SIZE);
+    memory->data = nd;
+    memory->pages = np;
+    return (int32_t)old;
+}
+
 uint8_t* wasm_memory_data(wasm_module_t* mod) {
-    return mod->memory.data;
+    return wasm_memory_data_at(mod, 0);
 }
 uint32_t wasm_memory_size(wasm_module_t* mod) {
-    return mod->memory.pages * WASM_PAGE_SIZE;
+    return wasm_memory_size_at(mod, 0);
 }
 
 int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages) {
-    uint32_t old = mod->memory.pages, np = old + delta_pages;
-    uint8_t* nd;
-    if (mod->memory.max_pages && np > mod->memory.max_pages) return -1;
-    nd = (uint8_t*)realloc(mod->memory.data, (size_t)np * WASM_PAGE_SIZE);
-    if (!nd) return -1;
-    memset(nd + (size_t)old * WASM_PAGE_SIZE, 0, (size_t)delta_pages * WASM_PAGE_SIZE);
-    mod->memory.data = nd;
-    mod->memory.pages = np;
-    return (int32_t)old;
+    return wasm_memory_grow_at(mod, 0, delta_pages);
 }
 
 const char* wasm_error_string(wasm_error_t err) {

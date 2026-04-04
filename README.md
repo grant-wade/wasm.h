@@ -98,11 +98,11 @@ At a high level it gives you:
 - loading and validating Wasm binary modules from memory
 - calling exported functions by name from C
 - registering C callbacks and globals as Wasm imports
-- linear memory support, including `memory.grow`
+- linear memory support, including multiple memories and indexed `memory.grow`
 - tables and indirect calls
 - trap and error reporting through `wasm_error_t` and `wasm_error_string`
 
-The current scope is the Wasm MVP execution model rather than newer proposal work. In practice that means the core numeric types, imports/exports, control flow, globals, linear memory, and tables are implemented, while SIMD, threads, GC, multiple memories, and tail calls are intentionally out of scope.
+The current scope is the Wasm MVP execution model plus a focused subset of newer proposals. In practice that means the core numeric types, imports/exports, control flow, globals, multi-memory linear memory, tables, bulk memory, reference types, multi-value, sign-extension, non-trapping truncation, mutable globals, and extended const expressions are implemented, while SIMD, threads, GC, tail calls, and exceptions are intentionally out of scope.
 
 Internally, the runtime is a straightforward stack-based interpreter. `wasm_runtime_t` holds imports, execution stack state, and error state; `wasm_module_t` owns decoded types, functions, exports, globals, table state, and memory for one loaded module.
 

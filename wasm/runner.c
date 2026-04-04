@@ -126,7 +126,16 @@ int main(int argc, char** argv) {
 
     printf("loaded: %s\n", wasm_path);
     print_exports(module);
-    printf("memory: %u bytes\n", (unsigned)wasm_memory_size(module));
+    printf("memories: %u\n", (unsigned)wasm_memory_count(module));
+    {
+        uint32_t memory_index;
+
+        for (memory_index = 0; memory_index < wasm_memory_count(module); memory_index++) {
+            printf("memory[%u]: %u bytes\n",
+                   (unsigned)memory_index,
+                   (unsigned)wasm_memory_size_at(module, memory_index));
+        }
+    }
 
     if (strcmp(mode, "load-ok") == 0) {
         exit_code = 0;
