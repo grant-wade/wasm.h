@@ -8,11 +8,137 @@
 #define WL_IMPL
 #include "wl.h"
 
-#define WASM_IMPL
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+typedef struct wasm_test_alloc_header {
+    size_t size;
+} wasm_test_alloc_header;
+
+typedef struct wasm_test_alloc_stats {
+    size_t malloc_calls;
+    size_t realloc_calls;
+    size_t free_calls;
+    size_t calloc_calls;
+    size_t live_blocks;
+    size_t peak_live_blocks;
+} wasm_test_alloc_stats;
+
+static wasm_test_alloc_stats g_wasm_test_alloc_stats;
+
+static void wasm_test_record_live_alloc(void) {
+    g_wasm_test_alloc_stats.live_blocks++;
+    if (g_wasm_test_alloc_stats.live_blocks > g_wasm_test_alloc_stats.peak_live_blocks)
+        g_wasm_test_alloc_stats.peak_live_blocks = g_wasm_test_alloc_stats.live_blocks;
+}
+
+static void* wasm_test_alloc_block(size_t size, int zero_fill) {
+    wasm_test_alloc_header* header;
+    size_t payload_size = size ? size : 1u;
+
+    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
+
+    if (zero_fill)
+        header = (wasm_test_alloc_header*)calloc(1, sizeof(*header) + payload_size);
+    else
+        header = (wasm_test_alloc_header*)malloc(sizeof(*header) + payload_size);
+    if (!header) return NULL;
+
+    header->size = payload_size;
+    wasm_test_record_live_alloc();
+    return (void*)(header + 1);
+}
+
+static void* wasm_test_malloc(size_t size) {
+    g_wasm_test_alloc_stats.malloc_calls++;
+    return wasm_test_alloc_block(size, 0);
+}
+
+static void* wasm_test_calloc(size_t count, size_t size) {
+    g_wasm_test_alloc_stats.calloc_calls++;
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    return wasm_test_alloc_block(count * size, 1);
+}
+
+static void* wasm_test_realloc(void* ptr, size_t size) {
+    wasm_test_alloc_header* header;
+    wasm_test_alloc_header* resized;
+    size_t payload_size = size ? size : 1u;
+
+    g_wasm_test_alloc_stats.realloc_calls++;
+    if (!ptr) return wasm_test_alloc_block(size, 0);
+    if (size == 0) {
+        free(((wasm_test_alloc_header*)ptr) - 1);
+        if (g_wasm_test_alloc_stats.live_blocks > 0) g_wasm_test_alloc_stats.live_blocks--;
+        return NULL;
+    }
+    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
+
+    header = ((wasm_test_alloc_header*)ptr) - 1;
+    resized = (wasm_test_alloc_header*)realloc(header, sizeof(*resized) + payload_size);
+    if (!resized) return NULL;
+
+    resized->size = payload_size;
+    return (void*)(resized + 1);
+}
+
+static void wasm_test_free(void* ptr) {
+    g_wasm_test_alloc_stats.free_calls++;
+    if (!ptr) return;
+
+    free(((wasm_test_alloc_header*)ptr) - 1);
+    if (g_wasm_test_alloc_stats.live_blocks > 0) g_wasm_test_alloc_stats.live_blocks--;
+}
+
+static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
+    return g_wasm_test_alloc_stats;
+}
+
+#define WASM_MALLOC(sz) wasm_test_malloc(sz)
+#define WASM_REALLOC(p, sz) wasm_test_realloc((p), (sz))
+#define WASM_FREE(p) wasm_test_free(p)
+#define WASM_CALLOC(n, sz) wasm_test_calloc((n), (sz))
+
+#define WASM_IMPL
 #include "wasm.h"
+
+static void wasm_test_init_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
+                 "allocator leak before %s: %zu live blocks",
+                 test_name,
+                 g_wasm_test_alloc_stats.live_blocks);
+    wasm_init(rt);
+}
+
+static void wasm_test_destroy_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
+    wasm_destroy(rt);
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
+                 "allocator leak after %s: %zu live blocks",
+                 test_name,
+                 g_wasm_test_alloc_stats.live_blocks);
+}
+
+static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
+    const char* case_name = (t && t->case_name) ? t->case_name : "<unnamed>";
+
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
+                 "allocator leak after test %s: %zu live blocks",
+                 case_name,
+                 g_wasm_test_alloc_stats.live_blocks);
+}
+
+#define wasm_init(rt) wasm_test_init_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
+#define wasm_destroy(rt) wasm_test_destroy_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
+
+#undef WL_TEST
+#define WL_TEST(name)                              \
+    static void name##_impl(wl_test_ctx* t);      \
+    static void name(wl_test_ctx* t) {            \
+        name##_impl(t);                           \
+        wasm_test_verify_case_cleanup(t);         \
+    }                                             \
+    static void name##_impl(wl_test_ctx* t)
 
 #if defined(_MSC_VER) && _MSC_VER < 1900
 #define WASM_TEST_SNPRINTF _snprintf
@@ -251,6 +377,10 @@ WL_TEST(test_add) {
     wasm_value_t args[] = { wasm_i32(3), wasm_i32(7) };
     wasm_value_t result;
     wasm_error_t err;
+    wasm_test_alloc_stats alloc_before = wasm_test_alloc_snapshot();
+    wasm_test_alloc_stats alloc_after;
+    size_t alloc_delta;
+    size_t free_delta;
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
@@ -268,6 +398,14 @@ WL_TEST(test_add) {
 
     wasm_free_module(m);
     wasm_destroy(&rt);
+
+    alloc_after = wasm_test_alloc_snapshot();
+    alloc_delta = (alloc_after.malloc_calls - alloc_before.malloc_calls) +
+                  (alloc_after.realloc_calls - alloc_before.realloc_calls) +
+                  (alloc_after.calloc_calls - alloc_before.calloc_calls);
+    free_delta = alloc_after.free_calls - alloc_before.free_calls;
+    WL_CHECK_MSG(t, alloc_delta > 0, "%s", "expected custom wasm allocators to be exercised");
+    WL_CHECK_MSG(t, free_delta > 0, "%s", "expected custom wasm allocator frees during cleanup");
 }
 
 /* ── Test 2: factorial(n) recursive ─────────────────────────────── */
