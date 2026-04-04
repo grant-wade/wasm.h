@@ -102,7 +102,6 @@ Key structural limitations that will affect almost every milestone:
 
 - Semantically: resolve the callee, tear down the current frame, and jump to the target without growing the call stack.
 - In your recursive interpreter, true TCO requires restructuring `wasm__exec` to use a loop-based dispatch where `return_call` sets up the new function/args and `continue`s instead of recursing. This is a significant refactor — the current recursive design makes this the hardest milestone architecturally.
-- Alternative: just implement them as call + return (correct semantics, just no stack depth guarantee). Pragmatic but modules relying on tail calls for deep recursion will hit `WASM_MAX_CALL_DEPTH`.
 
 ### Milestone 11: Exception Handling (Optional, Increasing Adoption)
 
