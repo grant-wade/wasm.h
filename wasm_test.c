@@ -32,6 +32,13 @@ static void fail_i32_got(int32_t value) {
     FAIL(buf);
 }
 
+static void fail_i64_got(int64_t value) {
+    char buf[64];
+
+    WASM_TEST_SNPRINTF(buf, sizeof(buf), "got %lld", (long long)value);
+    FAIL(buf);
+}
+
 /* ── Helper: build minimal wasm module ──────────────────────────── */
 
 typedef struct {
@@ -61,6 +68,19 @@ static void emit_leb128_i32(wasm_builder_t *b, int32_t val) {
     int more = 1;
     while (more) {
         uint8_t byte = val & 0x7F;
+        val >>= 7;
+        if ((val == 0 && !(byte & 0x40)) || (val == -1 && (byte & 0x40)))
+            more = 0;
+        else
+            byte |= 0x80;
+        emit(b, byte);
+    }
+}
+
+static void emit_leb128_i64(wasm_builder_t *b, int64_t val) {
+    int more = 1;
+    while (more) {
+        uint8_t byte = (uint8_t)(val & 0x7F);
         val >>= 7;
         if ((val == 0 && !(byte & 0x40)) || (val == -1 && (byte & 0x40)))
             more = 0;
@@ -907,6 +927,112 @@ static void test_prefixed_opcode_in_dead_branch(void) {
     wasm_destroy(&rt);
 }
 
+static void test_sign_extension_ops(void) {
+    TEST("sign-extension ops: i32/i64 extend*_s");
+
+    wasm_builder_t mod = {0};
+    wasm_runtime_t rt;
+    wasm_module_t *m;
+    wasm_value_t i32_result, i64_result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1); emit(&sec, 0x7E);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 'e'); emit(&sec, 'x'); emit(&sec, 't'); emit(&sec, '3'); emit(&sec, '2');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 'e'); emit(&sec, 'x'); emit(&sec, 't'); emit(&sec, '6'); emit(&sec, '4');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = {0};
+        wasm_builder_t body = {0};
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 65408);
+        emit(&body, 0xC0);
+        emit(&body, 0x41); emit_leb128_i32(&body, 32769);
+        emit(&body, 0xC1);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x42); emit_leb128_i64(&body, 128);
+        emit(&body, 0xC2);
+        emit(&body, 0x42); emit_leb128_i64(&body, 32769);
+        emit(&body, 0xC3);
+        emit(&body, 0x7C);
+        emit(&body, 0x42); emit_leb128_i64(&body, 4294967295LL);
+        emit(&body, 0xC4);
+        emit(&body, 0x7C);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    if (!m) { FAIL(rt.error_msg); return; }
+
+    err = wasm_call(m, "ext32", NULL, 0, &i32_result, 1);
+    if (err != WASM_OK) {
+        FAIL(wasm_error_string(err));
+        wasm_free_module(m);
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "ext64", NULL, 0, &i64_result, 1);
+    if (err != WASM_OK) { FAIL(wasm_error_string(err)); }
+    else if (i32_result.of.i32 != -32895) { fail_i32_got(i32_result.of.i32); }
+    else if (i64_result.of.i64 != -32896) { fail_i64_got(i64_result.of.i64); }
+    else { PASS(); }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
 static void test_bad_magic(void) {
@@ -991,6 +1117,7 @@ int main(void) {
     test_multi_result_call();
     test_loop_type_index_block();
     test_prefixed_opcode_in_dead_branch();
+    test_sign_extension_ops();
     test_bad_magic();
     test_div_by_zero();
 

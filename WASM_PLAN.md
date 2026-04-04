@@ -26,7 +26,7 @@ Key structural limitations that will affect almost every milestone:
 - Refactor block type parsing: detect `0x40` (void), `0x7F-0x7C` (single valtype), or otherwise read a signed LEB128 type index into `mod->types[]`. Propagate the resulting param/result counts into `wasm__label_t.arity` (which currently only tracks result arity — multi-value blocks need input arity tracking too).
 - Extend `wasm_valtype_t` enum with `WASM_TYPE_FUNCREF = 0x70` and `WASM_TYPE_EXTERNREF = 0x6F`.
 
-### Milestone 2: Sign-Extension Operators
+### [DONE] Milestone 2: Sign-Extension Operators
 
 **Goal:** Handle `0xC0–0xC4` opcodes.
 

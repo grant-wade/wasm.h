@@ -2419,6 +2419,43 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                 break;
             }
 
+            /* Sign extension */
+            case 0xC0: {
+                wasm_value_t a = WASM__POP(rt);
+                uint32_t value = (uint32_t)a.of.i32 & 0xFFu;
+                if (value & 0x80u) value |= 0xFFFFFF00u;
+                WASM__PUSH(rt, wasm_i32((int32_t)value));
+                break;
+            }
+            case 0xC1: {
+                wasm_value_t a = WASM__POP(rt);
+                uint32_t value = (uint32_t)a.of.i32 & 0xFFFFu;
+                if (value & 0x8000u) value |= 0xFFFF0000u;
+                WASM__PUSH(rt, wasm_i32((int32_t)value));
+                break;
+            }
+            case 0xC2: {
+                wasm_value_t a = WASM__POP(rt);
+                uint64_t value = (uint64_t)a.of.i64 & 0xFFu;
+                if (value & 0x80u) value |= 0xFFFFFFFFFFFFFF00ull;
+                WASM__PUSH(rt, wasm_i64((int64_t)value));
+                break;
+            }
+            case 0xC3: {
+                wasm_value_t a = WASM__POP(rt);
+                uint64_t value = (uint64_t)a.of.i64 & 0xFFFFu;
+                if (value & 0x8000u) value |= 0xFFFFFFFFFFFF0000ull;
+                WASM__PUSH(rt, wasm_i64((int64_t)value));
+                break;
+            }
+            case 0xC4: {
+                wasm_value_t a = WASM__POP(rt);
+                uint64_t value = (uint64_t)a.of.i64 & 0xFFFFFFFFull;
+                if (value & 0x80000000ull) value |= 0xFFFFFFFF00000000ull;
+                WASM__PUSH(rt, wasm_i64((int64_t)value));
+                break;
+            }
+
             default:
                 WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);
                 err = WASM_ERR_MALFORMED;
