@@ -5,10 +5,12 @@
  * Compile: cc -O2 -o test_wasm test_wasm.c -lm
  */
 
+#define WL_IMPL
+#include "wl.h"
+
 #define WASM_IMPL
 #include "wasm.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -18,34 +20,11 @@
 #define WASM_TEST_SNPRINTF snprintf
 #endif
 
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST(name) printf("  %-50s", name)
-#define PASS()                           \
-    do {                                 \
-        printf("\033[32mPASS\033[0m\n"); \
-        tests_passed++;                  \
-    } while (0)
-#define FAIL(msg)                                 \
-    do {                                          \
-        printf("\033[31mFAIL: %s\033[0m\n", msg); \
-        tests_failed++;                           \
-    } while (0)
-
-static void fail_i32_got(int32_t value) {
-    char buf[64];
-
-    WASM_TEST_SNPRINTF(buf, sizeof(buf), "got %d", value);
-    FAIL(buf);
-}
-
-static void fail_i64_got(int64_t value) {
-    char buf[64];
-
-    WASM_TEST_SNPRINTF(buf, sizeof(buf), "got %lld", (long long)value);
-    FAIL(buf);
-}
+#define WASM_CHECK_OK(t, err) WL_CHECK_MSG((t), (err) == WASM_OK, "%s", wasm_error_string(err))
+#define WASM_CHECK_I32(t, actual, expected) \
+    WL_CHECK_MSG((t), (actual) == (expected), "expected %d, got %d", (expected), (actual))
+#define WASM_CHECK_I64(t, actual, expected)                                                          \
+    WL_CHECK_MSG((t), (actual) == (expected), "expected %lld, got %lld", (long long)(expected), (long long)(actual))
 
 /* ── Helper: build minimal wasm module ──────────────────────────── */
 
@@ -144,8 +123,7 @@ static void emit_header(wasm_builder_t* b) {
 
 /* ── Test 1: add(a, b) -> a + b ─────────────────────────────────── */
 
-static void test_add(void) {
-    TEST("i32.add(3, 7) == 10");
+WL_TEST(test_add) {
 
     /*
      * Module with one function: (func (param i32 i32) (result i32)
@@ -212,23 +190,23 @@ static void test_add(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[] = { wasm_i32(3), wasm_i32(7) };
+    wasm_value_t result;
+    wasm_error_t err;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_value_t args[] = { wasm_i32(3), wasm_i32(7) };
-    wasm_value_t result;
-    wasm_error_t err = wasm_call(m, "add", args, 2, &result, 1);
-
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 10) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    err = wasm_call(m, "add", args, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 10);
     }
 
     wasm_free_module(m);
@@ -237,8 +215,7 @@ static void test_add(void) {
 
 /* ── Test 2: factorial(n) recursive ─────────────────────────────── */
 
-static void test_factorial(void) {
-    TEST("factorial(10) == 3628800");
+WL_TEST(test_factorial) {
 
     /*
      * (func $fac (param i32) (result i32)
@@ -326,23 +303,23 @@ static void test_factorial(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[] = { wasm_i32(10) };
+    wasm_value_t result;
+    wasm_error_t err;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_value_t args[] = { wasm_i32(10) };
-    wasm_value_t result;
-    wasm_error_t err = wasm_call(m, "fac", args, 1, &result, 1);
-
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 3628800) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    err = wasm_call(m, "fac", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 3628800);
     }
 
     wasm_free_module(m);
@@ -367,8 +344,7 @@ static wasm_error_t host_print(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static void test_host_import(void) {
-    TEST("host import: env.print(42)");
+WL_TEST(test_host_import) {
 
     host_print_called = 0;
     host_print_value = 0;
@@ -451,6 +427,9 @@ static void test_host_import(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+
     wasm_init(&rt);
 
     wasm_import_t imp;
@@ -461,22 +440,20 @@ static void test_host_import(void) {
     imp.func = host_print;
     wasm_register_import(&rt, &imp);
 
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_error_t err = wasm_call(m, "run", NULL, 0, NULL, 0);
-
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (!host_print_called) {
-        FAIL("host func not called");
-    } else if (host_print_value != 42) {
-        fail_i32_got(host_print_value);
-    } else {
-        PASS();
+    err = wasm_call(m, "run", NULL, 0, NULL, 0);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, host_print_called, "%s", "host func not called");
+        if (host_print_called) {
+            WASM_CHECK_I32(t, host_print_value, 42);
+        }
     }
 
     wasm_free_module(m);
@@ -485,8 +462,7 @@ static void test_host_import(void) {
 
 /* ── Test 4: memory load/store ──────────────────────────────────── */
 
-static void test_memory(void) {
-    TEST("memory: store 99 at offset 0, load it back");
+WL_TEST(test_memory) {
 
     wasm_builder_t mod = { 0 };
     emit_header(&mod);
@@ -565,22 +541,22 @@ static void test_memory(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_value_t result;
-    wasm_error_t err = wasm_call(m, "test", NULL, 0, &result, 1);
-
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 99) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    err = wasm_call(m, "test", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 99);
     }
 
     wasm_free_module(m);
@@ -589,8 +565,7 @@ static void test_memory(void) {
 
 /* ── Test 5: loop with br_if (sum 1..10) ────────────────────────── */
 
-static void test_loop(void) {
-    TEST("loop: sum(1..10) == 55");
+WL_TEST(test_loop) {
 
     /*
      * (func (result i32)
@@ -717,22 +692,22 @@ static void test_loop(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_value_t result;
-    wasm_error_t err = wasm_call(m, "sum", NULL, 0, &result, 1);
-
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 55) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    err = wasm_call(m, "sum", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 55);
     }
 
     wasm_free_module(m);
@@ -741,8 +716,7 @@ static void test_loop(void) {
 
 /* ── Test 6: large signatures and type-index blocks ─────────────── */
 
-static void test_large_param_call(void) {
-    TEST("call with 17 params survives dynamic signature storage");
+WL_TEST(test_large_param_call) {
 
     wasm_builder_t mod = { 0 };
     wasm_value_t args[17];
@@ -817,26 +791,23 @@ static void test_large_param_call(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "call", args, 17, &result, 1);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 17) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 17);
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_multi_result_call(void) {
-    TEST("call with 5 results survives dynamic result storage");
+WL_TEST(test_multi_result_call) {
 
     wasm_builder_t mod = { 0 };
     wasm_value_t results[5];
@@ -916,27 +887,28 @@ static void test_multi_result_call(void) {
     memset(results, 0, sizeof(results));
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "multi", NULL, 0, results, 5);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (results[0].of.i32 != 1 || results[1].of.i32 != 2 || results[2].of.i32 != 3 ||
-               results[3].of.i32 != 4 || results[4].of.i32 != 5) {
-        FAIL("unexpected multi-result values");
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(
+            t,
+            results[0].of.i32 == 1 && results[1].of.i32 == 2 && results[2].of.i32 == 3 &&
+                results[3].of.i32 == 4 && results[4].of.i32 == 5,
+            "%s",
+            "unexpected multi-result values");
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_loop_type_index_block(void) {
-    TEST("loop type index preserves block params on br_if");
+WL_TEST(test_loop_type_index_block) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1023,26 +995,23 @@ static void test_loop_type_index_block(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "loop", NULL, 0, &result, 1);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 5) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 5);
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_prefixed_opcode_in_dead_branch(void) {
-    TEST("0xFC immediates are skipped while scanning dead branches");
+WL_TEST(test_prefixed_opcode_in_dead_branch) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1114,26 +1083,23 @@ static void test_prefixed_opcode_in_dead_branch(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "skip", NULL, 0, &result, 1);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 7) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 7);
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_sign_extension_ops(void) {
-    TEST("sign-extension ops: i32/i64 extend*_s");
+WL_TEST(test_sign_extension_ops) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1233,36 +1199,32 @@ static void test_sign_extension_ops(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "ext32", NULL, 0, &i32_result, 1);
+    WASM_CHECK_OK(t, err);
     if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
         wasm_free_module(m);
         wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "ext64", NULL, 0, &i64_result, 1);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (i32_result.of.i32 != -32895) {
-        fail_i32_got(i32_result.of.i32);
-    } else if (i64_result.of.i64 != -32896) {
-        fail_i64_got(i64_result.of.i64);
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, i32_result.of.i32, -32895);
+        WASM_CHECK_I64(t, i64_result.of.i64, -32896);
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_exported_ctor_startup(void) {
-    TEST("startup: exported __wasm_call_ctors runs on load");
+WL_TEST(test_exported_ctor_startup) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1370,26 +1332,23 @@ static void test_exported_ctor_startup(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "get", NULL, 0, &result, 1);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (result.of.i32 != 77) {
-        fail_i32_got(result.of.i32);
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 77);
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_multivalue_if_block(void) {
-    TEST("multivalue if: type-index block returns two values");
+WL_TEST(test_multivalue_if_block) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1468,21 +1427,22 @@ static void test_multivalue_if_block(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     args[0] = wasm_i32(1);
     err = wasm_call(m, "mv", args, 1, results, 2);
+    WASM_CHECK_OK(t, err);
     if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
         wasm_free_module(m);
         wasm_destroy(&rt);
         return;
     }
-    if (results[0].of.i32 != 11 || results[1].of.i32 != 22) {
-        FAIL("unexpected true-branch multivalue results");
+    if (!(results[0].of.i32 == 11 && results[1].of.i32 == 22)) {
+        WL_CHECK_MSG(t, false, "%s", "unexpected true-branch multivalue results");
         wasm_free_module(m);
         wasm_destroy(&rt);
         return;
@@ -1490,20 +1450,20 @@ static void test_multivalue_if_block(void) {
 
     args[0] = wasm_i32(0);
     err = wasm_call(m, "mv", args, 1, results, 2);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (results[0].of.i32 != 33 || results[1].of.i32 != 44) {
-        FAIL("unexpected false-branch multivalue results");
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(
+            t,
+            results[0].of.i32 == 33 && results[1].of.i32 == 44,
+            "%s",
+            "unexpected false-branch multivalue results");
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_multivalue_branch_block(void) {
-    TEST("multivalue br: block branch preserves two results");
+WL_TEST(test_multivalue_branch_block) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1579,26 +1539,27 @@ static void test_multivalue_branch_block(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "br", NULL, 0, results, 2);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (results[0].of.i32 != 7 || results[1].of.i32 != 9) {
-        FAIL("unexpected multivalue branch results");
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(
+            t,
+            results[0].of.i32 == 7 && results[1].of.i32 == 9,
+            "%s",
+            "unexpected multivalue branch results");
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_multivalue_loop_params(void) {
-    TEST("multivalue loop: br 0 preserves loop params");
+WL_TEST(test_multivalue_loop_params) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1689,26 +1650,27 @@ static void test_multivalue_loop_params(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     err = wasm_call(m, "loop", NULL, 0, results, 2);
-    if (err != WASM_OK) {
-        FAIL(wasm_error_string(err));
-    } else if (results[0].of.i32 != 4 || results[1].of.i32 != 9) {
-        FAIL("unexpected multivalue loop results");
-    } else {
-        PASS();
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(
+            t,
+            results[0].of.i32 == 4 && results[1].of.i32 == 9,
+            "%s",
+            "unexpected multivalue loop results");
     }
 
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
-static void test_trunc_sat_ops(void) {
-    TEST("trunc-sat ops: all 0xFC 0x00-0x07 cases");
+WL_TEST(test_trunc_sat_ops) {
 
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1875,60 +1837,58 @@ static void test_trunc_sat_ops(void) {
 
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
     for (index = 0; index < 8; index++) {
         err = wasm_call(m, names[index], NULL, 0, &result, 1);
+        WASM_CHECK_OK(t, err);
         if (err != WASM_OK) {
-            FAIL(wasm_error_string(err));
             wasm_free_module(m);
             wasm_destroy(&rt);
             return;
         }
         if (!is_i64[index] && result.of.i32 != expected_i32[index]) {
-            fail_i32_got(result.of.i32);
+            WASM_CHECK_I32(t, result.of.i32, expected_i32[index]);
             wasm_free_module(m);
             wasm_destroy(&rt);
             return;
         }
         if (is_i64[index] && result.of.i64 != expected_i64[index]) {
-            fail_i64_got(result.of.i64);
+            WASM_CHECK_I64(t, result.of.i64, expected_i64[index]);
             wasm_free_module(m);
             wasm_destroy(&rt);
             return;
         }
     }
 
-    PASS();
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
-static void test_bad_magic(void) {
-    TEST("reject bad magic number");
+WL_TEST(test_bad_magic) {
 
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
+    wasm_module_t* m;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, bad, sizeof(bad));
+    m = wasm_load(&rt, bad, sizeof(bad));
     if (m) {
-        FAIL("should have rejected");
+        WL_CHECK_MSG(t, false, "%s", "should have rejected");
         wasm_free_module(m);
-    } else if (rt.last_error != WASM_ERR_INVALID_MAGIC) {
-        FAIL("wrong error code");
     } else {
-        PASS();
+        WL_CHECK(t, rt.last_error == WASM_ERR_INVALID_MAGIC);
     }
     wasm_destroy(&rt);
 }
 
-static void test_div_by_zero(void) {
-    TEST("trap on i32.div_s by zero");
+WL_TEST(test_div_by_zero) {
 
     wasm_builder_t mod = { 0 };
     emit_header(&mod);
@@ -1974,20 +1934,20 @@ static void test_div_by_zero(void) {
     }
 
     wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
     wasm_init(&rt);
-    wasm_module_t* m = wasm_load(&rt, mod.buf, mod.len);
-    if (!m) {
-        FAIL(rt.error_msg);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
         return;
     }
 
-    wasm_value_t result;
-    wasm_error_t err = wasm_call(m, "f", NULL, 0, &result, 1);
-    if (err == WASM_ERR_DIV_BY_ZERO) {
-        PASS();
-    } else {
-        FAIL("expected div by zero trap");
-    }
+    err = wasm_call(m, "f", NULL, 0, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_DIV_BY_ZERO, "%s", "expected div by zero trap");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -1996,26 +1956,25 @@ static void test_div_by_zero(void) {
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
-    printf("\n\033[1m=== wasm.h test suite ===\033[0m\n\n");
+    static const wl_test_case cases[] = {
+        { "i32.add(3, 7) == 10", test_add },
+        { "factorial(10) == 3628800", test_factorial },
+        { "host import: env.print(42)", test_host_import },
+        { "memory: store 99 at offset 0, load it back", test_memory },
+        { "loop: sum(1..10) == 55", test_loop },
+        { "call with 17 params survives dynamic signature storage", test_large_param_call },
+        { "call with 5 results survives dynamic result storage", test_multi_result_call },
+        { "loop type index preserves block params on br_if", test_loop_type_index_block },
+        { "0xFC immediates are skipped while scanning dead branches", test_prefixed_opcode_in_dead_branch },
+        { "sign-extension ops: i32/i64 extend*_s", test_sign_extension_ops },
+        { "startup: exported __wasm_call_ctors runs on load", test_exported_ctor_startup },
+        { "multivalue if: type-index block returns two values", test_multivalue_if_block },
+        { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
+        { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
+        { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
+        { "reject bad magic number", test_bad_magic },
+        { "trap on i32.div_s by zero", test_div_by_zero },
+    };
 
-    test_add();
-    test_factorial();
-    test_host_import();
-    test_memory();
-    test_loop();
-    test_large_param_call();
-    test_multi_result_call();
-    test_loop_type_index_block();
-    test_prefixed_opcode_in_dead_branch();
-    test_sign_extension_ops();
-    test_exported_ctor_startup();
-    test_multivalue_if_block();
-    test_multivalue_branch_block();
-    test_multivalue_loop_params();
-    test_trunc_sat_ops();
-    test_bad_magic();
-    test_div_by_zero();
-
-    printf("\n\033[1mResults: %d passed, %d failed\033[0m\n\n", tests_passed, tests_failed);
-    return tests_failed ? 1 : 0;
+    return wl_test_run("wasm", cases, WL_COUNTOF(cases));
 }
