@@ -33,14 +33,14 @@ Key structural limitations that will affect almost every milestone:
 - `i32.extend8_s` (0xC0), `i32.extend16_s` (0xC1), `i64.extend8_s` (0xC2), `i64.extend16_s` (0xC3), `i64.extend32_s` (0xC4).
 - Pure interpreter additions — five trivial sign-extension cases in the opcode switch. No structural changes needed. Smallest possible milestone, good validation checkpoint.
 
-### Milestone 3: Non-Trapping Float-to-Int Conversions
+### [DONE] Milestone 3: Non-Trapping Float-to-Int Conversions
 
 **Goal:** Handle `0xFC 0x00–0x07` opcodes.
 
 - Eight saturating truncation ops: `i32.trunc_sat_f32_s/u`, `i32.trunc_sat_f64_s/u`, `i64.trunc_sat_f32_s/u`, `i64.trunc_sat_f64_s/u`.
 - Requires the `0xFC` prefix dispatch from M1. Each op clamps NaN→0 and out-of-range values to min/max instead of trapping. Straightforward but the edge cases (NaN, ±inf, values between INT_MAX and INT_MAX+1) need careful handling — the existing trapping conversions at `0xA8–0xB1` don't validate these at all, which is itself a spec conformance bug you'll want to fix in parallel.
 
-### Milestone 4: Multi-Value
+### [DONE] Milestone 4: Multi-Value
 
 **Goal:** Blocks, if/else, and functions can consume and produce multiple values.
 

@@ -1313,6 +1313,24 @@ static wasm_error_t wasm__do_branch(wasm_runtime_t* rt, wasm__label_t* target,
     return WASM_OK;
 }
 
+static wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label) {
+    wasm_value_t result_values_buf[8];
+    wasm_value_t* result_values = result_values_buf;
+    uint32_t i;
+
+    if (label->arity > 8) {
+        result_values = (wasm_value_t*)malloc(label->arity * sizeof(wasm_value_t));
+        if (!result_values) return WASM_ERR_OOM;
+    }
+
+    for (i = 0; i < label->arity; i++) result_values[i] = rt->stack[rt->sp - label->arity + i];
+    rt->sp = label->sp_base;
+    for (i = 0; i < label->arity; i++) rt->stack[rt->sp++] = result_values[i];
+
+    if (result_values != result_values_buf) free(result_values);
+    return WASM_OK;
+}
+
 /* ── Interpreter ──────────────────────────────────────────────────── */
 
 #define WASM__MAX_LABELS 256
@@ -1391,17 +1409,19 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
 
             case 0x02: { /* block */
                 wasm__blocktype_t blocktype;
-                const uint8_t* be = wasm__find_block_end(r.ptr, r.end, NULL);
                 err = wasm__read_blocktype(mod, &r, &blocktype);
                 if (err != WASM_OK) goto cleanup;
-                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
-                labels[lsp].continuation = be;
-                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
-                labels[lsp].param_arity = blocktype.param_arity;
-                labels[lsp].arity = blocktype.result_arity;
-                labels[lsp].opcode = 0x02;
-                lsp++;
+                {
+                    const uint8_t* be = wasm__find_block_end(r.ptr, r.end, NULL);
+                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                    if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+                    labels[lsp].continuation = be;
+                    labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                    labels[lsp].param_arity = blocktype.param_arity;
+                    labels[lsp].arity = blocktype.result_arity;
+                    labels[lsp].opcode = 0x02;
+                    lsp++;
+                }
                 break;
             }
             case 0x03: { /* loop */
@@ -1423,36 +1443,44 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             }
             case 0x04: { /* if */
                 wasm__blocktype_t blocktype;
-                const uint8_t* ep = NULL;
-                const uint8_t* be = wasm__find_block_end(r.ptr, r.end, &ep);
                 wasm_value_t cond = WASM__POP(rt);
                 err = wasm__read_blocktype(mod, &r, &blocktype);
                 if (err != WASM_OK) goto cleanup;
-                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                if (!cond.of.i32) {
-                    if (!ep) {
-                        r.ptr = be;
-                        break;
+                {
+                    const uint8_t* ep = NULL;
+                    const uint8_t* be = wasm__find_block_end(r.ptr, r.end, &ep);
+                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                    if (!cond.of.i32) {
+                        if (!ep) {
+                            r.ptr = be;
+                            break;
+                        }
+                        r.ptr = ep;
                     }
-                    r.ptr = ep;
+                    if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+                    labels[lsp].continuation = be;
+                    labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                    labels[lsp].param_arity = blocktype.param_arity;
+                    labels[lsp].arity = blocktype.result_arity;
+                    labels[lsp].opcode = 0x04;
+                    lsp++;
                 }
-                if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
-                labels[lsp].continuation = be;
-                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
-                labels[lsp].param_arity = blocktype.param_arity;
-                labels[lsp].arity = blocktype.result_arity;
-                labels[lsp].opcode = 0x04;
-                lsp++;
                 break;
             }
             case 0x05:
                 if (lsp > 0) {
+                    err = wasm__leave_label(rt, &labels[lsp - 1]);
+                    if (err != WASM_OK) goto cleanup;
                     r.ptr = labels[lsp - 1].continuation;
                     lsp--;
                 }
                 break;
             case 0x0B:
-                if (lsp > 0) lsp--;
+                if (lsp > 0) {
+                    err = wasm__leave_label(rt, &labels[lsp - 1]);
+                    if (err != WASM_OK) goto cleanup;
+                    lsp--;
+                }
                 break;
 
             case 0x0C: {
