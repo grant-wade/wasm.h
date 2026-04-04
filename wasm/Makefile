@@ -30,7 +30,7 @@ switch_table_RUNNER_ARGS := call-i32 wl_case 40
 switch_table_EMCCFLAGS := -O2
 
 start_constructor_RUNNER_ARGS := call-i32 wl_case 77
-start_constructor_EMCCFLAGS := -O0
+start_constructor_EMCCFLAGS := -O0 -Wl,--export=__wasm_call_ctors
 
 i64_return_RUNNER_ARGS := call-i64 wl_case 1099511627785
 i64_return_EMCCFLAGS := -O1
@@ -53,11 +53,11 @@ $(BUILD_DIR):
 $(OUT_DIR):
 	mkdir -p $@
 
-$(RUNNER): $(RUNNER_DEPS) | $(BUILD_DIR)
+$(RUNNER): $(RUNNER_DEPS) Makefile | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ROOT) $(RUNNER_SRC) -o $@ $(LDFLAGS) -lm
 
 define WASM_CASE_RULE
-$(OUT_DIR)/$(1).wasm: $(FIXTURE_DIR)/$(1).c | $(OUT_DIR)
+$(OUT_DIR)/$(1).wasm: $(FIXTURE_DIR)/$(1).c Makefile | $(OUT_DIR)
 	$(EMCC) $$< -sSTANDALONE_WASM=1 -Wl,--no-entry -Wl,--export=wl_case $$($(1)_EMCCFLAGS) -o $$@
 endef
 

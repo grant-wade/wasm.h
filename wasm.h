@@ -245,6 +245,7 @@ struct wasm_module_t {
     wasm_memory_t memory;
     uint32_t num_func_imports;
     uint32_t start_func;
+    int startup_ran;
 };
 
 /* ── Runtime configuration ────────────────────────────────────────── */
@@ -874,6 +875,47 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
     return WASM_OK;
 }
 
+static uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name) {
+    uint32_t i;
+
+    for (i = 0; i < mod->num_exports; i++) {
+        if (mod->exports[i].kind == WASM_EXPORT_FUNC && strcmp(mod->exports[i].name, name) == 0)
+            return mod->exports[i].index;
+    }
+
+    return UINT32_MAX;
+}
+
+static wasm_error_t wasm__run_startup(wasm_module_t* mod) {
+    wasm_error_t err;
+
+    if (mod->startup_ran) return WASM_OK;
+
+    mod->startup_ran = 1;
+
+    if (mod->start_func != UINT32_MAX) {
+        err = wasm_call_index(mod, mod->start_func, NULL, 0, NULL, 0);
+        if (err != WASM_OK) {
+            mod->startup_ran = 0;
+            return err;
+        }
+        return WASM_OK;
+    }
+
+    {
+        uint32_t ctor_idx = wasm__find_exported_func(mod, "__wasm_call_ctors");
+        if (ctor_idx != UINT32_MAX) {
+            err = wasm_call_index(mod, ctor_idx, NULL, 0, NULL, 0);
+            if (err != WASM_OK) {
+                mod->startup_ran = 0;
+                return err;
+            }
+        }
+    }
+
+    return WASM_OK;
+}
+
 /* ── Module loader ────────────────────────────────────────────────── */
 
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
@@ -987,8 +1029,12 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         r.ptr = se;
     }
 
-    if (mod->start_func != UINT32_MAX)
-        wasm_call_index(mod, mod->start_func, NULL, 0, NULL, 0);
+    err = wasm__run_startup(mod);
+    if (err != WASM_OK) {
+        wasm_free_module(mod);
+        return NULL;
+    }
+
     return mod;
 }
 

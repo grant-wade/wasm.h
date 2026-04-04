@@ -40,6 +40,8 @@ make run-strict
 
 Current fixtures assume a zero-argument export named `wl_case`.
 
+For `emcc` constructor-style modules, the harness can also export `__wasm_call_ctors`. The runtime now runs the real start function when present, or an exported `__wasm_call_ctors` once at load time when there is no start section.
+
 Supported runner modes are:
 
 - `load-ok`
