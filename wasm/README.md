@@ -36,6 +36,17 @@ make run-strict
 
 1. Add a new `fixtures/<name>.c` file.
 2. Add `<name>` to `CASES` in [Makefile](Makefile).
-3. Define `<name>_EXPORT`, `<name>_RESULT`, `<name>_EXPECT`, and `<name>_EMCCFLAGS` in [Makefile](Makefile).
+3. Define `<name>_RUNNER_ARGS` and `<name>_EMCCFLAGS` in [Makefile](Makefile).
 
-Current fixtures assume a zero-argument export named `wl_case` that returns an `i32`. The runner itself can also exercise `void` exports, so that can be extended later without changing the basic flow.
+Current fixtures assume a zero-argument export named `wl_case`.
+
+Supported runner modes are:
+
+- `load-ok`
+- `load-fail`
+- `call-void wl_case`
+- `call-i32 wl_case <expected>`
+- `call-i64 wl_case <expected>`
+- `call-fail wl_case`
+
+That makes it easy to keep deliberately unsupported-feature probes in the suite without having to remove them when they fail today.
