@@ -70,7 +70,7 @@ Key structural limitations that will affect almost every milestone:
 - Mirror for tables: `table.init` (0xFC 0x0C), `elem.drop` (0xFC 0x0D), `table.copy` (0xFC 0x0E). Same pattern — passive element segments need retained/droppable storage.
 - Refactor the data section decoder to handle the three segment kinds (0=active, 1=passive, 2=active with explicit memory index). Same for element section — the current decoder only handles kind 0.
 
-### Milestone 7: Reference Types
+### [DONE] Milestone 7: Reference Types
 
 **Goal:** `funcref`/`externref` as first-class stack values, extended table operations.
 
