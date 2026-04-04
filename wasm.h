@@ -22,6 +22,23 @@
  *   wasm_value_t result;
  *   wasm_call(mod, "main", args, 1, &result, 1);
  *   printf("result = %d\n", result.of.i32);
+ *
+ * INTROSPECTION:
+ *   uint32_t export_count = wasm_export_count(mod);
+ *   for (uint32_t i = 0; i < export_count; i++) {
+ *       printf("export %s kind=%u index=%u\n",
+ *              wasm_export_name(mod, i),
+ *              (unsigned)wasm_export_kind(mod, i),
+ *              (unsigned)wasm_export_index(mod, i));
+ *   }
+ *   wasm_export_kind_t kind;
+ *   uint32_t func_idx;
+ *   if (wasm_find_export(mod, "main", &kind, &func_idx) && kind == WASM_EXPORT_FUNC) {
+ *       printf("main takes %u params and returns %u values\n",
+ *              (unsigned)wasm_func_param_count(mod, func_idx),
+ *              (unsigned)wasm_func_result_count(mod, func_idx));
+ *       wasm_call_index(mod, func_idx, args, 1, &result, 1);
+ *   }
  *   wasm_free_module(mod);
  *   wasm_destroy(&rt);
  *
@@ -402,6 +419,19 @@ int32_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint32_t 
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint32_t wasm_memory_size(wasm_module_t* mod);
 int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages);
+uint32_t wasm_export_count(wasm_module_t* mod);
+const char* wasm_export_name(wasm_module_t* mod, uint32_t index);
+wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
+uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index);
+int wasm_find_export(wasm_module_t* mod, const char* name,
+                     wasm_export_kind_t* out_kind, uint32_t* out_index);
+uint32_t wasm_func_count(wasm_module_t* mod);
+uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx);
+uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx);
+wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
+                                    uint32_t param_idx);
+wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
+                                     uint32_t result_idx);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -6423,14 +6453,14 @@ cleanup:
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results) {
-    uint32_t i;
-    for (i = 0; i < mod->num_exports; i++) {
-        if (mod->exports[i].kind == WASM_EXPORT_FUNC &&
-            strcmp(mod->exports[i].name, func_name) == 0)
-            return wasm_call_index(mod, mod->exports[i].index, args, num_args, results, num_results);
+    uint32_t idx;
+    wasm_export_kind_t kind;
+
+    if (!wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name);
+        return WASM_ERR_UNDEFINED_EXPORT;
     }
-    WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name);
-    return WASM_ERR_UNDEFINED_EXPORT;
+    return wasm_call_index(mod, idx, args, num_args, results, num_results);
 }
 
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
@@ -6505,6 +6535,82 @@ uint32_t wasm_memory_size(wasm_module_t* mod) {
 
 int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages) {
     return wasm_memory_grow_at(mod, 0, delta_pages);
+}
+
+uint32_t wasm_export_count(wasm_module_t* mod) {
+    return mod ? mod->num_exports : 0;
+}
+
+const char* wasm_export_name(wasm_module_t* mod, uint32_t index) {
+    if (!mod || index >= mod->num_exports) return NULL;
+    return mod->exports[index].name;
+}
+
+wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index) {
+    if (!mod || index >= mod->num_exports) return (wasm_export_kind_t)0;
+    return mod->exports[index].kind;
+}
+
+uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index) {
+    if (!mod || export_index >= mod->num_exports) return 0;
+    return mod->exports[export_index].index;
+}
+
+int wasm_find_export(wasm_module_t* mod, const char* name,
+                     wasm_export_kind_t* out_kind, uint32_t* out_index) {
+    uint32_t index;
+
+    if (!mod || !name) return 0;
+
+    for (index = 0; index < mod->num_exports; index++) {
+        if (strcmp(mod->exports[index].name, name) == 0) {
+            if (out_kind) *out_kind = mod->exports[index].kind;
+            if (out_index) *out_index = mod->exports[index].index;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+uint32_t wasm_func_count(wasm_module_t* mod) {
+    return mod ? mod->num_funcs : 0;
+}
+
+uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx) {
+    wasm_functype_t* ft;
+
+    if (!mod || func_idx >= mod->num_funcs) return 0;
+    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    return ft->num_params;
+}
+
+uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx) {
+    wasm_functype_t* ft;
+
+    if (!mod || func_idx >= mod->num_funcs) return 0;
+    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    return ft->num_results;
+}
+
+wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
+                                    uint32_t param_idx) {
+    wasm_functype_t* ft;
+
+    if (!mod || func_idx >= mod->num_funcs) return WASM_TYPE_VOID;
+    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    if (param_idx >= ft->num_params) return WASM_TYPE_VOID;
+    return ft->params[param_idx];
+}
+
+wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
+                                     uint32_t result_idx) {
+    wasm_functype_t* ft;
+
+    if (!mod || func_idx >= mod->num_funcs) return WASM_TYPE_VOID;
+    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    if (result_idx >= ft->num_results) return WASM_TYPE_VOID;
+    return ft->results[result_idx];
 }
 
 const char* wasm_error_string(wasm_error_t err) {

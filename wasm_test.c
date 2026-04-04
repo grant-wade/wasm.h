@@ -408,6 +408,105 @@ WL_TEST(test_add) {
     WL_CHECK_MSG(t, free_delta > 0, "%s", "expected custom wasm allocator frees during cleanup");
 }
 
+WL_TEST(test_introspection_helpers) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_export_kind_t kind = WASM_EXPORT_MEM;
+    uint32_t func_idx = 77;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "add", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm_export_count(NULL) == 0, "%s", "NULL module should report zero exports");
+    WL_CHECK_MSG(t, wasm_export_count(m) == 1, "%s", "expected one export");
+    WL_CHECK_MSG(t, wasm_export_name(m, 0) != NULL && strcmp(wasm_export_name(m, 0), "add") == 0,
+                 "%s", "expected export 0 to be named add");
+    WL_CHECK_MSG(t, wasm_export_name(m, 1) == NULL, "%s", "out-of-range export name should be NULL");
+    WL_CHECK_MSG(t, wasm_export_kind(m, 0) == WASM_EXPORT_FUNC, "%s", "expected function export kind");
+    WL_CHECK_MSG(t, wasm_export_index(m, 0) == 0, "%s", "expected function index 0");
+    WL_CHECK_MSG(t, wasm_export_index(m, 1) == 0, "%s", "out-of-range export index should default to 0");
+
+    WL_CHECK_MSG(t, !wasm_find_export(m, "missing", &kind, &func_idx), "%s", "missing export should not resolve");
+    WL_CHECK_MSG(t, kind == WASM_EXPORT_MEM, "%s", "missing export should leave kind untouched");
+    WL_CHECK_MSG(t, func_idx == 77, "%s", "missing export should leave index untouched");
+    WL_CHECK_MSG(t, wasm_find_export(m, "add", &kind, &func_idx), "%s", "expected add export lookup to succeed");
+    WL_CHECK_MSG(t, kind == WASM_EXPORT_FUNC, "%s", "expected add export kind to be function");
+    WL_CHECK_MSG(t, func_idx == 0, "%s", "expected add export to reference function 0");
+
+    WL_CHECK_MSG(t, wasm_func_count(NULL) == 0, "%s", "NULL module should report zero functions");
+    WL_CHECK_MSG(t, wasm_func_count(m) == 1, "%s", "expected one function");
+    WL_CHECK_MSG(t, wasm_func_param_count(m, 0) == 2, "%s", "expected two params");
+    WL_CHECK_MSG(t, wasm_func_param_count(m, 1) == 0, "%s", "out-of-range param count should default to 0");
+    WL_CHECK_MSG(t, wasm_func_result_count(m, 0) == 1, "%s", "expected one result");
+    WL_CHECK_MSG(t, wasm_func_result_count(m, 1) == 0, "%s", "out-of-range result count should default to 0");
+    WL_CHECK_MSG(t, wasm_func_param_type(m, 0, 0) == WASM_TYPE_I32, "%s", "expected first param type i32");
+    WL_CHECK_MSG(t, wasm_func_param_type(m, 0, 1) == WASM_TYPE_I32, "%s", "expected second param type i32");
+    WL_CHECK_MSG(t, wasm_func_param_type(m, 0, 2) == WASM_TYPE_VOID,
+                 "%s", "out-of-range param type should default to void");
+    WL_CHECK_MSG(t, wasm_func_param_type(NULL, 0, 0) == WASM_TYPE_VOID,
+                 "%s", "NULL module param type should default to void");
+    WL_CHECK_MSG(t, wasm_func_result_type(m, 0, 0) == WASM_TYPE_I32, "%s", "expected result type i32");
+    WL_CHECK_MSG(t, wasm_func_result_type(m, 0, 1) == WASM_TYPE_VOID,
+                 "%s", "out-of-range result type should default to void");
+    WL_CHECK_MSG(t, wasm_func_result_type(NULL, 0, 0) == WASM_TYPE_VOID,
+                 "%s", "NULL module result type should default to void");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Test 2: factorial(n) recursive ─────────────────────────────── */
 
 WL_TEST(test_factorial) {
@@ -6574,6 +6673,7 @@ WL_TEST(test_validation_rejects_long_i64_leb128) {
 int main(void) {
     static const wl_test_case cases[] = {
         { "i32.add(3, 7) == 10", test_add },
+        { "introspection: exports and signatures are queryable", test_introspection_helpers },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
         { "global import: mutable env.counter is read and updated by reference", test_imported_mutable_global },
