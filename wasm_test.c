@@ -127,6 +127,36 @@ static void emit_export_func(wasm_builder_t* b, const char* name, uint32_t index
     emit_leb128_u32(b, index);
 }
 
+static void emit_malformed_uleb128_u32(wasm_builder_t* b) {
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x00);
+}
+
+static void emit_malformed_sleb128_i32(wasm_builder_t* b) {
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x10);
+}
+
+static void emit_malformed_sleb128_i64(wasm_builder_t* b) {
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x80);
+    emit(b, 0x01);
+}
+
 static void emit_header(wasm_builder_t* b) {
     /* magic */
     emit(b, 0x00);
@@ -6061,6 +6091,346 @@ WL_TEST(test_memory_grow_respects_zero_max) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_trunc_allows_fractional_lower_edges) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7C);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7C);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 3);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 3);
+        emit_export_func(&sec, "i32s", 0);
+        emit_export_func(&sec, "i32u", 1);
+        emit_export_func(&sec, "i64u", 2);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xAA);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xAB);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xB1);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(-2147483648.75) };
+        err = wasm_call(m, "i32s", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, INT32_MIN);
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(-0.75) };
+        err = wasm_call(m, "i32u", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 0);
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(-0.75) };
+        err = wasm_call(m, "i64u", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, 0);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_call_indirect_uses_structural_type_equality) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x70);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 9, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x11);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_long_u32_leb128) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+    emit(&mod, 0x01);
+    emit_leb128_u32(&mod, 6);
+    emit_malformed_uleb128_u32(&mod);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected malformed long u32 LEB to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_long_i32_leb128) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "bad_i32", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_malformed_sleb128_i32(&body);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected malformed long i32 LEB to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_validation_rejects_long_i64_leb128) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "bad_i64", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x42);
+        emit_malformed_sleb128_i64(&body);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected malformed long i64 LEB to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -6097,10 +6467,12 @@ int main(void) {
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
         { "float min/max: NaN propagation and signed zero semantics", test_float_min_max_semantics },
         { "float trunc: trapping conversions reject NaN and overflow", test_trapping_float_to_int_conversions },
+        { "float trunc: fractional lower-edge values still convert", test_trunc_allows_fractional_lower_edges },
         { "rotates: zero-count paths avoid shift-width UB", test_rotate_by_zero },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
+        { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
         { "exceptions: typed catch receives payload values", test_exception_try_catch_payload },
         { "exceptions: catch_all handles unmatched tags", test_exception_catch_all },
         { "exceptions: rethrow forwards to outer catches", test_exception_rethrow },
@@ -6117,6 +6489,9 @@ int main(void) {
         { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
         { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
         { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
+        { "validation: long u32 LEBs are rejected during load", test_validation_rejects_long_u32_leb128 },
+        { "validation: long i32 LEBs are rejected during load", test_validation_rejects_long_i32_leb128 },
+        { "validation: long i64 LEBs are rejected during load", test_validation_rejects_long_i64_leb128 },
         { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
