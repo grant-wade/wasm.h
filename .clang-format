@@ -1,0 +1,14 @@
+# .clang-format ─ K&R style, 4-space indents
+BasedOnStyle:        Google               # K&R brace layout
+IndentWidth:         4                # main indent
+TabWidth:            4
+UseTab:              Never            # always spaces
+ContinuationIndentWidth: 4            # line-continuations
+NamespaceIndentation: None            # stay flush to the left for namespaces
+AccessModifierOffset: -4              # keeps public:/private: aligned under class
+BreakBeforeBraces:   Attach           # classic K&R brace placement
+ColumnLimit:         0                # 0 = don't wrap purely for length
+AllowShortIfStatementsOnASingleLine: true
+AllowShortFunctionsOnASingleLine:     InlineOnly
+SpaceBeforeParens:   ControlStatements
+Cpp11BracedListStyle: false
