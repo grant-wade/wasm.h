@@ -4,9 +4,37 @@ This repo is the home for a growing set of single-header C libraries.
 
 The center of gravity is `wl.h`: a small foundation library meant to remove the repeated scaffolding that shows up in every C project. Other headers can either build on top of it or live alongside it when they solve a more specific problem. `wasm.h` is an example of the second category: useful when you need it, otherwise irrelevant.
 
-## Included Libraries
+## Quick Start
 
-### `wl.h`
+The libraries follow the usual single-header pattern:
+
+```c
+/* Include wl.h wherever it's needed */
+#include "wl.h"
+
+/* Implement it in exactly one translation unit. */
+#define WL_IMPL
+#include "wl.h"
+```
+
+Platform specific APIs (time and file ops current) can be enabled with `WL_ENABLE_PLATFORM`:
+
+```c
+#define WL_ENABLE_PLATFORM 1
+#define WL_IMPL
+#include "wl.h"
+```
+
+`wasm.h` follows the same pattern:
+
+```c
+#define WASM_IMPL
+#include "wasm.h"
+```
+
+# Included Libraries
+
+## `wl.h`
 
 `wl.h` is the shared utility layer intended to support future projects in this repo.
 
@@ -26,9 +54,44 @@ It currently includes:
 
 The portable core targets C99. Platform-backed APIs are enabled explicitly with `WL_ENABLE_PLATFORM=1`.
 
-### `wasm.h`
+Allocator API Example:
 
-`wasm.h` is a standalone single-header WebAssembly runtime and interpreter. It is independent from `wl.h` and is meant to be pulled into projects only when it is actually relevant.
+```c
+wl_arena arena;
+wl_string msg;
+int *values = NULL;
+
+if (wl_arena_init(&arena, WL_KB(4), NULL) != WL_OK) {
+	return 1;
+}
+
+msg = wl_string_from("values:", &arena);
+if (wl_string_append_cstr(&msg, " ready") != WL_OK) {
+	wl_arena_destroy(&arena);
+	return 1;
+}
+
+values = wl_arr_init(int, &arena);
+if (values == NULL) {
+	wl_arena_destroy(&arena);
+	return 1;
+}
+
+if (wl_arr_push(values, 10) != WL_OK || wl_arr_push(values, 20) != WL_OK) {
+	wl_arena_destroy(&arena);
+	return 1;
+}
+
+wl_log_info("%s len=%zu last=%d", wl_string_cstr(&msg), wl_arr_len(values), wl_arr_last(values));
+
+wl_arena_destroy(&arena);
+```
+
+That example is a little random, but it shows the main thing `wl.h` is good at: using one allocator interface across multiple utilities without having to change how you call them.
+
+## `wasm.h`
+
+`wasm.h` is a standalone single-header WebAssembly runtime and interpreter.
 
 At a high level it gives you:
 
@@ -73,32 +136,6 @@ if (mod != NULL) {
 wasm_destroy(&rt);
 ```
 
-## Single-Header Usage
-
-The libraries follow the usual single-header pattern:
-
-```c
-#include "wl.h"
-
-/* In exactly one translation unit. */
-#define WL_IMPL
-#include "wl.h"
-```
-
-If you want the platform-backed APIs from `wl.h`, define `WL_ENABLE_PLATFORM=1` before including it in any translation unit that uses those APIs:
-
-```c
-#define WL_ENABLE_PLATFORM 1
-#define WL_IMPL
-#include "wl.h"
-```
-
-For `wasm.h`:
-
-```c
-#define WASM_IMPL
-#include "wasm.h"
-```
 
 ## Build And Test
 
