@@ -579,7 +579,7 @@ static void wasm__store_le64(void* p, uint64_t v) {
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-    WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS)
+     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -4348,7 +4348,7 @@ static wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* l
 
 /* ── Interpreter ──────────────────────────────────────────────────── */
 
-#define WASM__ERR_EXCEPTION ((wasm_error_t)-1)
+#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
 
 #define WASM__PUSH(rt, val)                \
     do {                                   \
