@@ -9,10 +9,10 @@
 #include "wl.h"
 
 #define WASM_IMPL
-#include "wasm.h"
-
 #include <stdio.h>
 #include <string.h>
+
+#include "wasm.h"
 
 #if defined(_MSC_VER) && _MSC_VER < 1900
 #define WASM_TEST_SNPRINTF _snprintf
@@ -23,7 +23,7 @@
 #define WASM_CHECK_OK(t, err) WL_CHECK_MSG((t), (err) == WASM_OK, "%s", wasm_error_string(err))
 #define WASM_CHECK_I32(t, actual, expected) \
     WL_CHECK_MSG((t), (actual) == (expected), "expected %d, got %d", (expected), (actual))
-#define WASM_CHECK_I64(t, actual, expected)                                                          \
+#define WASM_CHECK_I64(t, actual, expected) \
     WL_CHECK_MSG((t), (actual) == (expected), "expected %lld, got %lld", (long long)(expected), (long long)(actual))
 
 /* ── Helper: build minimal wasm module ──────────────────────────── */
@@ -134,7 +134,6 @@ static void emit_header(wasm_builder_t* b) {
 /* ── Test 1: add(a, b) -> a + b ─────────────────────────────────── */
 
 WL_TEST(test_add) {
-
     /*
      * Module with one function: (func (param i32 i32) (result i32)
      *   local.get 0
@@ -226,7 +225,6 @@ WL_TEST(test_add) {
 /* ── Test 2: factorial(n) recursive ─────────────────────────────── */
 
 WL_TEST(test_factorial) {
-
     /*
      * (func $fac (param i32) (result i32)
      *   local.get 0
@@ -355,7 +353,6 @@ static wasm_error_t host_print(wasm_runtime_t* rt,
 }
 
 WL_TEST(test_host_import) {
-
     host_print_called = 0;
     host_print_value = 0;
 
@@ -471,7 +468,6 @@ WL_TEST(test_host_import) {
 }
 
 WL_TEST(test_imported_mutable_global) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -590,7 +586,6 @@ WL_TEST(test_imported_mutable_global) {
 }
 
 WL_TEST(test_global_init_expr_global_get_import) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -715,7 +710,6 @@ WL_TEST(test_global_init_expr_global_get_import) {
 }
 
 WL_TEST(test_global_init_expr_extended_i32_arithmetic) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -812,7 +806,6 @@ WL_TEST(test_global_init_expr_extended_i32_arithmetic) {
 }
 
 WL_TEST(test_global_init_expr_extended_i64_arithmetic) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -909,7 +902,6 @@ WL_TEST(test_global_init_expr_extended_i64_arithmetic) {
 }
 
 WL_TEST(test_init_expr_rejects_local_mutable_global_get) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -943,7 +935,6 @@ WL_TEST(test_init_expr_rejects_local_mutable_global_get) {
 }
 
 WL_TEST(test_data_offset_from_imported_global) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1087,7 +1078,6 @@ WL_TEST(test_data_offset_from_imported_global) {
 }
 
 WL_TEST(test_data_offset_extended_const_expr) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1237,7 +1227,6 @@ WL_TEST(test_data_offset_extended_const_expr) {
 }
 
 WL_TEST(test_element_offset_extended_const_expr) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1350,7 +1339,6 @@ WL_TEST(test_element_offset_extended_const_expr) {
 /* ── Test 4: memory load/store ──────────────────────────────────── */
 
 WL_TEST(test_memory) {
-
     wasm_builder_t mod = { 0 };
     emit_header(&mod);
 
@@ -1451,7 +1439,6 @@ WL_TEST(test_memory) {
 }
 
 WL_TEST(test_multi_memory_indexed_access) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1574,7 +1561,6 @@ WL_TEST(test_multi_memory_indexed_access) {
 }
 
 WL_TEST(test_multi_memory_bulk_ops_and_growth) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1754,7 +1740,6 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
 }
 
 WL_TEST(test_bulk_memory_ops) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -1957,7 +1942,6 @@ WL_TEST(test_bulk_memory_ops) {
 }
 
 WL_TEST(test_bulk_memory_table_ops) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -2192,7 +2176,6 @@ WL_TEST(test_bulk_memory_table_ops) {
 }
 
 WL_TEST(test_bulk_memory_oob_traps) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -2338,7 +2321,6 @@ WL_TEST(test_bulk_memory_oob_traps) {
 }
 
 WL_TEST(test_bulk_memory_table_oob_traps) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -2499,7 +2481,6 @@ WL_TEST(test_bulk_memory_table_oob_traps) {
 }
 
 WL_TEST(test_reference_types_table_ops) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -2770,7 +2751,6 @@ WL_TEST(test_reference_types_table_ops) {
 }
 
 WL_TEST(test_reference_types_expr_element_segments) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -2956,7 +2936,6 @@ WL_TEST(test_reference_types_expr_element_segments) {
 /* ── Test 5: loop with br_if (sum 1..10) ────────────────────────── */
 
 WL_TEST(test_loop) {
-
     /*
      * (func (result i32)
      *   (local $i i32) (local $sum i32)
@@ -3107,7 +3086,6 @@ WL_TEST(test_loop) {
 /* ── Test 6: large signatures and type-index blocks ─────────────── */
 
 WL_TEST(test_large_param_call) {
-
     wasm_builder_t mod = { 0 };
     wasm_value_t args[17];
     wasm_value_t result;
@@ -3198,7 +3176,6 @@ WL_TEST(test_large_param_call) {
 }
 
 WL_TEST(test_multi_result_call) {
-
     wasm_builder_t mod = { 0 };
     wasm_value_t results[5];
     wasm_runtime_t rt;
@@ -3299,7 +3276,6 @@ WL_TEST(test_multi_result_call) {
 }
 
 WL_TEST(test_loop_type_index_block) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3402,7 +3378,6 @@ WL_TEST(test_loop_type_index_block) {
 }
 
 WL_TEST(test_prefixed_opcode_in_dead_branch) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3497,7 +3472,6 @@ WL_TEST(test_prefixed_opcode_in_dead_branch) {
 }
 
 WL_TEST(test_sign_extension_ops) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3622,7 +3596,6 @@ WL_TEST(test_sign_extension_ops) {
 }
 
 WL_TEST(test_exported_ctor_startup) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3746,7 +3719,6 @@ WL_TEST(test_exported_ctor_startup) {
 }
 
 WL_TEST(test_multivalue_if_block) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3861,7 +3833,6 @@ WL_TEST(test_multivalue_if_block) {
 }
 
 WL_TEST(test_multivalue_branch_block) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -3957,7 +3928,6 @@ WL_TEST(test_multivalue_branch_block) {
 }
 
 WL_TEST(test_multivalue_loop_params) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4068,7 +4038,6 @@ WL_TEST(test_multivalue_loop_params) {
 }
 
 WL_TEST(test_trunc_sat_ops) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4266,8 +4235,253 @@ WL_TEST(test_trunc_sat_ops) {
     wasm_destroy(&rt);
 }
 
-WL_TEST(test_feature_gate_sign_extension_disabled) {
+WL_TEST(test_tail_call_self_recursion) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[1];
+    wasm_value_t result;
+    wasm_error_t err;
 
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 9);
+        emit(&sec, 'c');
+        emit(&sec, 'o');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 't');
+        emit(&sec, 'd');
+        emit(&sec, 'o');
+        emit(&sec, 'w');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x45);
+        emit(&body, 0x04);
+        emit(&body, 0x7F);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 42);
+        emit(&body, 0x05);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x6B);
+        emit(&body, 0x12);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(2000);
+    err = wasm_call(m, "countdown", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 42);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_tail_call_indirect) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x70);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 'c');
+        emit(&sec, 'a');
+        emit(&sec, 'l');
+        emit(&sec, 'l');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 9, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 77);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x13);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "call", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 77);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_feature_gate_tail_call_disabled) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x12);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    wasm_disable_feature(&rt, WASM_FEATURE_TAIL_CALL);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled tail-call feature to reject module load");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_feature_gate_sign_extension_disabled) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4315,7 +4529,6 @@ WL_TEST(test_feature_gate_sign_extension_disabled) {
 }
 
 WL_TEST(test_validation_rejects_duplicate_export_names) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4388,7 +4601,6 @@ WL_TEST(test_validation_rejects_duplicate_export_names) {
 }
 
 WL_TEST(test_validation_rejects_invalid_start_signature) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4441,7 +4653,6 @@ WL_TEST(test_validation_rejects_invalid_start_signature) {
 }
 
 WL_TEST(test_validation_rejects_stack_type_errors) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4487,7 +4698,6 @@ WL_TEST(test_validation_rejects_stack_type_errors) {
 }
 
 WL_TEST(test_validation_requires_data_count_for_memory_init) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4559,7 +4769,6 @@ WL_TEST(test_validation_requires_data_count_for_memory_init) {
 }
 
 WL_TEST(test_validation_rejects_code_body_count_mismatch) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4603,7 +4812,6 @@ WL_TEST(test_validation_rejects_code_body_count_mismatch) {
 }
 
 WL_TEST(test_validation_rejects_data_count_mismatch) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4646,7 +4854,6 @@ WL_TEST(test_validation_rejects_data_count_mismatch) {
 }
 
 WL_TEST(test_validation_rejects_call_indirect_on_externref_table) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4703,7 +4910,6 @@ WL_TEST(test_validation_rejects_call_indirect_on_externref_table) {
 }
 
 WL_TEST(test_validation_rejects_invalid_load_alignment) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4762,7 +4968,6 @@ WL_TEST(test_validation_rejects_invalid_load_alignment) {
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
 WL_TEST(test_bad_magic) {
-
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4779,7 +4984,6 @@ WL_TEST(test_bad_magic) {
 }
 
 WL_TEST(test_div_by_zero) {
-
     wasm_builder_t mod = { 0 };
     emit_header(&mod);
 
@@ -4844,7 +5048,6 @@ WL_TEST(test_div_by_zero) {
 }
 
 WL_TEST(test_set_immutable_global_rejected) {
-
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -4947,6 +5150,9 @@ int main(void) {
         { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
+        { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
+        { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
+        { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },
         { "validation: invalid start signature is rejected at load", test_validation_rejects_invalid_start_signature },

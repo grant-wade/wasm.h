@@ -32,9 +32,9 @@
  *   - Linear memories with bounds checks, indexed memory access, and memory.grow
  *   - Tables, call_indirect, and reference-type table operations
  *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
- *   - Bulk memory, sign-extension ops, trunc_sat conversions, and extended const exprs
+ *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, and tail calls
  *   - Load-time validation plus runtime-configurable feature gating
- *   - No SIMD, threads, GC, tail calls, or exceptions
+ *   - No SIMD, threads, GC, or exceptions
  */
 
 #ifndef WASM_H
@@ -557,8 +557,8 @@ static void wasm__store_le64(void* p, uint64_t v) {
 #define WASM__IMPLEMENTED_FEATURES                                                     \
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
-    WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-    WASM_FEATURE_EXTENDED_CONST)
+     WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
+     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -2176,6 +2176,18 @@ static void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
     }
 }
 
+static wasm_error_t wasm__validator_check_tail_results(wasm__validator_t* v,
+                                                       const uint8_t* at,
+                                                       const wasm_functype_t* caller_type,
+                                                       const wasm_functype_t* callee_type) {
+    if (!wasm__validator_same_types(caller_type->results, caller_type->num_results,
+                                    callee_type->results, callee_type->num_results)) {
+        return wasm__validator_error(v, at,
+                                     "tail call results must match the enclosing function results");
+    }
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
                                                 const uint8_t* at,
                                                 uint32_t max_align_log2) {
@@ -2704,9 +2716,51 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 break;
             }
-            case 0x12:
-            case 0x13:
-                return wasm__validator_require_feature(&v, at, WASM_FEATURE_TAIL_CALL);
+            case 0x12: {
+                uint32_t callee = wasm__read_leb128_u32(&v.r);
+                wasm_functype_t* callee_type;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_TAIL_CALL);
+                if (err != WASM_OK) return err;
+                if (callee >= mod->num_funcs)
+                    return wasm__validator_error(&v, at, "call target %u out of range", (unsigned)callee);
+                callee_type = &mod->types[mod->funcs[callee].type_idx];
+                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                if (err != WASM_OK) return err;
+                v.sp -= callee_type->num_params;
+                err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
+                if (err != WASM_OK) return err;
+                wasm__validator_mark_unreachable(&v);
+                break;
+            }
+            case 0x13: {
+                uint32_t type_idx = wasm__read_leb128_u32(&v.r);
+                uint32_t table_idx = wasm__read_leb128_u32(&v.r);
+                wasm_functype_t* callee_type;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_TAIL_CALL);
+                if (err != WASM_OK) return err;
+                if (type_idx >= mod->num_types)
+                    return wasm__validator_error(&v, at, "call_indirect type index %u out of range", (unsigned)type_idx);
+                if (table_idx >= mod->num_tables)
+                    return wasm__validator_error(&v, at, "call_indirect table index %u out of range", (unsigned)table_idx);
+                if (table_idx != 0) {
+                    err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
+                    if (err != WASM_OK) return err;
+                }
+                if (mod->tables[table_idx].reftype != WASM_TYPE_FUNCREF)
+                    return wasm__validator_error(&v, at, "call_indirect requires a funcref table");
+                callee_type = &mod->types[type_idx];
+                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
+                if (err != WASM_OK) return err;
+                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                if (err != WASM_OK) return err;
+                v.sp -= callee_type->num_params;
+                err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
+                if (err != WASM_OK) return err;
+                wasm__validator_mark_unreachable(&v);
+                break;
+            }
             case 0x1A: {
                 wasm_valtype_t ignored;
                 err = wasm__validator_pop_any(&v, at, &ignored);
@@ -3499,15 +3553,13 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x3B:
         case 0x3C:
         case 0x3D:
-        case 0x3E:
-            {
-                wasm__memarg_t memarg;
-                if (wasm__read_memarg(r, &memarg) != WASM_OK) {
-                    r->ptr = r->end;
-                    return;
-                }
+        case 0x3E: {
+            wasm__memarg_t memarg;
+            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
+                r->ptr = r->end;
+                return;
             }
-            break;
+        } break;
         case 0x0E: {
             uint32_t n = wasm__read_leb128_u32(r), j;
             for (j = 0; j <= n; j++) wasm__read_leb128_u32(r);
@@ -3627,1573 +3679,1666 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                                wasm_value_t* results, uint32_t num_results,
                                uint32_t depth) {
     wasm_runtime_t* rt = mod->rt;
-    wasm_func_t* func;
-    wasm_functype_t* ft;
+    wasm_func_t* func = NULL;
+    wasm_functype_t* ft = NULL;
     wasm_value_t locals_buf[256];
-    wasm_value_t* locals;
-    uint32_t sp_base, i;
+    wasm_value_t tail_args_buf[8];
+    wasm_value_t* locals = NULL;
+    wasm_value_t* current_args = args;
+    uint32_t current_num_args = num_args;
+    uint32_t current_func_idx = func_idx;
+    uint32_t sp_base = 0, i;
+    int current_args_owned = 0;
+    int restart = 0;
     wasm__reader_t r;
     wasm__label_t labels[WASM__MAX_LABELS];
     uint32_t lsp = 0;
     wasm_error_t err = WASM_OK;
 
-    if (depth >= WASM_MAX_CALL_DEPTH) return WASM_ERR_CALL_STACK_EXHAUSTED;
-    if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
-    func = &mod->funcs[func_idx];
-    ft = &mod->types[func->type_idx];
+    for (;;) {
+        restart = 0;
+        if (depth >= WASM_MAX_CALL_DEPTH) {
+            err = WASM_ERR_CALL_STACK_EXHAUSTED;
+            goto cleanup;
+        }
+        if (current_func_idx >= mod->num_funcs) {
+            err = WASM_ERR_MALFORMED;
+            goto cleanup;
+        }
+        func = &mod->funcs[current_func_idx];
+        ft = &mod->types[func->type_idx];
 
-    if (func->is_import)
-        return func->host_func(rt, args, num_args, results, num_results, func->host_userdata);
+        if (func->is_import) {
+            err = func->host_func(rt, current_args, current_num_args, results, num_results, func->host_userdata);
+            goto cleanup;
+        }
 
-    locals = (func->num_locals <= 256) ? locals_buf : (wasm_value_t*)malloc(func->num_locals * sizeof(wasm_value_t));
-    if (!locals) return WASM_ERR_OOM;
-    for (i = 0; i < func->num_locals; i++) locals[i] = wasm__default_value(func->locals[i]);
-    for (i = 0; i < ft->num_params && i < num_args; i++) {
-        locals[i] = args[i];
-        locals[i].type = ft->params[i];
-    }
+        locals = (func->num_locals <= 256) ? locals_buf : (wasm_value_t*)malloc(func->num_locals * sizeof(wasm_value_t));
+        if (!locals) {
+            err = WASM_ERR_OOM;
+            goto cleanup;
+        }
+        for (i = 0; i < func->num_locals; i++) locals[i] = wasm__default_value(func->locals[i]);
+        for (i = 0; i < ft->num_params && i < current_num_args; i++) {
+            locals[i] = current_args[i];
+            locals[i].type = ft->params[i];
+        }
+        if (current_args_owned) {
+            free(current_args);
+            current_args = NULL;
+            current_args_owned = 0;
+        }
 
-    sp_base = rt->sp;
-    r.ptr = func->code;
-    r.end = func->code + func->code_len;
+        sp_base = rt->sp;
+        r.ptr = func->code;
+        r.end = func->code + func->code_len;
+        lsp = 0;
 
-    /* Implicit function-level label */
-    labels[lsp].continuation = r.end;
-    labels[lsp].sp_base = sp_base;
-    labels[lsp].param_arity = 0;
-    labels[lsp].arity = ft->num_results;
-    labels[lsp].opcode = 0x02;
-    lsp++;
+        /* Implicit function-level label */
+        labels[lsp].continuation = r.end;
+        labels[lsp].sp_base = sp_base;
+        labels[lsp].param_arity = 0;
+        labels[lsp].arity = ft->num_results;
+        labels[lsp].opcode = 0x02;
+        lsp++;
 
-    while (r.ptr < r.end) {
-        uint8_t op = wasm__read_u8(&r);
-        switch (op) {
-            case 0x00:
-                WASM__TRAP(WASM_ERR_UNREACHABLE);
-            case 0x01:
-                break;
+        while (r.ptr < r.end) {
+            uint8_t op = wasm__read_u8(&r);
+            switch (op) {
+                case 0x00:
+                    WASM__TRAP(WASM_ERR_UNREACHABLE);
+                case 0x01:
+                    break;
 
-            case 0x02: { /* block */
-                wasm__blocktype_t blocktype;
-                err = wasm__read_blocktype(mod, &r, &blocktype);
-                if (err != WASM_OK) goto cleanup;
-                {
-                    const uint8_t* be = wasm__find_block_end(r.ptr, r.end, NULL);
-                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                    if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
-                    labels[lsp].continuation = be;
-                    labels[lsp].sp_base = rt->sp - blocktype.param_arity;
-                    labels[lsp].param_arity = blocktype.param_arity;
-                    labels[lsp].arity = blocktype.result_arity;
-                    labels[lsp].opcode = 0x02;
-                    lsp++;
-                }
-                break;
-            }
-            case 0x03: { /* loop */
-                wasm__blocktype_t blocktype;
-                const uint8_t* ls;
-                err = wasm__read_blocktype(mod, &r, &blocktype);
-                if (err != WASM_OK) goto cleanup;
-                if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                ls = r.ptr;
-                wasm__find_block_end(r.ptr, r.end, NULL); /* skip past to register, but don't move r */
-                if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
-                labels[lsp].continuation = ls;
-                labels[lsp].sp_base = rt->sp - blocktype.param_arity;
-                labels[lsp].param_arity = blocktype.param_arity;
-                labels[lsp].arity = blocktype.result_arity;
-                labels[lsp].opcode = 0x03;
-                lsp++;
-                break;
-            }
-            case 0x04: { /* if */
-                wasm__blocktype_t blocktype;
-                wasm_value_t cond = WASM__POP(rt);
-                err = wasm__read_blocktype(mod, &r, &blocktype);
-                if (err != WASM_OK) goto cleanup;
-                {
-                    const uint8_t* ep = NULL;
-                    const uint8_t* be = wasm__find_block_end(r.ptr, r.end, &ep);
-                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                    if (!cond.of.i32) {
-                        if (!ep) {
-                            r.ptr = be;
-                            break;
-                        }
-                        r.ptr = ep;
+                case 0x02: { /* block */
+                    wasm__blocktype_t blocktype;
+                    err = wasm__read_blocktype(mod, &r, &blocktype);
+                    if (err != WASM_OK) goto cleanup;
+                    {
+                        const uint8_t* be = wasm__find_block_end(r.ptr, r.end, NULL);
+                        if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                        if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+                        labels[lsp].continuation = be;
+                        labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                        labels[lsp].param_arity = blocktype.param_arity;
+                        labels[lsp].arity = blocktype.result_arity;
+                        labels[lsp].opcode = 0x02;
+                        lsp++;
                     }
+                    break;
+                }
+                case 0x03: { /* loop */
+                    wasm__blocktype_t blocktype;
+                    const uint8_t* ls;
+                    err = wasm__read_blocktype(mod, &r, &blocktype);
+                    if (err != WASM_OK) goto cleanup;
+                    if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                    ls = r.ptr;
+                    wasm__find_block_end(r.ptr, r.end, NULL); /* skip past to register, but don't move r */
                     if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
-                    labels[lsp].continuation = be;
+                    labels[lsp].continuation = ls;
                     labels[lsp].sp_base = rt->sp - blocktype.param_arity;
                     labels[lsp].param_arity = blocktype.param_arity;
                     labels[lsp].arity = blocktype.result_arity;
-                    labels[lsp].opcode = 0x04;
+                    labels[lsp].opcode = 0x03;
                     lsp++;
+                    break;
                 }
-                break;
-            }
-            case 0x05:
-                if (lsp > 0) {
-                    err = wasm__leave_label(rt, &labels[lsp - 1]);
+                case 0x04: { /* if */
+                    wasm__blocktype_t blocktype;
+                    wasm_value_t cond = WASM__POP(rt);
+                    err = wasm__read_blocktype(mod, &r, &blocktype);
                     if (err != WASM_OK) goto cleanup;
-                    r.ptr = labels[lsp - 1].continuation;
-                    lsp--;
+                    {
+                        const uint8_t* ep = NULL;
+                        const uint8_t* be = wasm__find_block_end(r.ptr, r.end, &ep);
+                        if (rt->sp < blocktype.param_arity) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                        if (!cond.of.i32) {
+                            if (!ep) {
+                                r.ptr = be;
+                                break;
+                            }
+                            r.ptr = ep;
+                        }
+                        if (lsp >= WASM__MAX_LABELS) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+                        labels[lsp].continuation = be;
+                        labels[lsp].sp_base = rt->sp - blocktype.param_arity;
+                        labels[lsp].param_arity = blocktype.param_arity;
+                        labels[lsp].arity = blocktype.result_arity;
+                        labels[lsp].opcode = 0x04;
+                        lsp++;
+                    }
+                    break;
                 }
-                break;
-            case 0x0B:
-                if (lsp > 0) {
-                    err = wasm__leave_label(rt, &labels[lsp - 1]);
-                    if (err != WASM_OK) goto cleanup;
-                    lsp--;
-                }
-                break;
+                case 0x05:
+                    if (lsp > 0) {
+                        err = wasm__leave_label(rt, &labels[lsp - 1]);
+                        if (err != WASM_OK) goto cleanup;
+                        r.ptr = labels[lsp - 1].continuation;
+                        lsp--;
+                    }
+                    break;
+                case 0x0B:
+                    if (lsp > 0) {
+                        err = wasm__leave_label(rt, &labels[lsp - 1]);
+                        if (err != WASM_OK) goto cleanup;
+                        lsp--;
+                    }
+                    break;
 
-            case 0x0C: {
-                uint32_t d = wasm__read_leb128_u32(&r);
-                if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
-                if (err != WASM_OK) goto cleanup;
-                break;
-            }
-            case 0x0D: {
-                uint32_t d = wasm__read_leb128_u32(&r);
-                wasm_value_t c = WASM__POP(rt);
-                if (c.of.i32) {
+                case 0x0C: {
+                    uint32_t d = wasm__read_leb128_u32(&r);
                     if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
                     err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
                     if (err != WASM_OK) goto cleanup;
+                    break;
                 }
-                break;
-            }
-            case 0x0E: { /* br_table */
-                uint32_t nt = wasm__read_leb128_u32(&r), j, d;
-                uint32_t* tgts = (uint32_t*)malloc((nt + 1) * sizeof(uint32_t));
-                wasm_value_t iv;
-                if (!tgts) WASM__TRAP(WASM_ERR_OOM);
-                for (j = 0; j <= nt; j++) tgts[j] = wasm__read_leb128_u32(&r);
-                iv = WASM__POP(rt);
-                d = ((uint32_t)iv.of.i32 < nt) ? tgts[iv.of.i32] : tgts[nt];
-                free(tgts);
-                if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-                err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
-                if (err != WASM_OK) goto cleanup;
-                break;
-            }
-            case 0x0F: /* return */
-                for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
-                rt->sp = sp_base;
-                goto cleanup;
-
-            case 0x10: { /* call */
-                uint32_t ci = wasm__read_leb128_u32(&r);
-                wasm_functype_t* cft = &mod->types[mod->funcs[ci].type_idx];
-                wasm_value_t call_args_buf[8], call_results_buf[8];
-                wasm_value_t* call_args = call_args_buf;
-                wasm_value_t* call_results = call_results_buf;
-                int j;
-
-                if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
-                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                if (cft->num_results > 8) {
-                    call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
-                    if (!call_results) {
-                        if (call_args != call_args_buf) free(call_args);
-                        WASM__TRAP(WASM_ERR_OOM);
+                case 0x0D: {
+                    uint32_t d = wasm__read_leb128_u32(&r);
+                    wasm_value_t c = WASM__POP(rt);
+                    if (c.of.i32) {
+                        if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
+                        err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                        if (err != WASM_OK) goto cleanup;
                     }
+                    break;
                 }
-                if (cft->num_results > 0)
-                    memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
-                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
-                err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
-                if (call_args != call_args_buf) free(call_args);
-                if (err != WASM_OK) {
+                case 0x0E: { /* br_table */
+                    uint32_t nt = wasm__read_leb128_u32(&r), j, d;
+                    uint32_t* tgts = (uint32_t*)malloc((nt + 1) * sizeof(uint32_t));
+                    wasm_value_t iv;
+                    if (!tgts) WASM__TRAP(WASM_ERR_OOM);
+                    for (j = 0; j <= nt; j++) tgts[j] = wasm__read_leb128_u32(&r);
+                    iv = WASM__POP(rt);
+                    d = ((uint32_t)iv.of.i32 < nt) ? tgts[iv.of.i32] : tgts[nt];
+                    free(tgts);
+                    if (d >= lsp) WASM__TRAP(WASM_ERR_MALFORMED);
+                    err = wasm__do_branch(rt, &labels[lsp - 1 - d], &r, &lsp, d);
+                    if (err != WASM_OK) goto cleanup;
+                    break;
+                }
+                case 0x0F: /* return */
+                    for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
+                    rt->sp = sp_base;
+                    err = WASM_OK;
+                    goto cleanup_frame;
+
+                case 0x10: { /* call */
+                    uint32_t ci = wasm__read_leb128_u32(&r);
+                    wasm_functype_t* cft = &mod->types[mod->funcs[ci].type_idx];
+                    wasm_value_t call_args_buf[8], call_results_buf[8];
+                    wasm_value_t* call_args = call_args_buf;
+                    wasm_value_t* call_results = call_results_buf;
+                    int j;
+
+                    if (cft->num_params > 8) {
+                        call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                        if (!call_args) WASM__TRAP(WASM_ERR_OOM);
+                    }
+                    if (cft->num_results > 8) {
+                        call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
+                        if (!call_results) {
+                            if (call_args != call_args_buf) free(call_args);
+                            WASM__TRAP(WASM_ERR_OOM);
+                        }
+                    }
+                    if (cft->num_results > 0)
+                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
+                    for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
+                    err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
+                    if (call_args != call_args_buf) free(call_args);
+                    if (err != WASM_OK) {
+                        if (call_results != call_results_buf) free(call_results);
+                        goto cleanup;
+                    }
+                    for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
                     if (call_results != call_results_buf) free(call_results);
-                    goto cleanup;
+                    break;
                 }
-                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
-                if (call_results != call_results_buf) free(call_results);
-                break;
-            }
-            case 0x11: { /* call_indirect */
-                uint32_t ti = wasm__read_leb128_u32(&r), table_idx, tvi, ci;
-                wasm_functype_t* cft;
-                wasm_table_t* table;
-                wasm_value_t call_args_buf[8], call_results_buf[8], iv;
-                wasm_value_t* call_args = call_args_buf;
-                wasm_value_t* call_results = call_results_buf;
-                int j;
-                table_idx = wasm__read_leb128_u32(&r);
-                iv = WASM__POP(rt);
-                tvi = (uint32_t)iv.of.i32;
-                if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                table = &mod->tables[table_idx];
-                if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
-                if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
-                ci = table->elems[tvi].of.funcref;
-                if (mod->funcs[ci].type_idx != ti) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                cft = &mod->types[ti];
-                if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
-                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                if (cft->num_results > 8) {
-                    call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
-                    if (!call_results) {
-                        if (call_args != call_args_buf) free(call_args);
-                        WASM__TRAP(WASM_ERR_OOM);
+                case 0x11: { /* call_indirect */
+                    uint32_t ti = wasm__read_leb128_u32(&r), table_idx, tvi, ci;
+                    wasm_functype_t* cft;
+                    wasm_table_t* table;
+                    wasm_value_t call_args_buf[8], call_results_buf[8], iv;
+                    wasm_value_t* call_args = call_args_buf;
+                    wasm_value_t* call_results = call_results_buf;
+                    int j;
+                    table_idx = wasm__read_leb128_u32(&r);
+                    iv = WASM__POP(rt);
+                    tvi = (uint32_t)iv.of.i32;
+                    if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                    table = &mod->tables[table_idx];
+                    if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+                    if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
+                    if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
+                    ci = table->elems[tvi].of.funcref;
+                    if (mod->funcs[ci].type_idx != ti) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+                    cft = &mod->types[ti];
+                    if (cft->num_params > 8) {
+                        call_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                        if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                     }
-                }
-                if (cft->num_results > 0)
-                    memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
-                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
-                err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
-                if (call_args != call_args_buf) free(call_args);
-                if (err != WASM_OK) {
+                    if (cft->num_results > 8) {
+                        call_results = (wasm_value_t*)malloc(cft->num_results * sizeof(wasm_value_t));
+                        if (!call_results) {
+                            if (call_args != call_args_buf) free(call_args);
+                            WASM__TRAP(WASM_ERR_OOM);
+                        }
+                    }
+                    if (cft->num_results > 0)
+                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
+                    for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
+                    err = wasm__exec(mod, ci, call_args, cft->num_params, call_results, cft->num_results, depth + 1);
+                    if (call_args != call_args_buf) free(call_args);
+                    if (err != WASM_OK) {
+                        if (call_results != call_results_buf) free(call_results);
+                        goto cleanup;
+                    }
+                    for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
                     if (call_results != call_results_buf) free(call_results);
-                    goto cleanup;
+                    break;
                 }
-                for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
-                if (call_results != call_results_buf) free(call_results);
-                break;
-            }
+                case 0x12: { /* return_call */
+                    uint32_t ci = wasm__read_leb128_u32(&r);
+                    wasm_functype_t* cft;
+                    wasm_value_t* tail_args = tail_args_buf;
+                    int j;
 
-            case 0xFC: {
-                uint32_t subop = wasm__read_leb128_u32(&r);
-                switch (subop) {
-                    case 0x00: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i32_s((double)a.of.f32));
-                        break;
+                    if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                    cft = &mod->types[mod->funcs[ci].type_idx];
+                    if (cft->num_params > 8) {
+                        tail_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                        if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                     }
-                    case 0x01: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i32_u((double)a.of.f32));
-                        break;
-                    }
-                    case 0x02: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i32_s(a.of.f64));
-                        break;
-                    }
-                    case 0x03: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i32_u(a.of.f64));
-                        break;
-                    }
-                    case 0x04: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i64_s((double)a.of.f32));
-                        break;
-                    }
-                    case 0x05: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i64_u((double)a.of.f32));
-                        break;
-                    }
-                    case 0x06: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i64_s(a.of.f64));
-                        break;
-                    }
-                    case 0x07: {
-                        wasm_value_t a = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__trunc_sat_i64_u(a.of.f64));
-                        break;
-                    }
-                    case 0x08: {
-                        uint32_t data_idx = wasm__read_leb128_u32(&r);
-                        uint32_t mem_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t src = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        wasm_memory_t* memory;
-                        uint64_t mem_size;
-                        wasm_data_segment_t* segment;
+                    for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
-                        if (data_idx >= mod->num_data_segments) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                    rt->sp = sp_base;
+                    current_func_idx = ci;
+                    current_args = tail_args;
+                    current_num_args = cft->num_params;
+                    current_args_owned = (tail_args != tail_args_buf);
+                    restart = 1;
+                    err = WASM_OK;
+                    goto cleanup_frame;
+                }
+                case 0x13: { /* return_call_indirect */
+                    uint32_t ti = wasm__read_leb128_u32(&r), table_idx, tvi, ci;
+                    wasm_functype_t* cft;
+                    wasm_table_t* table;
+                    wasm_value_t* tail_args = tail_args_buf;
+                    wasm_value_t iv;
+                    int j;
+
+                    table_idx = wasm__read_leb128_u32(&r);
+                    iv = WASM__POP(rt);
+                    tvi = (uint32_t)iv.of.i32;
+                    if (ti >= mod->num_types || table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                    table = &mod->tables[table_idx];
+                    if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+                    if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
+                    if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
+                    ci = table->elems[tvi].of.funcref;
+                    if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                    if (mod->funcs[ci].type_idx != ti) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+
+                    cft = &mod->types[ti];
+                    if (cft->num_params > 8) {
+                        tail_args = (wasm_value_t*)malloc(cft->num_params * sizeof(wasm_value_t));
+                        if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
+                    }
+                    for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
+
+                    rt->sp = sp_base;
+                    current_func_idx = ci;
+                    current_args = tail_args;
+                    current_num_args = cft->num_params;
+                    current_args_owned = (tail_args != tail_args_buf);
+                    restart = 1;
+                    err = WASM_OK;
+                    goto cleanup_frame;
+                }
+
+                case 0xFC: {
+                    uint32_t subop = wasm__read_leb128_u32(&r);
+                    switch (subop) {
+                        case 0x00: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i32_s((double)a.of.f32));
+                            break;
                         }
-                        memory = wasm__memory_at(mod, mem_idx);
-                        if (!memory) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x01: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i32_u((double)a.of.f32));
+                            break;
                         }
-                        mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
-
-                        segment = &mod->data_segments[data_idx];
-                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
-                        if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
-                            !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
-                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0)
-                            memcpy(memory->data + dst_offset, segment->bytes + src_offset, len);
-                        break;
-                    }
-                    case 0x09: {
-                        uint32_t data_idx = wasm__read_leb128_u32(&r);
-
-                        if (data_idx >= mod->num_data_segments) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x02: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i32_s(a.of.f64));
+                            break;
                         }
-
-                        mod->data_segments[data_idx].is_dropped = 1;
-                        break;
-                    }
-                    case 0x0A: {
-                        uint32_t dst_mem_idx = wasm__read_leb128_u32(&r);
-                        uint32_t src_mem_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t src = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        wasm_memory_t* dst_memory = wasm__memory_at(mod, dst_mem_idx);
-                        wasm_memory_t* src_memory = wasm__memory_at(mod, src_mem_idx);
-                        uint64_t dst_mem_size;
-                        uint64_t src_mem_size;
-
-                        if (!dst_memory || !src_memory) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
-                                          "unknown memory %u,%u",
-                                          (unsigned)dst_mem_idx, (unsigned)src_mem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x03: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i32_u(a.of.f64));
+                            break;
                         }
-                        dst_mem_size = (uint64_t)dst_memory->pages * WASM_PAGE_SIZE;
-                        src_mem_size = (uint64_t)src_memory->pages * WASM_PAGE_SIZE;
-                        if (!wasm__range_in_bounds_u64(src_offset, len, src_mem_size) ||
-                            !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
-                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0)
-                            memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, len);
-                        break;
-                    }
-                    case 0x0B: {
-                        uint32_t mem_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t value = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
-                        uint64_t mem_size;
-
-                        if (!memory) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x04: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i64_s((double)a.of.f32));
+                            break;
                         }
-                        mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
-                        if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0)
-                            memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
-                        break;
-                    }
-                    case 0x0C: {
-                        uint32_t elem_idx = wasm__read_leb128_u32(&r);
-                        uint32_t table_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t src = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        wasm_elem_segment_t* segment;
-                        wasm_table_t* table;
-                        uint32_t j;
-
-                        if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                        if (elem_idx >= mod->num_elem_segments) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x05: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i64_u((double)a.of.f32));
+                            break;
                         }
-
-                        table = &mod->tables[table_idx];
-                        segment = &mod->elem_segments[elem_idx];
-                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
-                        if (table->reftype != segment->elem_type) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                        if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
-                            !wasm__range_in_bounds_u64(dst_offset, len, table->size))
-                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0) {
-                            if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                            for (j = 0; j < len; j++) table->elems[dst_offset + j] = segment->elems[src_offset + j];
+                        case 0x06: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i64_s(a.of.f64));
+                            break;
                         }
-                        break;
-                    }
-                    case 0x0D: {
-                        uint32_t elem_idx = wasm__read_leb128_u32(&r);
-
-                        if (elem_idx >= mod->num_elem_segments) {
-                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
-                            err = WASM_ERR_MALFORMED;
-                            goto cleanup;
+                        case 0x07: {
+                            wasm_value_t a = WASM__POP(rt);
+                            WASM__PUSH(rt, wasm__trunc_sat_i64_u(a.of.f64));
+                            break;
                         }
+                        case 0x08: {
+                            uint32_t data_idx = wasm__read_leb128_u32(&r);
+                            uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t src = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t src_offset = (uint32_t)src.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            wasm_memory_t* memory;
+                            uint64_t mem_size;
+                            wasm_data_segment_t* segment;
 
-                        mod->elem_segments[elem_idx].is_dropped = 1;
-                        break;
-                    }
-                    case 0x0E: {
-                        uint32_t dst_table_idx = wasm__read_leb128_u32(&r);
-                        uint32_t src_table_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t src = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        wasm_table_t* dst_table;
-                        wasm_table_t* src_table;
+                            if (data_idx >= mod->num_data_segments) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+                            memory = wasm__memory_at(mod, mem_idx);
+                            if (!memory) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+                            mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
 
-                        if (dst_table_idx >= mod->num_tables || src_table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                        dst_table = &mod->tables[dst_table_idx];
-                        src_table = &mod->tables[src_table_idx];
-                        if (dst_table->reftype != src_table->reftype) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                        if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
-                            !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))
-                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0) {
-                            if (!dst_table->elems || !src_table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                            memmove(dst_table->elems + dst_offset,
-                                    src_table->elems + src_offset,
-                                    len * sizeof(wasm_value_t));
+                            segment = &mod->data_segments[data_idx];
+                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
+                                !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
+                                WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0)
+                                memcpy(memory->data + dst_offset, segment->bytes + src_offset, len);
+                            break;
                         }
-                        break;
-                    }
-                    case 0x0F: {
-                        uint32_t table_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t delta_value = WASM__POP(rt);
-                        wasm_value_t init_value = WASM__POP(rt);
-                        wasm_table_t* table;
-                        uint32_t old_size;
-                        uint32_t delta;
-                        uint32_t new_size;
-                        wasm_value_t* new_elems;
-                        uint32_t j;
+                        case 0x09: {
+                            uint32_t data_idx = wasm__read_leb128_u32(&r);
 
-                        if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                        table = &mod->tables[table_idx];
-                        if (!wasm__value_matches_type(&init_value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                        old_size = table->size;
-                        delta = (uint32_t)delta_value.of.i32;
-                        if (delta == 0) {
+                            if (data_idx >= mod->num_data_segments) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+
+                            mod->data_segments[data_idx].is_dropped = 1;
+                            break;
+                        }
+                        case 0x0A: {
+                            uint32_t dst_mem_idx = wasm__read_leb128_u32(&r);
+                            uint32_t src_mem_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t src = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t src_offset = (uint32_t)src.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            wasm_memory_t* dst_memory = wasm__memory_at(mod, dst_mem_idx);
+                            wasm_memory_t* src_memory = wasm__memory_at(mod, src_mem_idx);
+                            uint64_t dst_mem_size;
+                            uint64_t src_mem_size;
+
+                            if (!dst_memory || !src_memory) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
+                                              "unknown memory %u,%u",
+                                              (unsigned)dst_mem_idx, (unsigned)src_mem_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+                            dst_mem_size = (uint64_t)dst_memory->pages * WASM_PAGE_SIZE;
+                            src_mem_size = (uint64_t)src_memory->pages * WASM_PAGE_SIZE;
+                            if (!wasm__range_in_bounds_u64(src_offset, len, src_mem_size) ||
+                                !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
+                                WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0)
+                                memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, len);
+                            break;
+                        }
+                        case 0x0B: {
+                            uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t value = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
+                            uint64_t mem_size;
+
+                            if (!memory) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown memory %u", (unsigned)mem_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+                            mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
+                            if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0)
+                                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
+                            break;
+                        }
+                        case 0x0C: {
+                            uint32_t elem_idx = wasm__read_leb128_u32(&r);
+                            uint32_t table_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t src = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t src_offset = (uint32_t)src.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            wasm_elem_segment_t* segment;
+                            wasm_table_t* table;
+                            uint32_t j;
+
+                            if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                            if (elem_idx >= mod->num_elem_segments) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+
+                            table = &mod->tables[table_idx];
+                            segment = &mod->elem_segments[elem_idx];
+                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (table->reftype != segment->elem_type) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                            if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
+                                !wasm__range_in_bounds_u64(dst_offset, len, table->size))
+                                WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0) {
+                                if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                for (j = 0; j < len; j++) table->elems[dst_offset + j] = segment->elems[src_offset + j];
+                            }
+                            break;
+                        }
+                        case 0x0D: {
+                            uint32_t elem_idx = wasm__read_leb128_u32(&r);
+
+                            if (elem_idx >= mod->num_elem_segments) {
+                                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
+                                err = WASM_ERR_MALFORMED;
+                                goto cleanup;
+                            }
+
+                            mod->elem_segments[elem_idx].is_dropped = 1;
+                            break;
+                        }
+                        case 0x0E: {
+                            uint32_t dst_table_idx = wasm__read_leb128_u32(&r);
+                            uint32_t src_table_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t src = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t src_offset = (uint32_t)src.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            wasm_table_t* dst_table;
+                            wasm_table_t* src_table;
+
+                            if (dst_table_idx >= mod->num_tables || src_table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                            dst_table = &mod->tables[dst_table_idx];
+                            src_table = &mod->tables[src_table_idx];
+                            if (dst_table->reftype != src_table->reftype) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                            if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
+                                !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))
+                                WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0) {
+                                if (!dst_table->elems || !src_table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                memmove(dst_table->elems + dst_offset,
+                                        src_table->elems + src_offset,
+                                        len * sizeof(wasm_value_t));
+                            }
+                            break;
+                        }
+                        case 0x0F: {
+                            uint32_t table_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t delta_value = WASM__POP(rt);
+                            wasm_value_t init_value = WASM__POP(rt);
+                            wasm_table_t* table;
+                            uint32_t old_size;
+                            uint32_t delta;
+                            uint32_t new_size;
+                            wasm_value_t* new_elems;
+                            uint32_t j;
+
+                            if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                            table = &mod->tables[table_idx];
+                            if (!wasm__value_matches_type(&init_value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                            old_size = table->size;
+                            delta = (uint32_t)delta_value.of.i32;
+                            if (delta == 0) {
+                                WASM__PUSH(rt, wasm_i32((int32_t)old_size));
+                                break;
+                            }
+                            if ((table->max_size != UINT32_MAX && delta > table->max_size - old_size) ||
+                                delta > UINT32_MAX - old_size) {
+                                WASM__PUSH(rt, wasm_i32(-1));
+                                break;
+                            }
+                            new_size = old_size + delta;
+                            new_elems = (wasm_value_t*)realloc(table->elems, new_size * sizeof(wasm_value_t));
+                            if (!new_elems) {
+                                WASM__PUSH(rt, wasm_i32(-1));
+                                break;
+                            }
+                            table->elems = new_elems;
+                            table->size = new_size;
+                            for (j = old_size; j < new_size; j++) table->elems[j] = init_value;
                             WASM__PUSH(rt, wasm_i32((int32_t)old_size));
                             break;
                         }
-                        if ((table->max_size != UINT32_MAX && delta > table->max_size - old_size) ||
-                            delta > UINT32_MAX - old_size) {
-                            WASM__PUSH(rt, wasm_i32(-1));
+                        case 0x10: {
+                            uint32_t table_idx = wasm__read_leb128_u32(&r);
+                            if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                            WASM__PUSH(rt, wasm_i32((int32_t)mod->tables[table_idx].size));
                             break;
                         }
-                        new_size = old_size + delta;
-                        new_elems = (wasm_value_t*)realloc(table->elems, new_size * sizeof(wasm_value_t));
-                        if (!new_elems) {
-                            WASM__PUSH(rt, wasm_i32(-1));
-                            break;
-                        }
-                        table->elems = new_elems;
-                        table->size = new_size;
-                        for (j = old_size; j < new_size; j++) table->elems[j] = init_value;
-                        WASM__PUSH(rt, wasm_i32((int32_t)old_size));
-                        break;
-                    }
-                    case 0x10: {
-                        uint32_t table_idx = wasm__read_leb128_u32(&r);
-                        if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                        WASM__PUSH(rt, wasm_i32((int32_t)mod->tables[table_idx].size));
-                        break;
-                    }
-                    case 0x11: {
-                        uint32_t table_idx = wasm__read_leb128_u32(&r);
-                        wasm_value_t count = WASM__POP(rt);
-                        wasm_value_t value = WASM__POP(rt);
-                        wasm_value_t dst = WASM__POP(rt);
-                        wasm_table_t* table;
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
-                        uint32_t j;
+                        case 0x11: {
+                            uint32_t table_idx = wasm__read_leb128_u32(&r);
+                            wasm_value_t count = WASM__POP(rt);
+                            wasm_value_t value = WASM__POP(rt);
+                            wasm_value_t dst = WASM__POP(rt);
+                            wasm_table_t* table;
+                            uint32_t len = (uint32_t)count.of.i32;
+                            uint32_t dst_offset = (uint32_t)dst.of.i32;
+                            uint32_t j;
 
-                        if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                        table = &mod->tables[table_idx];
-                        if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                        if (!wasm__range_in_bounds_u64(dst_offset, len, table->size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        if (len > 0) {
-                            if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                            for (j = 0; j < len; j++) table->elems[dst_offset + j] = value;
+                            if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                            table = &mod->tables[table_idx];
+                            if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                            if (!wasm__range_in_bounds_u64(dst_offset, len, table->size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            if (len > 0) {
+                                if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                for (j = 0; j < len; j++) table->elems[dst_offset + j] = value;
+                            }
+                            break;
                         }
-                        break;
+                        default:
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
                     }
-                    default:
-                        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
-                        err = WASM_ERR_MALFORMED;
+                    break;
+                }
+
+                /* Parametric */
+                case 0x1A: {
+                    wasm_value_t tmp = WASM__POP(rt);
+                    (void)tmp;
+                    break;
+                }
+                case 0x1B: {
+                    wasm_value_t c = WASM__POP(rt), v2 = WASM__POP(rt), v1 = WASM__POP(rt);
+                    WASM__PUSH(rt, c.of.i32 ? v1 : v2);
+                    break;
+                }
+
+                /* Variables */
+                case 0x20: {
+                    uint32_t x = wasm__read_leb128_u32(&r);
+                    WASM__PUSH(rt, locals[x]);
+                    break;
+                }
+                case 0x21: {
+                    uint32_t x = wasm__read_leb128_u32(&r);
+                    locals[x] = WASM__POP(rt);
+                    break;
+                }
+                case 0x22: {
+                    uint32_t x = wasm__read_leb128_u32(&r);
+                    locals[x] = WASM__PEEK(rt);
+                    break;
+                }
+                case 0x23: {
+                    uint32_t x = wasm__read_leb128_u32(&r);
+                    WASM__PUSH(rt, wasm__global_get_value(&mod->globals[x]));
+                    break;
+                }
+                case 0x24: {
+                    uint32_t x = wasm__read_leb128_u32(&r);
+                    if (!mod->globals[x].is_mutable) {
+                        WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)x);
+                        err = WASM_ERR_TYPE_MISMATCH;
                         goto cleanup;
+                    }
+                    wasm__global_set_value(&mod->globals[x], WASM__POP(rt));
+                    break;
                 }
-                break;
-            }
+                case 0x25: {
+                    uint32_t table_idx = wasm__read_leb128_u32(&r);
+                    wasm_table_t* table;
+                    wasm_value_t index;
+                    uint32_t element_index;
 
-            /* Parametric */
-            case 0x1A: {
-                wasm_value_t tmp = WASM__POP(rt);
-                (void)tmp;
-                break;
-            }
-            case 0x1B: {
-                wasm_value_t c = WASM__POP(rt), v2 = WASM__POP(rt), v1 = WASM__POP(rt);
-                WASM__PUSH(rt, c.of.i32 ? v1 : v2);
-                break;
-            }
-
-            /* Variables */
-            case 0x20: {
-                uint32_t x = wasm__read_leb128_u32(&r);
-                WASM__PUSH(rt, locals[x]);
-                break;
-            }
-            case 0x21: {
-                uint32_t x = wasm__read_leb128_u32(&r);
-                locals[x] = WASM__POP(rt);
-                break;
-            }
-            case 0x22: {
-                uint32_t x = wasm__read_leb128_u32(&r);
-                locals[x] = WASM__PEEK(rt);
-                break;
-            }
-            case 0x23: {
-                uint32_t x = wasm__read_leb128_u32(&r);
-                WASM__PUSH(rt, wasm__global_get_value(&mod->globals[x]));
-                break;
-            }
-            case 0x24: {
-                uint32_t x = wasm__read_leb128_u32(&r);
-                if (!mod->globals[x].is_mutable) {
-                    WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)x);
-                    err = WASM_ERR_TYPE_MISMATCH;
-                    goto cleanup;
+                    if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                    table = &mod->tables[table_idx];
+                    index = WASM__POP(rt);
+                    element_index = (uint32_t)index.of.i32;
+                    if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                    WASM__PUSH(rt, table->elems[element_index]);
+                    break;
                 }
-                wasm__global_set_value(&mod->globals[x], WASM__POP(rt));
-                break;
-            }
-            case 0x25: {
-                uint32_t table_idx = wasm__read_leb128_u32(&r);
-                wasm_table_t* table;
-                wasm_value_t index;
-                uint32_t element_index;
+                case 0x26: {
+                    uint32_t table_idx = wasm__read_leb128_u32(&r);
+                    wasm_table_t* table;
+                    wasm_value_t value;
+                    wasm_value_t index;
+                    uint32_t element_index;
 
-                if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                table = &mod->tables[table_idx];
-                index = WASM__POP(rt);
-                element_index = (uint32_t)index.of.i32;
-                if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                WASM__PUSH(rt, table->elems[element_index]);
-                break;
-            }
-            case 0x26: {
-                uint32_t table_idx = wasm__read_leb128_u32(&r);
-                wasm_table_t* table;
-                wasm_value_t value;
-                wasm_value_t index;
-                uint32_t element_index;
-
-                if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                table = &mod->tables[table_idx];
-                value = WASM__POP(rt);
-                index = WASM__POP(rt);
-                element_index = (uint32_t)index.of.i32;
-                if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                table->elems[element_index] = value;
-                break;
-            }
-
-            /* Memory load */
-            case 0x28:
-            case 0x29:
-            case 0x2A:
-            case 0x2B:
-            case 0x2C:
-            case 0x2D:
-            case 0x2E:
-            case 0x2F:
-            case 0x30:
-            case 0x31:
-            case 0x32:
-            case 0x33:
-            case 0x34:
-            case 0x35: {
-                wasm__memarg_t memarg;
-                wasm_value_t base;
-                uint64_t addr, msz;
-                wasm_memory_t* memory;
-
-                err = wasm__read_memarg(&r, &memarg);
-                if (err != WASM_OK) goto cleanup;
-                base = WASM__POP(rt);
-                memory = wasm__memory_at(mod, memarg.memory_index);
-                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
-                msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
-                switch (op) {
-                    case 0x28: {
-                        int32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i32(v));
-                        break;
-                    }
-                    case 0x29: {
-                        int64_t v;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int64_t)wasm__load_le64(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i64(v));
-                        break;
-                    }
-                    case 0x2A: {
-                        uint32_t b;
-                        float v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le32(memory->data + addr);
-                        memcpy(&v, &b, 4);
-                        WASM__PUSH(rt, wasm_f32(v));
-                        break;
-                    }
-                    case 0x2B: {
-                        uint64_t b;
-                        double v;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le64(memory->data + addr);
-                        memcpy(&v, &b, 8);
-                        WASM__PUSH(rt, wasm_f64(v));
-                        break;
-                    }
-                    case 0x2C:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i32((int32_t)(int8_t)memory->data[addr]));
-                        break;
-                    case 0x2D:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i32((int32_t)memory->data[addr]));
-                        break;
-                    case 0x2E: {
-                        int16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i32((int32_t)v));
-                        break;
-                    }
-                    case 0x2F: {
-                        uint16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i32((int32_t)v));
-                        break;
-                    }
-                    case 0x30:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i64((int64_t)(int8_t)memory->data[addr]));
-                        break;
-                    case 0x31:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__PUSH(rt, wasm_i64((int64_t)memory->data[addr]));
-                        break;
-                    case 0x32: {
-                        int16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x33: {
-                        uint16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x34: {
-                        int32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x35: {
-                        uint32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le32(memory->data + addr);
-                        WASM__PUSH(rt, wasm_i64((int64_t)v));
-                        break;
-                    }
-                    default:
-                        break;
+                    if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                    table = &mod->tables[table_idx];
+                    value = WASM__POP(rt);
+                    index = WASM__POP(rt);
+                    element_index = (uint32_t)index.of.i32;
+                    if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                    if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                    table->elems[element_index] = value;
+                    break;
                 }
-                break;
-            }
 
-            /* Memory store */
-            case 0x36:
-            case 0x37:
-            case 0x38:
-            case 0x39:
-            case 0x3A:
-            case 0x3B:
-            case 0x3C:
-            case 0x3D:
-            case 0x3E: {
-                wasm__memarg_t memarg;
-                wasm_value_t val, base;
-                uint64_t addr, msz;
-                wasm_memory_t* memory;
+                /* Memory load */
+                case 0x28:
+                case 0x29:
+                case 0x2A:
+                case 0x2B:
+                case 0x2C:
+                case 0x2D:
+                case 0x2E:
+                case 0x2F:
+                case 0x30:
+                case 0x31:
+                case 0x32:
+                case 0x33:
+                case 0x34:
+                case 0x35: {
+                    wasm__memarg_t memarg;
+                    wasm_value_t base;
+                    uint64_t addr, msz;
+                    wasm_memory_t* memory;
 
-                err = wasm__read_memarg(&r, &memarg);
-                if (err != WASM_OK) goto cleanup;
-                val = WASM__POP(rt);
-                base = WASM__POP(rt);
-                memory = wasm__memory_at(mod, memarg.memory_index);
-                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
-                msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
-                switch (op) {
-                    case 0x36:
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i32);
-                        break;
-                    case 0x37:
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le64(memory->data + addr, (uint64_t)val.of.i64);
-                        break;
-                    case 0x38: {
-                        uint32_t b;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memcpy(&b, &val.of.f32, 4);
-                        wasm__store_le32(memory->data + addr, b);
-                        break;
+                    err = wasm__read_memarg(&r, &memarg);
+                    if (err != WASM_OK) goto cleanup;
+                    base = WASM__POP(rt);
+                    memory = wasm__memory_at(mod, memarg.memory_index);
+                    if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                    addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
+                    msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
+                    switch (op) {
+                        case 0x28: {
+                            int32_t v;
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = (int32_t)wasm__load_le32(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i32(v));
+                            break;
+                        }
+                        case 0x29: {
+                            int64_t v;
+                            if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = (int64_t)wasm__load_le64(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i64(v));
+                            break;
+                        }
+                        case 0x2A: {
+                            uint32_t b;
+                            float v;
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            b = wasm__load_le32(memory->data + addr);
+                            memcpy(&v, &b, 4);
+                            WASM__PUSH(rt, wasm_f32(v));
+                            break;
+                        }
+                        case 0x2B: {
+                            uint64_t b;
+                            double v;
+                            if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            b = wasm__load_le64(memory->data + addr);
+                            memcpy(&v, &b, 8);
+                            WASM__PUSH(rt, wasm_f64(v));
+                            break;
+                        }
+                        case 0x2C:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            WASM__PUSH(rt, wasm_i32((int32_t)(int8_t)memory->data[addr]));
+                            break;
+                        case 0x2D:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            WASM__PUSH(rt, wasm_i32((int32_t)memory->data[addr]));
+                            break;
+                        case 0x2E: {
+                            int16_t v;
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = (int16_t)wasm__load_le16(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i32((int32_t)v));
+                            break;
+                        }
+                        case 0x2F: {
+                            uint16_t v;
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = wasm__load_le16(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i32((int32_t)v));
+                            break;
+                        }
+                        case 0x30:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            WASM__PUSH(rt, wasm_i64((int64_t)(int8_t)memory->data[addr]));
+                            break;
+                        case 0x31:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            WASM__PUSH(rt, wasm_i64((int64_t)memory->data[addr]));
+                            break;
+                        case 0x32: {
+                            int16_t v;
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = (int16_t)wasm__load_le16(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i64((int64_t)v));
+                            break;
+                        }
+                        case 0x33: {
+                            uint16_t v;
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = wasm__load_le16(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i64((int64_t)v));
+                            break;
+                        }
+                        case 0x34: {
+                            int32_t v;
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = (int32_t)wasm__load_le32(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i64((int64_t)v));
+                            break;
+                        }
+                        case 0x35: {
+                            uint32_t v;
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            v = wasm__load_le32(memory->data + addr);
+                            WASM__PUSH(rt, wasm_i64((int64_t)v));
+                            break;
+                        }
+                        default:
+                            break;
                     }
-                    case 0x39: {
-                        uint64_t b;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memcpy(&b, &val.of.f64, 8);
-                        wasm__store_le64(memory->data + addr, b);
-                        break;
+                    break;
+                }
+
+                /* Memory store */
+                case 0x36:
+                case 0x37:
+                case 0x38:
+                case 0x39:
+                case 0x3A:
+                case 0x3B:
+                case 0x3C:
+                case 0x3D:
+                case 0x3E: {
+                    wasm__memarg_t memarg;
+                    wasm_value_t val, base;
+                    uint64_t addr, msz;
+                    wasm_memory_t* memory;
+
+                    err = wasm__read_memarg(&r, &memarg);
+                    if (err != WASM_OK) goto cleanup;
+                    val = WASM__POP(rt);
+                    base = WASM__POP(rt);
+                    memory = wasm__memory_at(mod, memarg.memory_index);
+                    if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                    addr = (uint64_t)(uint32_t)base.of.i32 + memarg.offset;
+                    msz = (uint64_t)memory->pages * WASM_PAGE_SIZE;
+                    switch (op) {
+                        case 0x36:
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            wasm__store_le32(memory->data + addr, (uint32_t)val.of.i32);
+                            break;
+                        case 0x37:
+                            if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            wasm__store_le64(memory->data + addr, (uint64_t)val.of.i64);
+                            break;
+                        case 0x38: {
+                            uint32_t b;
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memcpy(&b, &val.of.f32, 4);
+                            wasm__store_le32(memory->data + addr, b);
+                            break;
+                        }
+                        case 0x39: {
+                            uint64_t b;
+                            if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memcpy(&b, &val.of.f64, 8);
+                            wasm__store_le64(memory->data + addr, b);
+                            break;
+                        }
+                        case 0x3A:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memory->data[addr] = (uint8_t)val.of.i32;
+                            break;
+                        case 0x3B:
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            wasm__store_le16(memory->data + addr, (uint16_t)val.of.i32);
+                            break;
+                        case 0x3C:
+                            if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memory->data[addr] = (uint8_t)val.of.i64;
+                            break;
+                        case 0x3D:
+                            if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            wasm__store_le16(memory->data + addr, (uint16_t)val.of.i64);
+                            break;
+                        case 0x3E:
+                            if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            wasm__store_le32(memory->data + addr, (uint32_t)val.of.i64);
+                            break;
+                        default:
+                            break;
                     }
-                    case 0x3A:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memory->data[addr] = (uint8_t)val.of.i32;
-                        break;
-                    case 0x3B:
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i32);
-                        break;
-                    case 0x3C:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memory->data[addr] = (uint8_t)val.of.i64;
-                        break;
-                    case 0x3D:
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i64);
-                        break;
-                    case 0x3E:
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i64);
-                        break;
-                    default:
-                        break;
+                    break;
                 }
-                break;
-            }
 
-            case 0x3F: {
-                uint32_t mem_idx = wasm__read_leb128_u32(&r);
-                wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
+                case 0x3F: {
+                    uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                    wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
 
-                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                WASM__PUSH(rt, wasm_i32((int32_t)memory->pages));
-                break;
-            }
-            case 0x40: {
-                wasm_value_t d;
-                int32_t res;
-                uint32_t mem_idx = wasm__read_leb128_u32(&r);
-                d = WASM__POP(rt);
-                res = wasm_memory_grow_at(mod, mem_idx, (uint32_t)d.of.i32);
-                WASM__PUSH(rt, wasm_i32(res));
-                break;
-            }
-
-            /* Reference instructions */
-            case 0xD0: {
-                wasm_valtype_t type;
-                err = wasm__read_reftype(&r, &type);
-                if (err != WASM_OK) goto cleanup;
-                WASM__PUSH(rt, wasm_ref_null(type));
-                break;
-            }
-            case 0xD1: {
-                wasm_value_t value = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(wasm__is_null_ref(&value) ? 1 : 0));
-                break;
-            }
-            case 0xD2: {
-                uint32_t func_index = wasm__read_leb128_u32(&r);
-                if (func_index >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                WASM__PUSH(rt, wasm_funcref(func_index));
-                break;
-            }
-
-            /* Constants */
-            case 0x41:
-                WASM__PUSH(rt, wasm_i32(wasm__read_leb128_i32(&r)));
-                break;
-            case 0x42:
-                WASM__PUSH(rt, wasm_i64(wasm__read_leb128_i64(&r)));
-                break;
-            case 0x43:
-                WASM__PUSH(rt, wasm_f32(wasm__read_f32(&r)));
-                break;
-            case 0x44:
-                WASM__PUSH(rt, wasm_f64(wasm__read_f64(&r)));
-                break;
-
-            /* i32 comparison */
-            case 0x45: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 == 0 ? 1 : 0));
-                break;
-            }
-            case 0x46: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 == b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x47: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 != b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x48: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 < b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x49: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 < (uint32_t)b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4A: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 > b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4B: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 > (uint32_t)b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4C: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 <= b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4D: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 <= (uint32_t)b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4E: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 >= b.of.i32 ? 1 : 0));
-                break;
-            }
-            case 0x4F: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 >= (uint32_t)b.of.i32 ? 1 : 0));
-                break;
-            }
-
-            /* i64 comparison */
-            case 0x50: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 == 0 ? 1 : 0));
-                break;
-            }
-            case 0x51: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 == b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x52: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 != b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x53: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 < b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x54: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 < (uint64_t)b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x55: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 > b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x56: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 > (uint64_t)b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x57: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 <= b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x58: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 <= (uint64_t)b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x59: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i64 >= b.of.i64 ? 1 : 0));
-                break;
-            }
-            case 0x5A: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 >= (uint64_t)b.of.i64 ? 1 : 0));
-                break;
-            }
-
-            /* f32/f64 comparison */
-            case 0x5B: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 == b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x5C: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 != b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x5D: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 < b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x5E: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 > b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x5F: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 <= b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x60: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f32 >= b.of.f32 ? 1 : 0));
-                break;
-            }
-            case 0x61: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 == b.of.f64 ? 1 : 0));
-                break;
-            }
-            case 0x62: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 != b.of.f64 ? 1 : 0));
-                break;
-            }
-            case 0x63: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 < b.of.f64 ? 1 : 0));
-                break;
-            }
-            case 0x64: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 > b.of.f64 ? 1 : 0));
-                break;
-            }
-            case 0x65: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 <= b.of.f64 ? 1 : 0));
-                break;
-            }
-            case 0x66: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.f64 >= b.of.f64 ? 1 : 0));
-                break;
-            }
-
-            /* i32 arithmetic */
-            case 0x67: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)wasm__clz32((uint32_t)a.of.i32)));
-                break;
-            }
-            case 0x68: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)wasm__ctz32((uint32_t)a.of.i32)));
-                break;
-            }
-            case 0x69: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)wasm__popcnt32((uint32_t)a.of.i32)));
-                break;
-            }
-            case 0x6A: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 + b.of.i32));
-                break;
-            }
-            case 0x6B: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 - b.of.i32));
-                break;
-            }
-            case 0x6C: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 * b.of.i32));
-                break;
-            }
-            case 0x6D: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                if (a.of.i32 == INT32_MIN && b.of.i32 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 / b.of.i32));
-                break;
-            }
-            case 0x6E: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 / (uint32_t)b.of.i32)));
-                break;
-            }
-            case 0x6F: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i32((a.of.i32 == INT32_MIN && b.of.i32 == -1) ? 0 : a.of.i32 % b.of.i32));
-                break;
-            }
-            case 0x70: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 % (uint32_t)b.of.i32)));
-                break;
-            }
-            case 0x71: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 & b.of.i32));
-                break;
-            }
-            case 0x72: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 | b.of.i32));
-                break;
-            }
-            case 0x73: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 ^ b.of.i32));
-                break;
-            }
-            case 0x74: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 << (b.of.i32 & 31)));
-                break;
-            }
-            case 0x75: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32(a.of.i32 >> (b.of.i32 & 31)));
-                break;
-            }
-            case 0x76: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 >> (b.of.i32 & 31))));
-                break;
-            }
-            case 0x77: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint32_t k = (uint32_t)b.of.i32 & 31u;
-                WASM__PUSH(rt, wasm_i32((int32_t)(((uint32_t)a.of.i32 << k) | ((uint32_t)a.of.i32 >> (32u - k)))));
-                break;
-            }
-            case 0x78: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint32_t k = (uint32_t)b.of.i32 & 31u;
-                WASM__PUSH(rt, wasm_i32((int32_t)(((uint32_t)a.of.i32 >> k) | ((uint32_t)a.of.i32 << (32u - k)))));
-                break;
-            }
-
-            /* i64 arithmetic */
-            case 0x79: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)wasm__clz64((uint64_t)a.of.i64)));
-                break;
-            }
-            case 0x7A: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)wasm__ctz64((uint64_t)a.of.i64)));
-                break;
-            }
-            case 0x7B: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)wasm__popcnt64((uint64_t)a.of.i64)));
-                break;
-            }
-            case 0x7C: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 + b.of.i64));
-                break;
-            }
-            case 0x7D: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 - b.of.i64));
-                break;
-            }
-            case 0x7E: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 * b.of.i64));
-                break;
-            }
-            case 0x7F: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                if (a.of.i64 == INT64_MIN && b.of.i64 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 / b.of.i64));
-                break;
-            }
-            case 0x80: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 / (uint64_t)b.of.i64)));
-                break;
-            }
-            case 0x81: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i64((a.of.i64 == INT64_MIN && b.of.i64 == -1) ? 0 : a.of.i64 % b.of.i64));
-                break;
-            }
-            case 0x82: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 % (uint64_t)b.of.i64)));
-                break;
-            }
-            case 0x83: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 & b.of.i64));
-                break;
-            }
-            case 0x84: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 | b.of.i64));
-                break;
-            }
-            case 0x85: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 ^ b.of.i64));
-                break;
-            }
-            case 0x86: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 << (b.of.i64 & 63)));
-                break;
-            }
-            case 0x87: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64(a.of.i64 >> (b.of.i64 & 63)));
-                break;
-            }
-            case 0x88: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 >> (b.of.i64 & 63))));
-                break;
-            }
-            case 0x89: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint64_t k = (uint64_t)b.of.i64 & 63u;
-                WASM__PUSH(rt, wasm_i64((int64_t)(((uint64_t)a.of.i64 << k) | ((uint64_t)a.of.i64 >> (64u - k)))));
-                break;
-            }
-            case 0x8A: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint64_t k = (uint64_t)b.of.i64 & 63u;
-                WASM__PUSH(rt, wasm_i64((int64_t)(((uint64_t)a.of.i64 >> k) | ((uint64_t)a.of.i64 << (64u - k)))));
-                break;
-            }
-
-            /* f32 arithmetic */
-            case 0x8B: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)fabs((double)a.of.f32)));
-                break;
-            }
-            case 0x8C: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(-a.of.f32));
-                break;
-            }
-            case 0x8D: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)ceil((double)a.of.f32)));
-                break;
-            }
-            case 0x8E: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)floor((double)a.of.f32)));
-                break;
-            }
-            case 0x8F: {
-                wasm_value_t a = WASM__POP(rt);
-                double d = (double)a.of.f32;
-                WASM__PUSH(rt, wasm_f32((float)(d >= 0 ? floor(d) : ceil(d))));
-                break;
-            }
-            case 0x90: {
-                wasm_value_t a = WASM__POP(rt);
-                double d = (double)a.of.f32, rd = floor(d + 0.5);
-                if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
-                WASM__PUSH(rt, wasm_f32((float)rd));
-                break;
-            }
-            case 0x91: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)sqrt((double)a.of.f32)));
-                break;
-            }
-            case 0x92: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 + b.of.f32));
-                break;
-            }
-            case 0x93: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 - b.of.f32));
-                break;
-            }
-            case 0x94: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 * b.of.f32));
-                break;
-            }
-            case 0x95: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 / b.of.f32));
-                break;
-            }
-            case 0x96: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 < b.of.f32 ? a.of.f32 : b.of.f32));
-                break;
-            }
-            case 0x97: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(a.of.f32 > b.of.f32 ? a.of.f32 : b.of.f32));
-                break;
-            }
-            case 0x98: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint32_t ab, bb, rb;
-                memcpy(&ab, &a.of.f32, 4);
-                memcpy(&bb, &b.of.f32, 4);
-                rb = (ab & 0x7FFFFFFFu) | (bb & 0x80000000u);
-                {
-                    float fv;
-                    memcpy(&fv, &rb, 4);
-                    WASM__PUSH(rt, wasm_f32(fv));
+                    if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+                    WASM__PUSH(rt, wasm_i32((int32_t)memory->pages));
+                    break;
                 }
-                break;
-            }
-
-            /* f64 arithmetic */
-            case 0x99: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(fabs(a.of.f64)));
-                break;
-            }
-            case 0x9A: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(-a.of.f64));
-                break;
-            }
-            case 0x9B: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(ceil(a.of.f64)));
-                break;
-            }
-            case 0x9C: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(floor(a.of.f64)));
-                break;
-            }
-            case 0x9D: {
-                wasm_value_t a = WASM__POP(rt);
-                double d = a.of.f64;
-                WASM__PUSH(rt, wasm_f64(d >= 0 ? floor(d) : ceil(d)));
-                break;
-            }
-            case 0x9E: {
-                wasm_value_t a = WASM__POP(rt);
-                double d = a.of.f64, rd = floor(d + 0.5);
-                if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
-                WASM__PUSH(rt, wasm_f64(rd));
-                break;
-            }
-            case 0x9F: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(sqrt(a.of.f64)));
-                break;
-            }
-            case 0xA0: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 + b.of.f64));
-                break;
-            }
-            case 0xA1: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 - b.of.f64));
-                break;
-            }
-            case 0xA2: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 * b.of.f64));
-                break;
-            }
-            case 0xA3: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 / b.of.f64));
-                break;
-            }
-            case 0xA4: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 < b.of.f64 ? a.of.f64 : b.of.f64));
-                break;
-            }
-            case 0xA5: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(a.of.f64 > b.of.f64 ? a.of.f64 : b.of.f64));
-                break;
-            }
-            case 0xA6: {
-                wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
-                uint64_t ab, bb, rb;
-                memcpy(&ab, &a.of.f64, 8);
-                memcpy(&bb, &b.of.f64, 8);
-                rb = (ab & (uint64_t)0x7FFFFFFFFFFFFFFFull) | (bb & (uint64_t)0x8000000000000000ull);
-                {
-                    double dv;
-                    memcpy(&dv, &rb, 8);
-                    WASM__PUSH(rt, wasm_f64(dv));
+                case 0x40: {
+                    wasm_value_t d;
+                    int32_t res;
+                    uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                    d = WASM__POP(rt);
+                    res = wasm_memory_grow_at(mod, mem_idx, (uint32_t)d.of.i32);
+                    WASM__PUSH(rt, wasm_i32(res));
+                    break;
                 }
-                break;
-            }
 
-            /* Conversions */
-            case 0xA7: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)a.of.i64));
-                break;
-            }
-            case 0xA8: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)a.of.f32));
-                break;
-            }
-            case 0xA9: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)(uint32_t)a.of.f32));
-                break;
-            }
-            case 0xAA: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)a.of.f64));
-                break;
-            }
-            case 0xAB: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i32((int32_t)(uint32_t)a.of.f64));
-                break;
-            }
-            case 0xAC: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)a.of.i32));
-                break;
-            }
-            case 0xAD: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)(uint32_t)a.of.i32));
-                break;
-            }
-            case 0xAE: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)a.of.f32));
-                break;
-            }
-            case 0xAF: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)(uint64_t)a.of.f32));
-                break;
-            }
-            case 0xB0: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)a.of.f64));
-                break;
-            }
-            case 0xB1: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_i64((int64_t)(uint64_t)a.of.f64));
-                break;
-            }
-            case 0xB2: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)a.of.i32));
-                break;
-            }
-            case 0xB3: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)(uint32_t)a.of.i32));
-                break;
-            }
-            case 0xB4: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)a.of.i64));
-                break;
-            }
-            case 0xB5: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)(uint64_t)a.of.i64));
-                break;
-            }
-            case 0xB6: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)a.of.f64));
-                break;
-            }
-            case 0xB7: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64((double)a.of.i32));
-                break;
-            }
-            case 0xB8: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64((double)(uint32_t)a.of.i32));
-                break;
-            }
-            case 0xB9: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64((double)a.of.i64));
-                break;
-            }
-            case 0xBA: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64((double)(uint64_t)a.of.i64));
-                break;
-            }
-            case 0xBB: {
-                wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64((double)a.of.f32));
-                break;
-            }
+                /* Reference instructions */
+                case 0xD0: {
+                    wasm_valtype_t type;
+                    err = wasm__read_reftype(&r, &type);
+                    if (err != WASM_OK) goto cleanup;
+                    WASM__PUSH(rt, wasm_ref_null(type));
+                    break;
+                }
+                case 0xD1: {
+                    wasm_value_t value = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(wasm__is_null_ref(&value) ? 1 : 0));
+                    break;
+                }
+                case 0xD2: {
+                    uint32_t func_index = wasm__read_leb128_u32(&r);
+                    if (func_index >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                    WASM__PUSH(rt, wasm_funcref(func_index));
+                    break;
+                }
 
-            /* Reinterpretations */
-            case 0xBC: {
-                wasm_value_t a = WASM__POP(rt);
-                int32_t v;
-                memcpy(&v, &a.of.f32, 4);
-                WASM__PUSH(rt, wasm_i32(v));
-                break;
-            }
-            case 0xBD: {
-                wasm_value_t a = WASM__POP(rt);
-                int64_t v;
-                memcpy(&v, &a.of.f64, 8);
-                WASM__PUSH(rt, wasm_i64(v));
-                break;
-            }
-            case 0xBE: {
-                wasm_value_t a = WASM__POP(rt);
-                float v;
-                memcpy(&v, &a.of.i32, 4);
-                WASM__PUSH(rt, wasm_f32(v));
-                break;
-            }
-            case 0xBF: {
-                wasm_value_t a = WASM__POP(rt);
-                double v;
-                memcpy(&v, &a.of.i64, 8);
-                WASM__PUSH(rt, wasm_f64(v));
-                break;
-            }
+                /* Constants */
+                case 0x41:
+                    WASM__PUSH(rt, wasm_i32(wasm__read_leb128_i32(&r)));
+                    break;
+                case 0x42:
+                    WASM__PUSH(rt, wasm_i64(wasm__read_leb128_i64(&r)));
+                    break;
+                case 0x43:
+                    WASM__PUSH(rt, wasm_f32(wasm__read_f32(&r)));
+                    break;
+                case 0x44:
+                    WASM__PUSH(rt, wasm_f64(wasm__read_f64(&r)));
+                    break;
 
-            /* Sign extension */
-            case 0xC0: {
-                wasm_value_t a = WASM__POP(rt);
-                uint32_t value = (uint32_t)a.of.i32 & 0xFFu;
-                if (value & 0x80u) value |= 0xFFFFFF00u;
-                WASM__PUSH(rt, wasm_i32((int32_t)value));
-                break;
-            }
-            case 0xC1: {
-                wasm_value_t a = WASM__POP(rt);
-                uint32_t value = (uint32_t)a.of.i32 & 0xFFFFu;
-                if (value & 0x8000u) value |= 0xFFFF0000u;
-                WASM__PUSH(rt, wasm_i32((int32_t)value));
-                break;
-            }
-            case 0xC2: {
-                wasm_value_t a = WASM__POP(rt);
-                uint64_t value = (uint64_t)a.of.i64 & 0xFFu;
-                if (value & 0x80u) value |= 0xFFFFFFFFFFFFFF00ull;
-                WASM__PUSH(rt, wasm_i64((int64_t)value));
-                break;
-            }
-            case 0xC3: {
-                wasm_value_t a = WASM__POP(rt);
-                uint64_t value = (uint64_t)a.of.i64 & 0xFFFFu;
-                if (value & 0x8000u) value |= 0xFFFFFFFFFFFF0000ull;
-                WASM__PUSH(rt, wasm_i64((int64_t)value));
-                break;
-            }
-            case 0xC4: {
-                wasm_value_t a = WASM__POP(rt);
-                uint64_t value = (uint64_t)a.of.i64 & 0xFFFFFFFFull;
-                if (value & 0x80000000ull) value |= 0xFFFFFFFF00000000ull;
-                WASM__PUSH(rt, wasm_i64((int64_t)value));
-                break;
-            }
+                /* i32 comparison */
+                case 0x45: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 == 0 ? 1 : 0));
+                    break;
+                }
+                case 0x46: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 == b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x47: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 != b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x48: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 < b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x49: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 < (uint32_t)b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4A: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 > b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4B: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 > (uint32_t)b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4C: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 <= b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4D: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 <= (uint32_t)b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4E: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 >= b.of.i32 ? 1 : 0));
+                    break;
+                }
+                case 0x4F: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint32_t)a.of.i32 >= (uint32_t)b.of.i32 ? 1 : 0));
+                    break;
+                }
 
-            default:
-                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);
-                err = WASM_ERR_MALFORMED;
-                goto cleanup;
+                /* i64 comparison */
+                case 0x50: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 == 0 ? 1 : 0));
+                    break;
+                }
+                case 0x51: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 == b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x52: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 != b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x53: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 < b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x54: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 < (uint64_t)b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x55: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 > b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x56: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 > (uint64_t)b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x57: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 <= b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x58: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 <= (uint64_t)b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x59: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i64 >= b.of.i64 ? 1 : 0));
+                    break;
+                }
+                case 0x5A: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((uint64_t)a.of.i64 >= (uint64_t)b.of.i64 ? 1 : 0));
+                    break;
+                }
+
+                /* f32/f64 comparison */
+                case 0x5B: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 == b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x5C: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 != b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x5D: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 < b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x5E: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 > b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x5F: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 <= b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x60: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f32 >= b.of.f32 ? 1 : 0));
+                    break;
+                }
+                case 0x61: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 == b.of.f64 ? 1 : 0));
+                    break;
+                }
+                case 0x62: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 != b.of.f64 ? 1 : 0));
+                    break;
+                }
+                case 0x63: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 < b.of.f64 ? 1 : 0));
+                    break;
+                }
+                case 0x64: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 > b.of.f64 ? 1 : 0));
+                    break;
+                }
+                case 0x65: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 <= b.of.f64 ? 1 : 0));
+                    break;
+                }
+                case 0x66: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.f64 >= b.of.f64 ? 1 : 0));
+                    break;
+                }
+
+                /* i32 arithmetic */
+                case 0x67: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)wasm__clz32((uint32_t)a.of.i32)));
+                    break;
+                }
+                case 0x68: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)wasm__ctz32((uint32_t)a.of.i32)));
+                    break;
+                }
+                case 0x69: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)wasm__popcnt32((uint32_t)a.of.i32)));
+                    break;
+                }
+                case 0x6A: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 + b.of.i32));
+                    break;
+                }
+                case 0x6B: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 - b.of.i32));
+                    break;
+                }
+                case 0x6C: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 * b.of.i32));
+                    break;
+                }
+                case 0x6D: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    if (a.of.i32 == INT32_MIN && b.of.i32 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 / b.of.i32));
+                    break;
+                }
+                case 0x6E: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 / (uint32_t)b.of.i32)));
+                    break;
+                }
+                case 0x6F: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i32((a.of.i32 == INT32_MIN && b.of.i32 == -1) ? 0 : a.of.i32 % b.of.i32));
+                    break;
+                }
+                case 0x70: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 % (uint32_t)b.of.i32)));
+                    break;
+                }
+                case 0x71: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 & b.of.i32));
+                    break;
+                }
+                case 0x72: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 | b.of.i32));
+                    break;
+                }
+                case 0x73: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 ^ b.of.i32));
+                    break;
+                }
+                case 0x74: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 << (b.of.i32 & 31)));
+                    break;
+                }
+                case 0x75: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32(a.of.i32 >> (b.of.i32 & 31)));
+                    break;
+                }
+                case 0x76: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)((uint32_t)a.of.i32 >> (b.of.i32 & 31))));
+                    break;
+                }
+                case 0x77: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint32_t k = (uint32_t)b.of.i32 & 31u;
+                    WASM__PUSH(rt, wasm_i32((int32_t)(((uint32_t)a.of.i32 << k) | ((uint32_t)a.of.i32 >> (32u - k)))));
+                    break;
+                }
+                case 0x78: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint32_t k = (uint32_t)b.of.i32 & 31u;
+                    WASM__PUSH(rt, wasm_i32((int32_t)(((uint32_t)a.of.i32 >> k) | ((uint32_t)a.of.i32 << (32u - k)))));
+                    break;
+                }
+
+                /* i64 arithmetic */
+                case 0x79: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)wasm__clz64((uint64_t)a.of.i64)));
+                    break;
+                }
+                case 0x7A: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)wasm__ctz64((uint64_t)a.of.i64)));
+                    break;
+                }
+                case 0x7B: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)wasm__popcnt64((uint64_t)a.of.i64)));
+                    break;
+                }
+                case 0x7C: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 + b.of.i64));
+                    break;
+                }
+                case 0x7D: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 - b.of.i64));
+                    break;
+                }
+                case 0x7E: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 * b.of.i64));
+                    break;
+                }
+                case 0x7F: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    if (a.of.i64 == INT64_MIN && b.of.i64 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 / b.of.i64));
+                    break;
+                }
+                case 0x80: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 / (uint64_t)b.of.i64)));
+                    break;
+                }
+                case 0x81: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i64((a.of.i64 == INT64_MIN && b.of.i64 == -1) ? 0 : a.of.i64 % b.of.i64));
+                    break;
+                }
+                case 0x82: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
+                    WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 % (uint64_t)b.of.i64)));
+                    break;
+                }
+                case 0x83: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 & b.of.i64));
+                    break;
+                }
+                case 0x84: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 | b.of.i64));
+                    break;
+                }
+                case 0x85: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 ^ b.of.i64));
+                    break;
+                }
+                case 0x86: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 << (b.of.i64 & 63)));
+                    break;
+                }
+                case 0x87: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64(a.of.i64 >> (b.of.i64 & 63)));
+                    break;
+                }
+                case 0x88: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)((uint64_t)a.of.i64 >> (b.of.i64 & 63))));
+                    break;
+                }
+                case 0x89: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint64_t k = (uint64_t)b.of.i64 & 63u;
+                    WASM__PUSH(rt, wasm_i64((int64_t)(((uint64_t)a.of.i64 << k) | ((uint64_t)a.of.i64 >> (64u - k)))));
+                    break;
+                }
+                case 0x8A: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint64_t k = (uint64_t)b.of.i64 & 63u;
+                    WASM__PUSH(rt, wasm_i64((int64_t)(((uint64_t)a.of.i64 >> k) | ((uint64_t)a.of.i64 << (64u - k)))));
+                    break;
+                }
+
+                /* f32 arithmetic */
+                case 0x8B: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)fabs((double)a.of.f32)));
+                    break;
+                }
+                case 0x8C: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(-a.of.f32));
+                    break;
+                }
+                case 0x8D: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)ceil((double)a.of.f32)));
+                    break;
+                }
+                case 0x8E: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)floor((double)a.of.f32)));
+                    break;
+                }
+                case 0x8F: {
+                    wasm_value_t a = WASM__POP(rt);
+                    double d = (double)a.of.f32;
+                    WASM__PUSH(rt, wasm_f32((float)(d >= 0 ? floor(d) : ceil(d))));
+                    break;
+                }
+                case 0x90: {
+                    wasm_value_t a = WASM__POP(rt);
+                    double d = (double)a.of.f32, rd = floor(d + 0.5);
+                    if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
+                    WASM__PUSH(rt, wasm_f32((float)rd));
+                    break;
+                }
+                case 0x91: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)sqrt((double)a.of.f32)));
+                    break;
+                }
+                case 0x92: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 + b.of.f32));
+                    break;
+                }
+                case 0x93: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 - b.of.f32));
+                    break;
+                }
+                case 0x94: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 * b.of.f32));
+                    break;
+                }
+                case 0x95: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 / b.of.f32));
+                    break;
+                }
+                case 0x96: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 < b.of.f32 ? a.of.f32 : b.of.f32));
+                    break;
+                }
+                case 0x97: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32(a.of.f32 > b.of.f32 ? a.of.f32 : b.of.f32));
+                    break;
+                }
+                case 0x98: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint32_t ab, bb, rb;
+                    memcpy(&ab, &a.of.f32, 4);
+                    memcpy(&bb, &b.of.f32, 4);
+                    rb = (ab & 0x7FFFFFFFu) | (bb & 0x80000000u);
+                    {
+                        float fv;
+                        memcpy(&fv, &rb, 4);
+                        WASM__PUSH(rt, wasm_f32(fv));
+                    }
+                    break;
+                }
+
+                /* f64 arithmetic */
+                case 0x99: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(fabs(a.of.f64)));
+                    break;
+                }
+                case 0x9A: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(-a.of.f64));
+                    break;
+                }
+                case 0x9B: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(ceil(a.of.f64)));
+                    break;
+                }
+                case 0x9C: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(floor(a.of.f64)));
+                    break;
+                }
+                case 0x9D: {
+                    wasm_value_t a = WASM__POP(rt);
+                    double d = a.of.f64;
+                    WASM__PUSH(rt, wasm_f64(d >= 0 ? floor(d) : ceil(d)));
+                    break;
+                }
+                case 0x9E: {
+                    wasm_value_t a = WASM__POP(rt);
+                    double d = a.of.f64, rd = floor(d + 0.5);
+                    if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
+                    WASM__PUSH(rt, wasm_f64(rd));
+                    break;
+                }
+                case 0x9F: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(sqrt(a.of.f64)));
+                    break;
+                }
+                case 0xA0: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 + b.of.f64));
+                    break;
+                }
+                case 0xA1: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 - b.of.f64));
+                    break;
+                }
+                case 0xA2: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 * b.of.f64));
+                    break;
+                }
+                case 0xA3: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 / b.of.f64));
+                    break;
+                }
+                case 0xA4: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 < b.of.f64 ? a.of.f64 : b.of.f64));
+                    break;
+                }
+                case 0xA5: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64(a.of.f64 > b.of.f64 ? a.of.f64 : b.of.f64));
+                    break;
+                }
+                case 0xA6: {
+                    wasm_value_t b = WASM__POP(rt), a = WASM__POP(rt);
+                    uint64_t ab, bb, rb;
+                    memcpy(&ab, &a.of.f64, 8);
+                    memcpy(&bb, &b.of.f64, 8);
+                    rb = (ab & (uint64_t)0x7FFFFFFFFFFFFFFFull) | (bb & (uint64_t)0x8000000000000000ull);
+                    {
+                        double dv;
+                        memcpy(&dv, &rb, 8);
+                        WASM__PUSH(rt, wasm_f64(dv));
+                    }
+                    break;
+                }
+
+                /* Conversions */
+                case 0xA7: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)a.of.i64));
+                    break;
+                }
+                case 0xA8: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)a.of.f32));
+                    break;
+                }
+                case 0xA9: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)(uint32_t)a.of.f32));
+                    break;
+                }
+                case 0xAA: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)a.of.f64));
+                    break;
+                }
+                case 0xAB: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i32((int32_t)(uint32_t)a.of.f64));
+                    break;
+                }
+                case 0xAC: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)a.of.i32));
+                    break;
+                }
+                case 0xAD: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)(uint32_t)a.of.i32));
+                    break;
+                }
+                case 0xAE: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)a.of.f32));
+                    break;
+                }
+                case 0xAF: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)(uint64_t)a.of.f32));
+                    break;
+                }
+                case 0xB0: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)a.of.f64));
+                    break;
+                }
+                case 0xB1: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_i64((int64_t)(uint64_t)a.of.f64));
+                    break;
+                }
+                case 0xB2: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)a.of.i32));
+                    break;
+                }
+                case 0xB3: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)(uint32_t)a.of.i32));
+                    break;
+                }
+                case 0xB4: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)a.of.i64));
+                    break;
+                }
+                case 0xB5: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)(uint64_t)a.of.i64));
+                    break;
+                }
+                case 0xB6: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f32((float)a.of.f64));
+                    break;
+                }
+                case 0xB7: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64((double)a.of.i32));
+                    break;
+                }
+                case 0xB8: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64((double)(uint32_t)a.of.i32));
+                    break;
+                }
+                case 0xB9: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64((double)a.of.i64));
+                    break;
+                }
+                case 0xBA: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64((double)(uint64_t)a.of.i64));
+                    break;
+                }
+                case 0xBB: {
+                    wasm_value_t a = WASM__POP(rt);
+                    WASM__PUSH(rt, wasm_f64((double)a.of.f32));
+                    break;
+                }
+
+                /* Reinterpretations */
+                case 0xBC: {
+                    wasm_value_t a = WASM__POP(rt);
+                    int32_t v;
+                    memcpy(&v, &a.of.f32, 4);
+                    WASM__PUSH(rt, wasm_i32(v));
+                    break;
+                }
+                case 0xBD: {
+                    wasm_value_t a = WASM__POP(rt);
+                    int64_t v;
+                    memcpy(&v, &a.of.f64, 8);
+                    WASM__PUSH(rt, wasm_i64(v));
+                    break;
+                }
+                case 0xBE: {
+                    wasm_value_t a = WASM__POP(rt);
+                    float v;
+                    memcpy(&v, &a.of.i32, 4);
+                    WASM__PUSH(rt, wasm_f32(v));
+                    break;
+                }
+                case 0xBF: {
+                    wasm_value_t a = WASM__POP(rt);
+                    double v;
+                    memcpy(&v, &a.of.i64, 8);
+                    WASM__PUSH(rt, wasm_f64(v));
+                    break;
+                }
+
+                /* Sign extension */
+                case 0xC0: {
+                    wasm_value_t a = WASM__POP(rt);
+                    uint32_t value = (uint32_t)a.of.i32 & 0xFFu;
+                    if (value & 0x80u) value |= 0xFFFFFF00u;
+                    WASM__PUSH(rt, wasm_i32((int32_t)value));
+                    break;
+                }
+                case 0xC1: {
+                    wasm_value_t a = WASM__POP(rt);
+                    uint32_t value = (uint32_t)a.of.i32 & 0xFFFFu;
+                    if (value & 0x8000u) value |= 0xFFFF0000u;
+                    WASM__PUSH(rt, wasm_i32((int32_t)value));
+                    break;
+                }
+                case 0xC2: {
+                    wasm_value_t a = WASM__POP(rt);
+                    uint64_t value = (uint64_t)a.of.i64 & 0xFFu;
+                    if (value & 0x80u) value |= 0xFFFFFFFFFFFFFF00ull;
+                    WASM__PUSH(rt, wasm_i64((int64_t)value));
+                    break;
+                }
+                case 0xC3: {
+                    wasm_value_t a = WASM__POP(rt);
+                    uint64_t value = (uint64_t)a.of.i64 & 0xFFFFu;
+                    if (value & 0x8000u) value |= 0xFFFFFFFFFFFF0000ull;
+                    WASM__PUSH(rt, wasm_i64((int64_t)value));
+                    break;
+                }
+                case 0xC4: {
+                    wasm_value_t a = WASM__POP(rt);
+                    uint64_t value = (uint64_t)a.of.i64 & 0xFFFFFFFFull;
+                    if (value & 0x80000000ull) value |= 0xFFFFFFFF00000000ull;
+                    WASM__PUSH(rt, wasm_i64((int64_t)value));
+                    break;
+                }
+
+                default:
+                    WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);
+                    err = WASM_ERR_MALFORMED;
+                    goto cleanup_frame;
+            }
         }
+
+        for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
+        rt->sp = sp_base;
+        err = WASM_OK;
+
+    cleanup_frame:
+        if (locals != locals_buf) free(locals);
+        locals = NULL;
+        if (restart) continue;
+        goto cleanup;
     }
 
-    for (i = 0; i < ft->num_results; i++) results[ft->num_results - 1 - i] = WASM__POP(rt);
-    rt->sp = sp_base;
-
 cleanup:
-    if (locals != locals_buf) free(locals);
+    if (current_args_owned && current_args) free(current_args);
     return err;
 }
 

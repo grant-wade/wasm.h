@@ -96,7 +96,7 @@ Key structural limitations that will affect almost every milestone:
 - Refactor init expression evaluation into a mini-interpreter that processes a sequence of const instructions until `0x0B`, supporting the extended set. This is a small contained evaluator — no control flow, no memory access, just arithmetic on a mini-stack.
 - `global.get` in init exprs may only reference previously defined immutable globals or imported globals.
 
-### Milestone 10: Tail Calls (Optional but Growing)
+### [DONE] Milestone 10: Tail Calls (Optional but Growing)
 
 **Goal:** `return_call` (0x12) and `return_call_indirect` (0x13).
 
