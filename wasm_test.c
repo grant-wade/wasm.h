@@ -118,6 +118,15 @@ static void emit_section(wasm_builder_t* b, uint8_t id, const uint8_t* content, 
     emit_bytes(b, content, len);
 }
 
+static void emit_export_func(wasm_builder_t* b, const char* name, uint32_t index) {
+    uint32_t len = (uint32_t)strlen(name);
+
+    emit_leb128_u32(b, len);
+    emit_bytes(b, (const uint8_t*)name, len);
+    emit(b, 0x00);
+    emit_leb128_u32(b, index);
+}
+
 static void emit_header(wasm_builder_t* b) {
     /* magic */
     emit(b, 0x00);
@@ -5542,6 +5551,516 @@ WL_TEST(test_set_immutable_global_rejected) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_float_min_max_semantics) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args_f32[2];
+    wasm_value_t args_f64[2];
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7D);
+        emit(&sec, 0x7D);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7D);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7C);
+        emit(&sec, 0x7C);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7C);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+        emit_export_func(&sec, "f32min", 0);
+        emit_export_func(&sec, "f32max", 1);
+        emit_export_func(&sec, "f64min", 2);
+        emit_export_func(&sec, "f64max", 3);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t ops[] = { 0x96, 0x97, 0xA4, 0xA5 };
+        uint32_t i;
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 4);
+        for (i = 0; i < 4; i++) {
+            wasm_builder_t body = { 0 };
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 1);
+            emit(&body, ops[i]);
+            emit(&body, 0x0B);
+            emit_leb128_u32(&sec, body.len);
+            emit_bytes(&sec, body.buf, body.len);
+        }
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args_f32[0] = wasm_f32(-0.0f);
+    args_f32[1] = wasm_f32(0.0f);
+    err = wasm_call(m, "f32min", args_f32, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.of.f32 == 0.0f && signbit(result.of.f32), "%s", "expected f32.min(-0,+0) to return -0");
+    }
+
+    err = wasm_call(m, "f32max", args_f32, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.of.f32 == 0.0f && !signbit(result.of.f32), "%s", "expected f32.max(-0,+0) to return +0");
+    }
+
+    args_f32[0] = wasm_f32(NAN);
+    args_f32[1] = wasm_f32(1.0f);
+    err = wasm_call(m, "f32min", args_f32, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, isnan(result.of.f32), "%s", "expected f32.min(NaN, 1) to return NaN");
+    }
+
+    args_f64[0] = wasm_f64(-0.0);
+    args_f64[1] = wasm_f64(0.0);
+    err = wasm_call(m, "f64min", args_f64, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.of.f64 == 0.0 && signbit(result.of.f64), "%s", "expected f64.min(-0,+0) to return -0");
+    }
+
+    err = wasm_call(m, "f64max", args_f64, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.of.f64 == 0.0 && !signbit(result.of.f64), "%s", "expected f64.max(-0,+0) to return +0");
+    }
+
+    args_f64[0] = wasm_f64(1.0);
+    args_f64[1] = wasm_f64(NAN);
+    err = wasm_call(m, "f64max", args_f64, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, isnan(result.of.f64), "%s", "expected f64.max(1, NaN) to return NaN");
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_trapping_float_to_int_conversions) {
+    static const char* export_names[] = {
+        "i32_trunc_f32_s",
+        "i32_trunc_f32_u",
+        "i32_trunc_f64_s",
+        "i32_trunc_f64_u",
+        "i64_trunc_f32_s",
+        "i64_trunc_f32_u",
+        "i64_trunc_f64_s",
+        "i64_trunc_f64_u"
+    };
+    static const uint8_t type_indices[] = { 0, 0, 1, 1, 2, 2, 3, 3 };
+    static const uint8_t ops[] = { 0xA8, 0xA9, 0xAA, 0xAB, 0xAE, 0xAF, 0xB0, 0xB1 };
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+    uint32_t i;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7D);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7C);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7D);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7C);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 8);
+        for (i = 0; i < 8; i++) emit_leb128_u32(&sec, type_indices[i]);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 8);
+        for (i = 0; i < 8; i++) emit_export_func(&sec, export_names[i], i);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 8);
+        for (i = 0; i < 8; i++) {
+            wasm_builder_t body = { 0 };
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 0);
+            emit(&body, ops[i]);
+            emit(&body, 0x0B);
+            emit_leb128_u32(&sec, body.len);
+            emit_bytes(&sec, body.buf, body.len);
+        }
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f32(123.75f) };
+        err = wasm_call(m, "i32_trunc_f32_s", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 123);
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(42.9) };
+        err = wasm_call(m, "i64_trunc_f64_u", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, 42);
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f32(NAN) };
+        err = wasm_call(m, "i32_trunc_f32_s", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f32(-1.0f) };
+        err = wasm_call(m, "i32_trunc_f32_u", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(2147483648.0) };
+        err = wasm_call(m, "i32_trunc_f64_s", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(4294967296.0) };
+        err = wasm_call(m, "i32_trunc_f64_u", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f32(NAN) };
+        err = wasm_call(m, "i64_trunc_f32_s", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f32(-1.0f) };
+        err = wasm_call(m, "i64_trunc_f32_u", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(9223372036854775808.0) };
+        err = wasm_call(m, "i64_trunc_f64_s", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    {
+        wasm_value_t args[] = { wasm_f64(18446744073709551616.0) };
+        err = wasm_call(m, "i64_trunc_f64_u", args, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_rotate_by_zero) {
+    static const char* export_names[] = { "rotl32", "rotr32", "rotl64", "rotr64" };
+    static const uint8_t type_indices[] = { 0, 0, 1, 1 };
+    static const uint8_t ops[] = { 0x77, 0x78, 0x89, 0x8A };
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+    uint32_t i;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+        for (i = 0; i < 4; i++) emit_leb128_u32(&sec, type_indices[i]);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+        for (i = 0; i < 4; i++) emit_export_func(&sec, export_names[i], i);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 4);
+        for (i = 0; i < 4; i++) {
+            wasm_builder_t body = { 0 };
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 0);
+            if (i < 2) {
+                emit(&body, 0x41);
+                emit_leb128_i32(&body, 0);
+            } else {
+                emit(&body, 0x42);
+                emit_leb128_i64(&body, 0);
+            }
+            emit(&body, ops[i]);
+            emit(&body, 0x0B);
+            emit_leb128_u32(&sec, body.len);
+            emit_bytes(&sec, body.buf, body.len);
+        }
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    {
+        wasm_value_t args[] = { wasm_i32((int32_t)0x81234567u) };
+        err = wasm_call(m, "rotl32", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, (int32_t)0x81234567u);
+
+        err = wasm_call(m, "rotr32", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, (int32_t)0x81234567u);
+    }
+
+    {
+        wasm_value_t args[] = { wasm_i64((int64_t)0x8123456789ABCDEFull) };
+        err = wasm_call(m, "rotl64", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, (int64_t)0x8123456789ABCDEFull);
+
+        err = wasm_call(m, "rotr64", args, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, (int64_t)0x8123456789ABCDEFull);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_typed_select_funcref) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[] = { wasm_i32(1) };
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x70);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "pick", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD2);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x70);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x1C);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x70);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "pick", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_FUNCREF, "%s", "expected funcref result type");
+        WL_CHECK_MSG(t, result.of.funcref == 0, "%s", "expected typed select to choose ref.func 0");
+    }
+
+    args[0] = wasm_i32(0);
+    err = wasm_call(m, "pick", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_FUNCREF, "%s", "expected funcref result type");
+        WL_CHECK_MSG(t, result.of.funcref == UINT32_MAX, "%s", "expected typed select to choose ref.null");
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_memory_grow_respects_zero_max) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    int32_t old_pages;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x01);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    old_pages = wasm_memory_grow_at(m, 0, 0);
+    WASM_CHECK_I32(t, old_pages, 0);
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
+
+    old_pages = wasm_memory_grow_at(m, 0, 1);
+    WASM_CHECK_I32(t, old_pages, -1);
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -5576,6 +6095,9 @@ int main(void) {
         { "multivalue if: type-index block returns two values", test_multivalue_if_block },
         { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
+        { "float min/max: NaN propagation and signed zero semantics", test_float_min_max_semantics },
+        { "float trunc: trapping conversions reject NaN and overflow", test_trapping_float_to_int_conversions },
+        { "rotates: zero-count paths avoid shift-width UB", test_rotate_by_zero },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
@@ -5583,6 +6105,7 @@ int main(void) {
         { "exceptions: catch_all handles unmatched tags", test_exception_catch_all },
         { "exceptions: rethrow forwards to outer catches", test_exception_rethrow },
         { "exceptions: delegate forwards to outer handlers", test_exception_delegate },
+        { "reference types: typed select chooses funcref operands", test_typed_select_funcref },
         { "feature gate: disabled exceptions reject module load", test_feature_gate_exceptions_disabled },
         { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
@@ -5594,6 +6117,7 @@ int main(void) {
         { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
         { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
         { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
+        { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
