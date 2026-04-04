@@ -1,4 +1,4 @@
-# wl
+# Wade Lib 'wl'
 
 This repo is the home for a growing set of single-header C libraries.
 
