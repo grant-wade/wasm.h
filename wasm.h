@@ -181,6 +181,14 @@ typedef struct wasm_import_t {
     void* userdata;
 } wasm_import_t;
 
+typedef struct wasm_global_import_t {
+    const char* module;
+    const char* name;
+    wasm_valtype_t type;
+    int is_mutable;
+    wasm_value_t* value;
+} wasm_global_import_t;
+
 /* ── Internal function representation ─────────────────────────────── */
 typedef struct wasm_func_t {
     uint32_t type_idx;
@@ -211,6 +219,8 @@ typedef struct wasm_export_t {
 typedef struct wasm_global_t {
     wasm_valtype_t type;
     int is_mutable;
+    int is_import;
+    wasm_value_t* import_value;
     wasm_value_t value;
 } wasm_global_t;
 
@@ -244,6 +254,7 @@ struct wasm_module_t {
     wasm_table_t table;
     wasm_memory_t memory;
     uint32_t num_func_imports;
+    uint32_t num_global_imports;
     uint32_t start_func;
     int startup_ran;
 };
@@ -260,6 +271,9 @@ struct wasm_runtime_t {
     wasm_import_t* imports;
     uint32_t num_imports;
     uint32_t cap_imports;
+    wasm_global_import_t* global_imports;
+    uint32_t num_global_imports;
+    uint32_t cap_global_imports;
     wasm_value_t stack[WASM_MAX_STACK];
     uint32_t sp;
     wasm_error_t last_error;
@@ -270,6 +284,7 @@ struct wasm_runtime_t {
 wasm_error_t wasm_init(wasm_runtime_t* rt);
 void wasm_destroy(wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
+wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
 void wasm_free_module(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
@@ -633,6 +648,87 @@ static wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functyp
     return WASM_OK;
 }
 
+static wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
+    return global->is_import ? *global->import_value : global->value;
+}
+
+static void wasm__global_set_value(wasm_global_t* global, wasm_value_t value) {
+    value.type = global->type;
+    if (global->is_import) {
+        global->import_value->type = global->type;
+        *global->import_value = value;
+    } else {
+        global->value = value;
+    }
+}
+
+static wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_globals;
+    wasm_global_t* globals;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    globals = (wasm_global_t*)realloc(mod->globals, (base + count) * sizeof(wasm_global_t));
+    if (!globals) return WASM_ERR_OOM;
+
+    mod->globals = globals;
+    memset(mod->globals + base, 0, count * sizeof(wasm_global_t));
+    mod->num_globals = base + count;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
+                                         uint32_t max_global_index,
+                                         wasm_value_t* out_value) {
+    uint8_t op = wasm__read_u8(r);
+    wasm_value_t value;
+
+    memset(&value, 0, sizeof(value));
+    switch (op) {
+        case 0x41:
+            value = wasm_i32(wasm__read_leb128_i32(r));
+            break;
+        case 0x42:
+            value = wasm_i64(wasm__read_leb128_i64(r));
+            break;
+        case 0x43:
+            value.type = WASM_TYPE_F32;
+            value.of.f32 = wasm__read_f32(r);
+            break;
+        case 0x44:
+            value.type = WASM_TYPE_F64;
+            value.of.f64 = wasm__read_f64(r);
+            break;
+        case 0x23: {
+            uint32_t global_index = wasm__read_leb128_u32(r);
+            if (global_index >= max_global_index) return WASM_ERR_MALFORMED;
+            value = wasm__global_get_value(&mod->globals[global_index]);
+            break;
+        }
+        default:
+            return WASM_ERR_MALFORMED;
+    }
+
+    if (wasm__read_u8(r) != 0x0B) return WASM_ERR_MALFORMED;
+    *out_value = value;
+    return WASM_OK;
+}
+
+static wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
+                                                      const char* module,
+                                                      const char* name) {
+    uint32_t i;
+
+    for (i = 0; i < rt->num_global_imports; i++) {
+        if (strcmp(rt->global_imports[i].module, module) == 0 &&
+            strcmp(rt->global_imports[i].name, name) == 0)
+            return &rt->global_imports[i];
+    }
+
+    return NULL;
+}
+
 /* ── Init / Destroy ───────────────────────────────────────────────── */
 
 wasm_error_t wasm_init(wasm_runtime_t* rt) {
@@ -645,6 +741,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
 
     for (i = 0; i < rt->num_imports; i++) wasm__free_functype(&rt->imports[i].type);
     free(rt->imports);
+    free(rt->global_imports);
     memset(rt, 0, sizeof(*rt));
 }
 
@@ -669,6 +766,33 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
     if (err != WASM_OK) return err;
 
     rt->imports[rt->num_imports++] = copy;
+    return WASM_OK;
+}
+
+wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp) {
+    wasm_global_import_t copy;
+
+    if (!imp || !imp->module || !imp->name || !imp->value) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid global import");
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (rt->num_global_imports >= rt->cap_global_imports) {
+        uint32_t new_cap = rt->cap_global_imports ? rt->cap_global_imports * 2 : 16;
+        wasm_global_import_t* a =
+            (wasm_global_import_t*)realloc(rt->global_imports, new_cap * sizeof(wasm_global_import_t));
+        if (!a) return WASM_ERR_OOM;
+        rt->global_imports = a;
+        rt->cap_global_imports = new_cap;
+    }
+
+    memset(&copy, 0, sizeof(copy));
+    copy.module = imp->module;
+    copy.name = imp->name;
+    copy.type = imp->type;
+    copy.is_mutable = imp->is_mutable;
+    copy.value = imp->value;
+    rt->global_imports[rt->num_global_imports++] = copy;
     return WASM_OK;
 }
 
@@ -740,8 +864,29 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             mod->memory.pages = wasm__read_leb128_u32(r);
             mod->memory.max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
         } else if (kind == 0x03) {
-            wasm__read_u8(r);
-            wasm__read_u8(r);
+            uint32_t gi;
+            wasm_global_import_t* gimp;
+            wasm_valtype_t type = (wasm_valtype_t)wasm__read_u8(r);
+            uint8_t is_mutable = wasm__read_u8(r);
+
+            gimp = wasm__find_global_import(mod->rt, mn, fn);
+            if (!gimp) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", mn, fn);
+                return WASM_ERR_UNKNOWN_IMPORT;
+            }
+            if (gimp->type != type || gimp->is_mutable != (int)is_mutable) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global import type mismatch: %.64s.%.64s", mn, fn);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
+            if (!gimp->value) return WASM_ERR_MALFORMED;
+            if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) return WASM_ERR_OOM;
+
+            mod->globals[gi].type = type;
+            mod->globals[gi].is_mutable = is_mutable;
+            mod->globals[gi].is_import = 1;
+            mod->globals[gi].import_value = gimp->value;
+            mod->globals[gi].import_value->type = type;
+            mod->num_global_imports++;
         }
     }
     return WASM_OK;
@@ -784,32 +929,22 @@ static wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader
 }
 
 static wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
-    mod->globals = (wasm_global_t*)calloc(count, sizeof(wasm_global_t));
-    if (!mod->globals && count) return WASM_ERR_OOM;
-    mod->num_globals = count;
+    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    wasm_error_t err;
+
+    err = wasm__append_global_slots(mod, count, &base);
+    if (err != WASM_OK) return err;
+
     for (i = 0; i < count; i++) {
-        uint8_t op;
-        mod->globals[i].type = (wasm_valtype_t)wasm__read_u8(r);
-        mod->globals[i].is_mutable = wasm__read_u8(r);
-        op = wasm__read_u8(r);
-        switch (op) {
-            case 0x41:
-                mod->globals[i].value.of.i32 = wasm__read_leb128_i32(r);
-                break;
-            case 0x42:
-                mod->globals[i].value.of.i64 = wasm__read_leb128_i64(r);
-                break;
-            case 0x43:
-                mod->globals[i].value.of.f32 = wasm__read_f32(r);
-                break;
-            case 0x44:
-                mod->globals[i].value.of.f64 = wasm__read_f64(r);
-                break;
-            default:
-                break;
-        }
-        wasm__read_u8(r);
+        uint32_t global_index = base + i;
+        wasm_value_t value;
+
+        mod->globals[global_index].type = (wasm_valtype_t)wasm__read_u8(r);
+        mod->globals[global_index].is_mutable = wasm__read_u8(r);
+        err = wasm__eval_init_expr(mod, r, global_index, &value);
+        if (err != WASM_OK) return err;
+        if (value.type != mod->globals[global_index].type) return WASM_ERR_TYPE_MISMATCH;
+        wasm__global_set_value(&mod->globals[global_index], value);
     }
     return WASM_OK;
 }
@@ -836,14 +971,13 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
     uint32_t count = wasm__read_leb128_u32(r), i, e;
     for (i = 0; i < count; i++) {
         uint32_t num_elems, offset = 0;
-        uint8_t op;
+        wasm_value_t offset_value;
+        wasm_error_t err;
         wasm__read_leb128_u32(r); /* table_idx */
-        op = wasm__read_u8(r);
-        if (op == 0x41)
-            offset = (uint32_t)wasm__read_leb128_i32(r);
-        else if (op == 0x23)
-            offset = wasm__read_leb128_u32(r);
-        wasm__read_u8(r);
+        err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+        if (err != WASM_OK) return err;
+        if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+        offset = (uint32_t)offset_value.of.i32;
         num_elems = wasm__read_leb128_u32(r);
         if (!mod->table.elems && mod->table.size > 0) {
             uint32_t te;
@@ -899,16 +1033,13 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
     uint32_t count = wasm__read_leb128_u32(r), i;
     for (i = 0; i < count; i++) {
         uint32_t offset = 0, size;
-        uint8_t op;
+        wasm_value_t offset_value;
+        wasm_error_t err;
         wasm__read_leb128_u32(r);
-        op = wasm__read_u8(r);
-        if (op == 0x41)
-            offset = (uint32_t)wasm__read_leb128_i32(r);
-        else if (op == 0x23) {
-            uint32_t gi = wasm__read_leb128_u32(r);
-            if (gi < mod->num_globals) offset = (uint32_t)mod->globals[gi].value.of.i32;
-        }
-        wasm__read_u8(r);
+        err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+        if (err != WASM_OK) return err;
+        if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+        offset = (uint32_t)offset_value.of.i32;
         size = wasm__read_leb128_u32(r);
         if (mod->memory.data && offset + size <= mod->memory.pages * WASM_PAGE_SIZE)
             memcpy(mod->memory.data + offset, r->ptr, size);
@@ -1672,12 +1803,17 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             }
             case 0x23: {
                 uint32_t x = wasm__read_leb128_u32(&r);
-                WASM__PUSH(rt, mod->globals[x].value);
+                WASM__PUSH(rt, wasm__global_get_value(&mod->globals[x]));
                 break;
             }
             case 0x24: {
                 uint32_t x = wasm__read_leb128_u32(&r);
-                mod->globals[x].value = WASM__POP(rt);
+                if (!mod->globals[x].is_mutable) {
+                    WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)x);
+                    err = WASM_ERR_TYPE_MISMATCH;
+                    goto cleanup;
+                }
+                wasm__global_set_value(&mod->globals[x], WASM__POP(rt));
                 break;
             }
 

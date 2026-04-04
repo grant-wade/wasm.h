@@ -97,7 +97,7 @@ At a high level it gives you:
 
 - loading and validating Wasm binary modules from memory
 - calling exported functions by name from C
-- registering C callbacks as Wasm imports
+- registering C callbacks and globals as Wasm imports
 - linear memory support, including `memory.grow`
 - tables and indirect calls
 - trap and error reporting through `wasm_error_t` and `wasm_error_string`
@@ -123,6 +123,7 @@ wasm_init(&rt);
 
 /* Optional: register host imports before loading. */
 /* wasm_register_import(&rt, &imp); */
+/* wasm_register_global_import(&rt, &global_imp); */
 
 mod = wasm_load(&rt, bytes, len);
 if (mod != NULL) {

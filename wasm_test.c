@@ -460,6 +460,394 @@ WL_TEST(test_host_import) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_imported_mutable_global) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_global_import_t imp;
+    wasm_value_t imported_counter = wasm_i32(10);
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 7);
+        emit(&sec, 'c');
+        emit(&sec, 'o');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 't');
+        emit(&sec, 'e');
+        emit(&sec, 'r');
+        emit(&sec, 0x03);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'r');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x23);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 5);
+        emit(&body, 0x6A);
+        emit(&body, 0x24);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x23);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "env";
+    imp.name = "counter";
+    imp.type = WASM_TYPE_I32;
+    imp.is_mutable = 1;
+    imp.value = &imported_counter;
+
+    err = wasm_register_global_import(&rt, &imp);
+    WASM_CHECK_OK(t, err);
+    if (err != WASM_OK) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 15);
+        WASM_CHECK_I32(t, imported_counter.of.i32, 15);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_global_init_expr_global_get_import) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_global_import_t imp;
+    wasm_value_t imported_seed = wasm_i32(33);
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 's');
+        emit(&sec, 'e');
+        emit(&sec, 'e');
+        emit(&sec, 'd');
+        emit(&sec, 0x03);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+        emit(&sec, 0x23);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_section(&mod, 6, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 8);
+        emit(&sec, 's');
+        emit(&sec, 'n');
+        emit(&sec, 'a');
+        emit(&sec, 'p');
+        emit(&sec, 's');
+        emit(&sec, 'h');
+        emit(&sec, 'o');
+        emit(&sec, 't');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x23);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "env";
+    imp.name = "seed";
+    imp.type = WASM_TYPE_I32;
+    imp.is_mutable = 1;
+    imp.value = &imported_seed;
+
+    err = wasm_register_global_import(&rt, &imp);
+    WASM_CHECK_OK(t, err);
+    if (err != WASM_OK) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    imported_seed.of.i32 = 99;
+    err = wasm_call(m, "snapshot", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 33);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_data_offset_from_imported_global) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_global_import_t imp;
+    wasm_value_t stack_pointer = wasm_i32(8);
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 15);
+        emit(&sec, '_');
+        emit(&sec, '_');
+        emit(&sec, 's');
+        emit(&sec, 't');
+        emit(&sec, 'a');
+        emit(&sec, 'c');
+        emit(&sec, 'k');
+        emit(&sec, '_');
+        emit(&sec, 'p');
+        emit(&sec, 'o');
+        emit(&sec, 'i');
+        emit(&sec, 'n');
+        emit(&sec, 't');
+        emit(&sec, 'e');
+        emit(&sec, 'r');
+        emit(&sec, 0x03);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'g');
+        emit(&sec, 'e');
+        emit(&sec, 't');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 8);
+        emit(&body, 0x28);
+        emit_leb128_u32(&body, 2);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[4] = { 42, 0, 0, 0 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x23);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, 4);
+        emit_bytes(&sec, data_bytes, 4);
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "env";
+    imp.name = "__stack_pointer";
+    imp.type = WASM_TYPE_I32;
+    imp.is_mutable = 1;
+    imp.value = &stack_pointer;
+
+    err = wasm_register_global_import(&rt, &imp);
+    WASM_CHECK_OK(t, err);
+    if (err != WASM_OK) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "get", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 42);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Test 4: memory load/store ──────────────────────────────────── */
 
 WL_TEST(test_memory) {
@@ -1953,6 +2341,83 @@ WL_TEST(test_div_by_zero) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_set_immutable_global_rejected) {
+
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 7);
+        emit(&sec, 0x0B);
+        emit_section(&mod, 6, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 'f');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 9);
+        emit(&body, 0x24);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "f", NULL, 0, NULL, 0);
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected immutable global write rejection");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -1960,6 +2425,9 @@ int main(void) {
         { "i32.add(3, 7) == 10", test_add },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
+        { "global import: mutable env.counter is read and updated by reference", test_imported_mutable_global },
+        { "global init expr: global.get can read imported globals", test_global_init_expr_global_get_import },
+        { "data offset expr: global.get can use imported __stack_pointer", test_data_offset_from_imported_global },
         { "memory: store 99 at offset 0, load it back", test_memory },
         { "loop: sum(1..10) == 55", test_loop },
         { "call with 17 params survives dynamic signature storage", test_large_param_call },
@@ -1974,6 +2442,7 @@ int main(void) {
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
+        { "reject global.set on immutable global", test_set_immutable_global_rejected },
     };
 
     return wl_test_run("wasm", cases, WL_COUNTOF(cases));
