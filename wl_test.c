@@ -13,7 +13,7 @@
 #endif
 #endif
 
-#define WL_IMPLEMENTATION
+#define WL_IMPL
 #include "wl.h"
 
 typedef struct test_alloc {

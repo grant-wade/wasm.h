@@ -12,7 +12,7 @@ unit that uses them.
 
 In exactly one translation unit:
 
-    #define WL_IMPLEMENTATION
+    #define WL_IMPL
     #include "wl.h"
 */
 
@@ -620,7 +620,7 @@ int wl_test_run(const char* suite_name, const wl_test_case* cases, usize count);
         }                                                                           \
     } while (0)
 
-#ifdef WL_IMPLEMENTATION
+#ifdef WL_IMPL
 
 #include <stdio.h>
 #include <string.h>
