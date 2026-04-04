@@ -1,7 +1,7 @@
 CC ?= cc
-CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L
-CFLAGS ?= -std=c23 -Wall -Wextra -Werror -fsanitize=address,undefined -g
-LDFLAGS ?= -fsanitize=address,undefined
+CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -DWL_ENABLE_PLATFORM=1
+CFLAGS ?= -std=c99 -Wall -Wextra -Werror -g
+LDFLAGS ?= 
 
 .PHONY: all test clean
 

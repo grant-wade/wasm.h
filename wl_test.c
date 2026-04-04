@@ -1,6 +1,17 @@
 #include <stdio.h>
 #include <string.h>
+#if defined(WL_ENABLE_PLATFORM) && WL_ENABLE_PLATFORM
+#if defined(_WIN32)
+#include <direct.h>
+#include <process.h>
+#define wl_test_getpid _getpid
+#define wl_test_rmdir _rmdir
+#else
 #include <unistd.h>
+#define wl_test_getpid getpid
+#define wl_test_rmdir rmdir
+#endif
+#endif
 
 #define WL_IMPLEMENTATION
 #include "wl.h"
@@ -108,10 +119,12 @@ static bool int_eq(const void *lhs, const void *rhs, usize key_size) {
     return *(const int *)lhs == *(const int *)rhs;
 }
 
+#if WL_ENABLE_PLATFORM
 static void make_temp_name(char *buf, usize buf_size, const char *label) {
-    u64 salt = (u64)wl_time_wall().ns ^ ((u64)(unsigned int)getpid() << 16u);
-    (void)snprintf(buf, buf_size, ".wl_test_%s_%llu_%u", label, (unsigned long long)salt, (unsigned int)getpid());
+    u64 salt = (u64)wl_time_wall().ns ^ ((u64)(unsigned int)wl_test_getpid() << 16u);
+    (void)snprintf(buf, buf_size, ".wl_test_%s_%llu_%u", label, (unsigned long long)salt, (unsigned int)wl_test_getpid());
 }
+#endif
 
 WL_TEST(test_status_and_alloc) {
     test_alloc alloc = test_alloc_make();
@@ -166,10 +179,10 @@ WL_TEST(test_arena) {
 
     wl_arena_reset(&arena);
     (void)wl_arena_alloc(&arena, 1u);
-    aligned = wl_arena_alloc(&arena, sizeof(max_align_t));
+    aligned = wl_arena_alloc(&arena, sizeof(wl__max_align));
     WL_REQUIRE(t, aligned != NULL);
     aligned_value = (uintptr_t)aligned;
-    WL_CHECK(t, aligned_value % _Alignof(max_align_t) == 0u);
+    WL_CHECK(t, aligned_value % WL_ALIGNOF(wl__max_align) == 0u);
     WL_CHECK(t, wl_arena_alloc(&arena, 1024u) == NULL);
 
     wl_arena_destroy(&arena);
@@ -325,9 +338,9 @@ WL_TEST(test_utf8) {
     WL_CHECK(t, wl_utf8_encode(encoded, 0x1f30du) == 4u);
     WL_CHECK(t, memcmp(encoded, globe, sizeof(globe)) == 0);
     WL_CHECK(t, wl_utf8_encode(encoded, 0x110000u) == 0u);
-    WL_CHECK(t, !wl_utf8_valid((wl_str){(const char *)overlong, sizeof(overlong)}));
-    WL_CHECK(t, !wl_utf8_valid((wl_str){(const char *)surrogate, sizeof(surrogate)}));
-    WL_CHECK(t, !wl_utf8_valid((wl_str){(const char *)truncated, sizeof(truncated)}));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)overlong, sizeof(overlong))));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)surrogate, sizeof(surrogate))));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)truncated, sizeof(truncated))));
 }
 
 WL_TEST(test_hash_functions) {
@@ -479,6 +492,7 @@ WL_TEST(test_rng) {
     }
 }
 
+#if WL_ENABLE_PLATFORM
 WL_TEST(test_time) {
     wl_time base = {1000ll};
     wl_duration delta = wl_ms(5);
@@ -549,14 +563,15 @@ WL_TEST(test_fs_and_paths) {
 
     WL_CHECK(t, wl_fs_remove(file_path) == WL_OK);
     WL_CHECK(t, wl_fs_remove(file_path) == WL_ERR_NOT_FOUND);
-    (void)rmdir(nested);
+    (void)wl_test_rmdir(nested);
     {
         char parent[192];
         WL_REQUIRE(t, wl_path_join(parent, sizeof(parent), wl_str_from_cstr(base), wl_str_lit("a")) == WL_OK);
-        (void)rmdir(parent);
+        (void)wl_test_rmdir(parent);
     }
-    (void)rmdir(base);
+    (void)wl_test_rmdir(base);
 }
+#endif
 
 int main(void) {
     static const wl_test_case cases[] = {
@@ -572,8 +587,10 @@ int main(void) {
         WL_TEST_CASE(test_hashmap_collisions_and_removal),
         WL_TEST_CASE(test_sort_and_search),
         WL_TEST_CASE(test_rng),
+#if WL_ENABLE_PLATFORM
         WL_TEST_CASE(test_time),
         WL_TEST_CASE(test_fs_and_paths),
+#endif
     };
 
     return wl_test_run("wl", cases, WL_COUNTOF(cases));

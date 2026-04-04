@@ -6,6 +6,10 @@ Single-header usage:
 
     #include "wl.h"
 
+Optional platform-backed APIs (time, sleep, filesystem) are available when
+WL_ENABLE_PLATFORM is defined to 1 before including wl.h in each translation
+unit that uses them.
+
 In exactly one translation unit:
 
     #define WL_IMPLEMENTATION
@@ -32,6 +36,12 @@ In exactly one translation unit:
 
 #if defined(_MSC_VER)
 #define WL_COMPILER_MSVC 1
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#if !defined(__func__)
+#define __func__ __FUNCTION__
+#endif
 #else
 #define WL_COMPILER_MSVC 0
 #endif
@@ -56,6 +66,16 @@ In exactly one translation unit:
 #define WL_PLATFORM_LINUX 0
 #define WL_PLATFORM_WINDOWS 0
 #define WL_PLATFORM_POSIX 0
+#endif
+
+#ifndef WL_ENABLE_PLATFORM
+#define WL_ENABLE_PLATFORM 0
+#endif
+
+#if WL_COMPILER_MSVC && !defined(__cplusplus)
+#define WL_INLINE static __inline
+#else
+#define WL_INLINE static inline
 #endif
 
 typedef uint8_t u8;
@@ -87,6 +107,16 @@ typedef ptrdiff_t isize;
 #define WL_STRINGIFY(x) WL_STRINGIFY_IMPL(x)
 #define WL_CONCAT_IMPL(a, b) a##b
 #define WL_CONCAT(a, b) WL_CONCAT_IMPL(a, b)
+
+/* C99-compatible alignment helpers used to avoid newer language requirements. */
+#define WL_ALIGNOF(T) offsetof(struct { char c; T value; }, value)
+
+typedef union wl__max_align {
+    void* ptr;
+    void (*fn)(void);
+    long long ll;
+    long double ld;
+} wl__max_align;
 
 #if WL_COMPILER_CLANG || WL_COMPILER_GCC
 #define wl_likely(x) __builtin_expect(!!(x), 1)
@@ -126,24 +156,24 @@ typedef struct wl_alloc_t {
 extern wl_alloc_t* wl_alloc_default;
 
 /* Resolves NULL to wl_alloc_default and passes embedded allocators through unchanged. */
-static inline wl_alloc_t* wl_as_alloc(void* alloc) {
+WL_INLINE wl_alloc_t* wl_as_alloc(void* alloc) {
     return alloc != NULL ? (wl_alloc_t*)alloc : wl_alloc_default;
 }
 
 /* Allocates size bytes with the provided allocator or the default allocator when alloc is NULL. */
-static inline void* wl_alloc(void* alloc, u64 size) {
+WL_INLINE void* wl_alloc(void* alloc, u64 size) {
     wl_alloc_t* resolved = wl_as_alloc(alloc);
     return resolved->alloc(resolved, size);
 }
 
 /* Reallocates ptr to new_size bytes with the provided allocator or the default allocator when alloc is NULL. */
-static inline void* wl_realloc(void* alloc, void* ptr, u64 new_size) {
+WL_INLINE void* wl_realloc(void* alloc, void* ptr, u64 new_size) {
     wl_alloc_t* resolved = wl_as_alloc(alloc);
     return resolved->realloc(resolved, ptr, new_size);
 }
 
 /* Frees ptr with the provided allocator or the default allocator when alloc is NULL. */
-static inline void wl_free(void* alloc, void* ptr) {
+WL_INLINE void wl_free(void* alloc, void* ptr) {
     wl_alloc_t* resolved = wl_as_alloc(alloc);
     resolved->free(resolved, ptr);
 }
@@ -165,7 +195,7 @@ typedef u64 wl_arena_savepoint;
 
 /* Initializes arena with a backing buffer allocated from backing or the default allocator. */
 wl_status wl_arena_init(wl_arena* arena, u64 capacity, void* backing);
-/* Allocates size bytes from the arena, aligned to max_align_t. Returns NULL on exhaustion. */
+/* Allocates size bytes from the arena, aligned for the library's widest builtin scalar types. Returns NULL on exhaustion. */
 void* wl_arena_alloc(wl_arena* arena, u64 size);
 /* Captures the current bump position for later restoration. */
 wl_arena_savepoint wl_arena_save(const wl_arena* arena);
@@ -316,8 +346,15 @@ typedef struct wl_str {
     usize len;
 } wl_str;
 
+WL_INLINE wl_str wl_str_make(const char* ptr, usize len) {
+    wl_str s;
+    s.ptr = ptr;
+    s.len = len;
+    return s;
+}
+
 /* Creates a wl_str from a string literal at compile time. */
-#define wl_str_lit(s) ((wl_str){ (s), sizeof(s) - 1u })
+#define wl_str_lit(s) wl_str_make((s), sizeof(s) - 1u)
 
 /* Creates a wl_str from a C string. NULL produces an empty view. */
 wl_str wl_str_from_cstr(const char* cstr);
@@ -481,31 +518,32 @@ typedef struct wl_duration {
 } wl_duration;
 
 /* Duration constructors. */
-static inline wl_duration wl_ns(i64 ns) {
+WL_INLINE wl_duration wl_ns(i64 ns) {
     wl_duration d = { ns };
     return d;
 }
 
-static inline wl_duration wl_us(i64 us) {
+WL_INLINE wl_duration wl_us(i64 us) {
     return wl_ns(us * 1000ll);
 }
 
-static inline wl_duration wl_ms(i64 ms) {
+WL_INLINE wl_duration wl_ms(i64 ms) {
     return wl_ns(ms * 1000000ll);
 }
 
-static inline wl_duration wl_sec(i64 sec) {
+WL_INLINE wl_duration wl_sec(i64 sec) {
     return wl_ns(sec * 1000000000ll);
 }
 
-/* Returns a monotonic timestamp suitable for interval measurement. */
-wl_time wl_time_now(void);
-/* Returns the current wall-clock UTC timestamp. */
-wl_time wl_time_wall(void);
 /* Returns a - b in nanoseconds. */
 wl_duration wl_time_diff(wl_time a, wl_time b);
 /* Returns t + d in nanoseconds. */
 wl_time wl_time_add(wl_time t, wl_duration d);
+#if WL_ENABLE_PLATFORM
+/* Returns a monotonic timestamp suitable for interval measurement. */
+wl_time wl_time_now(void);
+/* Returns the current wall-clock UTC timestamp. */
+wl_time wl_time_wall(void);
 /* Sleeps for at least duration, subject to OS scheduler granularity. */
 wl_status wl_sleep(wl_duration duration);
 
@@ -519,6 +557,7 @@ bool wl_fs_exists(const char* path);
 wl_status wl_fs_mkdir(const char* path, bool recursive);
 /* Removes one file. */
 wl_status wl_fs_remove(const char* path);
+#endif
 /* Returns a view of the file extension including the dot, or an empty view. */
 wl_str wl_path_ext(wl_str path);
 /* Returns a view of the final path component without its extension. */
@@ -567,37 +606,93 @@ int wl_test_run(const char* suite_name, const wl_test_case* cases, usize count);
 #define WL_TEST(name) static void name(wl_test_ctx* t)
 #define WL_TEST_CASE(name) { #name, name }
 #define WL_CHECK(t, expr) ((void)wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, NULL))
-#define WL_CHECK_MSG(t, expr, fmt, ...) ((void)wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, (fmt)__VA_OPT__(, ) __VA_ARGS__))
+#define WL_CHECK_MSG(t, expr, ...) ((void)wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, __VA_ARGS__))
 #define WL_REQUIRE(t, expr)                                                  \
     do {                                                                     \
         if (!wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, NULL)) { \
             return;                                                          \
         }                                                                    \
     } while (0)
-#define WL_REQUIRE_MSG(t, expr, fmt, ...)                                                               \
-    do {                                                                                                \
-        if (!wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, (fmt)__VA_OPT__(, ) __VA_ARGS__)) { \
-            return;                                                                                     \
-        }                                                                                               \
+#define WL_REQUIRE_MSG(t, expr, ...)                                                \
+    do {                                                                            \
+        if (!wl_test_expect((t), (expr), __FILE__, __LINE__, #expr, __VA_ARGS__)) { \
+            return;                                                                 \
+        }                                                                           \
     } while (0)
 
 #ifdef WL_IMPLEMENTATION
 
-#include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
-#if WL_PLATFORM_POSIX
-#include <fcntl.h>
+#if WL_ENABLE_PLATFORM
+#include <errno.h>
+#include <limits.h>
+#include <sys/stat.h>
+#endif
+
+#if WL_ENABLE_PLATFORM && WL_PLATFORM_POSIX
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #endif
 
-#if WL_PLATFORM_WINDOWS
-#error "wl.h currently supports POSIX platforms only"
+#if WL_ENABLE_PLATFORM && WL_PLATFORM_WINDOWS
+#include <direct.h>
+#include <io.h>
+#include <windows.h>
+#endif
+
+#if WL_ENABLE_PLATFORM && !WL_PLATFORM_POSIX && !WL_PLATFORM_WINDOWS
+#error "wl.h does not have a platform backend for this target yet"
+#endif
+
+#if WL_ENABLE_PLATFORM
+#if defined(PATH_MAX)
+#define WL__PATH_MAX PATH_MAX
+#elif WL_PLATFORM_WINDOWS && defined(MAX_PATH)
+#define WL__PATH_MAX MAX_PATH
+#else
+#define WL__PATH_MAX 4096
+#endif
+#endif
+
+#if WL_ENABLE_PLATFORM && WL_PLATFORM_WINDOWS
+typedef struct _stat64 wl__stat_t;
+
+WL_INLINE int wl__isatty_fd(int fd) {
+    return _isatty(fd);
+}
+
+WL_INLINE int wl__fileno_file(FILE* file) {
+    return _fileno(file);
+}
+
+WL_INLINE int wl__stat_path(const char* path, wl__stat_t* st) {
+    return _stat64(path, st);
+}
+
+WL_INLINE int wl__mkdir_one(const char* path) {
+    return _mkdir(path);
+}
+#elif WL_ENABLE_PLATFORM && WL_PLATFORM_POSIX
+typedef struct stat wl__stat_t;
+
+WL_INLINE int wl__isatty_fd(int fd) {
+    return isatty(fd);
+}
+
+WL_INLINE int wl__fileno_file(FILE* file) {
+    return fileno(file);
+}
+
+WL_INLINE int wl__stat_path(const char* path, wl__stat_t* st) {
+    return stat(path, st);
+}
+
+WL_INLINE int wl__mkdir_one(const char* path) {
+    return mkdir(path, 0755);
+}
 #endif
 
 static void* wl__default_alloc(void* ctx, u64 size) {
@@ -729,7 +824,7 @@ wl_status wl_arena_init(wl_arena* arena, u64 capacity, void* backing) {
 }
 
 void* wl_arena_alloc(wl_arena* arena, u64 size) {
-    const u64 align = (u64) _Alignof(max_align_t);
+    const u64 align = (u64)WL_ALIGNOF(wl__max_align);
     u64 aligned_pos;
 
     if (arena == NULL) {
@@ -799,6 +894,7 @@ static const char* wl__log_level_name(wl_log_level level) {
     }
 }
 
+#if WL_ENABLE_PLATFORM && WL_PLATFORM_POSIX
 static const char* wl__log_level_color(wl_log_level level) {
     switch (level) {
         case WL_LOG_TRACE:
@@ -815,6 +911,7 @@ static const char* wl__log_level_color(wl_log_level level) {
             return "";
     }
 }
+#endif
 
 void wl_log_set_level(wl_log_level level) {
     wl__log_level = level;
@@ -838,8 +935,8 @@ void wl_log_vemit(wl_log_level level, const char* file, int line, const char* fm
         return;
     }
 
-#if WL_PLATFORM_POSIX
-    if (isatty(fileno(stderr)) != 0) {
+#if WL_ENABLE_PLATFORM && WL_PLATFORM_POSIX
+    if (wl__isatty_fd(wl__fileno_file(stderr)) != 0) {
         fprintf(stderr, "%s[%s]\033[0m %s:%d: ", wl__log_level_color(level), wl__log_level_name(level), file, line);
     } else {
         fprintf(stderr, "[%s] %s:%d: ", wl__log_level_name(level), file, line);
@@ -1143,7 +1240,7 @@ wl_status wl_string_append_cstr(wl_string* s, const char* cstr) {
 }
 
 wl_status wl_string_append_char(wl_string* s, char c) {
-    return wl_string_append(s, (wl_str){ &c, 1u });
+    return wl_string_append(s, wl_str_make(&c, 1u));
 }
 
 void wl_string_clear(wl_string* s) {
@@ -1334,7 +1431,7 @@ bool wl_utf8_valid(wl_str s) {
     return true;
 }
 
-static inline u64 wl__rotl64(u64 x, u32 r) {
+WL_INLINE u64 wl__rotl64(u64 x, u32 r) {
     return (x << r) | (x >> (64u - r));
 }
 
@@ -1402,6 +1499,29 @@ static usize wl__hashmap_probe_distance(const wl_hashmap* map, usize index, u64 
     return (index + map->cap - ideal) & (map->cap - 1u);
 }
 
+static void wl__hashmap_write_slot(wl_hashmap* map, usize index, u64 hash, const void* key, const void* value) {
+    *wl__hashmap_slot_hash(map, index) = hash;
+    memcpy(wl__hashmap_slot_key(map, index), key, map->key_size);
+    memcpy(wl__hashmap_slot_val(map, index), value, map->val_size);
+}
+
+static void wl__hashmap_insert_at(wl_hashmap* map, usize index, u64 hash, const void* key, const void* value) {
+    usize empty = index;
+
+    while (*wl__hashmap_slot_hash(map, empty) != 0u) {
+        empty = (empty + 1u) & (map->cap - 1u);
+    }
+
+    while (empty != index) {
+        usize prev = (empty + map->cap - 1u) & (map->cap - 1u);
+        memcpy(map->slots + empty * map->stride, map->slots + prev * map->stride, map->stride);
+        empty = prev;
+    }
+
+    wl__hashmap_write_slot(map, index, hash, key, value);
+    ++map->count;
+}
+
 static wl_status wl__hashmap_resize(wl_hashmap* map, usize new_cap);
 
 wl_status wl_hashmap_init(
@@ -1429,45 +1549,26 @@ static wl_status wl__hashmap_insert_with_hash(wl_hashmap* map, const void* key, 
     usize index;
     usize dist = 0u;
     u64 cur_hash;
-    u8 cur_key[map->key_size];
-    u8 cur_val[map->val_size];
-    u8 swap_key[map->key_size];
-    u8 swap_val[map->val_size];
 
-    memcpy(cur_key, key, map->key_size);
-    memcpy(cur_val, value, map->val_size);
     cur_hash = hash != 0u ? hash : 1u;
     index = wl__hashmap_ideal_index(map, cur_hash);
 
     for (;;) {
         u64* slot_hash = wl__hashmap_slot_hash(map, index);
         if (*slot_hash == 0u) {
-            *slot_hash = cur_hash;
-            memcpy(wl__hashmap_slot_key(map, index), cur_key, map->key_size);
-            memcpy(wl__hashmap_slot_val(map, index), cur_val, map->val_size);
+            wl__hashmap_write_slot(map, index, cur_hash, key, value);
             ++map->count;
             return WL_OK;
         }
 
-        if (*slot_hash == cur_hash && map->eq_fn(wl__hashmap_slot_key(map, index), cur_key, map->key_size)) {
-            memcpy(wl__hashmap_slot_val(map, index), cur_val, map->val_size);
+        if (*slot_hash == cur_hash && map->eq_fn(wl__hashmap_slot_key(map, index), key, map->key_size)) {
+            memcpy(wl__hashmap_slot_val(map, index), value, map->val_size);
             return WL_OK;
         }
 
         if (wl__hashmap_probe_distance(map, index, *slot_hash) < dist) {
-            u64 tmp_hash = *slot_hash;
-            *slot_hash = cur_hash;
-            cur_hash = tmp_hash;
-
-            memcpy(swap_key, wl__hashmap_slot_key(map, index), map->key_size);
-            memcpy(wl__hashmap_slot_key(map, index), cur_key, map->key_size);
-            memcpy(cur_key, swap_key, map->key_size);
-
-            memcpy(swap_val, wl__hashmap_slot_val(map, index), map->val_size);
-            memcpy(wl__hashmap_slot_val(map, index), cur_val, map->val_size);
-            memcpy(cur_val, swap_val, map->val_size);
-
-            dist = wl__hashmap_probe_distance(map, index, cur_hash);
+            wl__hashmap_insert_at(map, index, cur_hash, key, value);
+            return WL_OK;
         }
 
         index = (index + 1u) & (map->cap - 1u);
@@ -1687,39 +1788,38 @@ static void wl__insertion_sort(u8* base, usize count, usize size, wl_cmp_fn cmp,
     }
 }
 
+static usize wl__quick_sort_partition(u8* base, usize lo, usize hi, usize size, wl_cmp_fn cmp, void* ctx) {
+    usize pivot_index = lo + (hi - lo) / 2u;
+    usize store = lo;
+    usize i;
+
+    wl__swap_bytes(base + pivot_index * size, base + hi * size, size);
+    for (i = lo; i < hi; ++i) {
+        if (cmp(base + i * size, base + hi * size, ctx) < 0) {
+            wl__swap_bytes(base + store * size, base + i * size, size);
+            ++store;
+        }
+    }
+    wl__swap_bytes(base + store * size, base + hi * size, size);
+    return store;
+}
+
 static void wl__quick_sort(u8* base, isize lo, isize hi, usize size, wl_cmp_fn cmp, void* ctx) {
     while (lo < hi) {
-        isize i = lo;
-        isize j = hi;
-        isize mid = lo + (hi - lo) / 2;
-        u8 pivot[size];
+        isize pivot = (isize)wl__quick_sort_partition(base, (usize)lo, (usize)hi, size, cmp, ctx);
+        isize left_hi = pivot - 1;
+        isize right_lo = pivot + 1;
 
-        memcpy(pivot, base + (usize)mid * size, size);
-
-        while (i <= j) {
-            while (cmp(base + (usize)i * size, pivot, ctx) < 0) {
-                ++i;
+        if (left_hi - lo < hi - right_lo) {
+            if (lo < left_hi) {
+                wl__quick_sort(base, lo, left_hi, size, cmp, ctx);
             }
-            while (cmp(base + (usize)j * size, pivot, ctx) > 0) {
-                --j;
-            }
-            if (i <= j) {
-                wl__swap_bytes(base + (usize)i * size, base + (usize)j * size, size);
-                ++i;
-                --j;
-            }
-        }
-
-        if (j - lo < hi - i) {
-            if (lo < j) {
-                wl__quick_sort(base, lo, j, size, cmp, ctx);
-            }
-            lo = i;
+            lo = right_lo;
         } else {
-            if (i < hi) {
-                wl__quick_sort(base, i, hi, size, cmp, ctx);
+            if (right_lo < hi) {
+                wl__quick_sort(base, right_lo, hi, size, cmp, ctx);
             }
-            hi = j;
+            hi = left_hi;
         }
     }
 }
@@ -1817,6 +1917,63 @@ void wl_rng_fill(wl_rng* rng, void* buf, usize len) {
     }
 }
 
+wl_duration wl_time_diff(wl_time a, wl_time b) {
+    wl_duration d;
+    d.ns = a.ns - b.ns;
+    return d;
+}
+
+wl_time wl_time_add(wl_time t, wl_duration d) {
+    wl_time out;
+    out.ns = t.ns + d.ns;
+    return out;
+}
+
+#if WL_ENABLE_PLATFORM
+
+#if WL_PLATFORM_WINDOWS
+static wl_time wl__time_from_filetime(FILETIME ft) {
+    ULARGE_INTEGER ticks;
+    wl_time t;
+
+    ticks.LowPart = ft.dwLowDateTime;
+    ticks.HighPart = ft.dwHighDateTime;
+    t.ns = (i64)((ticks.QuadPart - 116444736000000000ull) * 100ull);
+    return t;
+}
+
+wl_time wl_time_now(void) {
+    static LARGE_INTEGER freq = { 0 };
+    LARGE_INTEGER counter;
+    wl_time t;
+
+    if (freq.QuadPart == 0) {
+        if (QueryPerformanceFrequency(&freq) == 0) {
+            t.ns = 0ll;
+            return t;
+        }
+    }
+
+    QueryPerformanceCounter(&counter);
+    t.ns = (i64)((counter.QuadPart / freq.QuadPart) * 1000000000ll + ((counter.QuadPart % freq.QuadPart) * 1000000000ll) / freq.QuadPart);
+    return t;
+}
+
+wl_time wl_time_wall(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return wl__time_from_filetime(ft);
+}
+
+wl_status wl_sleep(wl_duration duration) {
+    if (duration.ns <= 0ll) {
+        return WL_OK;
+    }
+
+    Sleep((DWORD)((duration.ns + 999999ll) / 1000000ll));
+    return WL_OK;
+}
+#elif WL_PLATFORM_POSIX
 static wl_time wl__time_from_timespec(struct timespec ts) {
     wl_time t;
     t.ns = (i64)ts.tv_sec * 1000000000ll + (i64)ts.tv_nsec;
@@ -1833,18 +1990,6 @@ wl_time wl_time_wall(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return wl__time_from_timespec(ts);
-}
-
-wl_duration wl_time_diff(wl_time a, wl_time b) {
-    wl_duration d;
-    d.ns = a.ns - b.ns;
-    return d;
-}
-
-wl_time wl_time_add(wl_time t, wl_duration d) {
-    wl_time out;
-    out.ns = t.ns + d.ns;
-    return out;
 }
 
 wl_status wl_sleep(wl_duration duration) {
@@ -1865,52 +2010,53 @@ wl_status wl_sleep(wl_duration duration) {
     }
     return WL_OK;
 }
+#endif
 
 wl_status wl_fs_read_file(const char* path, void* alloc, u8** buf_out, usize* len_out) {
-    int fd;
-    struct stat st;
+    wl__stat_t st;
+    FILE* file;
     u8* buf;
+    usize file_size;
     usize offset = 0u;
 
     if (path == NULL || buf_out == NULL) {
         return WL_ERR_INVALID;
     }
 
-    fd = open(path, O_RDONLY);
-    if (fd < 0) {
+    if (wl__stat_path(path, &st) != 0) {
+        return errno == ENOENT ? WL_ERR_NOT_FOUND : WL_ERR_IO;
+    }
+    if (st.st_size < 0) {
+        return WL_ERR_IO;
+    }
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
         return errno == ENOENT ? WL_ERR_NOT_FOUND : WL_ERR_IO;
     }
 
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        return WL_ERR_IO;
-    }
-    if (st.st_size < 0) {
-        close(fd);
-        return WL_ERR_IO;
-    }
-
-    buf = wl_alloc(alloc, (usize)st.st_size + 1u);
+    file_size = (usize)st.st_size;
+    buf = wl_alloc(alloc, file_size + 1u);
     if (buf == NULL) {
-        close(fd);
+        fclose(file);
         return WL_ERR_NOMEM;
     }
 
-    while (offset < (usize)st.st_size) {
-        ssize_t n = read(fd, buf + offset, (size_t)st.st_size - offset);
-        if (n < 0) {
-            wl_free(alloc, buf);
-            close(fd);
-            return WL_ERR_IO;
-        }
-        if (n == 0) {
+    while (offset < file_size) {
+        size_t n = fread(buf + offset, 1u, file_size - offset, file);
+        if (n == 0u) {
+            if (ferror(file) != 0) {
+                wl_free(alloc, buf);
+                fclose(file);
+                return WL_ERR_IO;
+            }
             break;
         }
-        offset += (usize)n;
+        offset += n;
     }
     buf[offset] = 0u;
 
-    close(fd);
+    fclose(file);
     *buf_out = buf;
     if (len_out != NULL) {
         *len_out = offset;
@@ -1919,38 +2065,42 @@ wl_status wl_fs_read_file(const char* path, void* alloc, u8** buf_out, usize* le
 }
 
 wl_status wl_fs_write_file(const char* path, const void* data, usize len) {
-    int fd;
+    FILE* file;
     usize offset = 0u;
 
     if (path == NULL || (len > 0u && data == NULL)) {
         return WL_ERR_INVALID;
     }
 
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    file = fopen(path, "wb");
+    if (file == NULL) {
         return WL_ERR_IO;
     }
 
     while (offset < len) {
-        ssize_t n = write(fd, (const u8*)data + offset, len - offset);
-        if (n < 0) {
-            close(fd);
+        size_t n = fwrite((const u8*)data + offset, 1u, len - offset, file);
+        if (n == 0u) {
+            fclose(file);
             return WL_ERR_IO;
         }
-        offset += (usize)n;
+        offset += n;
     }
 
-    close(fd);
+    fclose(file);
     return WL_OK;
 }
 
 bool wl_fs_exists(const char* path) {
-    struct stat st;
-    return path != NULL && stat(path, &st) == 0;
+    wl__stat_t st;
+    return path != NULL && wl__stat_path(path, &st) == 0;
+}
+
+static bool wl__path_is_drive_prefix(const char* path, usize len) {
+    return len == 2u && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':';
 }
 
 wl_status wl_fs_mkdir(const char* path, bool recursive) {
-    char tmp[PATH_MAX > 0 ? PATH_MAX : 4096];
+    char tmp[WL__PATH_MAX];
     usize len;
     usize i;
 
@@ -1965,17 +2115,17 @@ wl_status wl_fs_mkdir(const char* path, bool recursive) {
 
     memcpy(tmp, path, len + 1u);
     if (!recursive) {
-        if (mkdir(tmp, 0755) == 0 || errno == EEXIST) {
+        if (wl__mkdir_one(tmp) == 0 || errno == EEXIST) {
             return WL_OK;
         }
         return WL_ERR_IO;
     }
 
     for (i = 1u; i <= len; ++i) {
-        if (tmp[i] == '/' || tmp[i] == '\0') {
+        if (tmp[i] == '/' || tmp[i] == '\\' || tmp[i] == '\0') {
             char saved = tmp[i];
             tmp[i] = '\0';
-            if (tmp[0] != '\0' && mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+            if (tmp[0] != '\0' && !wl__path_is_drive_prefix(tmp, i) && wl__mkdir_one(tmp) != 0 && errno != EEXIST) {
                 return WL_ERR_IO;
             }
             tmp[i] = saved;
@@ -1989,11 +2139,13 @@ wl_status wl_fs_remove(const char* path) {
     if (path == NULL) {
         return WL_ERR_INVALID;
     }
-    if (unlink(path) != 0) {
+    if (remove(path) != 0) {
         return errno == ENOENT ? WL_ERR_NOT_FOUND : WL_ERR_IO;
     }
     return WL_OK;
 }
+
+#endif
 
 static isize wl__path_last_sep(wl_str path) {
     isize i;
@@ -2010,10 +2162,10 @@ wl_str wl_path_ext(wl_str path) {
     isize i;
     for (i = (isize)path.len - 1; i > sep; --i) {
         if (path.ptr[i] == '.') {
-            return (wl_str){ path.ptr + i, (usize)((isize)path.len - i) };
+            return wl_str_make(path.ptr + i, (usize)((isize)path.len - i));
         }
     }
-    return (wl_str){ path.ptr + path.len, 0u };
+    return wl_str_make(path.ptr + path.len, 0u);
 }
 
 wl_str wl_path_stem(wl_str path) {
@@ -2027,15 +2179,15 @@ wl_str wl_path_stem(wl_str path) {
             break;
         }
     }
-    return (wl_str){ path.ptr + start, (usize)(end - start) };
+    return wl_str_make(path.ptr + start, (usize)(end - start));
 }
 
 wl_str wl_path_dir(wl_str path) {
     isize sep = wl__path_last_sep(path);
     if (sep < 0) {
-        return (wl_str){ path.ptr, 0u };
+        return wl_str_make(path.ptr, 0u);
     }
-    return (wl_str){ path.ptr, (usize)sep };
+    return wl_str_make(path.ptr, (usize)sep);
 }
 
 wl_status wl_path_join(char* buf, usize buf_size, wl_str a, wl_str b) {
