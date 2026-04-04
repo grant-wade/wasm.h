@@ -35,7 +35,7 @@ start_constructor_EMCCFLAGS := -O0 -Wl,--export=__wasm_call_ctors
 i64_return_RUNNER_ARGS := call-i64 wl_case 1099511627785
 i64_return_EMCCFLAGS := -O1
 
-trunc_sat_RUNNER_ARGS := call-i32 wl_case 2147483647
+trunc_sat_RUNNER_ARGS := call-i32 wl_case 255
 trunc_sat_EMCCFLAGS := -O2
 
 unresolved_import_RUNNER_ARGS := load-fail

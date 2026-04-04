@@ -536,6 +536,48 @@ static void wasm__read_name(wasm__reader_t* r, char* buf, size_t bufsz) {
     r->ptr += len;
 }
 
+static wasm_value_t wasm__u32_bits(uint32_t value) {
+    wasm_value_t result;
+
+    result.type = WASM_TYPE_I32;
+    memcpy(&result.of.i32, &value, sizeof(value));
+    return result;
+}
+
+static wasm_value_t wasm__u64_bits(uint64_t value) {
+    wasm_value_t result;
+
+    result.type = WASM_TYPE_I64;
+    memcpy(&result.of.i64, &value, sizeof(value));
+    return result;
+}
+
+static wasm_value_t wasm__trunc_sat_i32_s(double value) {
+    if (isnan(value)) return wasm_i32(0);
+    if (value <= -2147483648.0) return wasm_i32(INT32_MIN);
+    if (value >= 2147483648.0) return wasm_i32(INT32_MAX);
+    return wasm_i32((int32_t)value);
+}
+
+static wasm_value_t wasm__trunc_sat_i32_u(double value) {
+    if (isnan(value) || value <= 0.0) return wasm__u32_bits(0);
+    if (value >= 4294967296.0) return wasm__u32_bits(UINT32_MAX);
+    return wasm__u32_bits((uint32_t)value);
+}
+
+static wasm_value_t wasm__trunc_sat_i64_s(double value) {
+    if (isnan(value)) return wasm_i64(0);
+    if (value <= -9223372036854775808.0) return wasm_i64(INT64_MIN);
+    if (value >= 9223372036854775808.0) return wasm_i64(INT64_MAX);
+    return wasm_i64((int64_t)value);
+}
+
+static wasm_value_t wasm__trunc_sat_i64_u(double value) {
+    if (isnan(value) || value <= 0.0) return wasm__u64_bits(0);
+    if (value >= 18446744073709551616.0) return wasm__u64_bits(UINT64_MAX);
+    return wasm__u64_bits((uint64_t)value);
+}
+
 static int wasm__is_valtype_byte(uint8_t byte) {
     switch (byte) {
         case 0x6F:
@@ -1524,11 +1566,52 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             case 0xFC: {
                 uint32_t subop = wasm__read_leb128_u32(&r);
                 switch (subop) {
+                    case 0x00: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i32_s((double)a.of.f32));
+                        break;
+                    }
+                    case 0x01: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i32_u((double)a.of.f32));
+                        break;
+                    }
+                    case 0x02: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i32_s(a.of.f64));
+                        break;
+                    }
+                    case 0x03: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i32_u(a.of.f64));
+                        break;
+                    }
+                    case 0x04: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i64_s((double)a.of.f32));
+                        break;
+                    }
+                    case 0x05: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i64_u((double)a.of.f32));
+                        break;
+                    }
+                    case 0x06: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i64_s(a.of.f64));
+                        break;
+                    }
+                    case 0x07: {
+                        wasm_value_t a = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__trunc_sat_i64_u(a.of.f64));
+                        break;
+                    }
                     default:
                         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
                         err = WASM_ERR_MALFORMED;
                         goto cleanup;
                 }
+                break;
             }
 
             /* Parametric */
