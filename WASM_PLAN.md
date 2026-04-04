@@ -59,7 +59,7 @@ Key structural limitations that will affect almost every milestone:
 - Export of mutable globals is already structurally fine — the export section records the index, and `wasm_global_t` already has `is_mutable`.
 - The `__stack_pointer` global is the canonical use case — WASI/Emscripten modules import it as a mutable i32 global.
 
-### Milestone 6: Bulk Memory Operations
+### [DONE] Milestone 6: Bulk Memory Operations
 
 **Goal:** `memory.copy`, `memory.fill`, `memory.init`, `data.drop`, `table.copy`, `table.init`, `elem.drop`.
 

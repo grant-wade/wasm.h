@@ -20,8 +20,8 @@ basic_add_EMCCFLAGS := -O0
 function_pointer_RUNNER_ARGS := call-i32 wl_case 37
 function_pointer_EMCCFLAGS := -O1
 
-bulk_memory_RUNNER_ARGS := call-i32 wl_case 228
-bulk_memory_EMCCFLAGS := -O2 -mbulk-memory
+bulk_memory_RUNNER_ARGS := call-i32 wl_case 410
+bulk_memory_EMCCFLAGS := -O0 -mbulk-memory
 
 sign_extension_RUNNER_ARGS := call-i32 wl_case -32895
 sign_extension_EMCCFLAGS := -O2

@@ -231,6 +231,25 @@ typedef struct wasm_table_t {
     uint32_t max_size;
 } wasm_table_t;
 
+typedef struct wasm_data_segment_t {
+    uint8_t* bytes;
+    uint32_t size;
+    uint32_t memory_index;
+    uint32_t offset;
+    int is_passive;
+    int is_dropped;
+} wasm_data_segment_t;
+
+typedef struct wasm_elem_segment_t {
+    uint32_t* func_indices;
+    uint32_t num_elems;
+    uint32_t table_index;
+    uint32_t offset;
+    int is_passive;
+    int is_declarative;
+    int is_dropped;
+} wasm_elem_segment_t;
+
 /* ── Linear memory ────────────────────────────────────────────────── */
 #define WASM_PAGE_SIZE 65536u
 
@@ -253,6 +272,10 @@ struct wasm_module_t {
     uint32_t num_globals;
     wasm_table_t table;
     wasm_memory_t memory;
+    wasm_data_segment_t* data_segments;
+    uint32_t num_data_segments;
+    wasm_elem_segment_t* elem_segments;
+    uint32_t num_elem_segments;
     uint32_t num_func_imports;
     uint32_t num_global_imports;
     uint32_t start_func;
@@ -678,6 +701,115 @@ static wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count
     return WASM_OK;
 }
 
+static void wasm__free_data_segment(wasm_data_segment_t* segment) {
+    free(segment->bytes);
+    memset(segment, 0, sizeof(*segment));
+}
+
+static wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_data_segments;
+    wasm_data_segment_t* segments;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    segments = (wasm_data_segment_t*)realloc(mod->data_segments, (base + count) * sizeof(wasm_data_segment_t));
+    if (!segments) return WASM_ERR_OOM;
+
+    mod->data_segments = segments;
+    memset(mod->data_segments + base, 0, count * sizeof(wasm_data_segment_t));
+    mod->num_data_segments = base + count;
+    return WASM_OK;
+}
+
+static void wasm__free_elem_segment(wasm_elem_segment_t* segment) {
+    free(segment->func_indices);
+    memset(segment, 0, sizeof(*segment));
+}
+
+static wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_elem_segments;
+    wasm_elem_segment_t* segments;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    segments = (wasm_elem_segment_t*)realloc(mod->elem_segments, (base + count) * sizeof(wasm_elem_segment_t));
+    if (!segments) return WASM_ERR_OOM;
+
+    mod->elem_segments = segments;
+    memset(mod->elem_segments + base, 0, count * sizeof(wasm_elem_segment_t));
+    mod->num_elem_segments = base + count;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
+    if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__read_elem_func_indices(wasm_module_t* mod,
+                                                 wasm__reader_t* r,
+                                                 wasm_elem_segment_t* segment) {
+    uint32_t i;
+
+    segment->num_elems = wasm__read_leb128_u32(r);
+    if (segment->num_elems == 0) return WASM_OK;
+
+    segment->func_indices = (uint32_t*)malloc(segment->num_elems * sizeof(uint32_t));
+    if (!segment->func_indices) return WASM_ERR_OOM;
+
+    for (i = 0; i < segment->num_elems; i++) {
+        uint32_t func_index = wasm__read_leb128_u32(r);
+        if (func_index >= mod->num_funcs) return WASM_ERR_MALFORMED;
+        segment->func_indices[i] = func_index;
+    }
+
+    return WASM_OK;
+}
+
+static int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit) {
+    return offset <= limit && size <= (limit - offset);
+}
+
+static wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod) {
+    uint32_t i;
+    uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+
+    for (i = 0; i < mod->num_data_segments; i++) {
+        wasm_data_segment_t* segment = &mod->data_segments[i];
+
+        if (segment->is_passive) continue;
+        if (segment->memory_index != 0) return WASM_ERR_MALFORMED;
+        if (!wasm__range_in_bounds_u64(segment->offset, segment->size, mem_size)) return WASM_ERR_OUT_OF_BOUNDS;
+        if (segment->size > 0)
+            memcpy(mod->memory.data + segment->offset, segment->bytes, segment->size);
+    }
+
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
+    uint32_t i;
+
+    for (i = 0; i < mod->num_elem_segments; i++) {
+        wasm_elem_segment_t* segment = &mod->elem_segments[i];
+
+        if (segment->is_passive || segment->is_declarative) continue;
+        if (segment->table_index != 0) return WASM_ERR_MALFORMED;
+        if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, mod->table.size))
+            return WASM_ERR_OUT_OF_BOUNDS;
+        if (segment->num_elems > 0) {
+            if (!mod->table.elems) return WASM_ERR_OUT_OF_BOUNDS;
+            memcpy(mod->table.elems + segment->offset,
+                   segment->func_indices,
+                   segment->num_elems * sizeof(uint32_t));
+        }
+    }
+
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value) {
@@ -968,26 +1100,59 @@ static wasm_error_t wasm__decode_start_section(wasm_module_t* mod, wasm__reader_
 }
 
 static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, e;
+    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    wasm_error_t err;
+
+    err = wasm__append_elem_segments(mod, count, &base);
+    if (err != WASM_OK) return err;
+
     for (i = 0; i < count; i++) {
-        uint32_t num_elems, offset = 0;
-        wasm_value_t offset_value;
-        wasm_error_t err;
-        wasm__read_leb128_u32(r); /* table_idx */
-        err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
-        if (err != WASM_OK) return err;
-        if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
-        offset = (uint32_t)offset_value.of.i32;
-        num_elems = wasm__read_leb128_u32(r);
-        if (!mod->table.elems && mod->table.size > 0) {
-            uint32_t te;
-            mod->table.elems = (uint32_t*)malloc(mod->table.size * sizeof(uint32_t));
-            if (!mod->table.elems) return WASM_ERR_OOM;
-            for (te = 0; te < mod->table.size; te++) mod->table.elems[te] = UINT32_MAX;
-        }
-        for (e = 0; e < num_elems; e++) {
-            uint32_t fi = wasm__read_leb128_u32(r);
-            if (mod->table.elems && (offset + e) < mod->table.size) mod->table.elems[offset + e] = fi;
+        wasm_elem_segment_t* segment = &mod->elem_segments[base + i];
+        uint32_t flags = wasm__read_leb128_u32(r);
+
+        switch (flags) {
+            case 0x00: {
+                wasm_value_t offset_value;
+
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (err != WASM_OK) return err;
+                if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+                segment->table_index = 0;
+                segment->offset = (uint32_t)offset_value.of.i32;
+                err = wasm__read_elem_func_indices(mod, r, segment);
+                if (err != WASM_OK) return err;
+                break;
+            }
+            case 0x01:
+                segment->is_passive = 1;
+                err = wasm__read_elemkind(r);
+                if (err != WASM_OK) return err;
+                err = wasm__read_elem_func_indices(mod, r, segment);
+                if (err != WASM_OK) return err;
+                break;
+            case 0x02: {
+                wasm_value_t offset_value;
+
+                segment->table_index = wasm__read_leb128_u32(r);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (err != WASM_OK) return err;
+                if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+                segment->offset = (uint32_t)offset_value.of.i32;
+                err = wasm__read_elemkind(r);
+                if (err != WASM_OK) return err;
+                err = wasm__read_elem_func_indices(mod, r, segment);
+                if (err != WASM_OK) return err;
+                break;
+            }
+            case 0x03:
+                segment->is_declarative = 1;
+                err = wasm__read_elemkind(r);
+                if (err != WASM_OK) return err;
+                err = wasm__read_elem_func_indices(mod, r, segment);
+                if (err != WASM_OK) return err;
+                break;
+            default:
+                return WASM_ERR_MALFORMED;
         }
     }
     return WASM_OK;
@@ -1030,20 +1195,52 @@ static wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t
 }
 
 static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
+    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    wasm_error_t err;
+
+    err = wasm__append_data_segments(mod, count, &base);
+    if (err != WASM_OK) return err;
+
     for (i = 0; i < count; i++) {
-        uint32_t offset = 0, size;
-        wasm_value_t offset_value;
-        wasm_error_t err;
-        wasm__read_leb128_u32(r);
-        err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
-        if (err != WASM_OK) return err;
-        if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
-        offset = (uint32_t)offset_value.of.i32;
-        size = wasm__read_leb128_u32(r);
-        if (mod->memory.data && offset + size <= mod->memory.pages * WASM_PAGE_SIZE)
-            memcpy(mod->memory.data + offset, r->ptr, size);
-        r->ptr += size;
+        wasm_data_segment_t* segment = &mod->data_segments[base + i];
+        uint32_t flags = wasm__read_leb128_u32(r);
+
+        switch (flags) {
+            case 0x00: {
+                wasm_value_t offset_value;
+
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (err != WASM_OK) return err;
+                if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+                segment->offset = (uint32_t)offset_value.of.i32;
+                segment->memory_index = 0;
+                break;
+            }
+            case 0x01:
+                segment->is_passive = 1;
+                break;
+            case 0x02: {
+                wasm_value_t offset_value;
+
+                segment->memory_index = wasm__read_leb128_u32(r);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (err != WASM_OK) return err;
+                if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
+                segment->offset = (uint32_t)offset_value.of.i32;
+                break;
+            }
+            default:
+                return WASM_ERR_MALFORMED;
+        }
+
+        segment->size = wasm__read_leb128_u32(r);
+        if (!wasm__has(r, segment->size)) return WASM_ERR_MALFORMED;
+        if (segment->size > 0) {
+            segment->bytes = (uint8_t*)malloc(segment->size);
+            if (!segment->bytes) return WASM_ERR_OOM;
+            memcpy(segment->bytes, r->ptr, segment->size);
+        }
+        r->ptr += segment->size;
     }
     return WASM_OK;
 }
@@ -1161,6 +1358,9 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
             case 10:
                 err = wasm__decode_code_section(mod, &sr);
                 break;
+            case 11:
+                err = wasm__decode_data_section(mod, &sr);
+                break;
             default:
                 break;
         }
@@ -1188,18 +1388,16 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         for (ti = 0; ti < mod->table.size; ti++) mod->table.elems[ti] = UINT32_MAX;
     }
 
-    /* Second pass: data + element sections need allocated memory */
-    r.ptr = bytes + 8;
-    while (r.ptr < r.end) {
-        uint8_t sid = wasm__read_u8(&r);
-        uint32_t ssz = wasm__read_leb128_u32(&r);
-        const uint8_t* se = r.ptr + ssz;
-        wasm__reader_t sr;
-        sr.ptr = r.ptr;
-        sr.end = se;
-        if (sid == 9) wasm__decode_element_section(mod, &sr);
-        if (sid == 11) wasm__decode_data_section(mod, &sr);
-        r.ptr = se;
+    err = wasm__apply_active_data_segments(mod);
+    if (err != WASM_OK) {
+        wasm_free_module(mod);
+        return NULL;
+    }
+
+    err = wasm__apply_active_elem_segments(mod);
+    if (err != WASM_OK) {
+        wasm_free_module(mod);
+        return NULL;
     }
 
     err = wasm__run_startup(mod);
@@ -1220,6 +1418,10 @@ void wasm_free_module(wasm_module_t* mod) {
     free(mod->funcs);
     free(mod->exports);
     free(mod->globals);
+    for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(&mod->data_segments[i]);
+    free(mod->data_segments);
+    for (i = 0; i < mod->num_elem_segments; i++) wasm__free_elem_segment(&mod->elem_segments[i]);
+    free(mod->elem_segments);
     free(mod->table.elems);
     free(mod->memory.data);
     free(mod);
@@ -1763,6 +1965,169 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
                     case 0x07: {
                         wasm_value_t a = WASM__POP(rt);
                         WASM__PUSH(rt, wasm__trunc_sat_i64_u(a.of.f64));
+                        break;
+                    }
+                    case 0x08: {
+                        uint32_t data_idx = wasm__read_leb128_u32(&r);
+                        uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                        wasm_value_t count = WASM__POP(rt);
+                        wasm_value_t src = WASM__POP(rt);
+                        wasm_value_t dst = WASM__POP(rt);
+                        uint32_t len = (uint32_t)count.of.i32;
+                        uint32_t src_offset = (uint32_t)src.of.i32;
+                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+                        wasm_data_segment_t* segment;
+
+                        if (mem_idx != 0) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "memory.init memidx %u unsupported", (unsigned)mem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        if (data_idx >= mod->num_data_segments) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+
+                        segment = &mod->data_segments[data_idx];
+                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                        if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
+                            !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
+                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (len > 0)
+                            memcpy(mod->memory.data + dst_offset, segment->bytes + src_offset, len);
+                        break;
+                    }
+                    case 0x09: {
+                        uint32_t data_idx = wasm__read_leb128_u32(&r);
+
+                        if (data_idx >= mod->num_data_segments) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown data segment %u", (unsigned)data_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+
+                        mod->data_segments[data_idx].is_dropped = 1;
+                        break;
+                    }
+                    case 0x0A: {
+                        uint32_t dst_mem_idx = wasm__read_leb128_u32(&r);
+                        uint32_t src_mem_idx = wasm__read_leb128_u32(&r);
+                        wasm_value_t count = WASM__POP(rt);
+                        wasm_value_t src = WASM__POP(rt);
+                        wasm_value_t dst = WASM__POP(rt);
+                        uint32_t len = (uint32_t)count.of.i32;
+                        uint32_t src_offset = (uint32_t)src.of.i32;
+                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+
+                        if (dst_mem_idx != 0 || src_mem_idx != 0) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
+                                          "memory.copy memidx %u,%u unsupported",
+                                          (unsigned)dst_mem_idx, (unsigned)src_mem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        if (!wasm__range_in_bounds_u64(src_offset, len, mem_size) ||
+                            !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
+                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (len > 0)
+                            memmove(mod->memory.data + dst_offset, mod->memory.data + src_offset, len);
+                        break;
+                    }
+                    case 0x0B: {
+                        uint32_t mem_idx = wasm__read_leb128_u32(&r);
+                        wasm_value_t count = WASM__POP(rt);
+                        wasm_value_t value = WASM__POP(rt);
+                        wasm_value_t dst = WASM__POP(rt);
+                        uint32_t len = (uint32_t)count.of.i32;
+                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t mem_size = (uint64_t)mod->memory.pages * WASM_PAGE_SIZE;
+
+                        if (mem_idx != 0) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "memory.fill memidx %u unsupported", (unsigned)mem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (len > 0)
+                            memset(mod->memory.data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
+                        break;
+                    }
+                    case 0x0C: {
+                        uint32_t elem_idx = wasm__read_leb128_u32(&r);
+                        uint32_t table_idx = wasm__read_leb128_u32(&r);
+                        wasm_value_t count = WASM__POP(rt);
+                        wasm_value_t src = WASM__POP(rt);
+                        wasm_value_t dst = WASM__POP(rt);
+                        uint32_t len = (uint32_t)count.of.i32;
+                        uint32_t src_offset = (uint32_t)src.of.i32;
+                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        wasm_elem_segment_t* segment;
+
+                        if (table_idx != 0) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "table.init tableidx %u unsupported", (unsigned)table_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        if (elem_idx >= mod->num_elem_segments) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+
+                        segment = &mod->elem_segments[elem_idx];
+                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                        if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
+                            !wasm__range_in_bounds_u64(dst_offset, len, mod->table.size))
+                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (len > 0) {
+                            if (!mod->table.elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memcpy(mod->table.elems + dst_offset,
+                                   segment->func_indices + src_offset,
+                                   len * sizeof(uint32_t));
+                        }
+                        break;
+                    }
+                    case 0x0D: {
+                        uint32_t elem_idx = wasm__read_leb128_u32(&r);
+
+                        if (elem_idx >= mod->num_elem_segments) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown elem segment %u", (unsigned)elem_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+
+                        mod->elem_segments[elem_idx].is_dropped = 1;
+                        break;
+                    }
+                    case 0x0E: {
+                        uint32_t dst_table_idx = wasm__read_leb128_u32(&r);
+                        uint32_t src_table_idx = wasm__read_leb128_u32(&r);
+                        wasm_value_t count = WASM__POP(rt);
+                        wasm_value_t src = WASM__POP(rt);
+                        wasm_value_t dst = WASM__POP(rt);
+                        uint32_t len = (uint32_t)count.of.i32;
+                        uint32_t src_offset = (uint32_t)src.of.i32;
+                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+
+                        if (dst_table_idx != 0 || src_table_idx != 0) {
+                            WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
+                                          "table.copy tableidx %u,%u unsupported",
+                                          (unsigned)dst_table_idx, (unsigned)src_table_idx);
+                            err = WASM_ERR_MALFORMED;
+                            goto cleanup;
+                        }
+                        if (!wasm__range_in_bounds_u64(src_offset, len, mod->table.size) ||
+                            !wasm__range_in_bounds_u64(dst_offset, len, mod->table.size))
+                            WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (len > 0) {
+                            if (!mod->table.elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                            memmove(mod->table.elems + dst_offset,
+                                    mod->table.elems + src_offset,
+                                    len * sizeof(uint32_t));
+                        }
                         break;
                     }
                     default:
