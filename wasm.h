@@ -747,6 +747,53 @@ static void wasm__global_set_value(wasm_global_t* global, wasm_value_t value) {
     }
 }
 
+typedef struct wasm__init_expr_stack_t {
+    wasm_value_t* values;
+    uint32_t size;
+    uint32_t cap;
+} wasm__init_expr_stack_t;
+
+static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
+    if (stack->size >= stack->cap) {
+        uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
+        wasm_value_t* values = (wasm_value_t*)realloc(stack->values, new_cap * sizeof(wasm_value_t));
+        if (!values) return WASM_ERR_OOM;
+        stack->values = values;
+        stack->cap = new_cap;
+    }
+
+    stack->values[stack->size++] = value;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
+                                                    wasm_valtype_t expected_type,
+                                                    wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_MALFORMED;
+    value = stack->values[--stack->size];
+    if (value.type != expected_type) return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
+static int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs) {
+    return (int32_t)((uint32_t)lhs + (uint32_t)rhs);
+}
+
+static int32_t wasm__wrap_i32_mul(int32_t lhs, int32_t rhs) {
+    return (int32_t)((uint32_t)lhs * (uint32_t)rhs);
+}
+
+static int64_t wasm__wrap_i64_add(int64_t lhs, int64_t rhs) {
+    return (int64_t)((uint64_t)lhs + (uint64_t)rhs);
+}
+
+static int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs) {
+    return (int64_t)((uint64_t)lhs * (uint64_t)rhs);
+}
+
 static wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
     uint32_t base = mod->num_globals;
     wasm_global_t* globals;
@@ -899,50 +946,146 @@ static wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
 static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value) {
-    uint8_t op = wasm__read_u8(r);
-    wasm_value_t value;
+    wasm__init_expr_stack_t stack;
+    wasm_error_t err = WASM_OK;
 
-    memset(&value, 0, sizeof(value));
-    switch (op) {
-        case 0x41:
-            value = wasm_i32(wasm__read_leb128_i32(r));
-            break;
-        case 0x42:
-            value = wasm_i64(wasm__read_leb128_i64(r));
-            break;
-        case 0x43:
-            value.type = WASM_TYPE_F32;
-            value.of.f32 = wasm__read_f32(r);
-            break;
-        case 0x44:
-            value.type = WASM_TYPE_F64;
-            value.of.f64 = wasm__read_f64(r);
-            break;
-        case 0x23: {
-            uint32_t global_index = wasm__read_leb128_u32(r);
-            if (global_index >= max_global_index) return WASM_ERR_MALFORMED;
-            value = wasm__global_get_value(&mod->globals[global_index]);
+    memset(&stack, 0, sizeof(stack));
+
+    for (;;) {
+        uint8_t op;
+
+        if (!wasm__has(r, 1)) {
+            err = WASM_ERR_MALFORMED;
             break;
         }
-        case 0xD0: {
-            wasm_valtype_t type;
-            if (wasm__read_reftype(r, &type) != WASM_OK) return WASM_ERR_MALFORMED;
-            value = wasm_ref_null(type);
-            break;
+
+        op = wasm__read_u8(r);
+        if (op == 0x0B) break;
+
+        switch (op) {
+            case 0x41:
+                err = wasm__init_expr_stack_push(&stack, wasm_i32(wasm__read_leb128_i32(r)));
+                break;
+            case 0x42:
+                err = wasm__init_expr_stack_push(&stack, wasm_i64(wasm__read_leb128_i64(r)));
+                break;
+            case 0x43: {
+                wasm_value_t value = wasm_f32(wasm__read_f32(r));
+                err = wasm__init_expr_stack_push(&stack, value);
+                break;
+            }
+            case 0x44: {
+                wasm_value_t value = wasm_f64(wasm__read_f64(r));
+                err = wasm__init_expr_stack_push(&stack, value);
+                break;
+            }
+            case 0x23: {
+                uint32_t global_index = wasm__read_leb128_u32(r);
+                const wasm_global_t* global;
+
+                if (global_index >= max_global_index) {
+                    err = WASM_ERR_MALFORMED;
+                    break;
+                }
+
+                global = &mod->globals[global_index];
+                if (!global->is_import && global->is_mutable) {
+                    err = WASM_ERR_TYPE_MISMATCH;
+                    break;
+                }
+
+                err = wasm__init_expr_stack_push(&stack, wasm__global_get_value(global));
+                break;
+            }
+            case 0x6A: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i32(wasm__wrap_i32_add(lhs.of.i32, rhs.of.i32)));
+                break;
+            }
+            case 0x6C: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i32(wasm__wrap_i32_mul(lhs.of.i32, rhs.of.i32)));
+                break;
+            }
+            case 0x7C: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i64(wasm__wrap_i64_add(lhs.of.i64, rhs.of.i64)));
+                break;
+            }
+            case 0x7E: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i64(wasm__wrap_i64_mul(lhs.of.i64, rhs.of.i64)));
+                break;
+            }
+            case 0xD0: {
+                wasm_valtype_t type;
+                wasm_value_t value;
+
+                if (wasm__read_reftype(r, &type) != WASM_OK) {
+                    err = WASM_ERR_MALFORMED;
+                    break;
+                }
+
+                value = wasm_ref_null(type);
+                err = wasm__init_expr_stack_push(&stack, value);
+                break;
+            }
+            case 0xD2: {
+                uint32_t func_index = wasm__read_leb128_u32(r);
+
+                if (func_index >= mod->num_funcs) {
+                    err = WASM_ERR_MALFORMED;
+                    break;
+                }
+
+                err = wasm__init_expr_stack_push(&stack, wasm_funcref(func_index));
+                break;
+            }
+            default:
+                err = WASM_ERR_MALFORMED;
+                break;
         }
-        case 0xD2: {
-            uint32_t func_index = wasm__read_leb128_u32(r);
-            if (func_index >= mod->num_funcs) return WASM_ERR_MALFORMED;
-            value = wasm_funcref(func_index);
-            break;
-        }
-        default:
-            return WASM_ERR_MALFORMED;
+
+        if (err != WASM_OK) break;
     }
 
-    if (wasm__read_u8(r) != 0x0B) return WASM_ERR_MALFORMED;
-    *out_value = value;
-    return WASM_OK;
+    if (err == WASM_OK) {
+        if (stack.size != 1)
+            err = WASM_ERR_MALFORMED;
+        else
+            *out_value = stack.values[0];
+    }
+
+    free(stack.values);
+    return err;
 }
 
 static wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
