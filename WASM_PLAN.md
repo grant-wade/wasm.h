@@ -49,7 +49,7 @@ Key structural limitations that will affect almost every milestone:
 - `0x0B` (end) needs to validate/shuffle multi-value results when closing a block.
 - Function return (`0x0F`) already handles `num_results` but the result-popping loop needs auditing for correctness with >4 results.
 
-### Milestone 5: Mutable Globals Import/Export
+### [DONE] Milestone 5: Mutable Globals Import/Export
 
 **Goal:** Imported and exported globals, including mutable ones.
 
