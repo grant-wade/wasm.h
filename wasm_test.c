@@ -5393,6 +5393,39 @@ WL_TEST(test_feature_gate_sign_extension_disabled) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_frame_arena_allocator) {
+    wasm_runtime_t rt;
+    void* first;
+    void* second;
+    void* third;
+
+    memset(&rt, 0, sizeof(rt));
+
+    WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
+    WL_CHECK_MSG(t, rt.frame_arena != NULL, "%s", "expected arena storage");
+    WL_CHECK_MSG(t, rt.frame_arena_size == 64, "expected arena size 64, got %zu", rt.frame_arena_size);
+    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected zero offset, got %zu", rt.frame_arena_offset);
+
+    first = wasm__arena_alloc(&rt, 1);
+    second = wasm__arena_alloc(&rt, 8);
+    WL_CHECK_MSG(t, first != NULL, "%s", "expected first arena allocation to succeed");
+    WL_CHECK_MSG(t, second != NULL, "%s", "expected second arena allocation to succeed");
+    WL_CHECK_MSG(t, ((uintptr_t)first % sizeof(void*)) == 0, "%s", "expected aligned first allocation");
+    WL_CHECK_MSG(t, ((uintptr_t)second % sizeof(void*)) == 0, "%s", "expected aligned second allocation");
+
+    wasm__arena_reset(&rt, 0);
+    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected reset offset 0, got %zu", rt.frame_arena_offset);
+
+    third = wasm__arena_alloc(&rt, 64);
+    WL_CHECK_MSG(t, third == rt.frame_arena, "%s", "expected reset to rewind to the arena base");
+    WL_CHECK_MSG(t, wasm__arena_alloc(&rt, 1) == NULL, "%s", "expected exhaustion to return NULL");
+
+    wasm__arena_destroy(&rt);
+    WL_CHECK_MSG(t, rt.frame_arena == NULL, "%s", "expected arena destroy to clear storage");
+    WL_CHECK_MSG(t, rt.frame_arena_size == 0, "expected arena size 0, got %zu", rt.frame_arena_size);
+    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected arena offset 0, got %zu", rt.frame_arena_offset);
+}
+
 WL_TEST(test_validation_rejects_duplicate_export_names) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -7630,6 +7663,7 @@ int main(void) {
         { "feature gate: disabled exceptions reject module load", test_feature_gate_exceptions_disabled },
         { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
+        { "runtime: frame arena alloc/reset/destroy are well-formed", test_frame_arena_allocator },
         { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },
         { "validation: invalid start signature is rejected at load", test_validation_rejects_invalid_start_signature },
         { "validation: stack type errors are rejected at load", test_validation_rejects_stack_type_errors },

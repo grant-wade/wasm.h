@@ -685,3 +685,251 @@ Current status: scalar SIMD semantics are implemented inline in `wasm__exec` and
 | 0xFD | i32x4.trunc_sat_f64x2_u_zero | v128 | v128 | [x] |
 | 0xFE | f64x2.convert_low_i32x4_s | v128 | v128 | [x] |
 | 0xFF | f64x2.convert_low_i32x4_u | v128 | v128 | [x] |
+
+# `wasm__exec` refactor
+
+---
+
+## Phase 1: Data structure foundation
+
+**Goal:** Define the explicit frame stack and arena allocator without changing execution yet.
+
+**New types:**
+
+```c
+typedef struct wasm__call_frame_t {
+    uint32_t        func_idx;
+    uint32_t        sp_base;       // operand stack base for this frame
+    wasm_value_t   *locals;        // arena pointer
+    wasm__label_t  *labels;        // arena pointer
+    uint32_t        lsp;           // label stack pointer
+    uint32_t        max_labels;    // precomputed during validation
+    wasm__reader_t  r;             // bytecode cursor
+    wasm_func_t    *func;          // cached pointer
+    wasm_functype_t *ft;           // cached pointer
+    wasm_value_t   *results_dst;   // where to write results on return
+    uint32_t        num_results;   // how many results caller expects
+    size_t          arena_saved;   // arena watermark for dealloc on pop
+} wasm__call_frame_t;
+```
+
+**Arena allocator on `wasm_runtime_t`:**
+
+```c
+struct wasm_runtime_t {
+    // ... existing fields ...
+    uint8_t  *frame_arena;
+    size_t    frame_arena_size;
+    size_t    frame_arena_offset;
+};
+```
+
+Add these functions:
+
+- `wasm__arena_init(rt, size)` — called from `wasm_init`, default size derived from `WASM_MAX_CALL_DEPTH * estimated_frame_size`
+- `wasm__arena_alloc(rt, size)` — bump allocator, returns `NULL` on exhaustion
+- `wasm__arena_reset(rt, saved_offset)` — rewind to watermark
+- `wasm__arena_destroy(rt)` — called from `wasm_destroy`
+
+**Precompute per-function metadata during validation:**
+
+Add to `wasm_func_t`:
+
+```c
+uint32_t max_label_depth;  // max nesting depth seen during validation
+```
+
+Populate `max_label_depth` inside `wasm__validate_function` — you're already tracking `v.fp`, just record the high-water mark. This lets you arena-allocate exactly the right label array size per frame.
+
+**Testing checkpoint:** Everything compiles, existing `wasm__exec` unchanged. Write a unit test that exercises the arena allocator standalone.
+
+---
+
+## Phase 2: Extract the interpreter loop body
+
+**Goal:** Separate opcode dispatch from call frame management so the rewrite is surgical.
+
+**Refactor `wasm__exec` into two layers:**
+
+1. `wasm__interp_loop(mod, frames, frame_sp)` — the outer frame-aware loop
+2. The opcode switch stays inline but all references to locals/labels/reader go through `cf->` instead of bare local variables
+
+**Before touching control flow**, do a mechanical transformation of the current `wasm__exec`:
+
+- Replace `locals[x]` → `cf->locals[x]`
+- Replace `labels[x]` → `cf->labels[x]`
+- Replace `lsp` → `cf->lsp`
+- Replace `r` → `cf->r`
+- Replace `sp_base` → `cf->sp_base`
+- Replace `func` → `cf->func`
+- Replace `ft` → `cf->ft`
+
+This is a large but low-risk find-and-replace. The function signature changes but behavior is identical — still recursive at this point.
+
+**Testing checkpoint:** All existing tests pass. Behavior identical, just accessing state through the frame struct.
+
+---
+
+## Phase 3: Replace recursion with frame stack push/pop
+
+**Goal:** The core change. `call`, `call_indirect`, `return`, and end-of-function all manipulate the frame stack instead of making C-level recursive calls.
+
+**Frame stack location:** Array on `wasm_runtime_t`:
+
+```c
+wasm__call_frame_t *call_frames;  // heap-allocated, size WASM_MAX_CALL_DEPTH
+uint32_t            call_frame_sp;
+```
+
+Allocated in `wasm_init`, freed in `wasm_destroy`.
+
+**New interpreter entry point:**
+
+```c
+static wasm_error_t wasm__interp(wasm_module_t *mod,
+                                 uint32_t func_idx,
+                                 wasm_value_t *args, uint32_t num_args,
+                                 wasm_value_t *results, uint32_t num_results)
+```
+
+This is non-recursive. The main loop:
+
+```
+save arena watermark
+push initial frame
+loop:
+    cf = &frames[frame_sp]
+    read opcode
+    switch(op):
+        ... (most opcodes unchanged) ...
+        
+        case CALL:        goto handle_call
+        case CALL_IND:    goto handle_call_indirect
+        case RETURN:      goto handle_return
+        case END:         if (last label) goto handle_return
+                          else pop label normally
+        case RETURN_CALL: goto handle_tail_call
+        case RETURN_CALL_IND: goto handle_tail_call_indirect
+        case THROW:       goto handle_throw
+```
+
+**`handle_call` pseudocode:**
+
+```
+1. Read callee index
+2. Resolve callee func + functype
+3. If host function:
+     - pop args from operand stack into temp buffer
+     - call host_func directly (this is the ONLY remaining C call)
+     - push results onto operand stack
+     - continue loop
+4. If wasm function:
+     - check frame_sp < WASM_MAX_CALL_DEPTH
+     - save arena watermark on current frame
+     - pop args from operand stack into temp buffer
+     - frame_sp++
+     - cf = &frames[frame_sp]
+     - arena-allocate locals + labels for new frame
+     - initialize cf (func, ft, reader, sp_base, copy args into locals)
+     - push implicit function-level label
+     - continue loop
+```
+
+**`handle_return` pseudocode:**
+
+```
+1. Copy results from operand stack to cf->results_dst
+     (or directly into parent frame's operand stack)
+2. Reset arena to cf->arena_saved
+3. frame_sp--
+4. If frame_sp underflows: we're done, write to top-level results, break
+5. cf = &frames[frame_sp]
+6. Push returned values onto operand stack
+7. continue loop
+```
+
+**`handle_tail_call` pseudocode:**
+
+```
+1. Pop args from operand stack
+2. Reset arena to cf->arena_saved  (free current frame's locals/labels)
+3. Overwrite current frame with new callee
+4. Re-allocate locals/labels from arena for new function
+5. continue loop
+```
+
+This is where the tail call design gets cleaner — no `restart` flag, no `goto`, just overwrite the frame in place.
+
+**Host function calls remain synchronous C calls.** They don't push a frame. This is correct because host functions can't be re-entered or suspended — they run to completion.
+
+**Testing checkpoint:** All non-exception tests pass. Call, call_indirect, return, tail calls all work through the frame stack.
+
+---
+
+## Phase 4: Exception handling migration
+
+**Goal:** Port throw/catch/rethrow/delegate to the frame stack model.
+
+This is the trickiest part because exceptions unwind across frame boundaries.
+
+**`handle_throw` pseudocode:**
+
+```
+1. Pop tag payload from operand stack
+2. Set pending exception on runtime
+3. Walk frames from frame_sp downward:
+     For each frame:
+       Walk labels from cf->lsp downward:
+         If label is try block with matching catch:
+           - unwind to that frame (frame_sp = target)
+           - reset arena for discarded frames
+           - reset operand stack
+           - enter catch handler
+           - clear pending exception
+           - continue main loop
+         If label is try block with delegate:
+           - continue unwinding from delegate target depth
+     If no handler found in frame:
+       - pop frame, continue to next
+4. If no handler found anywhere:
+     - return uncaught exception error
+```
+
+The key difference from the current recursive model: unwinding doesn't rely on C stack unwinding. You just decrement `frame_sp` and reset arena watermarks. The `wasm__handle_exception` function needs to take the frame stack as context instead of only seeing labels within a single recursive call.
+
+**Rethrow** walks the frame stack's label arrays looking for active catch blocks, same logic as current `wasm__find_rethrow_label` but across frames instead of within one.
+
+**Testing checkpoint:** Exception tests pass. Throw across call boundaries works.
+
+---
+
+## Phase 5: Remove old recursive `wasm__exec`
+
+**Goal:** Delete dead code, clean up.
+
+- Remove the old `wasm__exec` function entirely
+- Remove `locals_buf`, `tail_args_buf`, the `restart` loop, `cleanup_frame` label
+- `wasm_call_index` calls `wasm__interp` directly
+- Remove the `depth` parameter that threaded through recursive calls
+- The `WASM_MAX_CALL_DEPTH` check is now just `frame_sp >= WASM_MAX_CALL_DEPTH` at push time
+
+**Testing checkpoint:** Full test suite passes. Valgrind/ASan clean.
+
+---
+
+## Phase 6: Tuning and hardening
+
+- **Arena sizing:** Default to `WASM_MAX_CALL_DEPTH * (max_locals_across_module * sizeof(wasm_value_t) + max_labels_across_module * sizeof(wasm__label_t))`. Or just a flat default like 4MB with a `WASM_FRAME_ARENA_SIZE` define override.
+- **Arena exhaustion:** Return `WASM_ERR_CALL_STACK_EXHAUSTED` if bump allocation fails. This is now a clean, deterministic resource limit instead of a C stack overflow / segfault.
+- **Operand stack:** Consider moving it to the arena too, or at least heap-allocating it. The fixed `wasm_value_t stack[WASM_MAX_STACK]` on `wasm_runtime_t` is 4096 * 24 bytes = ~96KB inline in the struct, which is fine but worth noting.
+- **Fuzz testing:** The explicit frame stack makes it easy to add resource limit assertions — you can check arena usage, frame depth, and operand stack depth all in one place with well-defined bounds.
+
+---
+
+## Risk areas to watch
+
+1. **Host function reentry.** If a host function calls back into `wasm_call` on the same runtime, you now have two `wasm__interp` invocations sharing the same frame stack. Either forbid reentry (simplest), or save/restore `call_frame_sp` around host calls.
+
+2. **The label cleanup dance.** Currently `wasm__clear_label` frees `caught_values`. With arena allocation, you need to decide whether exception payloads live in the arena (and get bulk-freed) or remain individually malloced. Arena is cleaner but means caught_values lifetimes must not outlive the frame.
+
+3. **The `cf` pointer invalidation risk.** If `call_frames` is a flat array, `cf` stays valid across pushes. But if you ever realloc the frame array, all `cf` pointers are dangling. Fix: allocate frame array once at init to `WASM_MAX_CALL_DEPTH` size, never realloc.
