@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (wasm_init(&runtime) != WASM_OK) {
+    if (wasm_init(&runtime, NULL) != WASM_OK) {
         fprintf(stderr, "failed to initialize runtime\n");
         free(bytes);
         return 1;

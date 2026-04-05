@@ -93,7 +93,7 @@ wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth, uint32
 
 ---
 
-### Phase 5: Runtime Configuration (Removing Hard Caps)
+### [DONE] Phase 5: Runtime Configuration (Removing Hard Caps)
 **Goal:** Allow the host to define the maximum stack, call depth, and label depth dynamically at runtime, *without* adding slow `realloc` checks to the hot interpreter loop.
 
 **The Strategy: "Allocate Once, Bound Dynamically"**

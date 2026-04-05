@@ -121,7 +121,7 @@ wasm_module_t *mod;
 wasm_value_t args[1];
 wasm_value_t result;
 
-wasm_init(&rt);
+wasm_init(&rt, NULL);
 
 /* Optional: register host imports before loading. */
 /* wasm_register_import(&rt, &imp); */

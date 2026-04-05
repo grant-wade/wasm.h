@@ -17,7 +17,7 @@
  *
  * QUICK START:
  *   wasm_runtime_t rt;
- *   wasm_init(&rt);
+ *   wasm_init(&rt, NULL);
  *   wasm_module_t *mod = wasm_load(&rt, bytecode, bytecode_len);
  *   wasm_value_t args[1];
  *   args[0] = wasm_i32(42);
@@ -174,6 +174,7 @@ typedef enum wasm_valtype_t {
 
 typedef struct wasm_module_t wasm_module_t;
 typedef struct wasm_gc_header_t wasm_gc_header_t;
+typedef struct wasm__val_frame_t wasm__val_frame_t;
 
 WASM_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
     return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
@@ -557,6 +558,9 @@ struct wasm_module_t {
 #ifndef WASM_MAX_CALL_DEPTH
 #define WASM_MAX_CALL_DEPTH 512
 #endif
+#ifndef WASM_MAX_LABELS
+#define WASM_MAX_LABELS 256
+#endif
 #ifndef WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE
 #define WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE 1024u
 #endif
@@ -574,6 +578,14 @@ struct wasm_module_t {
          : (size_t)WASM__FRAME_ARENA_MIN_SIZE)
 #endif
 
+typedef struct wasm_config_t {
+    uint32_t max_stack_values;
+    uint32_t max_call_depth;
+    uint32_t max_labels;
+    size_t initial_gc_heap_size;
+    size_t frame_arena_size;
+} wasm_config_t;
+
 struct wasm_runtime_t {
     wasm_import_t* imports;
     uint32_t num_imports;
@@ -581,7 +593,8 @@ struct wasm_runtime_t {
     wasm_global_import_t* global_imports;
     uint32_t num_global_imports;
     uint32_t cap_global_imports;
-    wasm_value_t stack[WASM_MAX_STACK];
+    wasm_value_t* stack;
+    uint32_t max_stack;
     uint32_t sp;
     uint32_t enabled_features;
     wasm_error_t last_error;
@@ -596,14 +609,20 @@ struct wasm_runtime_t {
     size_t frame_arena_size;
     size_t frame_arena_offset;
     wasm__call_frame_t* call_frames;
+    uint32_t max_call_frames;
     uint32_t call_frame_sp;
+    wasm_valtype_t* validator_stack;
+    wasm_reftype_t* validator_stack_reftypes;
+    wasm__val_frame_t* validator_frames;
     uint32_t backtrace_depth;
-    uint32_t backtrace_func_indices[WASM_MAX_CALL_DEPTH];
-    uint32_t backtrace_offsets[WASM_MAX_CALL_DEPTH];
+    uint32_t max_labels;
+    uint32_t* backtrace_func_indices;
+    uint32_t* backtrace_offsets;
 };
 
 /* ── Public API ───────────────────────────────────────────────────── */
-wasm_error_t wasm_init(wasm_runtime_t* rt);
+void wasm_config_default(wasm_config_t* config);
+wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config);
 void wasm_destroy(wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
@@ -5204,33 +5223,121 @@ static void wasm__arena_reset(wasm_runtime_t* rt, size_t saved_offset) {
     if (saved_offset <= rt->frame_arena_size) rt->frame_arena_offset = saved_offset;
 }
 
+void wasm_config_default(wasm_config_t* config) {
+    if (!config) return;
+
+    config->max_stack_values = WASM_MAX_STACK;
+    config->max_call_depth = WASM_MAX_CALL_DEPTH;
+    config->max_labels = WASM_MAX_LABELS;
+    config->initial_gc_heap_size = (size_t)WASM_GC_HEAP_SIZE;
+    config->frame_arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
+}
+
+static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
+    if (max_stack == 0) return WASM_ERR_MALFORMED;
+
+    rt->stack = (wasm_value_t*)WASM_MALLOC((size_t)max_stack * sizeof(*rt->stack));
+    if (!rt->stack) return WASM_ERR_OOM;
+
+    rt->max_stack = max_stack;
+    rt->sp = 0;
+    return WASM_OK;
+}
+
+static void wasm__stack_destroy(wasm_runtime_t* rt) {
+    WASM_FREE(rt->stack);
+    rt->stack = NULL;
+    rt->max_stack = 0;
+    rt->sp = 0;
+}
+
+static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
+    if (max_depth == 0) return WASM_ERR_MALFORMED;
+
+    rt->backtrace_func_indices = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_func_indices));
+    if (!rt->backtrace_func_indices) return WASM_ERR_OOM;
+
+    rt->backtrace_offsets = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_offsets));
+    if (!rt->backtrace_offsets) {
+        WASM_FREE(rt->backtrace_func_indices);
+        rt->backtrace_func_indices = NULL;
+        return WASM_ERR_OOM;
+    }
+
+    rt->backtrace_depth = 0;
+    return WASM_OK;
+}
+
+static void wasm__backtrace_destroy(wasm_runtime_t* rt) {
+    WASM_FREE(rt->backtrace_func_indices);
+    WASM_FREE(rt->backtrace_offsets);
+    rt->backtrace_func_indices = NULL;
+    rt->backtrace_offsets = NULL;
+    rt->backtrace_depth = 0;
+}
+
 static wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt);
 static void wasm__call_frame_stack_destroy(wasm_runtime_t* rt);
 static wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod);
 
-wasm_error_t wasm_init(wasm_runtime_t* rt) {
-    size_t arena_size;
-    size_t gc_heap_size;
+wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
+    wasm_config_t cfg;
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
 
     memset(rt, 0, sizeof(*rt));
+
+    if (config)
+        cfg = *config;
+    else
+        wasm_config_default(&cfg);
+
+    if (cfg.max_stack_values == 0 || cfg.max_call_depth == 0 || cfg.max_labels == 0) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "invalid runtime config");
+        return WASM_ERR_MALFORMED;
+    }
+
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
-    gc_heap_size = (size_t)WASM_GC_HEAP_SIZE;
-    if (wasm__gc_heap_init(rt, gc_heap_size) != WASM_OK) {
+    rt->max_call_frames = cfg.max_call_depth;
+    rt->max_labels = cfg.max_labels;
+
+    err = wasm__stack_init(rt, cfg.max_stack_values);
+    if (err != WASM_OK) {
+        WASM__SET_ERR(rt, err, "%s", err == WASM_ERR_OOM ? "failed to allocate value stack" : "invalid runtime config");
+        return err;
+    }
+
+    if (wasm__gc_heap_init(rt, cfg.initial_gc_heap_size) != WASM_OK) {
+        wasm__stack_destroy(rt);
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "failed to allocate GC heap");
         return WASM_ERR_OOM;
     }
-    arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
-    if (wasm__arena_init(rt, arena_size) != WASM_OK) {
+
+    if (wasm__arena_init(rt, cfg.frame_arena_size) != WASM_OK) {
         wasm__gc_heap_destroy(rt);
+        wasm__stack_destroy(rt);
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "failed to allocate frame arena");
         return WASM_ERR_OOM;
     }
+
     if (wasm__call_frame_stack_init(rt) != WASM_OK) {
         wasm__arena_destroy(rt);
         wasm__gc_heap_destroy(rt);
+        wasm__stack_destroy(rt);
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "failed to allocate call frame stack");
         return WASM_ERR_OOM;
     }
+
+    if (wasm__backtrace_init(rt, cfg.max_call_depth) != WASM_OK) {
+        wasm__call_frame_stack_destroy(rt);
+        wasm__arena_destroy(rt);
+        wasm__gc_heap_destroy(rt);
+        wasm__stack_destroy(rt);
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "failed to allocate backtrace buffers");
+        return WASM_ERR_OOM;
+    }
+
     return WASM_OK;
 }
 
@@ -5240,11 +5347,16 @@ void wasm_destroy(wasm_runtime_t* rt) {
     for (i = 0; i < rt->num_imports; i++) wasm__free_functype(&rt->imports[i].type);
     WASM_FREE(rt->imports);
     WASM_FREE(rt->global_imports);
+    WASM_FREE(rt->validator_stack);
+    WASM_FREE(rt->validator_stack_reftypes);
+    WASM_FREE(rt->validator_frames);
     wasm__free_exception_state(&rt->pending_exception);
+    wasm__backtrace_destroy(rt);
     wasm__call_frame_stack_destroy(rt);
     wasm__arena_destroy(rt);
     rt->gc_modules = NULL;
     wasm__gc_heap_destroy(rt);
+    wasm__stack_destroy(rt);
     memset(rt, 0, sizeof(*rt));
 }
 
@@ -6217,11 +6329,6 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
 
     return WASM_OK;
 }
-
-#ifndef WASM__MAX_LABELS
-#define WASM__MAX_LABELS 256
-#endif
-
 typedef struct wasm__blocktype_t {
     uint32_t param_arity;
     uint32_t result_arity;
@@ -6259,13 +6366,62 @@ typedef struct wasm__validator_t {
     uint32_t func_idx;
     const uint8_t* body_start;
     wasm__reader_t r;
-    wasm_valtype_t stack[WASM_MAX_STACK];
-    wasm_reftype_t stack_reftypes[WASM_MAX_STACK];
+    wasm_valtype_t* stack;
+    wasm_reftype_t* stack_reftypes;
+    uint32_t stack_capacity;
     uint32_t sp;
-    wasm__val_frame_t frames[WASM__MAX_LABELS];
+    wasm__val_frame_t* frames;
+    uint32_t frame_capacity;
     uint32_t fp;
     uint32_t max_fp;
 } wasm__validator_t;
+
+static void wasm__validator_destroy(wasm__validator_t* v) {
+    if (!v) return;
+    v->stack = NULL;
+    v->stack_reftypes = NULL;
+    v->frames = NULL;
+    v->stack_capacity = 0;
+    v->frame_capacity = 0;
+}
+
+static wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mod, uint32_t func_idx) {
+    wasm_runtime_t* rt;
+    uint32_t stack_capacity;
+    uint32_t frame_capacity;
+
+    if (!v || !mod || !mod->rt) return WASM_ERR_MALFORMED;
+
+    memset(v, 0, sizeof(*v));
+    v->mod = mod;
+    v->func_idx = func_idx;
+    rt = mod->rt;
+    stack_capacity = rt->max_stack ? rt->max_stack : 1u;
+    frame_capacity = rt->max_labels ? rt->max_labels : 1u;
+
+    if (!rt->validator_stack) {
+        rt->validator_stack = (wasm_valtype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack));
+        if (!rt->validator_stack) return WASM_ERR_OOM;
+    }
+    if (!rt->validator_stack_reftypes) {
+        rt->validator_stack_reftypes =
+            (wasm_reftype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack_reftypes));
+        if (!rt->validator_stack_reftypes) return WASM_ERR_OOM;
+    }
+    if (!rt->validator_frames) {
+        rt->validator_frames = (wasm__val_frame_t*)WASM_CALLOC(frame_capacity, sizeof(*rt->validator_frames));
+        if (!rt->validator_frames) return WASM_ERR_OOM;
+    } else {
+        memset(rt->validator_frames, 0, (size_t)frame_capacity * sizeof(*rt->validator_frames));
+    }
+
+    v->stack = rt->validator_stack;
+    v->stack_reftypes = rt->validator_stack_reftypes;
+    v->frames = rt->validator_frames;
+    v->stack_capacity = stack_capacity;
+    v->frame_capacity = frame_capacity;
+    return WASM_OK;
+}
 
 static wasm_error_t wasm__validator_error(wasm__validator_t* v,
                                           const uint8_t* at,
@@ -6355,7 +6511,7 @@ static wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
                                                const uint8_t* at,
                                                wasm_valtype_t type,
                                                const wasm_reftype_t* ref_type) {
-    if (v->sp >= WASM_MAX_STACK)
+    if (v->sp >= v->stack_capacity)
         return wasm__validator_error(v, at, "operand stack overflow");
     v->stack[v->sp++] = type;
     if (ref_type && wasm__has_reftype_info(ref_type))
@@ -7827,6 +7983,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     wasm__validator_t v;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
+    wasm_error_t err;
 
     if (!ft) {
         return wasm__set_validation_error(mod->rt, func_idx, 0,
@@ -7835,9 +7992,12 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                           (unsigned)func->type_idx);
     }
 
-    memset(&v, 0, sizeof(v));
-    v.mod = mod;
-    v.func_idx = func_idx;
+    err = wasm__validator_init(&v, mod, func_idx);
+    if (err != WASM_OK) {
+        return wasm__set_validation_error(mod->rt, func_idx, 0,
+                                          "failed to allocate validator state");
+    }
+
     v.body_start = func->code;
     v.r.ptr = func->code;
     v.r.end = func->code + func->code_len;
@@ -7860,7 +8020,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     while (v.r.ptr < v.r.end) {
         const uint8_t* at = v.r.ptr;
         uint8_t op = wasm__read_u8(&v.r);
-        wasm_error_t err = WASM_OK;
+
+        err = WASM_OK;
 
         switch (op) {
             case 0x00:
@@ -7879,7 +8040,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
-                if (v.fp >= WASM__MAX_LABELS)
+                if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
@@ -7918,7 +8079,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
-                if (v.fp >= WASM__MAX_LABELS)
+                if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
@@ -7984,7 +8145,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
-                if (v.fp >= WASM__MAX_LABELS)
+                if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
@@ -8817,21 +8978,33 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 break;
             default:
-                return wasm__validator_error(&v, at, "unknown opcode 0x%02X", op);
+                err = wasm__validator_error(&v, at, "unknown opcode 0x%02X", op);
+                goto done;
         }
 
         if (v.r.malformed)
-            return wasm__validator_error(&v, at, "malformed immediate");
+            {
+                err = wasm__validator_error(&v, at, "malformed immediate");
+                goto done;
+            }
     }
 
-    if (v.fp != 0)
-        return wasm__validator_error(&v, v.r.end, "function body ended before all blocks closed");
-    if (v.sp != ft->num_results)
-        return wasm__validator_error(&v, v.r.end, "function leaves %u stack values, expected %u",
-                                     (unsigned)v.sp,
-                                     (unsigned)ft->num_results);
+    if (v.fp != 0) {
+        err = wasm__validator_error(&v, v.r.end, "function body ended before all blocks closed");
+        goto done;
+    }
+    if (v.sp != ft->num_results) {
+        err = wasm__validator_error(&v, v.r.end, "function leaves %u stack values, expected %u",
+                                    (unsigned)v.sp,
+                                    (unsigned)ft->num_results);
+        goto done;
+    }
     func->max_label_depth = v.max_fp;
-    return WASM_OK;
+    err = WASM_OK;
+
+done:
+    wasm__validator_destroy(&v);
+    return err;
 }
 
 static wasm_error_t wasm__validate_code(wasm_module_t* mod) {
@@ -9145,6 +9318,7 @@ static int wasm__frame_storage_size(uint32_t num_locals,
 static int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out) {
     size_t max_frame_bytes = 0;
     size_t total_bytes;
+    size_t minimum_size;
     uint32_t i;
 
     if (!mod || !out) return 0;
@@ -9158,13 +9332,18 @@ static int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out)
         if (frame_bytes > max_frame_bytes) max_frame_bytes = frame_bytes;
     }
 
+    minimum_size = mod->rt ? mod->rt->frame_arena_size : (size_t)WASM_FRAME_ARENA_SIZE;
     if (max_frame_bytes == 0) {
-        *out = (size_t)WASM_FRAME_ARENA_SIZE;
+        *out = minimum_size;
         return 1;
     }
 
-    if (!wasm__size_mul(max_frame_bytes, (size_t)WASM_MAX_CALL_DEPTH, &total_bytes)) return 0;
-    if (total_bytes < (size_t)WASM_FRAME_ARENA_SIZE) total_bytes = (size_t)WASM_FRAME_ARENA_SIZE;
+    if (!wasm__size_mul(max_frame_bytes,
+                        (size_t)((mod->rt && mod->rt->max_call_frames) ? mod->rt->max_call_frames : WASM_MAX_CALL_DEPTH),
+                        &total_bytes)) {
+        return 0;
+    }
+    if (total_bytes < minimum_size) total_bytes = minimum_size;
 
     *out = total_bytes;
     return 1;
@@ -9223,7 +9402,7 @@ struct wasm__call_frame_t {
 };
 
 static wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt) {
-    rt->call_frames = (wasm__call_frame_t*)WASM_CALLOC(WASM_MAX_CALL_DEPTH, sizeof(*rt->call_frames));
+    rt->call_frames = (wasm__call_frame_t*)WASM_CALLOC(rt->max_call_frames, sizeof(*rt->call_frames));
     if (!rt->call_frames) return WASM_ERR_OOM;
     rt->call_frame_sp = 0;
     return WASM_OK;
@@ -9232,6 +9411,7 @@ static wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt) {
 static void wasm__call_frame_stack_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->call_frames);
     rt->call_frames = NULL;
+    rt->max_call_frames = 0;
     rt->call_frame_sp = 0;
 }
 
@@ -9263,7 +9443,7 @@ static void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_frame_sp) 
     }
 
     depth = rt->call_frame_sp - base_frame_sp;
-    if (depth > WASM_MAX_CALL_DEPTH) depth = WASM_MAX_CALL_DEPTH;
+    if (depth > rt->max_call_frames) depth = rt->max_call_frames;
     rt->backtrace_depth = depth;
     for (i = 0; i < depth; i++) {
         const wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1u - i];
@@ -9649,10 +9829,10 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
         if (err != WASM_OK) return err;
     }
 
-    if (rt->call_frame_sp >= WASM_MAX_CALL_DEPTH) {
+    if (rt->call_frame_sp >= rt->max_call_frames) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
                       "call frame depth exceeded limit %u",
-                      (unsigned)WASM_MAX_CALL_DEPTH);
+                      (unsigned)rt->max_call_frames);
         return WASM_ERR_CALL_STACK_EXHAUSTED;
     }
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
@@ -9662,6 +9842,13 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
     max_labels = func->max_label_depth ? func->max_label_depth : 1;
+    if (max_labels > rt->max_labels) {
+        WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
+                      "function label depth %u exceeds limit %u",
+                      (unsigned)max_labels,
+                      (unsigned)rt->max_labels);
+        return WASM_ERR_CALL_STACK_EXHAUSTED;
+    }
     arena_saved = rt->frame_arena_offset;
 
     if (func->num_locals > 0) {
@@ -10042,7 +10229,8 @@ typedef struct wasm__control_frame_t {
 static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
     wasm__reader_t scan;
     wasm__control_target_t* targets;
-    wasm__control_frame_t stack[WASM__MAX_LABELS];
+    wasm__control_frame_t* stack;
+    uint32_t stack_capacity;
     uint32_t depth = 0;
     uint32_t i;
 
@@ -10050,6 +10238,13 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
 
     targets = (wasm__control_target_t*)WASM_MALLOC(func->code_len * sizeof(wasm__control_target_t));
     if (!targets) return WASM_ERR_OOM;
+
+    stack_capacity = func->max_label_depth ? func->max_label_depth : 1u;
+    stack = (wasm__control_frame_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*stack));
+    if (!stack) {
+        WASM_FREE(targets);
+        return WASM_ERR_OOM;
+    }
 
     for (i = 0; i < func->code_len; i++) {
         targets[i].end_offset = UINT32_MAX;
@@ -10064,6 +10259,7 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
         uint8_t op = wasm__read_u8(&scan);
 
         if (scan.malformed) {
+            WASM_FREE(stack);
             WASM_FREE(targets);
             return WASM_ERR_MALFORMED;
         }
@@ -10073,7 +10269,8 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
             case 0x03:
             case 0x04:
             case 0x06:
-                if (depth >= WASM__MAX_LABELS) {
+                if (depth >= stack_capacity) {
+                    WASM_FREE(stack);
                     WASM_FREE(targets);
                     return WASM_ERR_MALFORMED;
                 }
@@ -10097,6 +10294,7 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
             case 0x0B:
                 if (depth == 0) {
                     if (scan.ptr != scan.end) {
+                        WASM_FREE(stack);
                         WASM_FREE(targets);
                         return WASM_ERR_MALFORMED;
                     }
@@ -10111,16 +10309,19 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
         }
 
         if (scan.malformed) {
+            WASM_FREE(stack);
             WASM_FREE(targets);
             return WASM_ERR_MALFORMED;
         }
     }
 
     if (depth != 0) {
+        WASM_FREE(stack);
         WASM_FREE(targets);
         return WASM_ERR_MALFORMED;
     }
 
+    WASM_FREE(stack);
     func->control_targets = targets;
     return WASM_OK;
 }
@@ -10257,7 +10458,7 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                     rt->sp = label->sp_base;
                     err = wasm__copy_exception_to_label(label, &rt->pending_exception);
                     if (err != WASM_OK) return err;
-                    if (rt->sp + label->caught_count > WASM_MAX_STACK) return WASM_ERR_STACK_OVERFLOW;
+                    if (rt->sp + label->caught_count > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
                     for (i = 0; i < label->caught_count; i++) rt->stack[rt->sp++] = label->caught_values[i];
                     wasm__free_exception_state(&rt->pending_exception);
                     *label_sp = idx;
@@ -10366,7 +10567,7 @@ static wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* l
 
 #define WASM__PUSH(rt, val)                \
     do {                                   \
-        if ((rt)->sp >= WASM_MAX_STACK) {  \
+        if ((rt)->sp >= (rt)->max_stack) { \
             err = WASM_ERR_STACK_OVERFLOW; \
             goto cleanup;                  \
         }                                  \

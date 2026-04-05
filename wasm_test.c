@@ -103,12 +103,39 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
 #define WASM_IMPL
 #include "wasm.h"
 
+static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
+    return wasm_init(rt, config);
+}
+
 static void wasm_test_init_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
+    wasm_error_t err;
+
     WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
                  "allocator leak before %s: %zu live blocks",
                  test_name,
                  g_wasm_test_alloc_stats.live_blocks);
-    wasm_init(rt);
+    err = wasm_test_init_raw(rt, NULL);
+    WL_CHECK_MSG(t, err == WASM_OK,
+                 "wasm_init failed before %s: %s",
+                 test_name,
+                 rt->error_msg[0] ? rt->error_msg : wasm_error_string(err));
+}
+
+static void wasm_test_init_with_config_checked(wl_test_ctx* t,
+                                               wasm_runtime_t* rt,
+                                               const wasm_config_t* config,
+                                               const char* test_name) {
+    wasm_error_t err;
+
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
+                 "allocator leak before %s: %zu live blocks",
+                 test_name,
+                 g_wasm_test_alloc_stats.live_blocks);
+    err = wasm_test_init_raw(rt, config);
+    WL_CHECK_MSG(t, err == WASM_OK,
+                 "wasm_init failed before %s: %s",
+                 test_name,
+                 rt->error_msg[0] ? rt->error_msg : wasm_error_string(err));
 }
 
 static void wasm_test_destroy_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
@@ -129,6 +156,11 @@ static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
 }
 
 #define wasm_init(rt) wasm_test_init_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
+#define wasm_init_config(rt, config)                                                                  \
+    wasm_test_init_with_config_checked(t,                                                             \
+                                       (rt),                                                          \
+                                       (config),                                                      \
+                                       ((t) && (t)->case_name) ? (t)->case_name : __func__)
 #define wasm_destroy(rt) wasm_test_destroy_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
 
 #undef WL_TEST
@@ -5738,6 +5770,330 @@ WL_TEST(test_feature_gate_sign_extension_disabled) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_runtime_config_defaults) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+
+    wasm_config_default(&cfg);
+    WL_CHECK_MSG(t, cfg.max_stack_values == WASM_MAX_STACK,
+                 "expected default max_stack_values %u, got %u",
+                 (unsigned)WASM_MAX_STACK,
+                 (unsigned)cfg.max_stack_values);
+    WL_CHECK_MSG(t, cfg.max_call_depth == WASM_MAX_CALL_DEPTH,
+                 "expected default max_call_depth %u, got %u",
+                 (unsigned)WASM_MAX_CALL_DEPTH,
+                 (unsigned)cfg.max_call_depth);
+    WL_CHECK_MSG(t, cfg.max_labels == WASM_MAX_LABELS,
+                 "expected default max_labels %u, got %u",
+                 (unsigned)WASM_MAX_LABELS,
+                 (unsigned)cfg.max_labels);
+    WL_CHECK_MSG(t, cfg.initial_gc_heap_size == (size_t)WASM_GC_HEAP_SIZE,
+                 "expected default GC heap size %zu, got %zu",
+                 (size_t)WASM_GC_HEAP_SIZE,
+                 cfg.initial_gc_heap_size);
+    WL_CHECK_MSG(t, cfg.frame_arena_size == (size_t)WASM_FRAME_ARENA_SIZE,
+                 "expected default frame arena size %zu, got %zu",
+                 (size_t)WASM_FRAME_ARENA_SIZE,
+                 cfg.frame_arena_size);
+
+    wasm_init(&rt);
+    WL_CHECK_MSG(t, rt.max_stack == cfg.max_stack_values,
+                 "expected runtime max_stack %u, got %u",
+                 (unsigned)cfg.max_stack_values,
+                 (unsigned)rt.max_stack);
+    WL_CHECK_MSG(t, rt.max_call_frames == cfg.max_call_depth,
+                 "expected runtime max_call_frames %u, got %u",
+                 (unsigned)cfg.max_call_depth,
+                 (unsigned)rt.max_call_frames);
+    WL_CHECK_MSG(t, rt.max_labels == cfg.max_labels,
+                 "expected runtime max_labels %u, got %u",
+                 (unsigned)cfg.max_labels,
+                 (unsigned)rt.max_labels);
+    WL_CHECK_MSG(t, rt.stack != NULL, "%s", "expected value stack allocation");
+    WL_CHECK_MSG(t, rt.call_frames != NULL, "%s", "expected call frame allocation");
+    WL_CHECK_MSG(t, rt.backtrace_func_indices != NULL, "%s", "expected backtrace function buffer");
+    WL_CHECK_MSG(t, rt.backtrace_offsets != NULL, "%s", "expected backtrace offset buffer");
+    WL_CHECK_MSG(t, rt.gc_heap_size == cfg.initial_gc_heap_size,
+                 "expected GC heap size %zu, got %zu",
+                 cfg.initial_gc_heap_size,
+                 rt.gc_heap_size);
+    WL_CHECK_MSG(t, rt.frame_arena_size == cfg.frame_arena_size,
+                 "expected frame arena size %zu, got %zu",
+                 cfg.frame_arena_size,
+                 rt.frame_arena_size);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_config_custom_allocations) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 32;
+    cfg.max_call_depth = 4;
+    cfg.max_labels = 8;
+    cfg.initial_gc_heap_size = 256;
+    cfg.frame_arena_size = 64;
+
+    wasm_init_config(&rt, &cfg);
+    WL_CHECK_MSG(t, rt.max_stack == 32, "expected max_stack 32, got %u", (unsigned)rt.max_stack);
+    WL_CHECK_MSG(t, rt.max_call_frames == 4,
+                 "expected max_call_frames 4, got %u",
+                 (unsigned)rt.max_call_frames);
+    WL_CHECK_MSG(t, rt.max_labels == 8, "expected max_labels 8, got %u", (unsigned)rt.max_labels);
+    WL_CHECK_MSG(t, rt.gc_heap_size == 256, "expected gc_heap_size 256, got %zu", rt.gc_heap_size);
+    WL_CHECK_MSG(t, rt.frame_arena_size == 64,
+                 "expected frame_arena_size 64, got %zu",
+                 rt.frame_arena_size);
+    WL_CHECK_MSG(t, rt.stack != NULL, "%s", "expected configured value stack allocation");
+    WL_CHECK_MSG(t, rt.call_frames != NULL, "%s", "expected configured call frame allocation");
+    WL_CHECK_MSG(t, rt.backtrace_func_indices != NULL, "%s", "expected configured backtrace function buffer");
+    WL_CHECK_MSG(t, rt.backtrace_offsets != NULL, "%s", "expected configured backtrace offset buffer");
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_config_rejects_zero_limits) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+    wasm_error_t err;
+
+    memset(&rt, 0, sizeof(rt));
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 0;
+    err = wasm_test_init_raw(&rt, &cfg);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED,
+                 "expected WASM_ERR_MALFORMED for zero stack limit, got %d",
+                 (int)err);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+
+    memset(&rt, 0, sizeof(rt));
+    wasm_config_default(&cfg);
+    cfg.max_call_depth = 0;
+    err = wasm_test_init_raw(&rt, &cfg);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED,
+                 "expected WASM_ERR_MALFORMED for zero call depth, got %d",
+                 (int)err);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+
+    memset(&rt, 0, sizeof(rt));
+    wasm_config_default(&cfg);
+    cfg.max_labels = 0;
+    err = wasm_test_init_raw(&rt, &cfg);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED,
+                 "expected WASM_ERR_MALFORMED for zero label limit, got %d",
+                 (int)err);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_config_limits_operand_stack_validation) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+    uint32_t i;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        for (i = 0; i < 9; i++) {
+            emit(&body, 0x41);
+            emit_leb128_i32(&body, (int32_t)i);
+        }
+        for (i = 0; i < 8; i++) emit(&body, 0x1A);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 8;
+    wasm_init_config(&rt, &cfg);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected load to fail when validator stack exceeds configured limit");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "operand stack overflow") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_config_limits_label_depth_validation) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+    uint32_t i;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        for (i = 0; i < 4; i++) {
+            emit(&body, 0x02);
+            emit(&body, 0x40);
+        }
+        for (i = 0; i < 4; i++) emit(&body, 0x0B);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_config_default(&cfg);
+    cfg.max_labels = 4;
+    wasm_init_config(&rt, &cfg);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected load to fail when control depth exceeds configured limit");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "control stack overflow") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_config_limits_call_depth_and_backtrace) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+    wasm_config_t cfg;
+    uint32_t func_idx = UINT32_MAX;
+    uint32_t offset = UINT32_MAX;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x10);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_config_default(&cfg);
+    cfg.max_call_depth = 4;
+    cfg.frame_arena_size = 128;
+    wasm_init_config(&rt, &cfg);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_CALL_STACK_EXHAUSTED,
+                 "expected WASM_ERR_CALL_STACK_EXHAUSTED, got %d",
+                 (int)err);
+    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 4,
+                 "expected backtrace depth 4, got %u",
+                 (unsigned)wasm_get_call_stack_depth(&rt));
+    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, &func_idx, &offset));
+    WL_CHECK_MSG(t, func_idx == 0, "expected top backtrace function 0, got %u", (unsigned)func_idx);
+    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 3, &func_idx, &offset));
+    WL_CHECK_MSG(t, func_idx == 0, "expected deepest captured function 0, got %u", (unsigned)func_idx);
+    WL_CHECK_MSG(t, wasm_get_call_frame_info(&rt, 4, &func_idx, &offset) == WASM_ERR_MALFORMED,
+                 "%s",
+                 "expected querying beyond configured backtrace depth to fail");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_frame_arena_allocator) {
     wasm_runtime_t rt;
     void* first;
@@ -5777,6 +6133,9 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
     wasm_module_t* m;
     wasm_value_t result;
     wasm_error_t err;
+    wasm_config_t cfg;
+    size_t frame_bytes = 0;
+    size_t expected_size = 0;
     size_t required_size = 0;
 
     emit_header(&mod);
@@ -5827,8 +6186,10 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
         emit_section(&mod, 10, sec.buf, sec.len);
     }
 
-    wasm_init(&rt);
-    WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
+    wasm_config_default(&cfg);
+    cfg.max_call_depth = 2;
+    cfg.frame_arena_size = 64;
+    wasm_init_config(&rt, &cfg);
 
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
@@ -5838,8 +6199,22 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
     }
 
     WL_CHECK_MSG(t, wasm__module_frame_arena_requirement(m, &required_size), "%s", "expected arena sizing for module to succeed");
-    WL_CHECK_MSG(t, required_size > 64, "expected module to require more than 64 bytes, got %zu", required_size);
-    WL_CHECK_MSG(t, rt.frame_arena_size == 64, "expected load to preserve undersized arena until execution, got %zu", rt.frame_arena_size);
+    WL_CHECK_MSG(t, wasm__frame_storage_size(m->funcs[0].num_locals,
+                                             m->funcs[0].max_label_depth ? m->funcs[0].max_label_depth : 1u,
+                                             &frame_bytes),
+                 "%s",
+                 "expected frame sizing for function to succeed");
+    WL_CHECK_MSG(t, wasm__size_mul(frame_bytes, (size_t)cfg.max_call_depth, &expected_size),
+                 "%s",
+                 "expected frame arena requirement multiplication to succeed");
+    if (expected_size < cfg.frame_arena_size) expected_size = cfg.frame_arena_size;
+    WL_CHECK_MSG(t, required_size == expected_size,
+                 "expected arena requirement %zu, got %zu",
+                 expected_size,
+                 required_size);
+    WL_CHECK_MSG(t, rt.frame_arena_size == cfg.frame_arena_size,
+                 "expected load to preserve undersized arena until execution, got %zu",
+                 rt.frame_arena_size);
 
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
@@ -11354,6 +11729,12 @@ int main(void) {
         { "feature gate: disabled exceptions reject module load", test_feature_gate_exceptions_disabled },
         { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
+        { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
+        { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
+        { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
+        { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
+        { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },
+        { "runtime config: call depth limit drives captured backtraces", test_runtime_config_limits_call_depth_and_backtrace },
         { "runtime: frame arena alloc/reset/destroy are well-formed", test_frame_arena_allocator },
         { "runtime: top-level execution grows the frame arena for validated modules", test_runtime_grows_frame_arena_for_execution },
         { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },
