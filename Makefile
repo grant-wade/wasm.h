@@ -1,44 +1,48 @@
-CC ?= cc
-CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -DWL_ENABLE_PLATFORM=1
-CFLAGS ?= -std=c99 -Wall -Wextra -Werror -g
-LDFLAGS ?= 
+CMAKE ?= cmake
+BUILD_DIR ?= build
+CONFIG ?=
+CMAKE_ARGS ?=
+BUILD_ARGS ?=
 
-.PHONY: all test clean wasm2api wasm-emcc wasm-emcc-build wasm-emcc-run wasm-emcc-run-strict
+ifeq ($(strip $(CONFIG)),)
+BUILD_CONFIG_ARGS :=
+else
+BUILD_CONFIG_ARGS := --config $(CONFIG)
+endif
+
+NATIVE_TARGETS := wl_test wasm_test wasm2api wasm basic_add_demo
+
+.PHONY: all configure build test check clean wasm-emcc wasm-emcc-build wasm-emcc-run wasm-emcc-run-strict wasm-emcc-list $(NATIVE_TARGETS)
 
 all: test
 
-wl_test: wl_test.c wl.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) wl_test.c -o $@ $(LDFLAGS)
+configure:
+	$(CMAKE) -S . -B $(BUILD_DIR) $(CMAKE_ARGS)
 
-wasm_test: wasm_test.c wasm.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) wasm_test.c -o $@ $(LDFLAGS) -lm
+build: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) $(BUILD_ARGS)
 
-wasm2api: wasm2api.c wasm.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) wasm2api.c -o $@ $(LDFLAGS) -lm
+test: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target check $(BUILD_ARGS)
 
-wasm: wasm.c wasm.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) wasm.c -o $@ $(LDFLAGS) -lm
+check: test
 
-basic_add_demo: basic_add_demo.c basic_add.c basic_add.h wasm.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) basic_add_demo.c basic_add.c -o $@ $(LDFLAGS) -lm
+$(NATIVE_TARGETS): configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target $@ $(BUILD_ARGS)
 
+wasm-emcc: wasm-emcc-run
 
-test: wl_test wasm_test
-	./wl_test
-	./wasm_test
+wasm-emcc-build: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target wasm-emcc-build $(BUILD_ARGS)
 
-wasm-emcc:
-	$(MAKE) -C test run
+wasm-emcc-run: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target wasm-emcc-run $(BUILD_ARGS)
 
-wasm-emcc-build:
-	$(MAKE) -C test all
+wasm-emcc-run-strict: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target wasm-emcc-run-strict $(BUILD_ARGS)
 
-wasm-emcc-run:
-	$(MAKE) -C test run
-
-wasm-emcc-run-strict:
-	$(MAKE) -C test run-strict
+wasm-emcc-list: configure
+	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target wasm-emcc-list $(BUILD_ARGS)
 
 clean:
-	rm -f wl_test wasm_test wasm2api wasm basic_add_demo
-	$(MAKE) -C test clean
+	$(CMAKE) -E rm -rf $(BUILD_DIR)

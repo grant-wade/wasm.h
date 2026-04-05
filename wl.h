@@ -413,9 +413,7 @@ bool wl_string_starts_with(const wl_string* s, wl_str prefix);
 /* Returns true when s ends with suffix. */
 bool wl_string_ends_with(const wl_string* s, wl_str suffix);
 
-enum {
-    WL_UTF8_INVALID = 0xffffffffu,
-};
+#define WL_UTF8_INVALID ((u32)0xffffffffu)
 
 /* Counts Unicode code points in a UTF-8 byte string. */
 usize wl_utf8_len(wl_str s);
@@ -1898,7 +1896,7 @@ u64 wl_rng_range(wl_rng* rng, u64 lo, u64 hi) {
             return lo;
         }
         span = hi - lo;
-        threshold = (u64)(-span) % span;
+        threshold = (u64)(0ull - span) % span;
         value = wl_rng_u64(rng);
         if (value >= threshold) {
             return lo + (value % span);

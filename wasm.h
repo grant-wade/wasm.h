@@ -299,14 +299,17 @@ struct wasm_gc_header_t {
 
 typedef struct wasm_gc_struct_t {
     wasm_gc_header_t header;
-    uint8_t payload[];
+    uint8_t payload[1];
 } wasm_gc_struct_t;
 
 typedef struct wasm_gc_array_t {
     wasm_gc_header_t header;
     uint32_t length;
-    uint8_t payload[];
+    uint8_t payload[1];
 } wasm_gc_array_t;
+
+#define WASM__GC_STRUCT_HEADER_SIZE offsetof(wasm_gc_struct_t, payload)
+#define WASM__GC_ARRAY_HEADER_SIZE offsetof(wasm_gc_array_t, payload)
 
 /* ── Forward declarations ─────────────────────────────────────────── */
 typedef struct wasm_runtime_t wasm_runtime_t;
@@ -964,14 +967,13 @@ static int wasm__platform_posix_clock_time_get(uint32_t clock_id, uint64_t* out_
 #endif
 
 #if defined(WASM__WASI_NEEDS_RANDOM_FALLBACK)
+#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
 static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     unsigned char* bytes = (unsigned char*)dst;
     size_t i;
-    static int seeded = 0;
 
     if (len > 0 && !dst) return 0;
 
-#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
     for (i = 0; i < len;) {
         unsigned int value;
         size_t chunk = len - i;
@@ -982,7 +984,15 @@ static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
         i += chunk;
     }
     return 1;
+}
 #elif WASM__PLATFORM_POSIX
+static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
+    unsigned char* bytes = (unsigned char*)dst;
+    size_t i;
+    static int seeded = 0;
+
+    if (len > 0 && !dst) return 0;
+
     if (len > 0) {
         FILE* random_file = fopen("/dev/urandom", "rb");
 
@@ -994,7 +1004,6 @@ static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     } else {
         return 1;
     }
-#endif
 
     if (!seeded) {
         unsigned int seed = (unsigned int)time(NULL);
@@ -1010,11 +1019,33 @@ static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
 }
 #else
 static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
+    unsigned char* bytes = (unsigned char*)dst;
+    size_t i;
+    static int seeded = 0;
+
+    if (len > 0 && !dst) return 0;
+
+    if (!seeded) {
+        unsigned int seed = (unsigned int)time(NULL);
+        clock_t ticks = clock();
+
+        if (ticks != (clock_t)-1) seed ^= (unsigned int)ticks;
+        srand(seed);
+        seeded = 1;
+    }
+
+    for (i = 0; i < len; i++) bytes[i] = (unsigned char)(rand() & 0xFF);
+    return 1;
+}
+#endif
+#else
+static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     return WASM_WASI_FILL_RANDOM(dst, len);
 }
 #endif
 
 #if defined(WASM__WASI_NEEDS_CLOCK_FALLBACK)
+#if WASM__PLATFORM_WINDOWS
 static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
                                               uint64_t precision,
                                               uint64_t* out_time) {
@@ -1022,7 +1053,6 @@ static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
 
     if (!out_time) return 0;
 
-#if WASM__PLATFORM_WINDOWS
     switch (clock_id) {
         case 0: {
             FILETIME ft;
@@ -1040,9 +1070,15 @@ static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
         default:
             return 0;
     }
+}
 #elif WASM__PLATFORM_POSIX
+static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
+                                              uint64_t precision,
+                                              uint64_t* out_time) {
+    (void)precision;
+
+    if (!out_time) return 0;
     if (wasm__platform_posix_clock_time_get(clock_id, out_time)) return 1;
-#endif
 
     switch (clock_id) {
         case 0: {
@@ -1065,6 +1101,36 @@ static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
             return 0;
     }
 }
+#else
+static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
+                                              uint64_t precision,
+                                              uint64_t* out_time) {
+    (void)precision;
+
+    if (!out_time) return 0;
+
+    switch (clock_id) {
+        case 0: {
+            time_t now = time(NULL);
+
+            if (now == (time_t)-1) return 0;
+            *out_time = (uint64_t)(now > (time_t)0 ? now : (time_t)0) * 1000000000ull;
+            return 1;
+        }
+        case 1:
+        case 2:
+        case 3: {
+            clock_t ticks = clock();
+
+            if (ticks == (clock_t)-1 || CLOCKS_PER_SEC <= 0) return 0;
+            *out_time = ((uint64_t)ticks * 1000000000ull) / (uint64_t)CLOCKS_PER_SEC;
+            return 1;
+        }
+        default:
+            return 0;
+    }
+}
+#endif
 #else
 static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
                                               uint64_t precision,
@@ -1576,7 +1642,7 @@ static size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
 }
 
 static size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index) {
-    size_t offset = sizeof(wasm_gc_struct_t);
+    size_t offset = WASM__GC_STRUCT_HEADER_SIZE;
     uint32_t i;
 
     for (i = 0; i < type->num_fields && i < field_index; i++) {
@@ -1597,7 +1663,7 @@ static size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32
 }
 
 static int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size) {
-    size_t offset = sizeof(wasm_gc_struct_t);
+    size_t offset = WASM__GC_STRUCT_HEADER_SIZE;
     uint32_t i;
 
     for (i = 0; i < type->num_fields; i++) {
@@ -1616,7 +1682,7 @@ static int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size)
 }
 
 static size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type) {
-    return wasm__align_up_size(sizeof(wasm_gc_array_t), wasm__gc_field_storage_alignment(&type->field));
+    return wasm__align_up_size(WASM__GC_ARRAY_HEADER_SIZE, wasm__gc_field_storage_alignment(&type->field));
 }
 
 static int wasm__gc_array_total_size(const wasm_arraytype_t* type,
@@ -4509,15 +4575,14 @@ static wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* v
 
     for (lane = 0; lane < 4; lane++) {
         int32_t signed_value = wasm__v128_get_i32(value, lane);
+        uint32_t wrapped_value = (uint32_t)signed_value;
 
         switch (subop) {
             case 0xA0:
-                wasm__v128_set_u32(&result, lane,
-                                   (uint32_t)(signed_value < 0 ? (uint32_t)(-(uint32_t)signed_value)
-                                                               : (uint32_t)signed_value));
+                wasm__v128_set_u32(&result, lane, signed_value < 0 ? (uint32_t)(0u - wrapped_value) : wrapped_value);
                 break;
             default:
-                wasm__v128_set_u32(&result, lane, (uint32_t)(-(uint32_t)signed_value));
+                wasm__v128_set_u32(&result, lane, (uint32_t)(0u - wrapped_value));
                 break;
         }
     }
@@ -4652,12 +4717,12 @@ static wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* v
         switch (subop) {
             case 0xC0:
                 if (signed_value < 0)
-                    wasm__v128_set_u64(&result, lane, (uint64_t)(-unsigned_value));
+                    wasm__v128_set_u64(&result, lane, (uint64_t)(0ull - unsigned_value));
                 else
                     wasm__v128_set_u64(&result, lane, unsigned_value);
                 break;
             default:
-                wasm__v128_set_u64(&result, lane, (uint64_t)(-unsigned_value));
+                wasm__v128_set_u64(&result, lane, (uint64_t)(0ull - unsigned_value));
                 break;
         }
     }
@@ -5913,8 +5978,8 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             if (err != WASM_OK) return err;
             is_mutable = wasm__read_u8(r);
             if (is_mutable) {
-                wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
-                if (err != WASM_OK) return err;
+                wasm_error_t feature_err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
+                if (feature_err != WASM_OK) return feature_err;
             }
 
             gimp = wasm__find_global_import(mod->rt, mn, fn);

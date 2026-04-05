@@ -436,33 +436,33 @@ WL_TEST(test_hashmap_collisions_and_removal) {
 }
 
 WL_TEST(test_sort_and_search) {
-    int small[] = {9, 1, 8, 2, 7, 3, 6, 4, 5, 0};
-    int large[64];
+    int small_values[] = {9, 1, 8, 2, 7, 3, 6, 4, 5, 0};
+    int large_values[64];
     int dir = -1;
     int key = 9;
     int missing = 999;
 
     for (int i = 0; i < 64; ++i) {
-        large[i] = i;
+        large_values[i] = i;
     }
     for (int i = 0; i < 64; ++i) {
         int j = (i * 17) & 63;
-        int tmp = large[i];
-        large[i] = large[j];
-        large[j] = tmp;
+        int tmp = large_values[i];
+        large_values[i] = large_values[j];
+        large_values[j] = tmp;
     }
 
-    wl_sort(small, WL_COUNTOF(small), sizeof(small[0]), cmp_int_asc, NULL);
-    for (usize i = 1u; i < WL_COUNTOF(small); ++i) {
-        WL_CHECK(t, small[i - 1u] <= small[i]);
+    wl_sort(small_values, WL_COUNTOF(small_values), sizeof(small_values[0]), cmp_int_asc, NULL);
+    for (usize i = 1u; i < WL_COUNTOF(small_values); ++i) {
+        WL_CHECK(t, small_values[i - 1u] <= small_values[i]);
     }
 
-    wl_sort(large, WL_COUNTOF(large), sizeof(large[0]), cmp_int_dir, &dir);
-    for (usize i = 1u; i < WL_COUNTOF(large); ++i) {
-        WL_CHECK(t, large[i - 1u] >= large[i]);
+    wl_sort(large_values, WL_COUNTOF(large_values), sizeof(large_values[0]), cmp_int_dir, &dir);
+    for (usize i = 1u; i < WL_COUNTOF(large_values); ++i) {
+        WL_CHECK(t, large_values[i - 1u] >= large_values[i]);
     }
-    WL_CHECK(t, wl_bsearch(small, WL_COUNTOF(small), sizeof(small[0]), &key, cmp_int_asc, NULL) == 9);
-    WL_CHECK(t, wl_bsearch(small, WL_COUNTOF(small), sizeof(small[0]), &missing, cmp_int_asc, NULL) == -1);
+    WL_CHECK(t, wl_bsearch(small_values, WL_COUNTOF(small_values), sizeof(small_values[0]), &key, cmp_int_asc, NULL) == 9);
+    WL_CHECK(t, wl_bsearch(small_values, WL_COUNTOF(small_values), sizeof(small_values[0]), &missing, cmp_int_asc, NULL) == -1);
 }
 
 WL_TEST(test_rng) {

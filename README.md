@@ -166,8 +166,11 @@ That mode adds `<prefix>_init_embedded(wasm_runtime_t* rt)` and `<prefix>_embedd
 Build it with:
 
 ```sh
-make wasm
+cmake -S . -B build
+cmake --build build --target wasm
 ```
+
+On multi-config generators such as Visual Studio, add `--config Debug` or `--config Release` to the build command.
 
 Then inspect or invoke a module directly:
 
@@ -186,23 +189,36 @@ By default the tool binds the built-in WASI stub set so common `wasi_snapshot_pr
 This repo includes test programs for both headers.
 
 ```sh
-make
+cmake -S . -B build
+cmake --build build --target check
 ```
+
+On Visual Studio generators, add the matching `--config <cfg>` flag to build and test targets.
 
 That builds and runs:
 
 - `wl_test` for `wl.h`
 - `wasm_test` for `wasm.h`
 
-The current `Makefile` enables `WL_ENABLE_PLATFORM=1` for the repo test build.
+`WL_ENABLE_PLATFORM` is enabled by default in the CMake build. Pass `-DWL_ENABLE_PLATFORM=OFF` at configure time if you want the portable-only configuration.
+
+If you prefer to build individual tools, the main executable targets are:
+
+- `wasm`
+- `wasm2api`
+- `basic_add_demo`
+- `wl_test`
+- `wasm_test`
 
 There is also an `emcc`-driven harness under [test/README.md](test/README.md) for compiling fixture C files into real `.wasm` blobs and running them through `wasm.h`.
 
 Useful targets:
 
-- `make wasm-emcc-build` — build the native harness runner and compile the fixture `.wasm` files
-- `make wasm-emcc-run` — build and run the `emcc` fixture harness, but do not fail the target if cases fail inside `wasm.h`
-- `make wasm-emcc-run-strict` — same harness, but fail if any fixture fails to load, execute, or match its expected result
+- `cmake --build build --target wasm-emcc-build` — build the native harness runner and compile the fixture `.wasm` files
+- `cmake --build build --target wasm-emcc-run` — run the `emcc` fixture harness and keep the target successful even if fixture cases fail inside `wasm.h`
+- `cmake --build build --target wasm-emcc-run-strict` — run the same harness, but fail if any fixture fails to load, execute, or match its expected result
+
+The legacy `Makefile` targets still exist as thin wrappers around the CMake targets above.
 
 ## Repository Layout
 

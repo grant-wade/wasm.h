@@ -8,7 +8,7 @@ The intent is not to require green results today. It is a regression and compati
 
 - `fixtures/*.c` — source files compiled by `emcc`
 - `runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export
-- `Makefile` — builds the runner, compiles the fixtures, and runs the suite
+- `CMakeLists.txt` — defines the runner, fixture compilation, and CTest integration
 
 The runner binds the built-in WASI stubs automatically, so fixtures that call `printf`/`puts` through `wasi_snapshot_preview1.fd_write` can run without extra setup.
 
@@ -17,28 +17,32 @@ The runner binds the built-in WASI stubs automatically, so fixtures that call `p
 From the repository root:
 
 ```sh
-make wasm-emcc-build
-make wasm-emcc-run
-make wasm-emcc-run-strict
+cmake -S . -B build
+cmake --build build --target wasm-emcc-build
+cmake --build build --target wasm-emcc-run
+cmake --build build --target wasm-emcc-run-strict
 ```
 
 Or directly in this directory:
 
 ```sh
-make
-make run
-make run-strict
+cmake -S .. -B ../build
+cmake --build ../build --target wasm-emcc-build
+cmake --build ../build --target wasm-emcc-run
+cmake --build ../build --target wasm-emcc-run-strict
 ```
 
 `run` always completes and prints a pass/fail summary even if the current interpreter cannot load or execute some modules.
 
 `run-strict` returns a failing exit code if any fixture fails.
 
+If you still use `make`, the local and root Makefiles now forward to these CMake targets instead of maintaining separate build rules.
+
 ## Adding A Fixture
 
 1. Add a new `fixtures/<name>.c` file.
-2. Add `<name>` to `CASES` in [Makefile](Makefile).
-3. Define `<name>_RUNNER_ARGS` and `<name>_EMCCFLAGS` in [Makefile](Makefile).
+2. Add a `wl_add_emcc_case(...)` entry in [test/CMakeLists.txt](test/CMakeLists.txt).
+3. Set the fixture runner arguments and any required `emcc` flags in that entry.
 
 Current fixtures assume a zero-argument export named `wl_case`.
 
