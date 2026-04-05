@@ -784,8 +784,8 @@ static void wasm__store_le64(void* p, uint64_t v) {
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-    WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-    WASM_FEATURE_SIMD | WASM_FEATURE_GC)
+     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
+     WASM_FEATURE_SIMD | WASM_FEATURE_GC)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -2236,11 +2236,12 @@ static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
 
 static wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
                                                       wasm__reader_t* r,
-                                                      wasm_valtype_t* out_type) {
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype) {
     uint32_t count = wasm__read_leb128_u32(r);
 
     if (count != 1) return WASM_ERR_MALFORMED;
-    return wasm__read_valtype(mod, r, out_type, NULL);
+    return wasm__read_valtype(mod, r, out_type, out_reftype);
 }
 
 static int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit) {
@@ -5042,7 +5043,10 @@ typedef struct wasm__blocktype_t {
     uint32_t result_arity;
     const wasm_valtype_t* params;
     const wasm_valtype_t* results;
+    const wasm_reftype_t* param_reftypes;
+    const wasm_reftype_t* result_reftypes;
     wasm_valtype_t inline_result;
+    wasm_reftype_t inline_result_reftype;
 } wasm__blocktype_t;
 static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype);
 
@@ -5052,10 +5056,13 @@ typedef struct wasm__val_frame_t {
     uint8_t opcode;
     uint32_t height;
     const wasm_valtype_t* param_types;
+    const wasm_reftype_t* param_reftypes;
     uint32_t num_params;
     const wasm_valtype_t* result_types;
+    const wasm_reftype_t* result_reftypes;
     uint32_t num_results;
     wasm_valtype_t inline_result;
+    wasm_reftype_t inline_result_reftype;
     int unreachable;
     int seen_else;
     int in_catch;
@@ -5069,6 +5076,7 @@ typedef struct wasm__validator_t {
     const uint8_t* body_start;
     wasm__reader_t r;
     wasm_valtype_t stack[WASM_MAX_STACK];
+    wasm_reftype_t stack_reftypes[WASM_MAX_STACK];
     uint32_t sp;
     wasm__val_frame_t frames[WASM__MAX_LABELS];
     uint32_t fp;
@@ -5102,33 +5110,100 @@ static wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
     return WASM_OK;
 }
 
+static int wasm__validator_get_effective_reftype(wasm_valtype_t type,
+                                                 const wasm_reftype_t* ref_type,
+                                                 wasm_reftype_t* out) {
+    if (!wasm__is_ref_type(type)) {
+        wasm__clear_reftype(out);
+        return 0;
+    }
+
+    if (ref_type && wasm__has_reftype_info(ref_type)) {
+        *out = *ref_type;
+        if (out->type == WASM_TYPE_VOID) out->type = type;
+        return 1;
+    }
+
+    wasm__clear_reftype(out);
+    out->type = type;
+    out->nullable = 1;
+    return 1;
+}
+
 static int wasm__validator_type_matches(const wasm__validator_t* v,
                                         wasm_valtype_t actual,
-                                        wasm_valtype_t expected) {
-    return actual == WASM__TYPE_BOT || expected == WASM__TYPE_BOT ||
-           wasm__is_valtype_subtype(v->mod, actual, expected);
+                                        const wasm_reftype_t* actual_ref,
+                                        wasm_valtype_t expected,
+                                        const wasm_reftype_t* expected_ref) {
+    wasm_reftype_t actual_effective;
+    wasm_reftype_t expected_effective;
+
+    if (actual == WASM__TYPE_BOT || expected == WASM__TYPE_BOT) return 1;
+    if (!wasm__is_valtype_subtype(v->mod, actual, expected)) return 0;
+    if (!wasm__is_ref_type(actual) || !wasm__is_ref_type(expected)) return 1;
+    if (!wasm__validator_get_effective_reftype(actual, actual_ref, &actual_effective) ||
+        !wasm__validator_get_effective_reftype(expected, expected_ref, &expected_effective)) {
+        return 1;
+    }
+    return wasm__reftype_is_subtype(v->mod, &actual_effective, &expected_effective);
 }
 
 static wasm__val_frame_t* wasm__validator_frame(wasm__validator_t* v) {
     return &v->frames[v->fp - 1];
 }
 
+static wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
+                                               const uint8_t* at,
+                                               wasm_valtype_t type,
+                                               const wasm_reftype_t* ref_type);
+static wasm_error_t wasm__validator_push_many_typed(wasm__validator_t* v,
+                                                    const uint8_t* at,
+                                                    const wasm_valtype_t* types,
+                                                    const wasm_reftype_t* reftypes,
+                                                    uint32_t count);
+static wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
+                                                  const uint8_t* at,
+                                                  wasm_valtype_t* out_type,
+                                                  wasm_reftype_t* out_ref_type);
+static wasm_error_t wasm__validator_pop_expect_typed(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     wasm_valtype_t expected,
+                                                     const wasm_reftype_t* expected_ref);
+static wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      const wasm_valtype_t* types,
+                                                      const wasm_reftype_t* reftypes,
+                                                      uint32_t count);
+
 static wasm_error_t wasm__validator_push(wasm__validator_t* v,
                                          const uint8_t* at,
                                          wasm_valtype_t type) {
+    return wasm__validator_push_typed(v, at, type, NULL);
+}
+
+static wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
+                                               const uint8_t* at,
+                                               wasm_valtype_t type,
+                                               const wasm_reftype_t* ref_type) {
     if (v->sp >= WASM_MAX_STACK)
         return wasm__validator_error(v, at, "operand stack overflow");
     v->stack[v->sp++] = type;
+    if (ref_type && wasm__has_reftype_info(ref_type))
+        v->stack_reftypes[v->sp - 1] = *ref_type;
+    else
+        wasm__clear_reftype(&v->stack_reftypes[v->sp - 1]);
     return WASM_OK;
 }
 
-static wasm_error_t wasm__validator_push_many(wasm__validator_t* v,
-                                              const uint8_t* at,
-                                              const wasm_valtype_t* types,
-                                              uint32_t count) {
+static wasm_error_t wasm__validator_push_many_typed(wasm__validator_t* v,
+                                                    const uint8_t* at,
+                                                    const wasm_valtype_t* types,
+                                                    const wasm_reftype_t* reftypes,
+                                                    uint32_t count) {
     uint32_t i;
     for (i = 0; i < count; i++) {
-        wasm_error_t err = wasm__validator_push(v, at, types[i]);
+        const wasm_reftype_t* ref_type = reftypes ? &reftypes[i] : NULL;
+        wasm_error_t err = wasm__validator_push_typed(v, at, types[i], ref_type);
         if (err != WASM_OK) return err;
     }
     return WASM_OK;
@@ -5137,26 +5212,43 @@ static wasm_error_t wasm__validator_push_many(wasm__validator_t* v,
 static wasm_error_t wasm__validator_pop_any(wasm__validator_t* v,
                                             const uint8_t* at,
                                             wasm_valtype_t* out_type) {
+    return wasm__validator_pop_any_typed(v, at, out_type, NULL);
+}
+
+static wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
+                                                  const uint8_t* at,
+                                                  wasm_valtype_t* out_type,
+                                                  wasm_reftype_t* out_ref_type) {
     wasm__val_frame_t* frame = wasm__validator_frame(v);
 
     if (v->sp == frame->height) {
         if (!frame->unreachable)
             return wasm__validator_error(v, at, "stack underflow");
         *out_type = WASM__TYPE_BOT;
+        wasm__clear_reftype(out_ref_type);
         return WASM_OK;
     }
 
     *out_type = v->stack[--v->sp];
+    if (out_ref_type) *out_ref_type = v->stack_reftypes[v->sp];
     return WASM_OK;
 }
 
 static wasm_error_t wasm__validator_pop_expect(wasm__validator_t* v,
                                                const uint8_t* at,
                                                wasm_valtype_t expected) {
+    return wasm__validator_pop_expect_typed(v, at, expected, NULL);
+}
+
+static wasm_error_t wasm__validator_pop_expect_typed(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     wasm_valtype_t expected,
+                                                     const wasm_reftype_t* expected_ref) {
     wasm_valtype_t actual;
-    wasm_error_t err = wasm__validator_pop_any(v, at, &actual);
+    wasm_reftype_t actual_ref;
+    wasm_error_t err = wasm__validator_pop_any_typed(v, at, &actual, &actual_ref);
     if (err != WASM_OK) return err;
-    if (!wasm__validator_type_matches(v, actual, expected)) {
+    if (!wasm__validator_type_matches(v, actual, &actual_ref, expected, expected_ref)) {
         return wasm__validator_error(v, at,
                                      "type mismatch: expected 0x%X, got 0x%X",
                                      (unsigned)expected,
@@ -5165,27 +5257,32 @@ static wasm_error_t wasm__validator_pop_expect(wasm__validator_t* v,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__validator_check_types(wasm__validator_t* v,
-                                                const uint8_t* at,
-                                                const wasm_valtype_t* types,
-                                                uint32_t count) {
+static wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      const wasm_valtype_t* types,
+                                                      const wasm_reftype_t* reftypes,
+                                                      uint32_t count) {
     wasm__val_frame_t* frame = wasm__validator_frame(v);
     uint32_t sp = v->sp;
     uint32_t i;
 
     for (i = 0; i < count; i++) {
         wasm_valtype_t actual;
+        wasm_reftype_t actual_ref;
         wasm_valtype_t expected = types[count - 1 - i];
+        const wasm_reftype_t* expected_ref = reftypes ? &reftypes[count - 1 - i] : NULL;
 
         if (sp == frame->height) {
             if (!frame->unreachable)
                 return wasm__validator_error(v, at, "stack underflow");
             actual = WASM__TYPE_BOT;
+            wasm__clear_reftype(&actual_ref);
         } else {
             actual = v->stack[--sp];
+            actual_ref = v->stack_reftypes[sp];
         }
 
-        if (!wasm__validator_type_matches(v, actual, expected)) {
+        if (!wasm__validator_type_matches(v, actual, &actual_ref, expected, expected_ref)) {
             return wasm__validator_error(v, at,
                                          "type mismatch: expected 0x%X, got 0x%X",
                                          (unsigned)expected,
@@ -5203,25 +5300,37 @@ static void wasm__validator_mark_unreachable(wasm__validator_t* v) {
 }
 
 static int wasm__validator_same_types(const wasm_valtype_t* a,
+                                      const wasm_reftype_t* a_refs,
                                       uint32_t a_count,
                                       const wasm_valtype_t* b,
+                                      const wasm_reftype_t* b_refs,
                                       uint32_t b_count) {
+    wasm_reftype_t a_effective;
+    wasm_reftype_t b_effective;
     uint32_t i;
     if (a_count != b_count) return 0;
     for (i = 0; i < a_count; i++) {
         if (a[i] != b[i]) return 0;
+        if (wasm__is_ref_type(a[i]) || wasm__is_ref_type(b[i])) {
+            wasm__validator_get_effective_reftype(a[i], a_refs ? &a_refs[i] : NULL, &a_effective);
+            wasm__validator_get_effective_reftype(b[i], b_refs ? &b_refs[i] : NULL, &b_effective);
+            if (!wasm__reftype_equal(&a_effective, &b_effective)) return 0;
+        }
     }
     return 1;
 }
 
 static void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
                                              const wasm_valtype_t** out_types,
+                                             const wasm_reftype_t** out_reftypes,
                                              uint32_t* out_count) {
     if (frame->opcode == 0x03) {
         *out_types = frame->param_types;
+        *out_reftypes = frame->param_reftypes;
         *out_count = frame->num_params;
     } else {
         *out_types = frame->result_types;
+        *out_reftypes = frame->result_reftypes;
         *out_count = frame->num_results;
     }
 }
@@ -5230,8 +5339,10 @@ static wasm_error_t wasm__validator_check_tail_results(wasm__validator_t* v,
                                                        const uint8_t* at,
                                                        const wasm_functype_t* caller_type,
                                                        const wasm_functype_t* callee_type) {
-    if (!wasm__validator_same_types(caller_type->results, caller_type->num_results,
-                                    callee_type->results, callee_type->num_results)) {
+    if (!wasm__validator_same_types(caller_type->results, caller_type->result_reftypes,
+                                    caller_type->num_results,
+                                    callee_type->results, callee_type->result_reftypes,
+                                    callee_type->num_results)) {
         return wasm__validator_error(v, at,
                                      "tail call results must match the enclosing function results");
     }
@@ -5246,7 +5357,10 @@ static wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
     if (!frame->unreachable) {
         if (v->sp != frame->height + frame->num_results)
             return wasm__validator_error(v, at, "try arm leaves wrong stack height");
-        err = wasm__validator_check_types(v, at, frame->result_types, frame->num_results);
+        err = wasm__validator_check_types_typed(v, at,
+                                                frame->result_types,
+                                                frame->result_reftypes,
+                                                frame->num_results);
         if (err != WASM_OK) return err;
     }
 
@@ -5329,8 +5443,9 @@ static wasm_error_t wasm__validator_pop_three_i32(wasm__validator_t* v,
 
 static wasm_error_t wasm__validator_read_typed_select(wasm__validator_t* v,
                                                       const uint8_t* at,
-                                                      wasm_valtype_t* out_type) {
-    wasm_error_t err = wasm__read_typed_select_immediate(v->mod, &v->r, out_type);
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype) {
+    wasm_error_t err = wasm__read_typed_select_immediate(v->mod, &v->r, out_type, out_reftype);
 
     if (err != WASM_OK)
         return wasm__validator_error(v, at, "typed select requires exactly one value type");
@@ -5342,9 +5457,116 @@ static wasm_valtype_t wasm__field_stack_type(const wasm_fieldtype_t* field) {
     return field->storage.of.valtype;
 }
 
+static const wasm_reftype_t* wasm__field_stack_reftype(const wasm_fieldtype_t* field) {
+    if (field->storage.kind != WASM_STORAGE_VALTYPE) return NULL;
+    if (!wasm__is_ref_type(field->storage.of.valtype)) return NULL;
+    return &field->storage.ref_type;
+}
+
 static int wasm__field_is_reference_type(const wasm_fieldtype_t* field) {
     return field->storage.kind == WASM_STORAGE_VALTYPE &&
            wasm__is_ref_type(field->storage.of.valtype);
+}
+
+static wasm_error_t wasm__validator_make_typeidx_reftype(wasm__validator_t* v,
+                                                         const uint8_t* at,
+                                                         uint32_t type_idx,
+                                                         int nullable,
+                                                         wasm_valtype_t* out_type,
+                                                         wasm_reftype_t* out_reftype) {
+    wasm_error_t err;
+
+    if (type_idx >= v->mod->num_types)
+        return wasm__validator_error(v, at, "type index %u out of range", (unsigned)type_idx);
+
+    wasm__clear_reftype(out_reftype);
+    out_reftype->has_type_index = 1;
+    out_reftype->type_index = type_idx;
+    out_reftype->nullable = nullable;
+    err = wasm__resolve_reftype(v->mod, out_reftype);
+    if (err != WASM_OK)
+        return wasm__validator_error(v, at, "type index %u does not name a reference type",
+                                     (unsigned)type_idx);
+    if (out_type) *out_type = out_reftype->type;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__validator_read_heap_reftype(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      int nullable,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype) {
+    wasm_error_t err;
+
+    wasm__clear_reftype(out_reftype);
+    out_reftype->nullable = nullable;
+    err = wasm__read_heaptype(v->mod, &v->r, out_reftype);
+    if (err != WASM_OK) return wasm__validator_error(v, at, "invalid heaptype");
+    if (out_type) *out_type = out_reftype->type ? out_reftype->type : WASM_TYPE_ANYREF;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__validator_read_cast_flag_reftype(wasm__validator_t* v,
+                                                           const uint8_t* at,
+                                                           uint8_t flags,
+                                                           uint8_t bit,
+                                                           wasm_valtype_t* out_type,
+                                                           wasm_reftype_t* out_reftype) {
+    return wasm__validator_read_heap_reftype(v, at, (flags & (uint8_t)(1u << bit)) != 0,
+                                             out_type, out_reftype);
+}
+
+static wasm_error_t wasm__validator_pop_ref_supertype(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      wasm_valtype_t expected_type,
+                                                      const wasm_reftype_t* expected_ref,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_ref) {
+    wasm_reftype_t actual_effective;
+    wasm_error_t err = wasm__validator_pop_any_typed(v, at, out_type, out_ref);
+
+    if (err != WASM_OK) return err;
+    if (*out_type == WASM__TYPE_BOT) return WASM_OK;
+    if (!wasm__is_ref_type(*out_type))
+        return wasm__validator_error(v, at, "instruction requires a reference operand");
+    if (!wasm__validator_get_effective_reftype(*out_type, out_ref, &actual_effective) ||
+        !wasm__reftype_is_subtype(v->mod, expected_ref, &actual_effective) ||
+        !wasm__is_valtype_subtype(v->mod, expected_type, *out_type)) {
+        return wasm__validator_error(v, at,
+                                     "type mismatch: expected 0x%X, got 0x%X",
+                                     (unsigned)expected_type,
+                                     (unsigned)*out_type);
+    }
+    return WASM_OK;
+}
+
+static void wasm__validator_reference_difference(const wasm_reftype_t* source,
+                                                 const wasm_reftype_t* target,
+                                                 wasm_valtype_t* out_type,
+                                                 wasm_reftype_t* out_ref) {
+    wasm_reftype_t diff = *source;
+
+    if (source->nullable && !target->nullable &&
+        source->has_type_index == target->has_type_index &&
+        source->type_index == target->type_index &&
+        source->type == target->type) {
+        diff.has_type_index = 0;
+        diff.nullable = 1;
+        switch (source->type) {
+            case WASM_TYPE_FUNCREF:
+                diff.type = WASM_TYPE_NOFUNC;
+                break;
+            case WASM_TYPE_EXTERNREF:
+                diff.type = WASM_TYPE_NOEXTERN;
+                break;
+            default:
+                diff.type = WASM_TYPE_NONE;
+                break;
+        }
+    }
+
+    if (out_type) *out_type = diff.type;
+    if (out_ref) *out_ref = diff;
 }
 
 static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint8_t* at) {
@@ -5358,6 +5580,8 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
         case 0x01: {
             uint32_t type_idx = wasm__read_leb128_u32(&v->r);
             const wasm_structtype_t* st = wasm__module_const_structtype(v->mod, type_idx);
+            wasm_valtype_t result_type;
+            wasm_reftype_t result_ref;
             uint32_t i;
 
             if (!st)
@@ -5365,11 +5589,15 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                                              (unsigned)type_idx);
             if (subop == 0x00) {
                 for (i = st->num_fields; i > 0; i--) {
-                    err = wasm__validator_pop_expect(v, at, wasm__field_stack_type(&st->fields[i - 1]));
+                    err = wasm__validator_pop_expect_typed(v, at,
+                                                           wasm__field_stack_type(&st->fields[i - 1]),
+                                                           wasm__field_stack_reftype(&st->fields[i - 1]));
                     if (err != WASM_OK) return err;
                 }
             }
-            return wasm__validator_push(v, at, WASM_TYPE_STRUCTREF);
+            err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 0, &result_type, &result_ref);
+            if (err != WASM_OK) return err;
+            return wasm__validator_push_typed(v, at, result_type, &result_ref);
         }
         case 0x02:
         case 0x03:
@@ -5379,12 +5607,16 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
             uint32_t field_idx = wasm__read_leb128_u32(&v->r);
             const wasm_structtype_t* st = wasm__module_const_structtype(v->mod, type_idx);
             const wasm_fieldtype_t* field;
+            wasm_valtype_t struct_ref_type;
+            wasm_reftype_t struct_ref;
 
             if (!st)
                 return wasm__validator_error(v, at, "struct instruction type index %u is not a struct type",
                                              (unsigned)type_idx);
             if (field_idx >= st->num_fields)
                 return wasm__validator_error(v, at, "struct field index %u out of range", (unsigned)field_idx);
+            err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 1, &struct_ref_type, &struct_ref);
+            if (err != WASM_OK) return err;
 
             field = &st->fields[field_idx];
             if (subop == 0x03 || subop == 0x04) {
@@ -5397,14 +5629,18 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
             if (subop == 0x05) {
                 if (!field->is_mutable)
                     return wasm__validator_error(v, at, "struct.set requires a mutable field");
-                err = wasm__validator_pop_expect(v, at, wasm__field_stack_type(field));
+                err = wasm__validator_pop_expect_typed(v, at,
+                                                       wasm__field_stack_type(field),
+                                                       wasm__field_stack_reftype(field));
                 if (err != WASM_OK) return err;
-                return wasm__validator_pop_expect(v, at, WASM_TYPE_STRUCTREF);
+                return wasm__validator_pop_expect_typed(v, at, struct_ref_type, &struct_ref);
             }
 
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_STRUCTREF);
+            err = wasm__validator_pop_expect_typed(v, at, struct_ref_type, &struct_ref);
             if (err != WASM_OK) return err;
-            return wasm__validator_push(v, at, wasm__field_stack_type(field));
+            return wasm__validator_push_typed(v, at,
+                                              wasm__field_stack_type(field),
+                                              wasm__field_stack_reftype(field));
         }
         case 0x06:
         case 0x07:
@@ -5422,32 +5658,41 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
             uint32_t type_idx = wasm__read_leb128_u32(&v->r);
             const wasm_arraytype_t* atype = wasm__module_const_arraytype(v->mod, type_idx);
             wasm_valtype_t elem_type;
+            const wasm_reftype_t* elem_ref_type;
+            wasm_valtype_t array_ref_type;
+            wasm_reftype_t array_ref;
 
             if (!atype)
                 return wasm__validator_error(v, at, "array instruction type index %u is not an array type",
                                              (unsigned)type_idx);
+            err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 1, &array_ref_type, &array_ref);
+            if (err != WASM_OK) return err;
 
             elem_type = wasm__field_stack_type(&atype->field);
+            elem_ref_type = wasm__field_stack_reftype(&atype->field);
             switch (subop) {
                 case 0x06:
-                    err = wasm__validator_pop_expect(v, at, elem_type);
+                    err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_push(v, at, WASM_TYPE_ARRAYREF);
+                    array_ref.nullable = 0;
+                    return wasm__validator_push_typed(v, at, array_ref_type, &array_ref);
                 case 0x07:
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_push(v, at, WASM_TYPE_ARRAYREF);
+                    array_ref.nullable = 0;
+                    return wasm__validator_push_typed(v, at, array_ref_type, &array_ref);
                 case 0x08: {
                     uint32_t count = wasm__read_leb128_u32(&v->r);
                     uint32_t i;
 
                     for (i = count; i > 0; i--) {
-                        err = wasm__validator_pop_expect(v, at, elem_type);
+                        err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                         if (err != WASM_OK) return err;
                     }
-                    return wasm__validator_push(v, at, WASM_TYPE_ARRAYREF);
+                    array_ref.nullable = 0;
+                    return wasm__validator_push_typed(v, at, array_ref_type, &array_ref);
                 }
                 case 0x09: {
                     uint32_t data_idx = wasm__read_leb128_u32(&v->r);
@@ -5461,7 +5706,8 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_push(v, at, WASM_TYPE_ARRAYREF);
+                    array_ref.nullable = 0;
+                    return wasm__validator_push_typed(v, at, array_ref_type, &array_ref);
                 }
                 case 0x0A: {
                     uint32_t elem_idx = wasm__read_leb128_u32(&v->r);
@@ -5470,16 +5716,19 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                         return wasm__validator_error(v, at, "element segment %u out of range", (unsigned)elem_idx);
                     if (!wasm__field_is_reference_type(&atype->field))
                         return wasm__validator_error(v, at, "array.new_elem requires a reference element type");
-                    if (!wasm__is_valtype_subtype(v->mod,
-                                                  v->mod->elem_segments[elem_idx].elem_type,
-                                                  atype->field.storage.of.valtype)) {
+                    if (!wasm__validator_type_matches(v,
+                                                      v->mod->elem_segments[elem_idx].elem_type,
+                                                      &v->mod->elem_segments[elem_idx].elem_ref_type,
+                                                      atype->field.storage.of.valtype,
+                                                      &atype->field.storage.ref_type)) {
                         return wasm__validator_error(v, at, "array.new_elem type mismatch");
                     }
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_push(v, at, WASM_TYPE_ARRAYREF);
+                    array_ref.nullable = 0;
+                    return wasm__validator_push_typed(v, at, array_ref_type, &array_ref);
                 }
                 case 0x0B:
                 case 0x0C:
@@ -5490,34 +5739,39 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                         return wasm__validator_error(v, at, "array.get requires an unpacked element type");
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    err = wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    err = wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_push(v, at, elem_type);
+                    return wasm__validator_push_typed(v, at, elem_type, elem_ref_type);
                 case 0x0E:
                     if (!atype->field.is_mutable)
                         return wasm__validator_error(v, at, "array.set requires a mutable element type");
-                    err = wasm__validator_pop_expect(v, at, elem_type);
+                    err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    return wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                 case 0x10:
                     if (!atype->field.is_mutable)
                         return wasm__validator_error(v, at, "array.fill requires a mutable element type");
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    err = wasm__validator_pop_expect(v, at, elem_type);
+                    err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    return wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                 case 0x11: {
                     uint32_t src_type_idx = wasm__read_leb128_u32(&v->r);
                     const wasm_arraytype_t* src_type = wasm__module_const_arraytype(v->mod, src_type_idx);
+                    wasm_valtype_t src_array_ref_type;
+                    wasm_reftype_t src_array_ref;
 
                     if (!src_type)
                         return wasm__validator_error(v, at, "array.copy source type index %u is not an array type",
                                                      (unsigned)src_type_idx);
+                    err = wasm__validator_make_typeidx_reftype(v, at, src_type_idx, 1,
+                                                               &src_array_ref_type, &src_array_ref);
+                    if (err != WASM_OK) return err;
                     if (!atype->field.is_mutable)
                         return wasm__validator_error(v, at, "array.copy destination must be mutable");
                     if (!wasm__is_fieldtype_subtype(v->mod, &src_type->field, &atype->field))
@@ -5526,11 +5780,11 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    err = wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    err = wasm__validator_pop_expect_typed(v, at, src_array_ref_type, &src_array_ref);
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    return wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                 }
                 case 0x12: {
                     uint32_t data_idx = wasm__read_leb128_u32(&v->r);
@@ -5548,7 +5802,7 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    return wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                 }
                 case 0x13: {
                     uint32_t elem_idx = wasm__read_leb128_u32(&v->r);
@@ -5559,9 +5813,11 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                         return wasm__validator_error(v, at, "array.init_elem requires a mutable element type");
                     if (!wasm__field_is_reference_type(&atype->field))
                         return wasm__validator_error(v, at, "array.init_elem requires a reference element type");
-                    if (!wasm__is_valtype_subtype(v->mod,
-                                                  v->mod->elem_segments[elem_idx].elem_type,
-                                                  atype->field.storage.of.valtype)) {
+                    if (!wasm__validator_type_matches(v,
+                                                      v->mod->elem_segments[elem_idx].elem_type,
+                                                      &v->mod->elem_segments[elem_idx].elem_ref_type,
+                                                      atype->field.storage.of.valtype,
+                                                      &atype->field.storage.ref_type)) {
                         return wasm__validator_error(v, at, "array.init_elem type mismatch");
                     }
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
@@ -5570,33 +5826,160 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                     if (err != WASM_OK) return err;
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
-                    return wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+                    return wasm__validator_pop_expect_typed(v, at, array_ref_type, &array_ref);
                 }
                 default:
                     return wasm__validator_error(v, at, "unsupported array GC opcode 0xFB 0x%X", (unsigned)subop);
             }
         }
-        case 0x0F:
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_ARRAYREF);
+        case 0x0F: {
+            wasm_reftype_t array_ref;
+            array_ref.type = WASM_TYPE_ARRAYREF;
+            array_ref.nullable = 1;
+            err = wasm__validator_pop_expect_typed(v, at, WASM_TYPE_ARRAYREF, &array_ref);
             if (err != WASM_OK) return err;
             return wasm__validator_push(v, at, WASM_TYPE_I32);
-        case 0x1A:
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_EXTERNREF);
+        }
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17: {
+            wasm_valtype_t target_type;
+            wasm_reftype_t target_ref;
+            wasm_valtype_t actual_type;
+            wasm_reftype_t actual_ref;
+
+            err = wasm__validator_read_heap_reftype(v, at, (subop == 0x15 || subop == 0x17),
+                                                    &target_type, &target_ref);
             if (err != WASM_OK) return err;
-            return wasm__validator_push(v, at, WASM_TYPE_ANYREF);
-        case 0x1B:
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_ANYREF);
+            err = wasm__validator_pop_ref_supertype(v, at,
+                                                    target_type, &target_ref,
+                                                    &actual_type, &actual_ref);
             if (err != WASM_OK) return err;
-            return wasm__validator_push(v, at, WASM_TYPE_EXTERNREF);
-        case 0x1C:
+            if (subop == 0x14 || subop == 0x15)
+                return wasm__validator_push(v, at, WASM_TYPE_I32);
+            return wasm__validator_push_typed(v, at, target_type, &target_ref);
+        }
+        case 0x18:
+        case 0x19: {
+            uint8_t flags = wasm__read_u8(&v->r);
+            uint32_t depth = wasm__read_leb128_u32(&v->r);
+            const wasm__val_frame_t* target_frame;
+            const wasm_valtype_t* branch_types;
+            const wasm_reftype_t* branch_reftypes;
+            uint32_t branch_count;
+            wasm_valtype_t source_type;
+            wasm_reftype_t source_ref;
+            wasm_valtype_t target_type;
+            wasm_reftype_t target_ref;
+            wasm_valtype_t diff_type;
+            wasm_reftype_t diff_ref;
+            wasm_valtype_t actual_type;
+            wasm_reftype_t actual_ref;
+
+            if ((flags & ~0x03u) != 0)
+                return wasm__validator_error(v, at, "invalid br_on_cast flags 0x%X", (unsigned)flags);
+            if (depth >= v->fp)
+                return wasm__validator_error(v, at, "branch depth %u out of range", (unsigned)depth);
+            err = wasm__validator_read_cast_flag_reftype(v, at, flags, 0, &source_type, &source_ref);
+            if (err != WASM_OK) return err;
+            err = wasm__validator_read_cast_flag_reftype(v, at, flags, 1, &target_type, &target_ref);
+            if (err != WASM_OK) return err;
+            if (!wasm__reftype_is_subtype(v->mod, &target_ref, &source_ref))
+                return wasm__validator_error(v, at, "br_on_cast target type must be a subtype of source type");
+            err = wasm__validator_pop_ref_supertype(v, at,
+                                                    source_type, &source_ref,
+                                                    &actual_type, &actual_ref);
+            if (err != WASM_OK) return err;
+
+            target_frame = &v->frames[v->fp - 1 - depth];
+            wasm__validator_branch_signature(target_frame, &branch_types, &branch_reftypes, &branch_count);
+            if (branch_count == 0)
+                return wasm__validator_error(v, at, "br_on_cast target must accept the cast operand");
+            err = wasm__validator_check_types_typed(v, at,
+                                                    branch_types,
+                                                    branch_reftypes,
+                                                    branch_count - 1);
+            if (err != WASM_OK) return err;
+
+            wasm__validator_reference_difference(&source_ref, &target_ref, &diff_type, &diff_ref);
+            if (subop == 0x18) {
+                if (!wasm__validator_type_matches(v,
+                                                  target_type, &target_ref,
+                                                  branch_types[branch_count - 1],
+                                                  branch_reftypes ? &branch_reftypes[branch_count - 1] : NULL)) {
+                    return wasm__validator_error(v, at, "br_on_cast target label type mismatch");
+                }
+                return wasm__validator_push_typed(v, at, diff_type, &diff_ref);
+            }
+
+            if (!wasm__validator_type_matches(v,
+                                              diff_type, &diff_ref,
+                                              branch_types[branch_count - 1],
+                                              branch_reftypes ? &branch_reftypes[branch_count - 1] : NULL)) {
+                return wasm__validator_error(v, at, "br_on_cast_fail target label type mismatch");
+            }
+            return wasm__validator_push_typed(v, at, target_type, &target_ref);
+        }
+        case 0x1A: {
+            wasm_valtype_t actual_type;
+            wasm_reftype_t actual_ref;
+            wasm_reftype_t expected_ref;
+            wasm_reftype_t pushed_ref;
+
+            expected_ref.type = WASM_TYPE_EXTERNREF;
+            expected_ref.nullable = 1;
+            err = wasm__validator_pop_ref_supertype(v, at,
+                                                    WASM_TYPE_EXTERNREF, &expected_ref,
+                                                    &actual_type, &actual_ref);
+            if (err != WASM_OK) return err;
+            wasm__clear_reftype(&pushed_ref);
+            if (actual_type != WASM__TYPE_BOT) {
+                wasm__validator_get_effective_reftype(actual_type, &actual_ref, &pushed_ref);
+                pushed_ref.type = WASM_TYPE_ANYREF;
+            }
+            return wasm__validator_push_typed(v, at, WASM_TYPE_ANYREF, &pushed_ref);
+        }
+        case 0x1B: {
+            wasm_valtype_t actual_type;
+            wasm_reftype_t actual_ref;
+            wasm_reftype_t expected_ref;
+            wasm_reftype_t pushed_ref;
+
+            expected_ref.type = WASM_TYPE_ANYREF;
+            expected_ref.nullable = 1;
+            err = wasm__validator_pop_ref_supertype(v, at,
+                                                    WASM_TYPE_ANYREF, &expected_ref,
+                                                    &actual_type, &actual_ref);
+            if (err != WASM_OK) return err;
+            wasm__clear_reftype(&pushed_ref);
+            if (actual_type != WASM__TYPE_BOT) {
+                wasm__validator_get_effective_reftype(actual_type, &actual_ref, &pushed_ref);
+                pushed_ref.type = WASM_TYPE_EXTERNREF;
+            }
+            return wasm__validator_push_typed(v, at, WASM_TYPE_EXTERNREF, &pushed_ref);
+        }
+        case 0x1C: {
+            wasm_reftype_t i31_ref;
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
-            return wasm__validator_push(v, at, WASM_TYPE_I31REF);
+            i31_ref.type = WASM_TYPE_I31REF;
+            i31_ref.nullable = 0;
+            i31_ref.has_type_index = 0;
+            i31_ref.type_index = 0;
+            return wasm__validator_push_typed(v, at, WASM_TYPE_I31REF, &i31_ref);
+        }
         case 0x1D:
-        case 0x1E:
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_I31REF);
+        case 0x1E: {
+            wasm_reftype_t i31_ref;
+            i31_ref.type = WASM_TYPE_I31REF;
+            i31_ref.nullable = 1;
+            i31_ref.has_type_index = 0;
+            i31_ref.type_index = 0;
+            err = wasm__validator_pop_expect_typed(v, at, WASM_TYPE_I31REF, &i31_ref);
             if (err != WASM_OK) return err;
             return wasm__validator_push(v, at, WASM_TYPE_I32);
+        }
         default:
             return wasm__validator_error(v, at, "unsupported GC opcode 0xFB 0x%X", (unsigned)subop);
     }
@@ -6197,7 +6580,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
                 return wasm__validator_error(v, at, "table.init index out of range");
             segment = &v->mod->elem_segments[elem_idx];
             table = &v->mod->tables[table_idx];
-            if (!wasm__is_valtype_subtype(v->mod, segment->elem_type, table->reftype))
+            if (!wasm__validator_type_matches(v,
+                                              segment->elem_type,
+                                              &segment->elem_ref_type,
+                                              table->reftype,
+                                              &table->reftype_info))
                 return wasm__validator_error(v, at, "table.init type mismatch");
             return wasm__validator_pop_three_i32(v, at);
         }
@@ -6216,9 +6603,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             if (err != WASM_OK) return err;
             if (dst_table_idx >= v->mod->num_tables || src_table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "table.copy index out of range");
-            if (!wasm__is_valtype_subtype(v->mod,
-                                          v->mod->tables[src_table_idx].reftype,
-                                          v->mod->tables[dst_table_idx].reftype))
+            if (!wasm__validator_type_matches(v,
+                                              v->mod->tables[src_table_idx].reftype,
+                                              &v->mod->tables[src_table_idx].reftype_info,
+                                              v->mod->tables[dst_table_idx].reftype,
+                                              &v->mod->tables[dst_table_idx].reftype_info))
                 return wasm__validator_error(v, at, "table.copy type mismatch");
             return wasm__validator_pop_three_i32(v, at);
         }
@@ -6232,7 +6621,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             table = &v->mod->tables[table_idx];
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
-            err = wasm__validator_pop_expect(v, at, table->reftype);
+            err = wasm__validator_pop_expect_typed(v, at, table->reftype, &table->reftype_info);
             if (err != WASM_OK) return err;
             return wasm__validator_push(v, at, WASM_TYPE_I32);
         }
@@ -6254,7 +6643,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             table = &v->mod->tables[table_idx];
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
-            err = wasm__validator_pop_expect(v, at, table->reftype);
+            err = wasm__validator_pop_expect_typed(v, at, table->reftype, &table->reftype_info);
             if (err != WASM_OK) return err;
             return wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
         }
@@ -6285,9 +6674,12 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     v.frames[0].opcode = 0xFF;
     v.frames[0].height = 0;
     v.frames[0].param_types = NULL;
+    v.frames[0].param_reftypes = NULL;
     v.frames[0].num_params = 0;
     v.frames[0].result_types = ft->results;
+    v.frames[0].result_reftypes = ft->result_reftypes;
     v.frames[0].num_results = ft->num_results;
+    wasm__clear_reftype(&v.frames[0].inline_result_reftype);
     v.frames[0].in_catch = 0;
     v.frames[0].seen_catch_all = 0;
     v.frames[0].seen_delegate = 0;
@@ -6311,19 +6703,28 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
 
                 err = wasm__read_blocktype(mod, &v.r, &blocktype);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
-                err = wasm__validator_check_types(&v, at, blocktype.params, blocktype.param_arity);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        blocktype.params,
+                                                        blocktype.param_reftypes,
+                                                        blocktype.param_arity);
                 if (err != WASM_OK) return err;
                 if (v.fp >= WASM__MAX_LABELS)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
                 v.frames[v.fp].param_types = blocktype.params;
+                v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
                 v.frames[v.fp].inline_result = blocktype.inline_result;
+                v.frames[v.fp].inline_result_reftype = blocktype.inline_result_reftype;
                 v.frames[v.fp].result_types =
                     (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
                         ? &v.frames[v.fp].inline_result
                         : blocktype.results;
+                v.frames[v.fp].result_reftypes =
+                    (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
+                        ? &v.frames[v.fp].inline_result_reftype
+                        : blocktype.result_reftypes;
                 v.frames[v.fp].num_results = blocktype.result_arity;
                 v.frames[v.fp].unreachable = 0;
                 v.frames[v.fp].seen_else = 0;
@@ -6341,19 +6742,28 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 err = wasm__read_blocktype(mod, &v.r, &blocktype);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
-                err = wasm__validator_check_types(&v, at, blocktype.params, blocktype.param_arity);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        blocktype.params,
+                                                        blocktype.param_reftypes,
+                                                        blocktype.param_arity);
                 if (err != WASM_OK) return err;
                 if (v.fp >= WASM__MAX_LABELS)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
                 v.frames[v.fp].param_types = blocktype.params;
+                v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
                 v.frames[v.fp].inline_result = blocktype.inline_result;
+                v.frames[v.fp].inline_result_reftype = blocktype.inline_result_reftype;
                 v.frames[v.fp].result_types =
                     (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
                         ? &v.frames[v.fp].inline_result
                         : blocktype.results;
+                v.frames[v.fp].result_reftypes =
+                    (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
+                        ? &v.frames[v.fp].inline_result_reftype
+                        : blocktype.result_reftypes;
                 v.frames[v.fp].num_results = blocktype.result_arity;
                 v.frames[v.fp].unreachable = 0;
                 v.frames[v.fp].seen_else = 0;
@@ -6375,11 +6785,17 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!frame->unreachable) {
                     if (v.sp != frame->height + frame->num_results)
                         return wasm__validator_error(&v, at, "then branch leaves wrong stack height");
-                    err = wasm__validator_check_types(&v, at, frame->result_types, frame->num_results);
+                    err = wasm__validator_check_types_typed(&v, at,
+                                                            frame->result_types,
+                                                            frame->result_reftypes,
+                                                            frame->num_results);
                     if (err != WASM_OK) return err;
                 }
                 v.sp = frame->height;
-                err = wasm__validator_push_many(&v, at, frame->param_types, frame->num_params);
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      frame->param_types,
+                                                      frame->param_reftypes,
+                                                      frame->num_params);
                 if (err != WASM_OK) return err;
                 frame->unreachable = 0;
                 frame->seen_else = 1;
@@ -6392,19 +6808,28 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 err = wasm__read_blocktype(mod, &v.r, &blocktype);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
-                err = wasm__validator_check_types(&v, at, blocktype.params, blocktype.param_arity);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        blocktype.params,
+                                                        blocktype.param_reftypes,
+                                                        blocktype.param_arity);
                 if (err != WASM_OK) return err;
                 if (v.fp >= WASM__MAX_LABELS)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
                 v.frames[v.fp].height = v.sp - blocktype.param_arity;
                 v.frames[v.fp].param_types = blocktype.params;
+                v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
                 v.frames[v.fp].inline_result = blocktype.inline_result;
+                v.frames[v.fp].inline_result_reftype = blocktype.inline_result_reftype;
                 v.frames[v.fp].result_types =
                     (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
                         ? &v.frames[v.fp].inline_result
                         : blocktype.results;
+                v.frames[v.fp].result_reftypes =
+                    (blocktype.result_arity == 1 && blocktype.results == &blocktype.inline_result)
+                        ? &v.frames[v.fp].inline_result_reftype
+                        : blocktype.result_reftypes;
                 v.frames[v.fp].num_results = blocktype.result_arity;
                 v.frames[v.fp].unreachable = 0;
                 v.frames[v.fp].seen_else = 0;
@@ -6435,7 +6860,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                  (unsigned)tag_index);
                 err = wasm__validator_finish_try_arm(&v, at, frame);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_push_many(&v, at, tag_type->params, tag_type->num_params);
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      tag_type->params,
+                                                      tag_type->param_reftypes,
+                                                      tag_type->num_params);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6451,7 +6879,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!tag_type)
                     return wasm__validator_error(&v, at, "tag %u does not reference a function type",
                                                  (unsigned)tag_index);
-                err = wasm__validator_check_types(&v, at, tag_type->params, tag_type->num_params);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        tag_type->params,
+                                                        tag_type->param_reftypes,
+                                                        tag_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= tag_type->num_params;
                 wasm__validator_mark_unreachable(&v);
@@ -6479,20 +6910,28 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     return wasm__validator_error(&v, at, "unexpected end");
                 frame = v.frames[v.fp - 1];
                 if (frame.opcode == 0x04 && !frame.seen_else &&
-                    !wasm__validator_same_types(frame.param_types, frame.num_params,
-                                                frame.result_types, frame.num_results)) {
+                    !wasm__validator_same_types(frame.param_types, frame.param_reftypes,
+                                                frame.num_params,
+                                                frame.result_types, frame.result_reftypes,
+                                                frame.num_results)) {
                     return wasm__validator_error(&v, at,
                                                  "if without else requires param and result types to match");
                 }
                 if (!frame.unreachable) {
                     if (v.sp != frame.height + frame.num_results)
                         return wasm__validator_error(&v, at, "block leaves wrong stack height");
-                    err = wasm__validator_check_types(&v, at, frame.result_types, frame.num_results);
+                    err = wasm__validator_check_types_typed(&v, at,
+                                                            frame.result_types,
+                                                            frame.result_reftypes,
+                                                            frame.num_results);
                     if (err != WASM_OK) return err;
                 }
                 v.sp = frame.height;
                 v.fp--;
-                err = wasm__validator_push_many(&v, at, frame.result_types, frame.num_results);
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      frame.result_types,
+                                                      frame.result_reftypes,
+                                                      frame.num_results);
                 if (err != WASM_OK) return err;
                 if (v.fp == 0) {
                     if (v.r.ptr != v.r.end)
@@ -6506,6 +6945,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t depth = wasm__read_leb128_u32(&v.r);
                 const wasm__val_frame_t* target;
                 const wasm_valtype_t* branch_types;
+                const wasm_reftype_t* branch_reftypes;
                 uint32_t branch_count;
 
                 if (op == 0x0D) {
@@ -6515,8 +6955,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (depth >= v.fp)
                     return wasm__validator_error(&v, at, "branch depth %u out of range", (unsigned)depth);
                 target = &v.frames[v.fp - 1 - depth];
-                wasm__validator_branch_signature(target, &branch_types, &branch_count);
-                err = wasm__validator_check_types(&v, at, branch_types, branch_count);
+                wasm__validator_branch_signature(target, &branch_types, &branch_reftypes, &branch_count);
+                err = wasm__validator_check_types_typed(&v, at, branch_types, branch_reftypes, branch_count);
                 if (err != WASM_OK) return err;
                 if (op == 0x0C) wasm__validator_mark_unreachable(&v);
                 break;
@@ -6525,6 +6965,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t count = wasm__read_leb128_u32(&v.r);
                 uint32_t first_depth = UINT32_MAX;
                 const wasm_valtype_t* branch_types = NULL;
+                const wasm_reftype_t* branch_reftypes = NULL;
                 uint32_t branch_count = 0;
                 uint32_t i;
 
@@ -6533,29 +6974,41 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 for (i = 0; i <= count; i++) {
                     uint32_t depth = wasm__read_leb128_u32(&v.r);
                     const wasm_valtype_t* candidate_types;
+                    const wasm_reftype_t* candidate_reftypes;
                     uint32_t candidate_count;
 
                     if (depth >= v.fp)
                         return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
-                    wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth], &candidate_types, &candidate_count);
+                    wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
+                                                     &candidate_types,
+                                                     &candidate_reftypes,
+                                                     &candidate_count);
                     if (i == 0) {
                         first_depth = depth;
                         branch_types = candidate_types;
+                        branch_reftypes = candidate_reftypes;
                         branch_count = candidate_count;
-                    } else if (!wasm__validator_same_types(branch_types, branch_count,
-                                                           candidate_types, candidate_count)) {
+                    } else if (!wasm__validator_same_types(branch_types, branch_reftypes, branch_count,
+                                                           candidate_types, candidate_reftypes,
+                                                           candidate_count)) {
                         return wasm__validator_error(&v, at,
                                                      "br_table targets do not share the same signature");
                     }
                 }
                 (void)first_depth;
-                err = wasm__validator_check_types(&v, at, branch_types, branch_count);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        branch_types,
+                                                        branch_reftypes,
+                                                        branch_count);
                 if (err != WASM_OK) return err;
                 wasm__validator_mark_unreachable(&v);
                 break;
             }
             case 0x0F:
-                err = wasm__validator_check_types(&v, at, ft->results, ft->num_results);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        ft->results,
+                                                        ft->result_reftypes,
+                                                        ft->num_results);
                 if (err != WASM_OK) return err;
                 wasm__validator_mark_unreachable(&v);
                 break;
@@ -6568,10 +7021,16 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!callee_type)
                     return wasm__validator_error(&v, at, "call target %u does not use a function type",
                                                  (unsigned)callee);
-                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        callee_type->params,
+                                                        callee_type->param_reftypes,
+                                                        callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
-                err = wasm__validator_push_many(&v, at, callee_type->results, callee_type->num_results);
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      callee_type->results,
+                                                      callee_type->result_reftypes,
+                                                      callee_type->num_results);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6595,10 +7054,16 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                  (unsigned)type_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        callee_type->params,
+                                                        callee_type->param_reftypes,
+                                                        callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
-                err = wasm__validator_push_many(&v, at, callee_type->results, callee_type->num_results);
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      callee_type->results,
+                                                      callee_type->result_reftypes,
+                                                      callee_type->num_results);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6614,7 +7079,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!callee_type)
                     return wasm__validator_error(&v, at, "call target %u does not use a function type",
                                                  (unsigned)callee);
-                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        callee_type->params,
+                                                        callee_type->param_reftypes,
+                                                        callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
                 err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
@@ -6645,7 +7113,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                  (unsigned)type_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        callee_type->params,
+                                                        callee_type->param_reftypes,
+                                                        callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
                 err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
@@ -6695,13 +7166,14 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x1B: {
                 wasm_valtype_t lhs, rhs;
+                wasm_reftype_t lhs_ref, rhs_ref;
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_pop_any(&v, at, &rhs);
+                err = wasm__validator_pop_any_typed(&v, at, &rhs, &rhs_ref);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_pop_any(&v, at, &lhs);
+                err = wasm__validator_pop_any_typed(&v, at, &lhs, &lhs_ref);
                 if (err != WASM_OK) return err;
-                if (!wasm__validator_type_matches(&v, lhs, rhs) ||
+                if (!wasm__validator_type_matches(&v, lhs, &lhs_ref, rhs, &rhs_ref) ||
                     ((lhs != WASM__TYPE_BOT && !wasm__is_number_or_vector_type(lhs)) ||
                      (rhs != WASM__TYPE_BOT && !wasm__is_number_or_vector_type(rhs)))) {
                     return wasm__validator_error(&v, at, "select requires matching numeric or vector operand types");
@@ -6712,16 +7184,17 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x1C: {
                 wasm_valtype_t select_type;
+                wasm_reftype_t select_ref_type;
 
-                err = wasm__validator_read_typed_select(&v, at, &select_type);
+                err = wasm__validator_read_typed_select(&v, at, &select_type, &select_ref_type);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_pop_expect(&v, at, select_type);
+                err = wasm__validator_pop_expect_typed(&v, at, select_type, &select_ref_type);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_pop_expect(&v, at, select_type);
+                err = wasm__validator_pop_expect_typed(&v, at, select_type, &select_ref_type);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_push(&v, at, select_type);
+                err = wasm__validator_push_typed(&v, at, select_type, &select_ref_type);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6729,7 +7202,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t index = wasm__read_leb128_u32(&v.r);
                 if (index >= func->num_locals)
                     return wasm__validator_error(&v, at, "local index %u out of range", (unsigned)index);
-                err = wasm__validator_push(&v, at, func->locals[index]);
+                err = wasm__validator_push_typed(&v, at,
+                                                 func->locals[index],
+                                                 func->local_reftypes ? &func->local_reftypes[index] : NULL);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6737,7 +7212,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t index = wasm__read_leb128_u32(&v.r);
                 if (index >= func->num_locals)
                     return wasm__validator_error(&v, at, "local index %u out of range", (unsigned)index);
-                err = wasm__validator_pop_expect(&v, at, func->locals[index]);
+                err = wasm__validator_pop_expect_typed(&v, at,
+                                                       func->locals[index],
+                                                       func->local_reftypes ? &func->local_reftypes[index] : NULL);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6745,7 +7222,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t index = wasm__read_leb128_u32(&v.r);
                 if (index >= func->num_locals)
                     return wasm__validator_error(&v, at, "local index %u out of range", (unsigned)index);
-                err = wasm__validator_check_types(&v, at, &func->locals[index], 1);
+                err = wasm__validator_check_types_typed(&v, at,
+                                                        &func->locals[index],
+                                                        func->local_reftypes ? &func->local_reftypes[index] : NULL,
+                                                        1);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6753,7 +7233,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t index = wasm__read_leb128_u32(&v.r);
                 if (index >= mod->num_globals)
                     return wasm__validator_error(&v, at, "global index %u out of range", (unsigned)index);
-                err = wasm__validator_push(&v, at, mod->globals[index].type);
+                err = wasm__validator_push_typed(&v, at,
+                                                 mod->globals[index].type,
+                                                 &mod->globals[index].ref_type);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6763,7 +7245,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     return wasm__validator_error(&v, at, "global index %u out of range", (unsigned)index);
                 if (!mod->globals[index].is_mutable)
                     return wasm__validator_error(&v, at, "global %u is immutable", (unsigned)index);
-                err = wasm__validator_pop_expect(&v, at, mod->globals[index].type);
+                err = wasm__validator_pop_expect_typed(&v, at,
+                                                       mod->globals[index].type,
+                                                       &mod->globals[index].ref_type);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6775,7 +7259,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     return wasm__validator_error(&v, at, "table %u out of range", (unsigned)table_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_push(&v, at, mod->tables[table_idx].reftype);
+                err = wasm__validator_push_typed(&v, at,
+                                                 mod->tables[table_idx].reftype,
+                                                 &mod->tables[table_idx].reftype_info);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -6785,7 +7271,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 if (table_idx >= mod->num_tables)
                     return wasm__validator_error(&v, at, "table %u out of range", (unsigned)table_idx);
-                err = wasm__validator_pop_expect(&v, at, mod->tables[table_idx].reftype);
+                err = wasm__validator_pop_expect_typed(&v, at,
+                                                       mod->tables[table_idx].reftype,
+                                                       &mod->tables[table_idx].reftype_info);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
@@ -7105,8 +7593,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 err = wasm__read_heaptype(mod, &v.r, &type_info);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "invalid heaptype");
+                type_info.nullable = 1;
                 reftype = type_info.type ? type_info.type : WASM_TYPE_ANYREF;
-                err = wasm__validator_push(&v, at, reftype);
+                err = wasm__validator_push_typed(&v, at, reftype, &type_info);
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -7126,7 +7615,13 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 if (func_ref >= mod->num_funcs)
                     return wasm__validator_error(&v, at, "ref.func index %u out of range", (unsigned)func_ref);
-                err = wasm__validator_push(&v, at, WASM_TYPE_FUNCREF);
+                {
+                    wasm_reftype_t ref_type;
+                    wasm__clear_reftype(&ref_type);
+                    ref_type.type = WASM_TYPE_FUNCREF;
+                    ref_type.nullable = 0;
+                    err = wasm__validator_push_typed(&v, at, WASM_TYPE_FUNCREF, &ref_type);
+                }
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -7218,12 +7713,12 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     mod->rt = rt;
     mod->start_func = UINT32_MAX;
 
-#define WASM__LOAD_FAIL(stage_literal)                                                     \
-    do {                                                                                   \
-        if (rt->last_error == WASM_OK)                                                     \
-            WASM__SET_ERR(rt, err, "%s: %s", stage_literal, wasm_error_string(err));      \
-        wasm_free_module(mod);                                                             \
-        return NULL;                                                                       \
+#define WASM__LOAD_FAIL(stage_literal)                                               \
+    do {                                                                             \
+        if (rt->last_error == WASM_OK)                                               \
+            WASM__SET_ERR(rt, err, "%s: %s", stage_literal, wasm_error_string(err)); \
+        wasm_free_module(mod);                                                       \
+        return NULL;                                                                 \
     } while (0)
 
     while (r.ptr < r.end && err == WASM_OK) {
@@ -7266,9 +7761,6 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
             case 5:
                 err = wasm__decode_memory_section(mod, &sr);
                 break;
-            case 13:
-                err = wasm__decode_tag_section(mod, &sr);
-                break;
             case 6:
                 err = wasm__decode_global_section(mod, &sr);
                 break;
@@ -7289,6 +7781,9 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
                 break;
             case 12:
                 err = wasm__decode_data_count_section(mod, &sr);
+                break;
+            case 13:
+                err = wasm__decode_tag_section(mod, &sr);
                 break;
             default:
                 WASM__SET_ERR(rt, WASM_ERR_INVALID_SECTION, "unknown section id %u", (unsigned)sid);
@@ -7817,6 +8312,19 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
             wasm__read_leb128_u32(r);
             wasm__read_leb128_u32(r);
             break;
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+            wasm__skip_heaptype(r);
+            break;
+        case 0x18:
+        case 0x19:
+            if (r->ptr < r->end) r->ptr++;
+            wasm__read_leb128_u32(r);
+            wasm__skip_heaptype(r);
+            wasm__skip_heaptype(r);
+            break;
         default:
             break;
     }
@@ -7830,7 +8338,10 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
     blocktype->result_arity = 0;
     blocktype->params = NULL;
     blocktype->results = NULL;
+    blocktype->param_reftypes = NULL;
+    blocktype->result_reftypes = NULL;
     blocktype->inline_result = WASM_TYPE_VOID;
+    wasm__clear_reftype(&blocktype->inline_result_reftype);
 
     if (lead == 0x40) {
         r->ptr++;
@@ -7838,10 +8349,11 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
     }
 
     if (wasm__is_valtype_byte(lead)) {
-        err = wasm__read_valtype(mod, r, &blocktype->inline_result, NULL);
+        err = wasm__read_valtype(mod, r, &blocktype->inline_result, &blocktype->inline_result_reftype);
         if (err != WASM_OK) return err;
         blocktype->result_arity = 1;
         blocktype->results = &blocktype->inline_result;
+        blocktype->result_reftypes = &blocktype->inline_result_reftype;
         return WASM_OK;
     }
 
@@ -7857,6 +8369,8 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
         blocktype->result_arity = ft->num_results;
         blocktype->params = ft->params;
         blocktype->results = ft->results;
+        blocktype->param_reftypes = ft->param_reftypes;
+        blocktype->result_reftypes = ft->result_reftypes;
     }
 
     return WASM_OK;
@@ -9917,7 +10431,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 wasm_valtype_t select_type;
                 wasm_value_t c, v2, v1;
 
-                err = wasm__read_typed_select_immediate(mod, &cf->r, &select_type);
+                err = wasm__read_typed_select_immediate(mod, &cf->r, &select_type, NULL);
                 if (err != WASM_OK) goto cleanup;
                 c = WASM__POP(rt);
                 v2 = WASM__POP(rt);

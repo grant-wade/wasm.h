@@ -8348,6 +8348,160 @@ WL_TEST(test_gc_validation_rejects_struct_get_on_packed_field_without_sign) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_validation_accepts_cast_and_branch_cast_opcodes) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_i32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x14);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x1A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x17);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x1A);
+
+        emit(&body, 0x02);
+        emit(&body, 0x63);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x18);
+        emit(&body, 0x01);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_i32(&body, 0);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x1A);
+
+        emit(&body, 0x02);
+        emit(&body, 0x63);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x19);
+        emit(&body, 0x01);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_i32(&body, 0);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x1A);
+
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_validation_rejects_invalid_ref_cast_relation) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6F);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x16);
+        emit(&body, 0x6D);
+        emit(&body, 0x1A);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected invalid static ref.cast relation to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_type_canonicalization_and_function_subtyping) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -8772,6 +8926,8 @@ int main(void) {
         { "wasmgc: ref.eq accepts eqref subtypes", test_gc_ref_eq_accepts_eqref_subtypes },
         { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },
         { "wasmgc: validator rejects struct.get on packed fields without signedness", test_gc_validation_rejects_struct_get_on_packed_field_without_sign },
+        { "wasmgc: validator accepts ref.cast and br_on_cast opcodes", test_gc_validation_accepts_cast_and_branch_cast_opcodes },
+        { "wasmgc: validator rejects invalid static ref.cast relations", test_gc_validation_rejects_invalid_ref_cast_relation },
         { "wasmgc: canonical ids and function subtyping are computed at load", test_gc_type_canonicalization_and_function_subtyping },
         { "wasmgc: struct width/depth subtyping validates", test_gc_type_validation_accepts_struct_width_subtyping },
         { "wasmgc: invalid function variance is rejected", test_gc_type_validation_rejects_invalid_function_subtype },
