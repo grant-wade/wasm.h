@@ -206,7 +206,7 @@ If you prefer to build individual tools, the main executable targets are:
 
 - `wasm`
 - `wasm2api`
-- `basic_add_demo`
+- `basic_add_demo` in `examples/`
 - `wl_test`
 - `wasm_test`
 
@@ -226,6 +226,7 @@ The legacy `Makefile` targets still exist as thin wrappers around the CMake targ
 - `wl_test.c` — test suite for `wl.h`
 - `wasm.h` — standalone WebAssembly runtime header
 - `wasm_test.c` — test suite for `wasm.h`
+- `examples/` — native sample programs and generated demo wrappers such as `basic_add_demo`
 - `test/` — `emcc` fixture harness for testing `wasm.h` against toolchain-produced modules
 - `PLAN.md` — design notes and longer-form planning for `wl.h`
 

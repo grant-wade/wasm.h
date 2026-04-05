@@ -59,7 +59,8 @@ wl_add_native_executable(wl_test wl_test.c)
 wl_add_native_executable(wasm_test wasm_test.c)
 wl_add_native_executable(wasm2api wasm2api.c)
 wl_add_native_executable(wasm wasm.c)
-wl_add_native_executable(basic_add_demo basic_add_demo.c basic_add.c)
+
+add_subdirectory(examples)
 
 if(BUILD_TESTING)
     add_test(NAME wl_test COMMAND wl_test)

@@ -1,0 +1,1 @@
+wl_add_native_executable(basic_add_demo basic_add_demo.c basic_add.c)
