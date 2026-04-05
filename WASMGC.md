@@ -28,7 +28,7 @@
 - Update `wasm_func_param_count`, `wasm_func_result_count`, `wasm_func_param_type`, `wasm_func_result_type` to go through `expand()`
 - Update call validation, `call_indirect`, import matching, tag type lookups
 
-**1.4 Heap type / reftype parsing**
+**[DONE] 1.4 Heap type / reftype parsing**
 
 - Extend `wasm__is_valtype_byte` and reftype readers to handle the new heap type opcodes
 - Heap types are encoded as s33 — positive values are type indices, negative values are abstract types

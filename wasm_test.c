@@ -7760,6 +7760,173 @@ WL_TEST(test_gc_type_section_respects_feature_gate) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x4E);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x63);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x63);
+        emit_leb128_u32(&sec, 0);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x63);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x63);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x00);
+        emit(&sec, 0xD0);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_section(&mod, 6, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x64);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x02);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x1A);
+
+        emit(&body, 0xD0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x1C);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x1A);
+
+        emit(&body, 0xD0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD1);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, m->types[0].of.struct_.fields[0].storage.of.valtype == WASM_TYPE_STRUCTREF,
+                 "%s", "expected self field to resolve to structref");
+    WL_CHECK_MSG(t, m->types[0].of.struct_.fields[0].storage.ref_type.has_type_index,
+                 "%s", "expected self field to preserve concrete type index");
+    WL_CHECK_MSG(t, m->types[0].of.struct_.fields[0].storage.ref_type.type_index == 0,
+                 "%s", "expected self field to point at type 0");
+    WL_CHECK_MSG(t, m->types[0].of.struct_.fields[0].storage.ref_type.nullable,
+                 "%s", "expected self field to stay nullable");
+
+    WL_CHECK_MSG(t, m->types[1].of.func.params[0] == WASM_TYPE_STRUCTREF,
+                 "%s", "expected concrete param to resolve to structref");
+    WL_CHECK_MSG(t, !m->types[1].of.func.param_reftypes[0].nullable,
+                 "%s", "expected concrete param to stay non-null");
+    WL_CHECK_MSG(t, m->types[1].of.func.param_reftypes[0].has_type_index &&
+                     m->types[1].of.func.param_reftypes[0].type_index == 0,
+                 "%s", "expected concrete param to keep type index 0");
+    WL_CHECK_MSG(t, m->types[1].of.func.results[0] == WASM_TYPE_STRUCTREF,
+                 "%s", "expected concrete result to resolve to structref");
+    WL_CHECK_MSG(t, m->types[1].of.func.result_reftypes[0].nullable,
+                 "%s", "expected concrete result to stay nullable");
+
+    WL_CHECK_MSG(t, m->tables[0].reftype == WASM_TYPE_STRUCTREF,
+                 "%s", "expected table reftype to resolve to structref");
+    WL_CHECK_MSG(t, m->tables[0].reftype_info.has_type_index && m->tables[0].reftype_info.type_index == 0,
+                 "%s", "expected table to preserve concrete heap type index");
+    WL_CHECK_MSG(t, m->globals[0].type == WASM_TYPE_STRUCTREF,
+                 "%s", "expected global reftype to resolve to structref");
+    WL_CHECK_MSG(t, m->globals[0].ref_type.has_type_index && m->globals[0].ref_type.type_index == 0,
+                 "%s", "expected global to preserve concrete heap type index");
+    WL_CHECK_MSG(t, m->funcs[0].num_locals == 1, "%s", "expected one concrete local");
+    WL_CHECK_MSG(t, m->funcs[0].locals[0] == WASM_TYPE_STRUCTREF,
+                 "%s", "expected concrete local to resolve to structref");
+    WL_CHECK_MSG(t, m->funcs[0].local_reftypes[0].has_type_index && m->funcs[0].local_reftypes[0].type_index == 0,
+                 "%s", "expected local to preserve concrete heap type index");
+    WL_CHECK_MSG(t, !m->funcs[0].local_reftypes[0].nullable,
+                 "%s", "expected concrete local to stay non-null");
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_ref_is_null_on_abstract_anyref) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -7800,7 +7967,7 @@ WL_TEST(test_gc_ref_is_null_on_abstract_anyref) {
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 0);
         emit(&body, 0xD0);
-        emit(&body, 0x12);
+        emit(&body, 0x6E);
         emit(&body, 0xD1);
         emit(&body, 0x0B);
         emit_leb128_u32(&sec, body.len);
@@ -7841,7 +8008,7 @@ WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
         emit_leb128_u32(&sec, 1);
         emit(&sec, 0x7F);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
@@ -7866,14 +8033,14 @@ WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 0);
         emit(&body, 0xD0);
-        emit(&body, 0x13);
+        emit(&body, 0x6D);
         emit(&body, 0xD0);
-        emit(&body, 0x12);
+        emit(&body, 0x6E);
         emit(&body, 0x20);
         emit_leb128_u32(&body, 0);
         emit(&body, 0x1C);
         emit_leb128_u32(&body, 1);
-        emit(&body, 0x12);
+        emit(&body, 0x6E);
         emit(&body, 0x0B);
         emit_leb128_u32(&sec, body.len);
         emit_bytes(&sec, body.buf, body.len);
@@ -7922,14 +8089,14 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 0);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
         emit(&sec, 0x00);
         emit_leb128_u32(&sec, 1);
         emit_section(&mod, 4, sec.buf, sec.len);
@@ -7958,7 +8125,7 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
         emit(&body, 0x41);
         emit_leb128_i32(&body, 0);
         emit(&body, 0xD0);
-        emit(&body, 0x13);
+        emit(&body, 0x6D);
         emit(&body, 0x26);
         emit_leb128_u32(&body, 0);
         emit(&body, 0x41);
@@ -8030,9 +8197,9 @@ WL_TEST(test_gc_ref_eq_accepts_eqref_subtypes) {
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 0);
         emit(&body, 0xD0);
-        emit(&body, 0x15);
+        emit(&body, 0x6B);
         emit(&body, 0xD0);
-        emit(&body, 0x13);
+        emit(&body, 0x6D);
         emit(&body, 0xD3);
         emit(&body, 0x0B);
         emit_leb128_u32(&sec, body.len);
@@ -8163,7 +8330,7 @@ WL_TEST(test_gc_validation_rejects_struct_get_on_packed_field_without_sign) {
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 0);
         emit(&body, 0xD0);
-        emit(&body, 0x15);
+        emit(&body, 0x6B);
         emit(&body, 0xFB);
         emit_leb128_u32(&body, 0x02);
         emit_leb128_u32(&body, 0);
@@ -8197,26 +8364,26 @@ WL_TEST(test_gc_type_canonicalization_and_function_subtyping) {
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
 
         emit(&sec, 0x50);
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
 
         emit(&sec, 0x50);
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
 
         emit_section(&mod, 1, sec.buf, sec.len);
     }
@@ -8259,7 +8426,7 @@ WL_TEST(test_gc_type_validation_accepts_struct_width_subtyping) {
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x5F);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
         emit(&sec, 0x00);
 
         emit(&sec, 0x50);
@@ -8267,7 +8434,7 @@ WL_TEST(test_gc_type_validation_accepts_struct_width_subtyping) {
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x5F);
         emit_leb128_u32(&sec, 2);
-        emit(&sec, 0x14);
+        emit(&sec, 0x6C);
         emit(&sec, 0x00);
         emit(&sec, 0x7F);
         emit(&sec, 0x00);
@@ -8306,18 +8473,18 @@ WL_TEST(test_gc_type_validation_rejects_invalid_function_subtype) {
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x12);
+        emit(&sec, 0x6E);
 
         emit(&sec, 0x50);
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x13);
+        emit(&sec, 0x6D);
 
         emit_section(&mod, 1, sec.buf, sec.len);
     }
@@ -8598,6 +8765,7 @@ int main(void) {
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
         { "wasmgc: composite type sections parse rec/sub/struct/array forms", test_gc_type_section_parses_composite_types },
         { "wasmgc: GC type syntax is feature-gated", test_gc_type_section_respects_feature_gate },
+        { "wasmgc: concrete heaptype parsing preserves typed refs across sections", test_gc_heaptype_parsing_tracks_concrete_type_refs },
         { "wasmgc: ref.is_null works on abstract anyref nulls", test_gc_ref_is_null_on_abstract_anyref },
         { "wasmgc: typed select accepts eqref where anyref is expected", test_gc_typed_select_accepts_eqref_as_anyref },
         { "wasmgc: anyref tables accept eqref values via subtyping", test_gc_table_set_accepts_eqref_into_anyref_table },
