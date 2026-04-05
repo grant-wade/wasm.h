@@ -512,6 +512,12 @@ typedef struct wasm_tag_t {
     uint32_t type_idx;
 } wasm_tag_t;
 
+typedef struct wasm_custom_section_t {
+    char* name;
+    const uint8_t* data;
+    uint32_t size;
+} wasm_custom_section_t;
+
 typedef struct wasm__exception_state_t {
     uint32_t tag_index;
     wasm_value_t* values;
@@ -538,6 +544,8 @@ struct wasm_module_t {
     wasm_table_t* tables;
     uint32_t num_tables;
     wasm_memory_t* memories;
+    wasm_custom_section_t* custom_sections;
+    uint32_t num_custom_sections;
     wasm_data_segment_t* data_segments;
     uint32_t num_data_segments;
     wasm_elem_segment_t* elem_segments;
@@ -678,6 +686,10 @@ wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
 uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index);
 int wasm_find_export(wasm_module_t* mod, const char* name,
                      wasm_export_kind_t* out_kind, uint32_t* out_index);
+uint32_t wasm_custom_section_count(wasm_module_t* mod);
+const char* wasm_custom_section_name(wasm_module_t* mod, uint32_t index);
+const uint8_t* wasm_custom_section_data(wasm_module_t* mod, uint32_t index, size_t* out_len);
+const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, size_t* out_len);
 uint32_t wasm_type_count(wasm_module_t* mod);
 wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx);
 const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx);
@@ -1449,6 +1461,28 @@ static void wasm__read_name(wasm__reader_t* r, char* buf, size_t bufsz) {
     memcpy(buf, r->ptr, copy);
     buf[copy] = '\0';
     r->ptr += len;
+}
+
+static wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name) {
+    uint32_t len = wasm__read_leb128_u32(r);
+    char* name;
+
+    if (!out_name) return WASM_ERR_MALFORMED;
+    *out_name = NULL;
+
+    if (r->malformed || !wasm__has(r, len)) {
+        r->ptr = r->end;
+        return WASM_ERR_MALFORMED;
+    }
+
+    name = (char*)WASM_MALLOC((size_t)len + 1u);
+    if (!name) return WASM_ERR_OOM;
+
+    if (len > 0) memcpy(name, r->ptr, len);
+    name[len] = '\0';
+    r->ptr += len;
+    *out_name = name;
+    return WASM_OK;
 }
 
 static wasm_value_t wasm__u32_bits(uint32_t value) {
@@ -3399,6 +3433,28 @@ static wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t coun
     mod->data_segments = segments;
     memset(mod->data_segments + base, 0, count * sizeof(wasm_data_segment_t));
     mod->num_data_segments = base + count;
+    return WASM_OK;
+}
+
+static void wasm__free_custom_section(wasm_custom_section_t* section) {
+    WASM_FREE(section->name);
+    memset(section, 0, sizeof(*section));
+}
+
+static wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_custom_sections;
+    wasm_custom_section_t* sections;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    sections = (wasm_custom_section_t*)WASM_REALLOC(mod->custom_sections,
+                                                    (base + count) * sizeof(wasm_custom_section_t));
+    if (!sections) return WASM_ERR_OOM;
+
+    mod->custom_sections = sections;
+    memset(mod->custom_sections + base, 0, count * sizeof(wasm_custom_section_t));
+    mod->num_custom_sections = base + count;
     return WASM_OK;
 }
 
@@ -5759,6 +5815,24 @@ static wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t
         }
     }
 
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__reader_t* r) {
+    uint32_t section_index;
+    wasm_custom_section_t* section;
+    wasm_error_t err;
+
+    err = wasm__append_custom_sections(mod, 1, &section_index);
+    if (err != WASM_OK) return err;
+
+    section = &mod->custom_sections[section_index];
+    err = wasm__read_name_owned(r, &section->name);
+    if (err != WASM_OK) return err;
+
+    section->data = r->ptr;
+    section->size = (uint32_t)(r->end - r->ptr);
+    r->ptr = r->end;
     return WASM_OK;
 }
 
@@ -9385,7 +9459,7 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         sr.malformed = 0;
         switch (sid) {
             case 0:
-                sr.ptr = sr.end;
+                err = wasm__decode_custom_section(mod, &sr);
                 break;
             case 1:
                 err = wasm__decode_type_section(mod, &sr);
@@ -9534,6 +9608,8 @@ void wasm_free_module(wasm_module_t* mod) {
     WASM_FREE(mod->exports);
     WASM_FREE(mod->globals);
     WASM_FREE(mod->tags);
+    for (i = 0; i < mod->num_custom_sections; i++) wasm__free_custom_section(&mod->custom_sections[i]);
+    WASM_FREE(mod->custom_sections);
     for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(&mod->data_segments[i]);
     WASM_FREE(mod->data_segments);
     for (i = 0; i < mod->num_elem_segments; i++) wasm__free_elem_segment(&mod->elem_segments[i]);
@@ -15567,6 +15643,38 @@ int wasm_find_export(wasm_module_t* mod, const char* name,
     }
 
     return 0;
+}
+
+uint32_t wasm_custom_section_count(wasm_module_t* mod) {
+    return mod ? mod->num_custom_sections : 0;
+}
+
+const char* wasm_custom_section_name(wasm_module_t* mod, uint32_t index) {
+    if (!mod || index >= mod->num_custom_sections) return NULL;
+    return mod->custom_sections[index].name;
+}
+
+const uint8_t* wasm_custom_section_data(wasm_module_t* mod, uint32_t index, size_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!mod || index >= mod->num_custom_sections) return NULL;
+    if (out_len) *out_len = (size_t)mod->custom_sections[index].size;
+    return mod->custom_sections[index].data;
+}
+
+const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, size_t* out_len) {
+    uint32_t index;
+
+    if (out_len) *out_len = 0;
+    if (!mod || !name) return NULL;
+
+    for (index = 0; index < mod->num_custom_sections; index++) {
+        if (strcmp(mod->custom_sections[index].name, name) == 0) {
+            if (out_len) *out_len = (size_t)mod->custom_sections[index].size;
+            return mod->custom_sections[index].data;
+        }
+    }
+
+    return NULL;
 }
 
 uint32_t wasm_type_count(wasm_module_t* mod) {

@@ -325,6 +325,19 @@ static void emit_section(wasm_builder_t* b, uint8_t id, const uint8_t* content, 
     emit_bytes(b, content, len);
 }
 
+static void emit_custom_section(wasm_builder_t* b,
+                                const char* name,
+                                const uint8_t* payload,
+                                uint32_t payload_len) {
+    wasm_builder_t sec = { 0 };
+    uint32_t name_len = (uint32_t)strlen(name);
+
+    emit_leb128_u32(&sec, name_len);
+    emit_bytes(&sec, (const uint8_t*)name, name_len);
+    if (payload_len > 0) emit_bytes(&sec, payload, payload_len);
+    emit_section(b, 0, sec.buf, sec.len);
+}
+
 static void emit_export_func(wasm_builder_t* b, const char* name, uint32_t index) {
     uint32_t len = (uint32_t)strlen(name);
 
@@ -678,8 +691,13 @@ WL_TEST(test_introspection_helpers) {
     wasm_module_t* m;
     wasm_export_kind_t kind = WASM_EXPORT_MEM;
     uint32_t func_idx = 77;
+    static const uint8_t meta_payload[] = { 0x01, 0x02, 0x03 };
+    static const uint8_t cfg_payload[] = { 'o', 'k' };
+    const uint8_t* custom_data;
+    size_t custom_len = 0;
 
     emit_header(&mod);
+    emit_custom_section(&mod, "meta", meta_payload, (uint32_t)sizeof(meta_payload));
 
     {
         wasm_builder_t sec = { 0 };
@@ -706,6 +724,8 @@ WL_TEST(test_introspection_helpers) {
         emit_export_func(&sec, "add", 0);
         emit_section(&mod, 7, sec.buf, sec.len);
     }
+
+    emit_custom_section(&mod, "cfg", cfg_payload, (uint32_t)sizeof(cfg_payload));
 
     {
         wasm_builder_t sec = { 0 };
@@ -748,6 +768,38 @@ WL_TEST(test_introspection_helpers) {
     WL_CHECK_MSG(t, wasm_find_export(m, "add", &kind, &func_idx), "%s", "expected add export lookup to succeed");
     WL_CHECK_MSG(t, kind == WASM_EXPORT_FUNC, "%s", "expected add export kind to be function");
     WL_CHECK_MSG(t, func_idx == 0, "%s", "expected add export to reference function 0");
+
+    WL_CHECK_MSG(t, wasm_custom_section_count(NULL) == 0,
+                 "%s", "NULL module should report zero custom sections");
+    WL_CHECK_MSG(t, wasm_custom_section_count(m) == 2,
+                 "%s", "expected two custom sections");
+    WL_CHECK_MSG(t, wasm_custom_section_name(m, 0) != NULL && strcmp(wasm_custom_section_name(m, 0), "meta") == 0,
+                 "%s", "expected custom section 0 to be named meta");
+    WL_CHECK_MSG(t, wasm_custom_section_name(m, 1) != NULL && strcmp(wasm_custom_section_name(m, 1), "cfg") == 0,
+                 "%s", "expected custom section 1 to be named cfg");
+    WL_CHECK_MSG(t, wasm_custom_section_name(m, 2) == NULL,
+                 "%s", "out-of-range custom section name should be NULL");
+
+    custom_data = wasm_custom_section_data(m, 0, &custom_len);
+    WL_CHECK_MSG(t, custom_data != NULL, "%s", "expected custom section payload");
+    WL_CHECK_MSG(t, custom_len == sizeof(meta_payload), "%s", "unexpected meta payload length");
+    WL_CHECK_MSG(t, memcmp(custom_data, meta_payload, sizeof(meta_payload)) == 0,
+                 "%s", "unexpected meta payload bytes");
+
+    custom_len = 123;
+    WL_CHECK_MSG(t, wasm_custom_section_data(m, 9, &custom_len) == NULL,
+                 "%s", "out-of-range custom section data should be NULL");
+    WL_CHECK_MSG(t, custom_len == 0, "%s", "out-of-range custom section length should reset to zero");
+
+    custom_data = wasm_custom_section_find(m, "cfg", &custom_len);
+    WL_CHECK_MSG(t, custom_data != NULL, "%s", "expected cfg custom section lookup to succeed");
+    WL_CHECK_MSG(t, custom_len == sizeof(cfg_payload), "%s", "unexpected cfg payload length");
+    WL_CHECK_MSG(t, memcmp(custom_data, cfg_payload, sizeof(cfg_payload)) == 0,
+                 "%s", "unexpected cfg payload bytes");
+    custom_len = 55;
+    WL_CHECK_MSG(t, wasm_custom_section_find(m, "missing", &custom_len) == NULL,
+                 "%s", "missing custom section should not resolve");
+    WL_CHECK_MSG(t, custom_len == 0, "%s", "missing custom section length should reset to zero");
 
     WL_CHECK_MSG(t, wasm_func_count(NULL) == 0, "%s", "NULL module should report zero functions");
     WL_CHECK_MSG(t, wasm_func_count(m) == 1, "%s", "expected one function");
@@ -13105,7 +13157,7 @@ WL_TEST(test_validation_rejects_long_i64_leb128) {
 int main(void) {
     static const wl_test_case cases[] = {
         { "i32.add(3, 7) == 10", test_add },
-        { "introspection: exports and signatures are queryable", test_introspection_helpers },
+        { "introspection: exports, custom sections, and signatures are queryable", test_introspection_helpers },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
         { "public api: module userdata is visible in host callbacks", test_module_userdata_api },

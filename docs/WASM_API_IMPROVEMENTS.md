@@ -270,7 +270,7 @@ void* wasm_module_get_userdata(wasm_module_t* mod);
 
 ---
 
-### Phase 9: Custom Sections Introspection
+### [DONE] Phase 9: Custom Sections Introspection
 **The Problem:** Wasm files often contain "Custom Sections" (Section ID `0`). The standard `name` section contains the actual names of functions and variables (e.g., `calculate_physics` instead of `func[14]`). Game engines also use custom sections to bundle configuration data or assets directly inside the `.wasm` file. Your current loader (`wasm_load`) just skips Section 0.
 
 **The Solution:** Parse and expose custom sections to the host.
@@ -291,3 +291,4 @@ const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, si
     1. Read the name string (using your `wasm__read_name` helper).
     2. The rest of the section size is the payload.
     3. Because your `bytes` pointer (passed to `wasm_load`) must stay alive for the lifetime of the module anyway (since you don't copy the bytecode), you can just store a `const uint8_t* payload = r.ptr;` and `size_t len` directly into the struct without `malloc`ing new memory!
+*   The runtime now owns a null-terminated copy of each section name for stable public access, while payload pointers continue to alias the original module byte buffer.
