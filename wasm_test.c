@@ -8560,6 +8560,131 @@ WL_TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
+    wasm_runtime_t rt;
+    wasm_module_t mod;
+    wasm_comptype_t types[2];
+    wasm_fieldtype_t struct_fields[3];
+    wasm_gc_struct_t* struct_obj;
+    wasm_gc_array_t* array_obj;
+    wasm_value_t value;
+
+    memset(&mod, 0, sizeof(mod));
+    memset(types, 0, sizeof(types));
+    memset(struct_fields, 0, sizeof(struct_fields));
+
+    wasm_init(&rt);
+
+    struct_fields[0].storage.kind = WASM_STORAGE_PACKED;
+    struct_fields[0].storage.of.packed_type = WASM_PACKED_I8;
+    struct_fields[0].is_mutable = 1;
+
+    struct_fields[1].storage.kind = WASM_STORAGE_PACKED;
+    struct_fields[1].storage.of.packed_type = WASM_PACKED_I16;
+    struct_fields[1].is_mutable = 1;
+
+    struct_fields[2].storage.kind = WASM_STORAGE_VALTYPE;
+    struct_fields[2].storage.of.valtype = WASM_TYPE_I32;
+    struct_fields[2].is_mutable = 1;
+
+    types[0].kind = WASM_COMP_STRUCT;
+    types[0].of.struct_.num_fields = 3;
+    types[0].of.struct_.fields = struct_fields;
+
+    types[1].kind = WASM_COMP_ARRAY;
+    types[1].of.array.field.storage.kind = WASM_STORAGE_PACKED;
+    types[1].of.array.field.storage.of.packed_type = WASM_PACKED_I8;
+    types[1].of.array.field.is_mutable = 1;
+
+    mod.rt = &rt;
+    mod.types = types;
+    mod.num_types = 2;
+
+    struct_obj = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    array_obj = wasm__gc_alloc_array_object(&rt, &mod, 1, &types[1].of.array, 2);
+
+    WL_CHECK_MSG(t, struct_obj != NULL, "%s", "expected struct allocation for accessor test to succeed");
+    WL_CHECK_MSG(t, array_obj != NULL, "%s", "expected array allocation for accessor test to succeed");
+    if (!struct_obj || !array_obj) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm__gc_struct_set_field(struct_obj, &types[0].of.struct_, 0, wasm_i32(0xFF)) == WASM_OK,
+                 "%s",
+                 "expected packed i8 struct store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_set_field(struct_obj, &types[0].of.struct_, 1, wasm_i32(0xFF80)) == WASM_OK,
+                 "%s",
+                 "expected packed i16 struct store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_set_field(struct_obj, &types[0].of.struct_, 2, wasm_i32(77)) == WASM_OK,
+                 "%s",
+                 "expected unpacked struct store to succeed");
+
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 0, 1, &value) == WASM_OK,
+                 "%s",
+                 "expected packed i8 signed load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, -1);
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 0, 0, &value) == WASM_OK,
+                 "%s",
+                 "expected packed i8 unsigned load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, 255);
+
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 1, 1, &value) == WASM_OK,
+                 "%s",
+                 "expected packed i16 signed load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, -128);
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 1, 0, &value) == WASM_OK,
+                 "%s",
+                 "expected packed i16 unsigned load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, 65408);
+
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 2, 0, &value) == WASM_OK,
+                 "%s",
+                 "expected unpacked struct load to succeed");
+    WL_CHECK_MSG(t, value.type == WASM_TYPE_I32 && value.of.i32 == 77,
+                 "%s",
+                 "expected unpacked struct accessor to preserve the stored value");
+
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(NULL, &types[0].of.struct_, 0, 0, &value) == WASM_ERR_TRAP,
+                 "%s",
+                 "expected null struct access to trap");
+    WL_CHECK_MSG(t, wasm__gc_struct_get_field(struct_obj, &types[0].of.struct_, 3, 0, &value) == WASM_ERR_MALFORMED,
+                 "%s",
+                 "expected invalid struct field access to be rejected");
+
+    WL_CHECK_MSG(t, wasm__gc_array_set(array_obj, &types[1].of.array, 0, wasm_i32(0x7F)) == WASM_OK,
+                 "%s",
+                 "expected first packed array store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_array_set(array_obj, &types[1].of.array, 1, wasm_i32(0x80)) == WASM_OK,
+                 "%s",
+                 "expected second packed array store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_array_len(array_obj) == 2,
+                 "expected array accessor length 2, got %u",
+                 (unsigned)wasm__gc_array_len(array_obj));
+
+    WL_CHECK_MSG(t, wasm__gc_array_get(array_obj, &types[1].of.array, 0, 1, &value) == WASM_OK,
+                 "%s",
+                 "expected first packed array load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, 127);
+    WL_CHECK_MSG(t, wasm__gc_array_get(array_obj, &types[1].of.array, 1, 1, &value) == WASM_OK,
+                 "%s",
+                 "expected signed packed array load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, -128);
+    WL_CHECK_MSG(t, wasm__gc_array_get(array_obj, &types[1].of.array, 1, 0, &value) == WASM_OK,
+                 "%s",
+                 "expected unsigned packed array load to succeed");
+    WASM_CHECK_I32(t, value.of.i32, 128);
+
+    WL_CHECK_MSG(t, wasm__gc_array_get(array_obj, &types[1].of.array, 2, 0, &value) == WASM_ERR_OUT_OF_BOUNDS,
+                 "%s",
+                 "expected out-of-bounds array access to trap with bounds error");
+    WL_CHECK_MSG(t, wasm__gc_array_set(NULL, &types[1].of.array, 0, wasm_i32(0)) == WASM_ERR_TRAP,
+                 "%s",
+                 "expected null array store to trap");
+
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     wasm_runtime_t rt;
     wasm_module_t mod;
@@ -9480,6 +9605,7 @@ int main(void) {
         { "wasmgc: i31ref values use tagged non-null storage", test_gc_i31ref_uses_tagged_non_null_storage },
         { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
         { "wasmgc: const expressions support GC allocation ops", test_gc_const_expr_supports_gc_alloc_ops },
+        { "wasmgc: GC accessors handle packed fields and array bounds", test_gc_accessors_handle_packed_fields_and_array_bounds },
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
         { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },

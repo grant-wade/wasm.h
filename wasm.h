@@ -1188,6 +1188,29 @@ static wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* field) 
     }
 }
 
+static wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
+                                              const void* src,
+                                              int sign_extend,
+                                              wasm_value_t* out_value) {
+    if (!field || !src || !out_value) return WASM_ERR_MALFORMED;
+
+    if (field->storage.kind == WASM_STORAGE_PACKED) {
+        if (field->storage.of.packed_type == WASM_PACKED_I8) {
+            uint8_t raw = *(const uint8_t*)src;
+
+            *out_value = wasm_i32(sign_extend ? (int32_t)(int8_t)raw : (int32_t)raw);
+        } else {
+            uint16_t raw = wasm__load_le16(src);
+
+            *out_value = wasm_i32(sign_extend ? (int32_t)(int16_t)raw : (int32_t)raw);
+        }
+        return WASM_OK;
+    }
+
+    *out_value = *(const wasm_value_t*)src;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__gc_store_field_bytes(const wasm_fieldtype_t* field,
                                                void* dst,
                                                wasm_value_t value) {
@@ -1208,16 +1231,70 @@ static wasm_error_t wasm__gc_store_field_bytes(const wasm_fieldtype_t* field,
     return WASM_OK;
 }
 
+static void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
+                                       const wasm_structtype_t* type,
+                                       uint32_t field_index) {
+    size_t offset;
+
+    if (!object || !type || field_index >= type->num_fields) return NULL;
+    offset = wasm__gc_struct_field_offset(type, field_index);
+    if (offset == (size_t)-1) return NULL;
+    return ((uint8_t*)object) + offset;
+}
+
+static const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
+                                                   const wasm_structtype_t* type,
+                                                   uint32_t field_index) {
+    size_t offset;
+
+    if (!object || !type || field_index >= type->num_fields) return NULL;
+    offset = wasm__gc_struct_field_offset(type, field_index);
+    if (offset == (size_t)-1) return NULL;
+    return ((const uint8_t*)object) + offset;
+}
+
+WASM_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_t* object,
+                                                   const wasm_structtype_t* type,
+                                                   uint32_t field_index,
+                                                   int sign_extend,
+                                                   wasm_value_t* out_value) {
+    const void* src;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
+    src = wasm__gc_struct_field_const_ptr(object, type, field_index);
+    if (!src) return WASM_ERR_OOM;
+    return wasm__gc_load_field_bytes(&type->fields[field_index], src, sign_extend, out_value);
+}
+
+static wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
+                                              const wasm_structtype_t* type,
+                                              uint32_t field_index,
+                                              wasm_value_t value) {
+    void* dst;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
+    dst = wasm__gc_struct_field_ptr(object, type, field_index);
+    if (!dst) return WASM_ERR_OOM;
+    return wasm__gc_store_field_bytes(&type->fields[field_index], dst, value);
+}
+
 static wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
                                                 const wasm_structtype_t* type,
                                                 uint32_t field_index,
                                                 wasm_value_t value) {
-    size_t offset;
+    return wasm__gc_struct_set_field(object, type, field_index, value);
+}
 
-    if (!object || !type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
-    offset = wasm__gc_struct_field_offset(type, field_index);
-    if (offset == (size_t)-1) return WASM_ERR_OOM;
-    return wasm__gc_store_field_bytes(&type->fields[field_index], ((uint8_t*)object) + offset, value);
+static const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
+                                                    const wasm_arraytype_t* type,
+                                                    uint32_t index) {
+    size_t data_offset = wasm__gc_array_data_offset(type);
+    size_t elem_size = wasm__gc_field_storage_size(&type->field);
+
+    if (!object || !type || index >= object->length || data_offset == (size_t)-1) return NULL;
+    return ((const uint8_t*)object) + data_offset + ((size_t)index * elem_size);
 }
 
 static void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
@@ -1230,14 +1307,44 @@ static void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
     return ((uint8_t*)object) + data_offset + ((size_t)index * elem_size);
 }
 
+WASM_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* object,
+                                            const wasm_arraytype_t* type,
+                                            uint32_t index,
+                                            int sign_extend,
+                                            wasm_value_t* out_value) {
+    const void* src;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type) return WASM_ERR_MALFORMED;
+    if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
+    src = wasm__gc_array_element_const_ptr(object, type, index);
+    if (!src) return WASM_ERR_OOM;
+    return wasm__gc_load_field_bytes(&type->field, src, sign_extend, out_value);
+}
+
+static wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
+                                       const wasm_arraytype_t* type,
+                                       uint32_t index,
+                                       wasm_value_t value) {
+    void* dst;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type) return WASM_ERR_MALFORMED;
+    if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
+    dst = wasm__gc_array_element_ptr(object, type, index);
+    if (!dst) return WASM_ERR_OOM;
+    return wasm__gc_store_field_bytes(&type->field, dst, value);
+}
+
+WASM_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object) {
+    return object ? object->length : 0u;
+}
+
 static wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
                                                  const wasm_arraytype_t* type,
                                                  uint32_t index,
                                                  wasm_value_t value) {
-    void* dst = wasm__gc_array_element_ptr(object, type, index);
-
-    if (!dst) return WASM_ERR_MALFORMED;
-    return wasm__gc_store_field_bytes(&type->field, dst, value);
+    return wasm__gc_array_set(object, type, index, value);
 }
 
 static wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,

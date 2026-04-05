@@ -130,14 +130,14 @@
 - Track allocation list for mark-sweep traversal
 - Provide `WASM_GC_ALLOC(sz)` / `WASM_GC_FREE(p)` override points consistent with existing `WASM_MALLOC` pattern
 
-**4.4 Mark-sweep collector**
+**[DONE] 4.4 Mark-sweep collector**
 
 - **Mark phase**: walk root set — `rt->stack[0..sp]`, all active call frame locals, `mod->globals`, `mod->tables` — mark reachable GC objects, recursing into struct fields and array elements that hold GC refs
 - **Sweep phase**: walk allocation list, free unmarked objects, clear marks on survivors
 - Trigger: when bump allocator is exhausted, run collection, then retry
 - Expose `wasm_gc_collect(rt)` as public API for manual triggering
 
-**4.5 Struct/array accessors**
+** [DONE] 4.5 Struct/array accessors**
 
 - `wasm__gc_struct_get_field(obj, field_idx)` — return `wasm_value_t`, handling packed reads with sign/zero extension
 - `wasm__gc_struct_set_field(obj, field_idx, value)` — write, handling packed stores
