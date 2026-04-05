@@ -1705,22 +1705,38 @@ static wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_value) {
 
 static float wasm__f32_min(float lhs, float rhs) {
     if (isnan(lhs) || isnan(rhs)) return lhs + rhs;
-    return fminf(lhs, rhs);
+    if (lhs == rhs) {
+        if (lhs == 0.0f) return (signbit(lhs) || signbit(rhs)) ? -0.0f : 0.0f;
+        return lhs;
+    }
+    return lhs < rhs ? lhs : rhs;
 }
 
 static float wasm__f32_max(float lhs, float rhs) {
     if (isnan(lhs) || isnan(rhs)) return lhs + rhs;
-    return fmaxf(lhs, rhs);
+    if (lhs == rhs) {
+        if (lhs == 0.0f) return (signbit(lhs) && signbit(rhs)) ? -0.0f : 0.0f;
+        return lhs;
+    }
+    return lhs > rhs ? lhs : rhs;
 }
 
 static double wasm__f64_min(double lhs, double rhs) {
     if (isnan(lhs) || isnan(rhs)) return lhs + rhs;
-    return fmin(lhs, rhs);
+    if (lhs == rhs) {
+        if (lhs == 0.0) return (signbit(lhs) || signbit(rhs)) ? -0.0 : 0.0;
+        return lhs;
+    }
+    return lhs < rhs ? lhs : rhs;
 }
 
 static double wasm__f64_max(double lhs, double rhs) {
     if (isnan(lhs) || isnan(rhs)) return lhs + rhs;
-    return fmax(lhs, rhs);
+    if (lhs == rhs) {
+        if (lhs == 0.0) return (signbit(lhs) && signbit(rhs)) ? -0.0 : 0.0;
+        return lhs;
+    }
+    return lhs > rhs ? lhs : rhs;
 }
 
 static float wasm__nearest_f32(float value) {
