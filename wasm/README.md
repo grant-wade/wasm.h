@@ -10,6 +10,8 @@ The intent is not to require green results today. It is a regression and compati
 - `runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export
 - `Makefile` — builds the runner, compiles the fixtures, and runs the suite
 
+The runner binds the built-in WASI stubs automatically, so fixtures that call `printf`/`puts` through `wasi_snapshot_preview1.fd_write` can run without extra setup.
+
 ## Usage
 
 From the repository root:
@@ -49,6 +51,7 @@ Supported runner modes are:
 - `call-void wl_case`
 - `call-i32 wl_case <expected>`
 - `call-i64 wl_case <expected>`
+- `call-stdout wl_case <expected_stdout>`
 - `call-fail wl_case`
 
 That makes it easy to keep deliberately unsupported-feature probes in the suite without having to remove them when they fail today.

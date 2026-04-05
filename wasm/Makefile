@@ -12,7 +12,7 @@ RUNNER := $(BUILD_DIR)/wasm_runner
 RUNNER_SRC := runner.c
 RUNNER_DEPS := $(RUNNER_SRC) $(ROOT)/wasm.h
 
-CASES := basic_add function_pointer bulk_memory sign_extension switch_table start_constructor i64_return trunc_sat tail_call unresolved_import
+CASES := basic_add function_pointer bulk_memory sign_extension switch_table start_constructor i64_return trunc_sat tail_call stdout_print unresolved_import
 
 basic_add_RUNNER_ARGS := call-i32 wl_case 10
 basic_add_EMCCFLAGS := -O0
@@ -40,6 +40,9 @@ trunc_sat_EMCCFLAGS := -O2
 
 tail_call_RUNNER_ARGS := call-i32 wl_case 29
 tail_call_EMCCFLAGS := -O1 -mtail-call
+
+stdout_print_RUNNER_ARGS := call-stdout wl_case stdout-fixture-ok
+stdout_print_EMCCFLAGS := -O0
 
 unresolved_import_RUNNER_ARGS := load-fail
 unresolved_import_EMCCFLAGS := -O0 -Wl,--allow-undefined

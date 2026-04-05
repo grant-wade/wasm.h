@@ -227,7 +227,7 @@ uint64_t wasm_get_fuel(wasm_runtime_t* rt);
 
 ---
 
-### Phase 7: Built-in WASI Print Stubs (Compatibility)
+### [DONE] Phase 7: Built-in WASI Print Stubs (Compatibility)
 **The Problem:** If someone writes a C, C++, Rust, or Zig program and types `printf("Hello World");`, the compiler targets `wasm32-wasi`. When they try to load that module into your runtime, it will crash with: `Unknown import: wasi_snapshot_preview1.fd_write`.
 Forcing every user to manually read the WASI spec and implement `fd_write` just to get `printf` working is highly frustrating.
 
@@ -235,15 +235,17 @@ Forcing every user to manually read the WASI spec and implement `fd_write` just 
 
 **Public API:**
 ```c
-// Automatically registers basic WASI imports (fd_write, proc_exit, environ_get)
+// Automatically registers basic WASI imports (fd_write, fd_close, fd_seek,
+// fd_fdstat_get, args_sizes_get, args_get, environ_sizes_get,
+// environ_get, random_get, clock_time_get, proc_exit)
 // so that standard C/Rust libraries don't crash on load.
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
 ```
 
 **Implementation Strategy:**
-*   You don't need a full filesystem. You just need to implement a host function for `"wasi_snapshot_preview1"`, `"fd_write"`.
-*   `fd_write` takes 4 arguments: `fd` (1=stdout, 2=stderr), `iovs_ptr` (pointer to array of string vectors in Wasm memory), `iovs_len`, and `nwritten_ptr`.
-*   The host function implementation simply reads those strings from `wasm_memory_data(mod)` and passes them to standard C `fwrite` or `printf`.
+*   `wasm_bind_wasi_stubs()` now registers `wasi_snapshot_preview1.fd_write`, `fd_close`, `fd_seek`, `fd_fdstat_get`, `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get`, `random_get`, `clock_time_get`, and `proc_exit`.
+*   `fd_write` resolves the active calling module, validates guest iovecs against memory 0, writes to host `stdout`/`stderr`, and stores `nwritten` back into guest memory. `fd_fdstat_get` reports stdio descriptors as character devices.
+*   Argument and environment stubs default to empty lists, while `random_get` and `clock_time_get` route through portable C99-friendly platform hooks near the top of the implementation section so embedders can override them without pulling POSIX-only code into the core runtime.
 
 ---
 

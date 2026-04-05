@@ -5,6 +5,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <io.h>
+#define WASM_RUNNER_DUP _dup
+#define WASM_RUNNER_DUP2 _dup2
+#define WASM_RUNNER_CLOSE _close
+#define WASM_RUNNER_FILENO _fileno
+#else
+#include <unistd.h>
+#define WASM_RUNNER_DUP dup
+#define WASM_RUNNER_DUP2 dup2
+#define WASM_RUNNER_CLOSE close
+#define WASM_RUNNER_FILENO fileno
+#endif
+
+typedef struct wasm_runner_stdout_capture {
+    FILE* temp;
+    int stdout_fd;
+    int saved_fd;
+} wasm_runner_stdout_capture;
+
 static void print_usage(const char* argv0) {
     fprintf(stderr, "usage: %s <module.wasm> <mode> [args...]\n", argv0);
     fprintf(stderr, "  modes:\n");
@@ -13,7 +33,80 @@ static void print_usage(const char* argv0) {
     fprintf(stderr, "    call-void <export_name>\n");
     fprintf(stderr, "    call-i32 <export_name> <expected>\n");
     fprintf(stderr, "    call-i64 <export_name> <expected>\n");
+    fprintf(stderr, "    call-stdout <export_name> <expected_stdout>\n");
     fprintf(stderr, "    call-fail <export_name>\n");
+}
+
+static int begin_stdout_capture(wasm_runner_stdout_capture* capture) {
+    int temp_fd;
+
+    if (!capture) return 0;
+
+    memset(capture, 0, sizeof(*capture));
+    capture->stdout_fd = WASM_RUNNER_FILENO(stdout);
+    if (capture->stdout_fd < 0) return 0;
+
+    fflush(stdout);
+    capture->saved_fd = WASM_RUNNER_DUP(capture->stdout_fd);
+    if (capture->saved_fd < 0) return 0;
+
+    capture->temp = tmpfile();
+    if (!capture->temp) {
+        WASM_RUNNER_CLOSE(capture->saved_fd);
+        capture->saved_fd = -1;
+        return 0;
+    }
+
+    temp_fd = WASM_RUNNER_FILENO(capture->temp);
+    if (temp_fd < 0 || WASM_RUNNER_DUP2(temp_fd, capture->stdout_fd) < 0) {
+        fclose(capture->temp);
+        capture->temp = NULL;
+        WASM_RUNNER_CLOSE(capture->saved_fd);
+        capture->saved_fd = -1;
+        return 0;
+    }
+
+    return 1;
+}
+
+static int end_stdout_capture(wasm_runner_stdout_capture* capture, char** out_text) {
+    long size;
+    char* text = NULL;
+
+    if (out_text) *out_text = NULL;
+    if (!capture || !capture->temp || !out_text) return 0;
+
+    fflush(stdout);
+    fflush(capture->temp);
+
+    if (fseek(capture->temp, 0, SEEK_END) != 0) goto fail;
+    size = ftell(capture->temp);
+    if (size < 0) goto fail;
+    if (fseek(capture->temp, 0, SEEK_SET) != 0) goto fail;
+
+    text = (char*)malloc((size_t)size + 1u);
+    if (!text) goto fail;
+    if (size > 0 && fread(text, 1, (size_t)size, capture->temp) != (size_t)size) goto fail;
+    text[size] = '\0';
+
+    if (WASM_RUNNER_DUP2(capture->saved_fd, capture->stdout_fd) < 0) goto fail;
+    WASM_RUNNER_CLOSE(capture->saved_fd);
+    fclose(capture->temp);
+    capture->saved_fd = -1;
+    capture->temp = NULL;
+    *out_text = text;
+    return 1;
+
+fail:
+    if (capture->saved_fd >= 0) {
+        WASM_RUNNER_DUP2(capture->saved_fd, capture->stdout_fd);
+        WASM_RUNNER_CLOSE(capture->saved_fd);
+    }
+    if (capture->temp) fclose(capture->temp);
+    free(text);
+    capture->saved_fd = -1;
+    capture->temp = NULL;
+    return 0;
 }
 
 static unsigned char* read_file_bytes(const char* path, size_t* out_size) {
@@ -113,6 +206,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "failed to initialize runtime\n");
         free(bytes);
         return 1;
+    }
+
+    if (wasm_bind_wasi_stubs(&runtime) != WASM_OK) {
+        fprintf(stderr, "failed to bind wasi stubs: %s\n",
+                runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(runtime.last_error));
+        goto cleanup;
     }
 
     module = wasm_load(&runtime, bytes, size);
@@ -248,6 +347,45 @@ int main(int argc, char** argv) {
                     expected_i64, (long long)result.of.i64);
             goto cleanup;
         }
+        exit_code = 0;
+        goto cleanup;
+        }
+    }
+
+    if (strcmp(mode, "call-stdout") == 0) {
+        wasm_runner_stdout_capture capture;
+        char* captured = NULL;
+
+        if (argc != 5) {
+            print_usage(argv[0]);
+            exit_code = 2;
+            goto cleanup;
+        }
+        export_name = argv[3];
+
+        if (!begin_stdout_capture(&capture)) {
+            fprintf(stderr, "failed to capture stdout\n");
+            goto cleanup;
+        }
+
+        {
+        wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
+        if (!end_stdout_capture(&capture, &captured)) {
+            fprintf(stderr, "failed to finalize stdout capture\n");
+            goto cleanup;
+        }
+        if (err != WASM_OK) {
+            fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            free(captured);
+            goto cleanup;
+        }
+        printf("call ok: %s() printed '%s'\n", export_name, captured);
+        if (strcmp(captured, argv[4]) != 0) {
+            fprintf(stderr, "expected stdout '%s' but got '%s'\n", argv[4], captured);
+            free(captured);
+            goto cleanup;
+        }
+        free(captured);
         exit_code = 0;
         goto cleanup;
         }
