@@ -146,6 +146,23 @@ static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
 #define WASM_TEST_SNPRINTF snprintf
 #endif
 
+#define WASM_TEST_GC_I31_TAG ((uintptr_t)1u)
+
+static int wasm_test_value_is_i31ref(const wasm_value_t* value) {
+    return value && value->type == WASM_TYPE_I31REF && (value->of.gc_ref & WASM_TEST_GC_I31_TAG) != 0;
+}
+
+static int32_t wasm_test_gc_i31_get_s(uintptr_t bits) {
+    uint32_t raw = (uint32_t)(bits >> 1) & 0x7FFFFFFFu;
+
+    if ((raw & 0x40000000u) != 0) raw |= 0x80000000u;
+    return (int32_t)raw;
+}
+
+static uint32_t wasm_test_gc_i31_get_u(uintptr_t bits) {
+    return (uint32_t)(bits >> 1) & 0x7FFFFFFFu;
+}
+
 #define WASM_CHECK_OK(t, err) WL_CHECK_MSG((t), (err) == WASM_OK, "%s", wasm_error_string(err))
 #define WASM_CHECK_I32(t, actual, expected) \
     WL_CHECK_MSG((t), (actual) == (expected), "expected %d, got %d", (expected), (actual))
@@ -8223,6 +8240,308 @@ WL_TEST(test_gc_ref_eq_accepts_eqref_subtypes) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_runtime_initializes_heap_arena) {
+    wasm_runtime_t rt;
+
+    wasm_init(&rt);
+
+    WL_CHECK_MSG(t, rt.gc_heap != NULL, "%s", "expected wasm_init to allocate a GC heap arena");
+    WL_CHECK_MSG(t, rt.gc_heap_size == (size_t)WASM_GC_HEAP_SIZE,
+                 "expected GC heap size %zu, got %zu",
+                 (size_t)WASM_GC_HEAP_SIZE,
+                 rt.gc_heap_size);
+    WL_CHECK_MSG(t, rt.gc_heap_offset == 0, "%s", "expected empty GC heap to start at offset 0");
+    WL_CHECK_MSG(t, rt.gc_allocations == NULL, "%s", "expected no GC objects to be tracked initially");
+
+    wasm_destroy(&rt);
+
+    WL_CHECK_MSG(t, rt.gc_heap == NULL, "%s", "expected wasm_destroy to release the GC heap arena");
+    WL_CHECK_MSG(t, rt.gc_heap_size == 0, "%s", "expected wasm_destroy to clear GC heap size");
+    WL_CHECK_MSG(t, rt.gc_heap_offset == 0, "%s", "expected wasm_destroy to clear GC heap offset");
+    WL_CHECK_MSG(t, rt.gc_allocations == NULL, "%s", "expected wasm_destroy to clear tracked GC objects");
+}
+
+WL_TEST(test_gc_i31ref_uses_tagged_non_null_storage) {
+    wasm_value_t null_i31 = wasm_ref_null(WASM_TYPE_I31REF);
+    wasm_value_t minus_one = wasm_i31ref(-1);
+    wasm_value_t positive = wasm_i31ref(123456789);
+
+    WL_CHECK_MSG(t, null_i31.type == WASM_TYPE_I31REF, "%s", "expected null i31ref to preserve its value type");
+    WL_CHECK_MSG(t, wasm__is_null_ref(&null_i31), "%s", "expected ref.null i31 to stay null");
+
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&minus_one), "%s", "expected tagged i31ref payloads to be non-null");
+    WL_CHECK_MSG(t, wasm_test_value_is_i31ref(&minus_one), "%s", "expected wasm_i31ref to set the i31 tag bit");
+    WL_CHECK_MSG(t, minus_one.of.gc_ref == wasm__gc_i31_encode(-1), "%s", "expected wasm_i31ref to use the internal tagged encoding");
+    WASM_CHECK_I32(t, wasm_test_gc_i31_get_s(minus_one.of.gc_ref), -1);
+    WL_CHECK_MSG(t, wasm_test_gc_i31_get_u(minus_one.of.gc_ref) == 0x7FFFFFFFu,
+                 "expected unsigned i31 decode to keep the low 31 bits, got %u",
+                 (unsigned)wasm_test_gc_i31_get_u(minus_one.of.gc_ref));
+    WASM_CHECK_I32(t, wasm_test_gc_i31_get_s(positive.of.gc_ref), 123456789);
+}
+
+WL_TEST(test_gc_allocator_tracks_struct_and_array_objects) {
+    wasm_runtime_t rt;
+    wasm_fieldtype_t struct_fields[2];
+    wasm_structtype_t struct_type;
+    wasm_arraytype_t array_type;
+    wasm_gc_struct_t* struct_obj;
+    wasm_gc_array_t* array_obj;
+    size_t struct_size = 0;
+    size_t array_size = 0;
+    size_t struct_field0_offset;
+    size_t struct_field1_offset;
+    size_t first_heap_offset;
+
+    memset(struct_fields, 0, sizeof(struct_fields));
+    memset(&struct_type, 0, sizeof(struct_type));
+    memset(&array_type, 0, sizeof(array_type));
+
+    wasm_init(&rt);
+
+    struct_fields[0].storage.kind = WASM_STORAGE_VALTYPE;
+    struct_fields[0].storage.of.valtype = WASM_TYPE_I32;
+    struct_fields[1].storage.kind = WASM_STORAGE_PACKED;
+    struct_fields[1].storage.of.packed_type = WASM_PACKED_I8;
+    struct_fields[1].is_mutable = 1;
+    struct_type.num_fields = 2;
+    struct_type.fields = struct_fields;
+
+    array_type.field.storage.kind = WASM_STORAGE_PACKED;
+    array_type.field.storage.of.packed_type = WASM_PACKED_I16;
+
+    WL_CHECK_MSG(t, wasm__gc_struct_size(&struct_type, &struct_size), "%s", "expected struct object size calculation to succeed");
+    WL_CHECK_MSG(t, wasm__gc_array_total_size(&array_type, 4, &array_size), "%s", "expected array object size calculation to succeed");
+
+    struct_field0_offset = wasm__gc_struct_field_offset(&struct_type, 0);
+    struct_field1_offset = wasm__gc_struct_field_offset(&struct_type, 1);
+    WL_CHECK_MSG(t, struct_field0_offset == wasm__align_up_size(sizeof(wasm_gc_struct_t), (size_t)WASM__ALIGNOF(wasm_value_t)),
+                 "unexpected first struct field offset %zu",
+                 struct_field0_offset);
+    WL_CHECK_MSG(t, struct_field1_offset > struct_field0_offset,
+                 "expected later packed fields to follow earlier fields (%zu <= %zu)",
+                 struct_field1_offset,
+                 struct_field0_offset);
+
+    struct_obj = wasm__gc_alloc_struct_object(&rt, 7, &struct_type);
+    WL_CHECK_MSG(t, struct_obj != NULL, "%s", "expected struct allocation from the GC heap to succeed");
+    if (struct_obj == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, struct_obj->header.type_index == 7, "%s", "expected struct object header to store its runtime type index");
+    WL_CHECK_MSG(t, struct_obj->header.kind == WASM_GC_OBJ_STRUCT, "%s", "expected struct allocation kind tag");
+    WL_CHECK_MSG(t, struct_obj->header.object_size == struct_size,
+                 "expected struct object size %zu, got %zu",
+                 struct_size,
+                 struct_obj->header.object_size);
+    WL_CHECK_MSG(t, struct_obj->header.next_alloc == NULL, "%s", "expected first GC allocation to terminate the allocation list");
+    WL_CHECK_MSG(t, rt.gc_allocations == &struct_obj->header, "%s", "expected runtime to track the struct allocation");
+
+    first_heap_offset = rt.gc_heap_offset;
+
+    array_obj = wasm__gc_alloc_array_object(&rt, 11, &array_type, 4);
+    WL_CHECK_MSG(t, array_obj != NULL, "%s", "expected array allocation from the GC heap to succeed");
+    if (array_obj == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, array_obj->length == 4, "%s", "expected array header to store its logical length");
+    WL_CHECK_MSG(t, array_obj->header.type_index == 11, "%s", "expected array object header to store its runtime type index");
+    WL_CHECK_MSG(t, array_obj->header.kind == WASM_GC_OBJ_ARRAY, "%s", "expected array allocation kind tag");
+    WL_CHECK_MSG(t, array_obj->header.object_size == array_size,
+                 "expected array object size %zu, got %zu",
+                 array_size,
+                 array_obj->header.object_size);
+    WL_CHECK_MSG(t, rt.gc_allocations == &array_obj->header, "%s", "expected latest allocation to be the head of the GC allocation list");
+    WL_CHECK_MSG(t, array_obj->header.next_alloc == &struct_obj->header,
+                 "%s",
+                 "expected GC allocation list to chain older objects behind newer ones");
+    WL_CHECK_MSG(t, rt.gc_heap_offset > first_heap_offset,
+                 "expected second allocation to advance the heap offset (%zu -> %zu)",
+                 first_heap_offset,
+                 rt.gc_heap_offset);
+
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_const_expr_supports_gc_alloc_ops) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_gc_struct_t* struct_init;
+    wasm_gc_struct_t* struct_default;
+    wasm_gc_array_t* array_init;
+    wasm_gc_array_t* array_default;
+    wasm_gc_array_t* array_fixed;
+    wasm_value_t* struct_init_field;
+    wasm_value_t* struct_default_field;
+    wasm_value_t* array_init_data;
+    wasm_value_t* array_default_data;
+    wasm_value_t* array_fixed_data;
+    size_t struct_field_offset;
+    size_t array_data_offset;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 6);
+
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 7);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x00);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x01);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 3);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 9);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x06);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 4);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x07);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x64);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 1);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 2);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x08);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x6C);
+        emit(&sec, 0x00);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, -1);
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x1C);
+        emit(&sec, 0x0B);
+
+        emit_section(&mod, 6, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, m->num_globals == 6, "expected 6 globals, got %u", (unsigned)m->num_globals);
+
+    struct_init = (wasm_gc_struct_t*)m->globals[0].value.of.gc_obj;
+    struct_default = (wasm_gc_struct_t*)m->globals[1].value.of.gc_obj;
+    array_init = (wasm_gc_array_t*)m->globals[2].value.of.gc_obj;
+    array_default = (wasm_gc_array_t*)m->globals[3].value.of.gc_obj;
+    array_fixed = (wasm_gc_array_t*)m->globals[4].value.of.gc_obj;
+
+    WL_CHECK_MSG(t, m->globals[0].type == WASM_TYPE_STRUCTREF, "%s", "expected struct.new global to resolve to structref");
+    WL_CHECK_MSG(t, m->globals[1].type == WASM_TYPE_STRUCTREF, "%s", "expected struct.new_default global to resolve to structref");
+    WL_CHECK_MSG(t, m->globals[2].type == WASM_TYPE_ARRAYREF, "%s", "expected array.new global to resolve to arrayref");
+    WL_CHECK_MSG(t, m->globals[3].type == WASM_TYPE_ARRAYREF, "%s", "expected array.new_default global to resolve to arrayref");
+    WL_CHECK_MSG(t, m->globals[4].type == WASM_TYPE_ARRAYREF, "%s", "expected array.new_fixed global to resolve to arrayref");
+    WL_CHECK_MSG(t, m->globals[5].type == WASM_TYPE_I31REF, "%s", "expected ref.i31 global to resolve to i31ref");
+
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[0].value), "%s", "expected struct.new const expr to allocate an object");
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[1].value), "%s", "expected struct.new_default const expr to allocate an object");
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[2].value), "%s", "expected array.new const expr to allocate an object");
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[3].value), "%s", "expected array.new_default const expr to allocate an object");
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[4].value), "%s", "expected array.new_fixed const expr to allocate an object");
+    WL_CHECK_MSG(t, !wasm__is_null_ref(&m->globals[5].value), "%s", "expected ref.i31 const expr to produce a non-null tagged ref");
+
+    WL_CHECK_MSG(t, struct_init != NULL && struct_init->header.kind == WASM_GC_OBJ_STRUCT,
+                 "%s", "expected struct.new global to point at a struct object");
+    WL_CHECK_MSG(t, struct_default != NULL && struct_default->header.kind == WASM_GC_OBJ_STRUCT,
+                 "%s", "expected struct.new_default global to point at a struct object");
+    WL_CHECK_MSG(t, array_init != NULL && array_init->header.kind == WASM_GC_OBJ_ARRAY,
+                 "%s", "expected array.new global to point at an array object");
+    WL_CHECK_MSG(t, array_default != NULL && array_default->header.kind == WASM_GC_OBJ_ARRAY,
+                 "%s", "expected array.new_default global to point at an array object");
+    WL_CHECK_MSG(t, array_fixed != NULL && array_fixed->header.kind == WASM_GC_OBJ_ARRAY,
+                 "%s", "expected array.new_fixed global to point at an array object");
+
+    struct_field_offset = wasm__gc_struct_field_offset(&m->types[0].of.struct_, 0);
+    array_data_offset = wasm__gc_array_data_offset(&m->types[1].of.array);
+    struct_init_field = (wasm_value_t*)((uint8_t*)struct_init + struct_field_offset);
+    struct_default_field = (wasm_value_t*)((uint8_t*)struct_default + struct_field_offset);
+    array_init_data = (wasm_value_t*)((uint8_t*)array_init + array_data_offset);
+    array_default_data = (wasm_value_t*)((uint8_t*)array_default + array_data_offset);
+    array_fixed_data = (wasm_value_t*)((uint8_t*)array_fixed + array_data_offset);
+
+    WL_CHECK_MSG(t, struct_init_field->type == WASM_TYPE_I32 && struct_init_field->of.i32 == 7,
+                 "%s", "expected struct.new const expr to preserve field values");
+    WL_CHECK_MSG(t, struct_default_field->type == WASM_TYPE_I32 && struct_default_field->of.i32 == 0,
+                 "%s", "expected struct.new_default const expr to zero-initialize fields");
+
+    WL_CHECK_MSG(t, array_init->length == 3, "expected array.new length 3, got %u", (unsigned)array_init->length);
+    WL_CHECK_MSG(t, array_default->length == 4, "expected array.new_default length 4, got %u", (unsigned)array_default->length);
+    WL_CHECK_MSG(t, array_fixed->length == 2, "expected array.new_fixed length 2, got %u", (unsigned)array_fixed->length);
+    WL_CHECK_MSG(t, array_init_data[0].of.i32 == 9 && array_init_data[1].of.i32 == 9 && array_init_data[2].of.i32 == 9,
+                 "%s", "expected array.new const expr to fill with the initializer value");
+    WL_CHECK_MSG(t, array_default_data[0].of.i32 == 0 && array_default_data[3].of.i32 == 0,
+                 "%s", "expected array.new_default const expr to zero-initialize elements");
+    WL_CHECK_MSG(t, array_fixed_data[0].of.i32 == 1 && array_fixed_data[1].of.i32 == 2,
+                 "%s", "expected array.new_fixed const expr to preserve element order");
+
+    WL_CHECK_MSG(t, wasm_test_value_is_i31ref(&m->globals[5].value), "%s", "expected ref.i31 const expr to use the tagged i31 representation");
+    WASM_CHECK_I32(t, wasm_test_gc_i31_get_s(m->globals[5].value.of.gc_ref), -1);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_validation_accepts_struct_and_array_gc_opcodes) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -8924,6 +9243,10 @@ int main(void) {
         { "wasmgc: typed select accepts eqref where anyref is expected", test_gc_typed_select_accepts_eqref_as_anyref },
         { "wasmgc: anyref tables accept eqref values via subtyping", test_gc_table_set_accepts_eqref_into_anyref_table },
         { "wasmgc: ref.eq accepts eqref subtypes", test_gc_ref_eq_accepts_eqref_subtypes },
+        { "wasmgc: runtime init allocates a tracked GC heap arena", test_gc_runtime_initializes_heap_arena },
+        { "wasmgc: i31ref values use tagged non-null storage", test_gc_i31ref_uses_tagged_non_null_storage },
+        { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
+        { "wasmgc: const expressions support GC allocation ops", test_gc_const_expr_supports_gc_alloc_ops },
         { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },
         { "wasmgc: validator rejects struct.get on packed fields without signedness", test_gc_validation_rejects_struct_get_on_packed_field_without_sign },
         { "wasmgc: validator accepts ref.cast and br_on_cast opcodes", test_gc_validation_accepts_cast_and_branch_cast_opcodes },

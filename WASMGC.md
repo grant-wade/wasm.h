@@ -98,7 +98,7 @@
 - Global/table types with new reference types
 - `select` with reference types in the typed variant
 
-**3.4 Constant expression extensions**
+**[DONE] 3.4 Constant expression extensions**
 
 - `struct.new`, `struct.new_default`, `array.new`, `array.new_default`, `array.new_fixed`, `ref.i31`, `any.convert_extern`, `extern.convert_any` are all constant instructions
 - `global.get` in const exprs can reference preceding immutable globals (not just imports)
@@ -110,21 +110,21 @@
 
 **Goal**: Implement a managed heap for GC-allocated structs and arrays.
 
-**4.1 Heap object representation**
+**[DONE] 4.1 Heap object representation**
 
 - Define `wasm_gc_header_t`: type index (RTT), mark bit, object size/kind
 - Struct layout: header + N fields as `wasm_value_t` (or packed for i8/i16)
 - Array layout: header + length (u32) + element data (packed or `wasm_value_t` per element)
 - i31: no allocation — store as tagged value in `wasm_value_t` (use existing `i32` field with a distinct valtype)
 
-**4.2 GC value in `wasm_value_t`**
+**[DONE] 4.2 GC value in `wasm_value_t`**
 
 - Add `WASM_TYPE_I31` to `wasm_valtype_t` (or reuse the 0x14 encoding)
 - Add a GC ref variant to the `wasm_value_t` union — pointer to heap object
 - Null GC ref = NULL pointer
 - Update `wasm__default_value`, `wasm__is_null_ref`, `wasm__value_matches_type` for new types
 
-**4.3 Heap allocator**
+**[DONE] 4.3 Heap allocator**
 
 - Bump allocator for GC objects, backed by a configurable-size arena (`WASM_GC_HEAP_SIZE`)
 - Track allocation list for mark-sweep traversal
