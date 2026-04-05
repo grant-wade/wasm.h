@@ -310,6 +310,7 @@ typedef struct wasm_gc_array_t {
 
 /* ── Forward declarations ─────────────────────────────────────────── */
 typedef struct wasm_runtime_t wasm_runtime_t;
+#ifdef WASM_IMPL
 static wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
 static int wasm__is_heap_subtype(const wasm_module_t* mod,
                                  wasm_valtype_t subtype,
@@ -320,6 +321,7 @@ static inline int wasm__is_subtype(const wasm_module_t* mod,
 static int wasm__is_valtype_subtype(const wasm_module_t* mod,
                                     wasm_valtype_t subtype,
                                     wasm_valtype_t supertype);
+#endif
 
 typedef struct wasm_reftype_t {
     wasm_valtype_t type;

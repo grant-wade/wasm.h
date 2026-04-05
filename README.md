@@ -143,6 +143,22 @@ wasm_destroy(&rt);
 
 For GC-aware tooling you can introspect composite types with `wasm_type_count`, `wasm_type_kind`, `wasm_struct_type_field`, and `wasm_array_type_field`. Host code can also allocate and manipulate managed values directly with `wasm_struct_new`, `wasm_array_new`, `wasm_struct_get_field`, `wasm_struct_set_field`, `wasm_array_length`, `wasm_array_get_elem`, and `wasm_array_set_elem` when it needs to seed globals, tables, or other runtime state with GC objects.
 
+## `wasm2api`
+
+`wasm2api` generates a small C wrapper pair from the exported functions in a `.wasm` module:
+
+```sh
+./wasm2api path/to/module.wasm my_module
+```
+
+If you want the generated API to carry the module bytes in its `.c` file, use `--embed`:
+
+```sh
+./wasm2api --embed path/to/module.wasm my_module
+```
+
+That mode adds `<prefix>_init_embedded(wasm_runtime_t* rt)` and `<prefix>_embedded_wasm(size_t* out_len)` so callers can initialize the module without knowing a runtime file path.
+
 ## Build And Test
 
 This repo includes test programs for both headers.
