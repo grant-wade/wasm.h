@@ -1,6 +1,6 @@
 # WASM Public API Improvements
 
-### Phase 1: Safe Memory & Global Access (The Foundation)
+### [DONE] Phase 1: Safe Memory & Global Access (The Foundation)
 **Goal:** Allow the host C code to manipulate linear memory and global variables safely, without manual pointer arithmetic or bounds-checking.
 
 **Proposed Public APIs:**
@@ -22,13 +22,13 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
 
 ---
 
-### Phase 2: The Format String API (The Ergonomic Core)
+### [DONE] Phase 2: The Format String API (The Ergonomic Core)
 **Goal:** Eliminate the boilerplate of constructing `wasm_value_t` arrays and `wasm_functype_t` structs manually. 
 
 **Format Mapping Concept:**
 *   `i` = i32, `I` = i64
 *   `f` = f32, `F` = f64
-*   `r` = anyref/externref (passed as `void*` or `uintptr_t`)
+*   `r` = externref (passed as `void*`)
 *   `v` = void (used only for returns)
 *   Syntax: `"args(results)"` -> e.g., `"ii(i)"` (two i32s in, one i32 out), `"I(v)"` (one i64 in, void out).
 
@@ -44,7 +44,7 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name, co
 ```
 **Implementation Strategy:**
 *   Write a tiny internal parser `wasm__parse_fmt_string(const char* fmt, wasm_valtype_t* params, wasm_valtype_t* results)`.
-*   For `wasm_call_fmt`, use `va_arg` to pull the primitive C types off the stack, wrap them in `wasm_i32()`, `wasm_f32()`, etc., populate an array, and pass it to your existing `wasm_call`. For the return values, take pointers (`int32_t*`, `float*`) from `va_arg` and write the results back.
+*   For `wasm_call_fmt`, parse and validate the format string against the exported function signature, then use `va_arg` to pack primitive C types into temporary `wasm_value_t` arrays before forwarding to `wasm_call_index`. Return values are written back through typed output pointers (`int32_t*`, `int64_t*`, `float*`, `double*`, `void**`).
 *   For `wasm_bind_host_func`, use the parsed arrays to populate a `wasm_import_t` and call your existing `wasm_register_import`.
 
 ---

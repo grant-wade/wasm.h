@@ -829,6 +829,7 @@ WL_TEST(test_factorial) {
 
 static int host_print_called = 0;
 static int32_t host_print_value = 0;
+static int host_fmt_add_called = 0;
 
 static wasm_error_t host_print(wasm_runtime_t* rt,
                                const wasm_value_t* args, uint32_t num_args,
@@ -853,6 +854,19 @@ static wasm_error_t host_gc_subtype_identity(wasm_runtime_t* rt,
     (void)userdata;
 
     if (num_results > 0) results[0] = wasm_ref_null(WASM_TYPE_NONE);
+    return WASM_OK;
+}
+
+static wasm_error_t host_fmt_add(wasm_runtime_t* rt,
+                                 const wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results,
+                                 void* userdata) {
+    int32_t bias = userdata ? *(const int32_t*)userdata : 0;
+
+    (void)rt;
+    host_fmt_add_called = 1;
+    if (num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32 + bias);
     return WASM_OK;
 }
 
@@ -965,6 +979,216 @@ WL_TEST(test_host_import) {
         if (host_print_called) {
             WASM_CHECK_I32(t, host_print_value, 42);
         }
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_format_call_api) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    int32_t sum_i32 = 0;
+    float sum_f32 = 0.0f;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7D);
+        emit(&sec, 0x7D);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7D);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+        emit_export_func(&sec, "add", 0);
+        emit_export_func(&sec, "fadd", 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t ops[] = { 0x6A, 0x92 };
+        uint32_t i;
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+        for (i = 0; i < 2; i++) {
+            wasm_builder_t body = { 0 };
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 0);
+            emit(&body, 0x20);
+            emit_leb128_u32(&body, 1);
+            emit(&body, ops[i]);
+            emit(&body, 0x0B);
+            emit_leb128_u32(&sec, body.len);
+            emit_bytes(&sec, body.buf, body.len);
+        }
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call_fmt(m, "add", "ii(i)", (int32_t)3, (int32_t)7, &sum_i32);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, sum_i32, 10);
+    }
+
+    err = wasm_call_fmt(m, "fadd", "ff(f)", 1.5, 2.5, &sum_f32);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, sum_f32 == 4.0f, "%s", "expected f32 format-call result 4.0");
+    }
+
+    err = wasm_call_fmt(m, "add", "ii(v)", (int32_t)1, (int32_t)2);
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected signature mismatch rejection");
+
+    err = wasm_call_fmt(m, "add", "ii(i", (int32_t)1, (int32_t)2, &sum_i32);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected malformed format string rejection");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_bind_host_func_api) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    int32_t bias = 5;
+    int32_t result = 0;
+
+    host_fmt_add_called = 0;
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'a');
+        emit(&sec, 'd');
+        emit(&sec, 'd');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 9);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 4);
+        emit(&body, 0x10);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    err = wasm_bind_host_func(&rt, "env", "bad", "i(vv)", host_fmt_add, &bias);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected malformed format rejection during bind");
+
+    err = wasm_bind_host_func(&rt, "env", "add", "ii(i)", host_fmt_add, &bias);
+    WASM_CHECK_OK(t, err);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call_fmt(m, "run", "(i)", &result);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, host_fmt_add_called, "%s", "expected bound host function to run");
+        WASM_CHECK_I32(t, result, 18);
     }
 
     wasm_free_module(m);
@@ -2059,6 +2283,70 @@ WL_TEST(test_multi_memory_indexed_access) {
         WASM_CHECK_I32(t, memory0[0], 11);
         WASM_CHECK_I32(t, memory1[0], 31);
     }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_public_memory_helpers) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    uint8_t bytes[4] = { 0, 0, 0, 0 };
+    static const uint8_t tail_bytes[2] = { 'x', 'y' };
+    char buffer[8];
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_memory_write(m, 0, 4, "abc", 4);
+    WASM_CHECK_OK(t, err);
+
+    err = wasm_memory_read(m, 0, 4, bytes, sizeof(bytes));
+    WASM_CHECK_OK(t, err);
+    WL_CHECK_MSG(t, memcmp(bytes, "abc", sizeof(bytes)) == 0,
+                 "%s", "expected memory_read to copy the written bytes");
+
+    memset(buffer, '?', sizeof(buffer));
+    err = wasm_memory_get_string(m, 0, 4, buffer, sizeof(buffer));
+    WASM_CHECK_OK(t, err);
+    WL_CHECK_MSG(t, strcmp(buffer, "abc") == 0,
+                 "%s", "expected memory_get_string to read a NUL-terminated string");
+
+    err = wasm_memory_write(m, 0, WASM_PAGE_SIZE - 2u, tail_bytes, sizeof(tail_bytes));
+    WASM_CHECK_OK(t, err);
+
+    memset(buffer, '?', sizeof(buffer));
+    err = wasm_memory_get_string(m, 0, WASM_PAGE_SIZE - 2u, buffer, sizeof(buffer));
+    WASM_CHECK_OK(t, err);
+    WL_CHECK_MSG(t, strcmp(buffer, "xy") == 0,
+                 "%s", "expected memory_get_string to stop at the end of memory and append NUL");
+
+    err = wasm_memory_read(m, 0, WASM_PAGE_SIZE - 1u, bytes, sizeof(bytes));
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS, "%s", "expected out-of-bounds read rejection");
+
+    err = wasm_memory_write(m, 1, 0, bytes, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected invalid memory index rejection");
+
+    err = wasm_memory_get_string(m, 0, 0, buffer, 0);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected zero-length string buffer rejection");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -6151,6 +6439,117 @@ WL_TEST(test_set_immutable_global_rejected) {
     WL_CHECK_MSG(t, m == NULL, "%s", "expected immutable global write rejection during load");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "immutable") != NULL, "%s", rt.error_msg);
 
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_public_global_helpers) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t value;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 7);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0x7E);
+        emit(&sec, 0x00);
+        emit(&sec, 0x42);
+        emit_leb128_i64(&sec, 99);
+        emit(&sec, 0x0B);
+
+        emit_section(&mod, 6, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+        emit_export_func(&sec, "run", 0);
+        emit_export_kind(&sec, "counter", 0x03, 0);
+        emit_export_kind(&sec, "limit", 0x03, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_global_get(m, "counter", &value);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, value.type == WASM_TYPE_I32, "%s", "expected counter to be an i32 global");
+        WASM_CHECK_I32(t, value.of.i32, 7);
+    }
+
+    err = wasm_global_set(m, "counter", wasm_i32(11));
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        err = wasm_global_get(m, "counter", &value);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) {
+            WASM_CHECK_I32(t, value.of.i32, 11);
+            WASM_CHECK_I32(t, m->globals[0].value.of.i32, 11);
+        }
+    }
+
+    err = wasm_global_set(m, "counter", wasm_i64(11));
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected type mismatch for wrong global value type");
+
+    err = wasm_global_set(m, "limit", wasm_i64(100));
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected immutable global write rejection");
+
+    err = wasm_global_get(m, "run", &value);
+    WL_CHECK_MSG(t, err == WASM_ERR_UNDEFINED_EXPORT, "%s", "expected non-global export lookup to fail");
+
+    err = wasm_global_get(m, "missing", &value);
+    WL_CHECK_MSG(t, err == WASM_ERR_UNDEFINED_EXPORT, "%s", "expected missing global export lookup to fail");
+
+    wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
@@ -10689,6 +11088,8 @@ int main(void) {
         { "introspection: exports and signatures are queryable", test_introspection_helpers },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
+        { "public api: format-call packs ints and floats", test_format_call_api },
+        { "public api: bind_host_func registers typed callbacks", test_bind_host_func_api },
         { "global import: mutable env.counter is read and updated by reference", test_imported_mutable_global },
         { "global init expr: global.get can read imported globals", test_global_init_expr_global_get_import },
         { "global init expr: i32 add/mul runs in initializer", test_global_init_expr_extended_i32_arithmetic },
@@ -10698,6 +11099,7 @@ int main(void) {
         { "data offset expr: add/mul runs in initializer", test_data_offset_extended_const_expr },
         { "element offset expr: add runs before active table init", test_element_offset_extended_const_expr },
         { "memory: store 99 at offset 0, load it back", test_memory },
+        { "public api: safe memory read/write/string helpers", test_public_memory_helpers },
         { "multi-memory: indexed load/store and memory APIs", test_multi_memory_indexed_access },
         { "multi-memory: indexed bulk ops plus size/grow", test_multi_memory_bulk_ops_and_growth },
         { "bulk memory: passive data, copy/fill/drop semantics", test_bulk_memory_ops },
@@ -10780,6 +11182,7 @@ int main(void) {
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
+        { "public api: exported globals can be read and updated safely", test_public_global_helpers },
     };
 
     return wl_test_run("wasm", cases, WL_COUNTOF(cases));
