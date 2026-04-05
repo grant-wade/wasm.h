@@ -400,6 +400,9 @@ struct wasm_module_t {
 #ifndef WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE
 #define WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE 1024u
 #endif
+#ifndef WASM_FRAME_ARENA_SIZE
+#define WASM_FRAME_ARENA_SIZE ((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE)
+#endif
 
 struct wasm_runtime_t {
     wasm_import_t* imports;
@@ -3185,11 +3188,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt) {
 
     memset(rt, 0, sizeof(*rt));
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
-    if ((size_t)WASM_MAX_CALL_DEPTH > (size_t)-1 / (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE) {
-        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "frame arena size overflow");
-        return WASM_ERR_OOM;
-    }
-    arena_size = (size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE;
+    arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
     if (wasm__arena_init(rt, arena_size) != WASM_OK) {
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "failed to allocate frame arena");
         return WASM_ERR_OOM;
@@ -6144,14 +6143,16 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
         locals = (wasm_value_t*)wasm__arena_alloc(rt, func->num_locals * sizeof(wasm_value_t));
         if (!locals) {
             wasm__arena_reset(rt, arena_saved);
-            return WASM_ERR_OOM;
+            WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED, "%s", "frame arena exhausted");
+            return WASM_ERR_CALL_STACK_EXHAUSTED;
         }
     }
 
     labels = (wasm__label_t*)wasm__arena_alloc(rt, max_labels * sizeof(wasm__label_t));
     if (!labels) {
         wasm__arena_reset(rt, arena_saved);
-        return WASM_ERR_OOM;
+        WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED, "%s", "frame arena exhausted");
+        return WASM_ERR_CALL_STACK_EXHAUSTED;
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];
@@ -6171,6 +6172,7 @@ static wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_fr
     wasm__call_frame_t* cf;
     wasm_value_t result_values_buf[8];
     wasm_value_t* result_values = result_values_buf;
+    wasm_value_t* results_dst;
     uint32_t result_count;
     uint32_t i;
     int is_root;
@@ -6178,6 +6180,7 @@ static wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_fr
     if (rt->call_frame_sp <= base_frame_sp) return WASM_ERR_MALFORMED;
 
     cf = &rt->call_frames[rt->call_frame_sp - 1];
+    results_dst = cf->results_dst;
     result_count = cf->ft->num_results;
     is_root = (rt->call_frame_sp == base_frame_sp + 1u);
 
@@ -6192,9 +6195,10 @@ static wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_fr
     rt->sp = cf->sp_base;
     wasm__arena_reset(rt, cf->arena_saved);
     rt->call_frame_sp--;
+    memset(cf, 0, sizeof(*cf));
 
     if (is_root) {
-        for (i = 0; i < result_count; i++) cf->results_dst[i] = result_values[i];
+        for (i = 0; i < result_count; i++) results_dst[i] = result_values[i];
     } else {
         for (i = 0; i < result_count; i++) rt->stack[rt->sp++] = result_values[i];
     }
@@ -6217,6 +6221,7 @@ static wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t b
         wasm__clear_call_frame(cf);
         rt->sp = cf->sp_base;
         wasm__arena_reset(rt, cf->arena_saved);
+        memset(cf, 0, sizeof(*cf));
         rt->call_frame_sp--;
     }
 
@@ -9500,6 +9505,7 @@ static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
             uint32_t next_result_count = cf->num_results;
 
             wasm__arena_reset(rt, cf->arena_saved);
+            memset(cf, 0, sizeof(*cf));
             rt->call_frame_sp--;
 
             err = wasm__push_call_frame(mod, next_func_idx, next_args, next_num_args,
@@ -9538,6 +9544,7 @@ cleanup:
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
         wasm__clear_call_frame(cf);
         wasm__arena_reset(rt, cf->arena_saved);
+        memset(cf, 0, sizeof(*cf));
         rt->call_frame_sp--;
     }
     return err;
