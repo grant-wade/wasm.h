@@ -163,6 +163,24 @@ static uint32_t wasm_test_gc_i31_get_u(uintptr_t bits) {
     return (uint32_t)(bits >> 1) & 0x7FFFFFFFu;
 }
 
+static uint32_t wasm_test_gc_allocation_count(const wasm_runtime_t* rt) {
+    uint32_t count = 0;
+    const wasm_gc_header_t* object;
+
+    if (!rt) return 0;
+    for (object = rt->gc_allocations; object; object = object->next_alloc) count++;
+    return count;
+}
+
+static wasm_value_t* wasm_test_gc_struct_field_value(wasm_gc_struct_t* object,
+                                                     const wasm_structtype_t* type,
+                                                     uint32_t field_index) {
+    size_t offset = wasm__gc_struct_field_offset(type, field_index);
+
+    if (!object || !type || offset == (size_t)-1) return NULL;
+    return (wasm_value_t*)(((uint8_t*)object) + offset);
+}
+
 #define WASM_CHECK_OK(t, err) WL_CHECK_MSG((t), (err) == WASM_OK, "%s", wasm_error_string(err))
 #define WASM_CHECK_I32(t, actual, expected) \
     WL_CHECK_MSG((t), (actual) == (expected), "expected %d, got %d", (expected), (actual))
@@ -8322,7 +8340,7 @@ WL_TEST(test_gc_allocator_tracks_struct_and_array_objects) {
                  struct_field1_offset,
                  struct_field0_offset);
 
-    struct_obj = wasm__gc_alloc_struct_object(&rt, 7, &struct_type);
+    struct_obj = wasm__gc_alloc_struct_object(&rt, NULL, 7, &struct_type);
     WL_CHECK_MSG(t, struct_obj != NULL, "%s", "expected struct allocation from the GC heap to succeed");
     if (struct_obj == NULL) {
         wasm_destroy(&rt);
@@ -8340,7 +8358,7 @@ WL_TEST(test_gc_allocator_tracks_struct_and_array_objects) {
 
     first_heap_offset = rt.gc_heap_offset;
 
-    array_obj = wasm__gc_alloc_array_object(&rt, 11, &array_type, 4);
+    array_obj = wasm__gc_alloc_array_object(&rt, NULL, 11, &array_type, 4);
     WL_CHECK_MSG(t, array_obj != NULL, "%s", "expected array allocation from the GC heap to succeed");
     if (array_obj == NULL) {
         wasm_destroy(&rt);
@@ -8539,6 +8557,221 @@ WL_TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     WASM_CHECK_I32(t, wasm_test_gc_i31_get_s(m->globals[5].value.of.gc_ref), -1);
 
     wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
+    wasm_runtime_t rt;
+    wasm_module_t mod;
+    wasm_comptype_t types[2];
+    wasm_fieldtype_t child_fields[1];
+    wasm_fieldtype_t parent_fields[1];
+    wasm_global_t globals[1];
+    wasm_table_t tables[1];
+    wasm_value_t table_elems[1];
+    wasm_func_t fake_func;
+    wasm_value_t frame_locals[1];
+    wasm_gc_struct_t* child;
+    wasm_gc_struct_t* parent;
+    wasm_gc_struct_t* table_root;
+    wasm_gc_struct_t* local_root;
+    wasm_gc_struct_t* stack_root;
+    wasm_gc_struct_t* garbage;
+    wasm_gc_struct_t* moved_parent;
+    wasm_gc_struct_t* moved_child;
+    wasm_value_t* parent_field;
+    wasm_value_t* child_field;
+    wasm_value_t* table_field;
+    wasm_value_t* local_field;
+    wasm_value_t* stack_field;
+
+    memset(&mod, 0, sizeof(mod));
+    memset(types, 0, sizeof(types));
+    memset(child_fields, 0, sizeof(child_fields));
+    memset(parent_fields, 0, sizeof(parent_fields));
+    memset(globals, 0, sizeof(globals));
+    memset(tables, 0, sizeof(tables));
+    memset(table_elems, 0, sizeof(table_elems));
+    memset(&fake_func, 0, sizeof(fake_func));
+    memset(frame_locals, 0, sizeof(frame_locals));
+
+    wasm_init(&rt);
+
+    child_fields[0].storage.kind = WASM_STORAGE_VALTYPE;
+    child_fields[0].storage.of.valtype = WASM_TYPE_I32;
+    types[0].kind = WASM_COMP_STRUCT;
+    types[0].of.struct_.num_fields = 1;
+    types[0].of.struct_.fields = child_fields;
+
+    parent_fields[0].storage.kind = WASM_STORAGE_VALTYPE;
+    parent_fields[0].storage.of.valtype = WASM_TYPE_STRUCTREF;
+    types[1].kind = WASM_COMP_STRUCT;
+    types[1].of.struct_.num_fields = 1;
+    types[1].of.struct_.fields = parent_fields;
+
+    mod.rt = &rt;
+    mod.types = types;
+    mod.num_types = 2;
+    mod.globals = globals;
+    mod.num_globals = 1;
+    mod.tables = tables;
+    mod.num_tables = 1;
+    tables[0].elems = table_elems;
+    tables[0].size = 1;
+    tables[0].reftype = WASM_TYPE_STRUCTREF;
+    wasm__gc_register_module(&rt, &mod);
+
+    fake_func.num_locals = 1;
+    rt.call_frame_sp = 1;
+    rt.call_frames[0].func = &fake_func;
+    rt.call_frames[0].locals = frame_locals;
+
+    child = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    parent = wasm__gc_alloc_struct_object(&rt, &mod, 1, &types[1].of.struct_);
+    table_root = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    local_root = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    stack_root = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    garbage = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+
+    WL_CHECK_MSG(t, child && parent && table_root && local_root && stack_root && garbage,
+                 "%s",
+                 "expected all GC test allocations to succeed");
+    if (!(child && parent && table_root && local_root && stack_root && garbage)) {
+        wasm__gc_unregister_module(&rt, &mod);
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(child, &types[0].of.struct_, 0, wasm_i32(123)) == WASM_OK,
+                 "%s",
+                 "expected child field store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(parent, &types[1].of.struct_, 0,
+                                                wasm__gc_type_ref_value(&mod, 0, &child->header)) == WASM_OK,
+                 "%s",
+                 "expected parent field store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(table_root, &types[0].of.struct_, 0, wasm_i32(77)) == WASM_OK,
+                 "%s",
+                 "expected table-root field store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(local_root, &types[0].of.struct_, 0, wasm_i32(99)) == WASM_OK,
+                 "%s",
+                 "expected local-root field store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(stack_root, &types[0].of.struct_, 0, wasm_i32(55)) == WASM_OK,
+                 "%s",
+                 "expected stack-root field store to succeed");
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(garbage, &types[0].of.struct_, 0, wasm_i32(-1)) == WASM_OK,
+                 "%s",
+                 "expected garbage field store to succeed");
+
+    globals[0].type = WASM_TYPE_STRUCTREF;
+    globals[0].value = wasm__gc_type_ref_value(&mod, 1, &parent->header);
+    table_elems[0] = wasm__gc_type_ref_value(&mod, 0, &table_root->header);
+    frame_locals[0] = wasm__gc_type_ref_value(&mod, 0, &local_root->header);
+    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &stack_root->header);
+
+    wasm_gc_collect(&rt);
+
+    WL_CHECK_MSG(t, wasm_test_gc_allocation_count(&rt) == 5,
+                 "expected 5 live GC objects after collection, got %u",
+                 (unsigned)wasm_test_gc_allocation_count(&rt));
+
+    moved_parent = (wasm_gc_struct_t*)globals[0].value.of.gc_obj;
+    parent_field = wasm_test_gc_struct_field_value(moved_parent, &types[1].of.struct_, 0);
+    moved_child = parent_field ? (wasm_gc_struct_t*)parent_field->of.gc_obj : NULL;
+    child_field = wasm_test_gc_struct_field_value(moved_child, &types[0].of.struct_, 0);
+    table_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)table_elems[0].of.gc_obj,
+                                                  &types[0].of.struct_,
+                                                  0);
+    local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)frame_locals[0].of.gc_obj,
+                                                  &types[0].of.struct_,
+                                                  0);
+    stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)rt.stack[0].of.gc_obj,
+                                                  &types[0].of.struct_,
+                                                  0);
+
+    WL_CHECK_MSG(t, moved_parent != NULL && moved_parent != parent,
+                 "%s",
+                 "expected collection to rewrite the rooted parent reference");
+    WL_CHECK_MSG(t, moved_child != NULL && moved_child != child,
+                 "%s",
+                 "expected collection to rewrite nested child references");
+    WL_CHECK_MSG(t, child_field != NULL && child_field->of.i32 == 123,
+                 "%s",
+                 "expected child object contents to survive collection");
+    WL_CHECK_MSG(t, table_field != NULL && table_field->of.i32 == 77,
+                 "%s",
+                 "expected table roots to survive collection");
+    WL_CHECK_MSG(t, local_field != NULL && local_field->of.i32 == 99,
+                 "%s",
+                 "expected call-frame local roots to survive collection");
+    WL_CHECK_MSG(t, stack_field != NULL && stack_field->of.i32 == 55,
+                 "%s",
+                 "expected operand-stack roots to survive collection");
+
+    wasm__gc_unregister_module(&rt, &mod);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
+    wasm_runtime_t rt;
+    wasm_module_t mod;
+    wasm_comptype_t types[1];
+    wasm_fieldtype_t fields[1];
+    wasm_gc_struct_t* root;
+    wasm_gc_struct_t* garbage;
+    wasm_gc_struct_t* fresh;
+    size_t object_size = 0;
+    size_t heap_size;
+
+    memset(&mod, 0, sizeof(mod));
+    memset(types, 0, sizeof(types));
+    memset(fields, 0, sizeof(fields));
+
+    wasm_init(&rt);
+
+    fields[0].storage.kind = WASM_STORAGE_VALTYPE;
+    fields[0].storage.of.valtype = WASM_TYPE_I32;
+    types[0].kind = WASM_COMP_STRUCT;
+    types[0].of.struct_.num_fields = 1;
+    types[0].of.struct_.fields = fields;
+
+    mod.rt = &rt;
+    mod.types = types;
+    mod.num_types = 1;
+    wasm__gc_register_module(&rt, &mod);
+
+    WL_CHECK_MSG(t, wasm__gc_struct_size(&types[0].of.struct_, &object_size),
+                 "%s",
+                 "expected struct size calculation to succeed");
+    heap_size = object_size * 2u + (object_size / 2u);
+    WL_CHECK_MSG(t, wasm__gc_heap_init(&rt, heap_size) == WASM_OK,
+                 "%s",
+                 "expected GC heap resize for exhaustion test to succeed");
+
+    root = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    garbage = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+    WL_CHECK_MSG(t, root != NULL && garbage != NULL,
+                 "%s",
+                 "expected initial allocations in the resized heap to succeed");
+    if (!(root && garbage)) {
+        wasm__gc_unregister_module(&rt, &mod);
+        wasm_destroy(&rt);
+        return;
+    }
+
+    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &root->header);
+    fresh = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+
+    WL_CHECK_MSG(t, fresh != NULL,
+                 "%s",
+                 "expected GC allocation to retry after collecting unreachable objects");
+    WL_CHECK_MSG(t, wasm_test_gc_allocation_count(&rt) == 2,
+                 "expected only the rooted object and the fresh allocation to remain, got %u",
+                 (unsigned)wasm_test_gc_allocation_count(&rt));
+    WL_CHECK_MSG(t, rt.stack[0].of.gc_obj != NULL && rt.stack[0].of.gc_obj != &root->header,
+                 "%s",
+                 "expected collection to rewrite the rooted reference during retry");
+
+    wasm__gc_unregister_module(&rt, &mod);
     wasm_destroy(&rt);
 }
 
@@ -9247,6 +9480,8 @@ int main(void) {
         { "wasmgc: i31ref values use tagged non-null storage", test_gc_i31ref_uses_tagged_non_null_storage },
         { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
         { "wasmgc: const expressions support GC allocation ops", test_gc_const_expr_supports_gc_alloc_ops },
+        { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
+        { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
         { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },
         { "wasmgc: validator rejects struct.get on packed fields without signedness", test_gc_validation_rejects_struct_get_on_packed_field_without_sign },
         { "wasmgc: validator accepts ref.cast and br_on_cast opcodes", test_gc_validation_accepts_cast_and_branch_cast_opcodes },
