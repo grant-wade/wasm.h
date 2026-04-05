@@ -668,6 +668,16 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
 wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             const wasm_value_t* elem_values, uint32_t num_elems,
                             wasm_value_t* out_ref);
+wasm_error_t wasm_struct_get_field(wasm_module_t* mod, wasm_value_t struct_ref,
+                                   uint32_t field_idx, wasm_value_t* out_val);
+wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
+                                   uint32_t field_idx, wasm_value_t val);
+wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
+                               uint32_t* out_len);
+wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
+                                 uint32_t index, wasm_value_t* out_val);
+wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
+                                 uint32_t index, wasm_value_t val);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -14445,6 +14455,202 @@ wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
     if (!ft) return WASM_TYPE_VOID;
     if (result_idx >= ft->num_results) return WASM_TYPE_VOID;
     return ft->results[result_idx];
+}
+
+static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
+    switch (kind) {
+        case WASM_GC_OBJ_STRUCT:
+            return "struct";
+        case WASM_GC_OBJ_ARRAY:
+            return "array";
+        default:
+            return "gc";
+    }
+}
+
+static wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
+                                                   const wasm_value_t* ref,
+                                                   wasm_gc_object_kind_t expected_kind,
+                                                   const wasm_gc_header_t** out_object) {
+    const wasm_gc_header_t* object;
+
+    if (!mod || !ref || !out_object) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid GC access arguments");
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (!wasm__uses_gc_ref_storage(ref->type)) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "expected %s reference, got value type 0x%X",
+                          wasm__gc_kind_name(expected_kind),
+                          (unsigned)ref->type);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    if (wasm__is_null_ref(ref)) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TRAP,
+                          "null %s reference", wasm__gc_kind_name(expected_kind));
+        return WASM_ERR_TRAP;
+    }
+
+    if ((ref->of.gc_ref & WASM__GC_I31_TAG) != 0) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "expected %s heap object reference",
+                          wasm__gc_kind_name(expected_kind));
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    object = wasm__runtime_get_gc_object(mod, ref);
+    if (!object) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TRAP,
+                          "invalid %s reference", wasm__gc_kind_name(expected_kind));
+        return WASM_ERR_TRAP;
+    }
+
+    if (object->kind != expected_kind) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "expected %s reference", wasm__gc_kind_name(expected_kind));
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    if (!object->module || object->type_index >= object->module->num_types) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "invalid %s type metadata", wasm__gc_kind_name(expected_kind));
+        return WASM_ERR_MALFORMED;
+    }
+
+    *out_object = object;
+    return WASM_OK;
+}
+
+wasm_error_t wasm_struct_get_field(wasm_module_t* mod, wasm_value_t struct_ref,
+                                   uint32_t field_idx, wasm_value_t* out_val) {
+    const wasm_gc_header_t* header;
+    const wasm_structtype_t* type;
+    wasm_error_t err;
+
+    if (!out_val) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid struct get arguments");
+        return WASM_ERR_MALFORMED;
+    }
+
+    err = wasm__public_resolve_gc_object(mod, &struct_ref, WASM_GC_OBJ_STRUCT, &header);
+    if (err != WASM_OK) return err;
+
+    type = wasm__module_const_structtype(header->module, header->type_index);
+    if (!type) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid struct type metadata");
+        return WASM_ERR_MALFORMED;
+    }
+
+    return wasm__gc_struct_get_field((const wasm_gc_struct_t*)header, type, field_idx, 0, out_val);
+}
+
+wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
+                                   uint32_t field_idx, wasm_value_t val) {
+    const wasm_gc_header_t* header;
+    const wasm_structtype_t* type;
+    wasm_error_t err;
+
+    err = wasm__public_resolve_gc_object(mod, &struct_ref, WASM_GC_OBJ_STRUCT, &header);
+    if (err != WASM_OK) return err;
+
+    type = wasm__module_const_structtype(header->module, header->type_index);
+    if (!type) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid struct type metadata");
+        return WASM_ERR_MALFORMED;
+    }
+    if (field_idx >= type->num_fields) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "struct field %u out of range", (unsigned)field_idx);
+        return WASM_ERR_MALFORMED;
+    }
+    if (!type->fields[field_idx].is_mutable) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "struct field %u is immutable", (unsigned)field_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    return wasm__gc_struct_set_field((wasm_gc_struct_t*)header, type, field_idx, val);
+}
+
+wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
+                               uint32_t* out_len) {
+    const wasm_gc_header_t* header;
+    wasm_error_t err;
+
+    if (!out_len) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid array length arguments");
+        return WASM_ERR_MALFORMED;
+    }
+
+    err = wasm__public_resolve_gc_object(mod, &array_ref, WASM_GC_OBJ_ARRAY, &header);
+    if (err != WASM_OK) return err;
+
+    *out_len = ((const wasm_gc_array_t*)header)->length;
+    return WASM_OK;
+}
+
+wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
+                                 uint32_t index, wasm_value_t* out_val) {
+    const wasm_gc_header_t* header;
+    const wasm_arraytype_t* type;
+    wasm_error_t err;
+
+    if (!out_val) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid array get arguments");
+        return WASM_ERR_MALFORMED;
+    }
+
+    err = wasm__public_resolve_gc_object(mod, &array_ref, WASM_GC_OBJ_ARRAY, &header);
+    if (err != WASM_OK) return err;
+
+    type = wasm__module_const_arraytype(header->module, header->type_index);
+    if (!type) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid array type metadata");
+        return WASM_ERR_MALFORMED;
+    }
+
+    return wasm__gc_array_get((const wasm_gc_array_t*)header, type, index, 0, out_val);
+}
+
+wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
+                                 uint32_t index, wasm_value_t val) {
+    const wasm_gc_header_t* header;
+    const wasm_arraytype_t* type;
+    wasm_error_t err;
+
+    err = wasm__public_resolve_gc_object(mod, &array_ref, WASM_GC_OBJ_ARRAY, &header);
+    if (err != WASM_OK) return err;
+
+    type = wasm__module_const_arraytype(header->module, header->type_index);
+    if (!type) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid array type metadata");
+        return WASM_ERR_MALFORMED;
+    }
+    if (!type->field.is_mutable) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "array element is immutable");
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
 }
 
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,

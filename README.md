@@ -141,7 +141,7 @@ wasm_destroy(&rt);
 ```
 
 
-For GC-aware tooling you can introspect composite types with `wasm_type_count`, `wasm_type_kind`, `wasm_struct_type_field`, and `wasm_array_type_field`. Host code can also allocate managed values directly with `wasm_struct_new` and `wasm_array_new` when it needs to seed globals, tables, or other runtime state with GC objects.
+For GC-aware tooling you can introspect composite types with `wasm_type_count`, `wasm_type_kind`, `wasm_struct_type_field`, and `wasm_array_type_field`. Host code can also allocate and manipulate managed values directly with `wasm_struct_new`, `wasm_array_new`, `wasm_struct_get_field`, `wasm_struct_set_field`, `wasm_array_length`, `wasm_array_get_elem`, and `wasm_array_set_elem` when it needs to seed globals, tables, or other runtime state with GC objects.
 
 ## Build And Test
 

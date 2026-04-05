@@ -49,7 +49,7 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name, co
 
 ---
 
-### Phase 3: GC Object Interop (Bridging the Managed World)
+### [DONE] Phase 3: GC Object Interop (Bridging the Managed World)
 **Goal:** If a Wasm function returns a `struct` or `array` reference, the host needs a way to read and write to its fields without causing memory corruption.
 
 **Proposed Public APIs:**
@@ -66,6 +66,7 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref, uin
 **Implementation Strategy:**
 *   You already wrote `wasm__gc_struct_get_field` and `wasm__gc_array_get`. These public functions just act as safe wrappers.
 *   They will verify that the passed `wasm_value_t` is actually a valid GC reference type, resolve it to the `wasm_gc_header_t*`, and then forward the work to your internal inline helpers.
+*   For packed fields and elements, the public getters currently return a zero-extended `i32` so the host sees the raw stored bits without an implicit signedness choice.
 
 ---
 

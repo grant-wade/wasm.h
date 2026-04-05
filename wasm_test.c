@@ -8945,6 +8945,7 @@ WL_TEST(test_gc_public_type_helpers_and_host_allocators) {
     const wasm_gc_header_t* struct_header;
     const wasm_gc_header_t* array_header;
     wasm_value_t loaded;
+    uint32_t array_len = 0;
     wasm_error_t err;
 
     emit_header(&mod);
@@ -8973,7 +8974,7 @@ WL_TEST(test_gc_public_type_helpers_and_host_allocators) {
 
         emit(&sec, 0x5E);
         emit(&sec, 0x77);
-        emit(&sec, 0x00);
+        emit(&sec, 0x01);
 
         emit(&sec, 0x60);
         emit_leb128_u32(&sec, 0);
@@ -9075,6 +9076,30 @@ WL_TEST(test_gc_public_type_helpers_and_host_allocators) {
             WASM_CHECK_OK(t, err);
             if (err == WASM_OK) WASM_CHECK_I32(t, loaded.of.i32, 9);
         }
+
+        err = wasm_struct_get_field(m, struct_ref, 0, &loaded);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) {
+            WL_CHECK_MSG(t, loaded.type == WASM_TYPE_I32, "%s", "expected public struct.get to return i32");
+            WASM_CHECK_I32(t, loaded.of.i32, 9);
+        }
+
+        err = wasm_struct_set_field(m, struct_ref, 1, wasm_i32(44));
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) {
+            err = wasm_struct_get_field(m, struct_ref, 1, &loaded);
+            WASM_CHECK_OK(t, err);
+            if (err == WASM_OK) WASM_CHECK_I32(t, loaded.of.i32, 44);
+        }
+
+        err = wasm_struct_set_field(m, struct_ref, 0, wasm_i32(12));
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected immutable struct field rejection");
+
+        err = wasm_struct_set_field(m, struct_ref, 1, wasm_i64(12));
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected struct field type mismatch");
+
+        err = wasm_struct_get_field(m, wasm_ref_null(WASM_TYPE_NONE), 0, &loaded);
+        WL_CHECK_MSG(t, err == WASM_ERR_TRAP, "%s", "expected null struct ref to trap");
     }
 
     err = wasm_array_new(m, 2, array_values, 2, &array_ref);
@@ -9093,6 +9118,40 @@ WL_TEST(test_gc_public_type_helpers_and_host_allocators) {
             WASM_CHECK_OK(t, err);
             if (err == WASM_OK) WASM_CHECK_I32(t, loaded.of.i32, 20);
         }
+
+        err = wasm_array_length(m, array_ref, &array_len);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) WASM_CHECK_I32(t, (int32_t)array_len, 2);
+
+        err = wasm_array_get_elem(m, array_ref, 1, &loaded);
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) {
+            WL_CHECK_MSG(t, loaded.type == WASM_TYPE_I32, "%s", "expected public array.get to return i32");
+            WASM_CHECK_I32(t, loaded.of.i32, 20);
+        }
+
+        err = wasm_array_set_elem(m, array_ref, 0, wasm_i32(4660));
+        WASM_CHECK_OK(t, err);
+        if (err == WASM_OK) {
+            err = wasm_array_get_elem(m, array_ref, 0, &loaded);
+            WASM_CHECK_OK(t, err);
+            if (err == WASM_OK) WASM_CHECK_I32(t, loaded.of.i32, 4660);
+        }
+
+        err = wasm_array_set_elem(m, array_ref, 0, wasm_i64(1));
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected array element type mismatch");
+
+        err = wasm_array_get_elem(m, array_ref, 9, &loaded);
+        WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS, "%s", "expected array element bounds rejection");
+
+        err = wasm_array_length(m, struct_ref, &array_len);
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected wrong-kind array length rejection");
+
+        err = wasm_struct_get_field(m, array_ref, 0, &loaded);
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected wrong-kind struct access rejection");
+
+        err = wasm_array_length(m, wasm_i31ref(7), &array_len);
+        WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected i31 array length rejection");
     }
 
     wasm_free_module(m);
