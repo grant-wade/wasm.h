@@ -16,6 +16,9 @@ wasm_test: wasm_test.c wasm.h
 wasm2api: wasm2api.c wasm.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) wasm2api.c -o $@ $(LDFLAGS) -lm
 
+wasm: wasm.c wasm.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) wasm.c -o $@ $(LDFLAGS) -lm
+
 basic_add_demo: basic_add_demo.c basic_add.c basic_add.h wasm.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) basic_add_demo.c basic_add.c -o $@ $(LDFLAGS) -lm
 
@@ -25,17 +28,17 @@ test: wl_test wasm_test
 	./wasm_test
 
 wasm-emcc:
-	$(MAKE) -C wasm run
+	$(MAKE) -C test run
 
 wasm-emcc-build:
-	$(MAKE) -C wasm all
+	$(MAKE) -C test all
 
 wasm-emcc-run:
-	$(MAKE) -C wasm run
+	$(MAKE) -C test run
 
 wasm-emcc-run-strict:
-	$(MAKE) -C wasm run-strict
+	$(MAKE) -C test run-strict
 
 clean:
-	rm -f wl_test wasm_test wasm2api basic_add_demo
-	$(MAKE) -C wasm clean
+	rm -f wl_test wasm_test wasm2api wasm basic_add_demo
+	$(MAKE) -C test clean

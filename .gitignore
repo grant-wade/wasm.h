@@ -2,6 +2,7 @@ wl_test
 wasm_test
 basic_add_demo
 wasm2api
-wasm/build/
-wasm/out/
+wasm
+test/build/
+test/out/
 *.dSYM/

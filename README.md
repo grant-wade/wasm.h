@@ -159,6 +159,28 @@ If you want the generated API to carry the module bytes in its `.c` file, use `-
 
 That mode adds `<prefix>_init_embedded(wasm_runtime_t* rt)` and `<prefix>_embedded_wasm(size_t* out_len)` so callers can initialize the module without knowing a runtime file path.
 
+## `wasm.c`
+
+`wasm.c` is a small command-line runner and inspection tool built on top of `wasm.h`.
+
+Build it with:
+
+```sh
+make wasm
+```
+
+Then inspect or invoke a module directly:
+
+```sh
+./wasm path/to/module.wasm info
+./wasm path/to/module.wasm exports
+./wasm path/to/module.wasm funcs
+./wasm path/to/module.wasm call add 2 40
+./wasm path/to/module.wasm memory-read 0 0 64
+```
+
+By default the tool binds the built-in WASI stub set so common `wasi_snapshot_preview1` imports resolve during inspection and calls. Use `--no-wasi` if you want to load a module without that binding layer.
+
 ## Build And Test
 
 This repo includes test programs for both headers.
@@ -174,7 +196,7 @@ That builds and runs:
 
 The current `Makefile` enables `WL_ENABLE_PLATFORM=1` for the repo test build.
 
-There is also an `emcc`-driven harness under [wasm/README.md](wasm/README.md) for compiling fixture C files into real `.wasm` blobs and running them through `wasm.h`.
+There is also an `emcc`-driven harness under [test/README.md](test/README.md) for compiling fixture C files into real `.wasm` blobs and running them through `wasm.h`.
 
 Useful targets:
 
@@ -188,7 +210,7 @@ Useful targets:
 - `wl_test.c` — test suite for `wl.h`
 - `wasm.h` — standalone WebAssembly runtime header
 - `wasm_test.c` — test suite for `wasm.h`
-- `wasm/` — `emcc` fixture harness for testing `wasm.h` against toolchain-produced modules
+- `test/` — `emcc` fixture harness for testing `wasm.h` against toolchain-produced modules
 - `PLAN.md` — design notes and longer-form planning for `wl.h`
 
 

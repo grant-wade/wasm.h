@@ -1,4 +1,4 @@
-# wasm emcc Harness
+# test/ Wasm emcc Harness
 
 This directory holds a small harness for compiling real C fixtures with `emcc` and running the emitted `.wasm` files through [../wasm.h](../wasm.h).
 
