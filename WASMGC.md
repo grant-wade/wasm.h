@@ -151,7 +151,7 @@
 
 **Goal**: Implement all 0xFB-prefixed GC opcodes and related instructions in the interpreter loop.
 
-**5.1 Struct instructions**
+**[DONE] 5.1 Struct instructions**
 
 - `struct.new $t` (0xFB00): pop N field values, allocate struct, store fields, push ref
 - `struct.new_default $t` (0xFB01): allocate struct, zero-init all fields, push ref
@@ -160,7 +160,7 @@
 - `struct.get_u $t i` (0xFB04): same with zero extension for packed
 - `struct.set $t i` (0xFB05): pop value + ref, null check, write field
 
-**5.2 Array instructions**
+**[DONE] 5.2 Array instructions**
 
 - `array.new $t` (0xFB06): pop init value + length, allocate, fill, push ref
 - `array.new_default $t` (0xFB07): pop length, allocate, zero-init, push ref
@@ -177,7 +177,7 @@
 - `array.init_data $t $d` (0xFB12): pop size + src_offset + dst_offset + ref, copy from data segment
 - `array.init_elem $t $e` (0xFB13): pop size + src_offset + dst_offset + ref, copy from elem segment
 
-**5.3 i31 instructions**
+**[DONE] 5.3 i31 instructions**
 
 - `ref.i31` (0xFB1C): pop i32, truncate to 31 bits, push i31ref
 - `i31.get_s` (0xFB1D): pop i31ref, null check, sign-extend to i32, push
@@ -192,16 +192,16 @@
 - `br_on_cast $l rt1 rt2` (0xFB18): read flags byte + label + two heap types, pop ref, if cast succeeds branch with narrowed type, otherwise fall through with type difference
 - `br_on_cast_fail $l rt1 rt2` (0xFB19): inverse — branch on failure with original type, fall through with narrowed type
 
-**5.5 Conversion instructions**
+**[DONE] 5.5 Conversion instructions**
 
 - `any.convert_extern` (0xFB1A): pop externref, wrap as anyref, push
 - `extern.convert_any` (0xFB1B): pop anyref, wrap as externref, push
 
-**5.6 ref.eq**
+**[DONE] 5.6 ref.eq**
 
 - `ref.eq` (0xD3): pop two eqrefs, compare identity (pointer equality for heap objects, value equality for i31), push i32
 
-**5.7 Constant expression support**
+**[DONE] 5.7 Constant expression support**
 
 - Add GC constant instructions to `wasm__eval_init_expr`: `ref.i31`, `struct.new`, `struct.new_default`, `array.new`, `array.new_default`, `array.new_fixed`, `any.convert_extern`, `extern.convert_any`
 - Extend `global.get` in const exprs to reference preceding immutable globals

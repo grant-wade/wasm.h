@@ -7930,8 +7930,7 @@ WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
                  "%s", "expected concrete param to resolve to structref");
     WL_CHECK_MSG(t, !m->types[1].of.func.param_reftypes[0].nullable,
                  "%s", "expected concrete param to stay non-null");
-    WL_CHECK_MSG(t, m->types[1].of.func.param_reftypes[0].has_type_index &&
-                     m->types[1].of.func.param_reftypes[0].type_index == 0,
+    WL_CHECK_MSG(t, m->types[1].of.func.param_reftypes[0].has_type_index && m->types[1].of.func.param_reftypes[0].type_index == 0,
                  "%s", "expected concrete param to keep type index 0");
     WL_CHECK_MSG(t, m->types[1].of.func.results[0] == WASM_TYPE_STRUCTREF,
                  "%s", "expected concrete result to resolve to structref");
@@ -8770,8 +8769,7 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     WL_CHECK_MSG(t, wasm__gc_struct_store_field(child, &types[0].of.struct_, 0, wasm_i32(123)) == WASM_OK,
                  "%s",
                  "expected child field store to succeed");
-    WL_CHECK_MSG(t, wasm__gc_struct_store_field(parent, &types[1].of.struct_, 0,
-                                                wasm__gc_type_ref_value(&mod, 0, &child->header)) == WASM_OK,
+    WL_CHECK_MSG(t, wasm__gc_struct_store_field(parent, &types[1].of.struct_, 0, wasm__gc_type_ref_value(&mod, 0, &child->header)) == WASM_OK,
                  "%s",
                  "expected parent field store to succeed");
     WL_CHECK_MSG(t, wasm__gc_struct_store_field(table_root, &types[0].of.struct_, 0, wasm_i32(77)) == WASM_OK,
@@ -8897,6 +8895,697 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
                  "expected collection to rewrite the rooted reference during retry");
 
     wasm__gc_unregister_module(&rt, &mod);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+        emit(&sec, 0x78);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 2);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 3);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 10);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, -1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x00);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x02);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x03);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x04);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 20);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x05);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x08);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0F);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0E);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 3);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x10);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 4);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x06);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 2);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x07);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 3);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 3);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, -5);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1C);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1D);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1C);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1E);
+        emit(&body, 0x6A);
+
+        emit(&body, 0xD0);
+        emit(&body, 0x6F);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1A);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x1B);
+        emit(&body, 0xD1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD3);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 286);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_runtime_executes_cast_and_branch_cast_opcodes) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x01);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x01);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x14);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x16);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD3);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x02);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x18);
+        emit(&body, 0x01);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x0B);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x14);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x02);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x19);
+        emit(&body, 0x01);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x0B);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x14);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0xD0);
+        emit(&body, 0x6B);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x15);
+        emit(&body, 0x6B);
+        emit(&body, 0x6A);
+
+        emit(&body, 0xD0);
+        emit(&body, 0x6B);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x17);
+        emit(&body, 0x6B);
+        emit(&body, 0xD1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 6);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_runtime_executes_segment_backed_array_ops) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 4);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x78);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x78);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x6B);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 0x80, 0x7F, 0x05 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 12, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 0x6B);
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0xD0);
+        emit(&sec, 0x6B);
+        emit(&sec, 0x0B);
+
+        emit(&sec, 0xFB);
+        emit_leb128_u32(&sec, 0x01);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+
+        emit_section(&mod, 9, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 3);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x63);
+        emit_leb128_u32(&body, 2);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, -1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x00);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x04);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 3);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x09);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0C);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0D);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x11);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0D);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x12);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0D);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0A);
+        emit_leb128_u32(&body, 2);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x21);
+        emit_leb128_u32(&body, 2);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0F);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0xD1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x13);
+        emit_leb128_u32(&body, 2);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x0B);
+        emit_leb128_u32(&body, 2);
+        emit(&body, 0xD1);
+        emit(&body, 0x6A);
+
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 390);
+
+    wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
@@ -9608,6 +10297,9 @@ int main(void) {
         { "wasmgc: GC accessors handle packed fields and array bounds", test_gc_accessors_handle_packed_fields_and_array_bounds },
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
+        { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
+        { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },
+        { "wasmgc: runtime executes segment-backed array ops", test_gc_runtime_executes_segment_backed_array_ops },
         { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },
         { "wasmgc: validator rejects struct.get on packed fields without signedness", test_gc_validation_rejects_struct_get_on_packed_field_without_sign },
         { "wasmgc: validator accepts ref.cast and br_on_cast opcodes", test_gc_validation_accepts_cast_and_branch_cast_opcodes },
