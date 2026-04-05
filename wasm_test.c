@@ -6879,6 +6879,168 @@ WL_TEST(test_public_backtrace_helpers_capture_traps) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 42);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
+    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+
+    wasm_set_fuel(&rt, 2);
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
+    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    uint32_t func_idx;
+    uint32_t offset;
+    char backtrace[128];
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "spin", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x03);
+        emit(&body, 0x40);
+        emit(&body, 0x0C);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_set_fuel(&rt, 5);
+    err = wasm_call(m, "spin", NULL, 0, NULL, 0);
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_FUEL, "%s", "expected out of fuel trap");
+    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+    WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 1);
+
+    err = wasm_get_call_frame_info(&rt, 0, &func_idx, &offset);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, (int32_t)func_idx, 0);
+        WASM_CHECK_I32(t, (int32_t)offset, 2);
+    }
+
+    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    WL_CHECK_MSG(t, strstr(backtrace, "#0 func[0] at offset 0x0002") != NULL,
+                 "%s", "expected fuel trap backtrace frame");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_set_immutable_global_rejected) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -11752,6 +11914,8 @@ int main(void) {
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
+        { "public api: fuel helpers meter finite execution", test_public_fuel_helpers_account_for_finite_calls },
+        { "public api: fuel helpers stop infinite loops", test_public_fuel_helpers_trap_in_infinite_loop },
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
         { "public api: exported globals can be read and updated safely", test_public_global_helpers },
     };

@@ -135,6 +135,7 @@ typedef enum wasm_error_t {
     WASM_ERR_INVALID_CONVERSION,
     WASM_ERR_CALL_STACK_EXHAUSTED,
     WASM_ERR_OOM,
+    WASM_ERR_OUT_OF_FUEL,
     WASM_ERR_TRAP
 } wasm_error_t;
 
@@ -596,6 +597,8 @@ struct wasm_runtime_t {
     wasm_value_t* stack;
     uint32_t max_stack;
     uint32_t sp;
+    uint64_t fuel;
+    int fuel_enabled;
     uint32_t enabled_features;
     wasm_error_t last_error;
     char error_msg[256];
@@ -704,6 +707,8 @@ void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size);
 uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
 wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
+void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
+uint64_t wasm_get_fuel(wasm_runtime_t* rt);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -10653,6 +10658,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
     sp_base = cf->sp_base;
 
     while (cf->r.ptr < cf->r.end) {
+        if (rt->fuel_enabled) {
+            if (rt->fuel == 0) WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
+            rt->fuel--;
+        }
+
         const uint8_t* op_at = cf->r.ptr;
         uint8_t op = wasm__read_u8(&cf->r);
 
@@ -14994,6 +15004,17 @@ wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
     return WASM_OK;
 }
 
+void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
+    if (!rt) return;
+
+    rt->fuel = fuel;
+    rt->fuel_enabled = 1;
+}
+
+uint64_t wasm_get_fuel(wasm_runtime_t* rt) {
+    return rt ? rt->fuel : 0;
+}
+
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref) {
@@ -15104,6 +15125,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "call stack exhausted";
         case WASM_ERR_OOM:
             return "out of memory";
+        case WASM_ERR_OUT_OF_FUEL:
+            return "out of fuel";
         case WASM_ERR_TRAP:
             return "trap";
     }

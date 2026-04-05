@@ -204,7 +204,7 @@ Since the validator only runs *once* at load time, it's entirely safe to dynamic
 3. **Total Host Control:** If a user is running on a microcontroller with 64KB of RAM, they can pass a config with `max_stack = 512`. If they are running on a desktop parsing a massive 50MB LLVM payload, they can pass `max_stack = 1000000`.
 
 
-### Phase 6: Gas Metering / Execution Limits (Security)
+### [DONE] Phase 6: Gas Metering / Execution Limits (Security)
 **The Problem:** WebAssembly is often used to run untrusted third-party code (plugins, mods, smart contracts). If a user uploads a Wasm file with an infinite loop `(loop (br 0))`, your host C application will freeze forever.
 **The Solution:** Add "Gas Metering" (or an instruction counter). 
 
@@ -221,14 +221,9 @@ uint64_t wasm_get_fuel(wasm_runtime_t* rt);
 ```
 
 **Implementation Strategy:**
-*   Add `uint64_t fuel;` to `wasm_runtime_t`.
-*   Inside your massive `wasm__interp_loop`, add a single check at the top of the `while (cf->r.ptr < cf->r.end)` loop:
-    ```c
-    if (rt->fuel > 0) {
-        if (--rt->fuel == 0) WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
-    }
-    ```
-*   *(Note: Checking this once per instruction is the simplest method. For maximum speed, you only check/decrement fuel at branch targets (`loop`, `call`, `br`), but a simple per-instruction counter is perfectly fine for V1).*
+*   Add public `wasm_set_fuel()` / `wasm_get_fuel()` helpers on `wasm_runtime_t`, with metering disabled by default until the host sets a budget.
+*   Inside `wasm__interp_loop`, check fuel once per opcode before dispatch. When fuel is enabled and reaches zero, trap with `WASM_ERR_OUT_OF_FUEL`.
+*   This V1 implementation counts each dispatched opcode, including `end`, which keeps the runtime simple and makes remaining-fuel accounting predictable.
 
 ---
 
