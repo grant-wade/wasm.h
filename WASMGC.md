@@ -75,7 +75,7 @@
 
 **Goal**: Update the bytecode validator to handle GC instructions and subtype-aware type checking.
 
-**3.1 Subtype-aware operand stack**
+**[DONE] 3.1 Subtype-aware operand stack**
 
 - Replace `wasm__validator_type_matches` (currently equality) with subtype checking
 - Update `wasm__validator_pop_expect` to accept subtypes
@@ -91,7 +91,7 @@
 - `ref.eq` (0xD3): both operands eqref, result i32
 - `any.convert_extern` (0xFB1A), `extern.convert_any` (0xFB1B): nullability preservation
 
-**3.3 Validate reference type extensions**
+**[DONE] 3.3 Validate reference type extensions**
 
 - `ref.null` with new heap types
 - Blocktype returns with new reference types

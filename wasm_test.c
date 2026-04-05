@@ -7760,6 +7760,427 @@ WL_TEST(test_gc_type_section_respects_feature_gate) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_ref_is_null_on_abstract_anyref) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x12);
+        emit(&body, 0xD1);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[] = { wasm_i32(1) };
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "pick", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x13);
+        emit(&body, 0xD0);
+        emit(&body, 0x12);
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x1C);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x12);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "pick", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected subtype operand to survive typed select");
+        WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected null eqref result");
+    }
+
+    args[0] = wasm_i32(0);
+    err = wasm_call(m, "pick", args, 1, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF, "%s", "expected anyref branch to survive typed select");
+        WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected null anyref result");
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x13);
+        emit(&body, 0x26);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x25);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected table.get to return the stored eqref value");
+        WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected table entry 0 to hold a null eqref");
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_ref_eq_accepts_eqref_subtypes) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x15);
+        emit(&body, 0xD0);
+        emit(&body, 0x13);
+        emit(&body, 0xD3);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_validation_accepts_struct_and_array_gc_opcodes) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x00);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x1A);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 3);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 9);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x06);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x1A);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_validation_rejects_struct_get_on_packed_field_without_sign) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x78);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD0);
+        emit(&body, 0x15);
+        emit(&body, 0xFB);
+        emit_leb128_u32(&body, 0x02);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected unpacked struct.get validation to reject packed fields");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "unpacked field") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_type_canonicalization_and_function_subtyping) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -8177,6 +8598,12 @@ int main(void) {
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
         { "wasmgc: composite type sections parse rec/sub/struct/array forms", test_gc_type_section_parses_composite_types },
         { "wasmgc: GC type syntax is feature-gated", test_gc_type_section_respects_feature_gate },
+        { "wasmgc: ref.is_null works on abstract anyref nulls", test_gc_ref_is_null_on_abstract_anyref },
+        { "wasmgc: typed select accepts eqref where anyref is expected", test_gc_typed_select_accepts_eqref_as_anyref },
+        { "wasmgc: anyref tables accept eqref values via subtyping", test_gc_table_set_accepts_eqref_into_anyref_table },
+        { "wasmgc: ref.eq accepts eqref subtypes", test_gc_ref_eq_accepts_eqref_subtypes },
+        { "wasmgc: validator accepts struct.new and array.new opcodes", test_gc_validation_accepts_struct_and_array_gc_opcodes },
+        { "wasmgc: validator rejects struct.get on packed fields without signedness", test_gc_validation_rejects_struct_get_on_packed_field_without_sign },
         { "wasmgc: canonical ids and function subtyping are computed at load", test_gc_type_canonicalization_and_function_subtyping },
         { "wasmgc: struct width/depth subtyping validates", test_gc_type_validation_accepts_struct_width_subtyping },
         { "wasmgc: invalid function variance is rejected", test_gc_type_validation_rejects_invalid_function_subtype },
