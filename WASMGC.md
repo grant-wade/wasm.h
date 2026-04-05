@@ -45,26 +45,26 @@
 
 **Goal**: Implement iso-recursive type equivalence and the full subtype relation.
 
-**2.1 Type canonicalization**
+**[DONE] 2.1 Type canonicalization**
 
 - At load time, after all types are parsed, canonicalize rec groups bottom-up
 - For each rec group, produce a "tied" representation where internal references use `rec.i` indices instead of absolute type indices
 - Hash/intern rec groups so that structurally identical groups map to the same canonical form
 - Store canonical ID per type for O(1) equivalence checks at runtime
 
-**2.2 Type equivalence**
+**[DONE] 2.2 Type equivalence**
 
 - `wasm__type_equal(mod, t1, t2)` — compare canonical IDs
 - Used in `call_indirect` type checks (replace current `wasm__functype_equal`), import matching
 
-**2.3 Subtype relation**
+**[DONE] 2.3 Subtype relation**
 
 - `wasm__is_subtype(mod, t1, t2)` — walk supertype chain from t1, checking equivalence at each step
 - `wasm__is_heap_subtype(mod, ht1, ht2)` — handle abstract heap type hierarchy: `none <: i31/struct/array <: eq <: any`, `nofunc <: $functype <: func`, `noextern <: extern`
 - `wasm__is_reftype_subtype(mod, rt1, rt2)` — combines heap subtyping with nullability (non-null <: nullable)
 - Composite type subtyping (only used during type definition validation): func contravariant/covariant, struct width+depth, array depth, field covariance for immutable / invariance for mutable
 
-**2.4 Validation of type definitions**
+**[DONE] 2.4 Validation of type definitions**
 
 - Validate supertype constraints: supertypes must have lower indices than current type, must not be final, comptype must match (struct subtypes struct with width subtyping, etc.)
 - Integrate into `wasm__validate_structural` or a new `wasm__validate_types`

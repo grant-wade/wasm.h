@@ -7590,6 +7590,8 @@ WL_TEST(test_gc_type_section_parses_composite_types) {
         emit(&sec, 0x4E);
         emit_leb128_u32(&sec, 2);
 
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
         emit(&sec, 0x5F);
         emit_leb128_u32(&sec, 1);
         emit(&sec, 0x7F);
@@ -7677,6 +7679,7 @@ WL_TEST(test_gc_type_section_parses_composite_types) {
     WL_CHECK_MSG(t, m->types[1].num_supertypes == 1, "expected subtype to record one supertype");
     WL_CHECK_MSG(t, m->types[1].supertypes != NULL && m->types[1].supertypes[0] == 0,
                  "%s", "expected subtype to point at type 0");
+    WL_CHECK_MSG(t, m->types[0].is_final == 0, "%s", "expected explicit root type to stay non-final");
     WL_CHECK_MSG(t, m->types[1].is_final == 0, "%s", "sub type should not be final by default");
     WL_CHECK_MSG(t, m->types[0].of.struct_.num_fields == 1, "%s", "struct field count mismatch");
     WL_CHECK_MSG(t, m->types[1].of.struct_.num_fields == 2, "%s", "sub-struct field count mismatch");
@@ -7754,6 +7757,189 @@ WL_TEST(test_gc_type_section_respects_feature_gate) {
     WL_CHECK_MSG(t, m == NULL, "%s", "expected GC-disabled runtime to reject GC type section");
     WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
     WL_CHECK_MSG(t, strstr(rt.error_msg, "garbage collection") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_type_canonicalization_and_function_subtyping) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, m->types[0].canonical_id != 0, "%s", "expected canonical ids to be assigned");
+    WL_CHECK_MSG(t, m->types[0].canonical_id == m->types[2].canonical_id,
+                 "expected equivalent function types to share a canonical id (%u vs %u)",
+                 (unsigned)m->types[0].canonical_id,
+                 (unsigned)m->types[2].canonical_id);
+    WL_CHECK_MSG(t, wasm__type_equal(m, 0, 2), "%s", "expected structurally identical types to compare equal");
+    WL_CHECK_MSG(t, !wasm__type_equal(m, 0, 1), "%s", "expected subtype body to remain distinct from its supertype");
+    WL_CHECK_MSG(t, wasm__is_subtype(m, 1, 0), "%s", "expected declared subtype relation to hold");
+    WL_CHECK_MSG(t, !wasm__is_subtype(m, 0, 1), "%s", "expected subtype relation to be directional");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_type_validation_accepts_struct_width_subtyping) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x14);
+        emit(&sec, 0x00);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm__is_subtype(m, 1, 0), "%s", "expected struct width/depth subtype to validate");
+    WL_CHECK_MSG(t, !wasm__type_equal(m, 1, 0), "%s", "expected subtype to stay distinct from supertype");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_type_validation_rejects_invalid_function_subtype) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x12);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x13);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected invalid function variance to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "valid subtype") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_type_validation_rejects_final_supertype) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected subtyping from a final type to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "final type") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
 }
 
@@ -7991,6 +8177,10 @@ int main(void) {
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
         { "wasmgc: composite type sections parse rec/sub/struct/array forms", test_gc_type_section_parses_composite_types },
         { "wasmgc: GC type syntax is feature-gated", test_gc_type_section_respects_feature_gate },
+        { "wasmgc: canonical ids and function subtyping are computed at load", test_gc_type_canonicalization_and_function_subtyping },
+        { "wasmgc: struct width/depth subtyping validates", test_gc_type_validation_accepts_struct_width_subtyping },
+        { "wasmgc: invalid function variance is rejected", test_gc_type_validation_rejects_invalid_function_subtype },
+        { "wasmgc: final supertypes cannot be extended", test_gc_type_validation_rejects_final_supertype },
         { "loader: control-target scan accepts signed i32.const encodings", test_control_target_scan_accepts_signed_i32_const_leb },
         { "exceptions: typed catch receives payload values", test_exception_try_catch_payload },
         { "exceptions: catch_all handles unmatched tags", test_exception_catch_all },

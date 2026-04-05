@@ -300,6 +300,7 @@ typedef struct wasm_comptype_t {
     uint32_t num_supertypes;
     uint32_t* supertypes;
     uint32_t rec_group;
+    uint32_t canonical_id;
     int is_final;
     union {
         wasm_functype_t func;
@@ -1224,6 +1225,7 @@ static void wasm__free_comptype(wasm_comptype_t* type) {
 
     type->kind = WASM_COMP_FUNC;
     type->rec_group = 0;
+    type->canonical_id = 0;
     type->is_final = 0;
 }
 
@@ -1271,6 +1273,203 @@ static int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_functype_
         if (lhs->results[i] != rhs->results[i]) return 0;
     }
     return 1;
+}
+
+static int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs) {
+    if (lhs->kind != rhs->kind) return 0;
+    if (lhs->kind == WASM_STORAGE_PACKED) return lhs->of.packed_type == rhs->of.packed_type;
+    return lhs->of.valtype == rhs->of.valtype;
+}
+
+static int wasm__fieldtype_equal(const wasm_fieldtype_t* lhs, const wasm_fieldtype_t* rhs) {
+    return lhs->is_mutable == rhs->is_mutable &&
+           wasm__storagetype_equal(&lhs->storage, &rhs->storage);
+}
+
+static int wasm__comptype_body_equal(const wasm_comptype_t* lhs, const wasm_comptype_t* rhs) {
+    uint32_t i;
+
+    if (lhs->kind != rhs->kind) return 0;
+
+    switch (lhs->kind) {
+        case WASM_COMP_FUNC:
+            return wasm__functype_equal(&lhs->of.func, &rhs->of.func);
+        case WASM_COMP_STRUCT:
+            if (lhs->of.struct_.num_fields != rhs->of.struct_.num_fields) return 0;
+            for (i = 0; i < lhs->of.struct_.num_fields; i++) {
+                if (!wasm__fieldtype_equal(&lhs->of.struct_.fields[i], &rhs->of.struct_.fields[i]))
+                    return 0;
+            }
+            return 1;
+        case WASM_COMP_ARRAY:
+            return wasm__fieldtype_equal(&lhs->of.array.field, &rhs->of.array.field);
+        default:
+            return 0;
+    }
+}
+
+static wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
+    uint32_t i;
+    uint32_t next_id = 1;
+
+    if (!mod) return WASM_OK;
+
+    for (i = 0; i < mod->num_types; i++) mod->types[i].canonical_id = 0;
+
+    for (i = 0; i < mod->num_types; i++) {
+        uint32_t j;
+
+        for (j = 0; j < i; j++) {
+            if (wasm__comptype_body_equal(&mod->types[i], &mod->types[j])) {
+                mod->types[i].canonical_id = mod->types[j].canonical_id;
+                break;
+            }
+        }
+
+        if (j == i) {
+            if (next_id == 0) return WASM_ERR_OOM;
+            mod->types[i].canonical_id = next_id++;
+        }
+    }
+
+    return WASM_OK;
+}
+
+static int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
+    const wasm_comptype_t* lhs;
+    const wasm_comptype_t* rhs;
+
+    if (!mod || lhs_idx >= mod->num_types || rhs_idx >= mod->num_types) return 0;
+    if (lhs_idx == rhs_idx) return 1;
+
+    lhs = &mod->types[lhs_idx];
+    rhs = &mod->types[rhs_idx];
+    if (lhs->canonical_id != 0 && rhs->canonical_id != 0) return lhs->canonical_id == rhs->canonical_id;
+    return wasm__comptype_body_equal(lhs, rhs);
+}
+
+static int wasm__is_heap_subtype(const wasm_module_t* mod,
+                                 wasm_valtype_t subtype,
+                                 wasm_valtype_t supertype) {
+    (void)mod;
+
+    if (subtype == supertype) return 1;
+
+    switch (subtype) {
+        case WASM_TYPE_NONE:
+            return supertype == WASM_TYPE_I31REF || supertype == WASM_TYPE_STRUCTREF ||
+                   supertype == WASM_TYPE_ARRAYREF || supertype == WASM_TYPE_EQREF ||
+                   supertype == WASM_TYPE_ANYREF;
+        case WASM_TYPE_I31REF:
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ARRAYREF:
+            return supertype == WASM_TYPE_EQREF || supertype == WASM_TYPE_ANYREF;
+        case WASM_TYPE_EQREF:
+            return supertype == WASM_TYPE_ANYREF;
+        case WASM_TYPE_NOFUNC:
+            return supertype == WASM_TYPE_FUNCREF;
+        case WASM_TYPE_NOEXTERN:
+            return supertype == WASM_TYPE_EXTERNREF;
+        default:
+            return 0;
+    }
+}
+
+static int wasm__is_reftype_subtype(const wasm_module_t* mod,
+                                    wasm_valtype_t subtype,
+                                    wasm_valtype_t supertype) {
+    if (!wasm__is_ref_type(subtype) || !wasm__is_ref_type(supertype)) return 0;
+    return wasm__is_heap_subtype(mod, subtype, supertype);
+}
+
+static int wasm__is_valtype_subtype(const wasm_module_t* mod,
+                                    wasm_valtype_t subtype,
+                                    wasm_valtype_t supertype) {
+    if (subtype == supertype) return 1;
+    if (wasm__is_ref_type(subtype) && wasm__is_ref_type(supertype))
+        return wasm__is_reftype_subtype(mod, subtype, supertype);
+    return 0;
+}
+
+static int wasm__is_storagetype_subtype(const wasm_module_t* mod,
+                                        const wasm_storagetype_t* subtype,
+                                        const wasm_storagetype_t* supertype) {
+    if (subtype->kind != supertype->kind) return 0;
+    if (subtype->kind == WASM_STORAGE_PACKED)
+        return subtype->of.packed_type == supertype->of.packed_type;
+    return wasm__is_valtype_subtype(mod, subtype->of.valtype, supertype->of.valtype);
+}
+
+static int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
+                                      const wasm_fieldtype_t* subtype,
+                                      const wasm_fieldtype_t* supertype) {
+    if (subtype->is_mutable != supertype->is_mutable) return 0;
+    if (subtype->is_mutable)
+        return wasm__storagetype_equal(&subtype->storage, &supertype->storage);
+    return wasm__is_storagetype_subtype(mod, &subtype->storage, &supertype->storage);
+}
+
+static int wasm__is_comptype_immediate_subtype(const wasm_module_t* mod,
+                                               const wasm_comptype_t* subtype,
+                                               const wasm_comptype_t* supertype) {
+    uint32_t i;
+
+    if (subtype->kind != supertype->kind) return 0;
+
+    switch (subtype->kind) {
+        case WASM_COMP_FUNC:
+            if (subtype->of.func.num_params != supertype->of.func.num_params ||
+                subtype->of.func.num_results != supertype->of.func.num_results)
+                return 0;
+            for (i = 0; i < subtype->of.func.num_params; i++) {
+                if (!wasm__is_valtype_subtype(mod,
+                                              supertype->of.func.params[i],
+                                              subtype->of.func.params[i]))
+                    return 0;
+            }
+            for (i = 0; i < subtype->of.func.num_results; i++) {
+                if (!wasm__is_valtype_subtype(mod,
+                                              subtype->of.func.results[i],
+                                              supertype->of.func.results[i]))
+                    return 0;
+            }
+            return 1;
+        case WASM_COMP_STRUCT:
+            if (subtype->of.struct_.num_fields < supertype->of.struct_.num_fields) return 0;
+            for (i = 0; i < supertype->of.struct_.num_fields; i++) {
+                if (!wasm__is_fieldtype_subtype(mod,
+                                                &subtype->of.struct_.fields[i],
+                                                &supertype->of.struct_.fields[i]))
+                    return 0;
+            }
+            return 1;
+        case WASM_COMP_ARRAY:
+            return wasm__is_fieldtype_subtype(mod,
+                                              &subtype->of.array.field,
+                                              &supertype->of.array.field);
+        default:
+            return 0;
+    }
+}
+
+static inline int wasm__is_subtype(const wasm_module_t* mod,
+                                   uint32_t subtype_idx,
+                                   uint32_t supertype_idx) {
+    const wasm_comptype_t* subtype;
+    uint32_t i;
+
+    if (!mod || subtype_idx >= mod->num_types || supertype_idx >= mod->num_types) return 0;
+    if (wasm__type_equal(mod, subtype_idx, supertype_idx)) return 1;
+
+    subtype = &mod->types[subtype_idx];
+    for (i = 0; i < subtype->num_supertypes; i++) {
+        uint32_t parent_idx = subtype->supertypes[i];
+
+        if (parent_idx >= mod->num_types) continue;
+        if (wasm__is_subtype(mod, parent_idx, supertype_idx)) return 1;
+    }
+
+    return 0;
 }
 
 static int wasm__functype_is_unspecified(const wasm_functype_t* ft) {
@@ -4140,6 +4339,84 @@ static wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
     return WASM_ERR_MALFORMED;
 }
 
+static wasm_error_t wasm__validate_types(wasm_module_t* mod) {
+    uint32_t i;
+
+    for (i = 0; i < mod->num_rec_groups; i++) {
+        wasm_recgroup_t* group = &mod->rec_groups[i];
+
+        if (group->first_type > mod->num_types ||
+            group->num_types > mod->num_types - group->first_type) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "rec group %u is out of range",
+                                              (unsigned)i);
+        }
+    }
+
+    for (i = 0; i < mod->num_types; i++) {
+        wasm_comptype_t* type = &mod->types[i];
+        uint32_t j;
+
+        if (type->rec_group >= mod->num_rec_groups) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u refers to missing rec group %u",
+                                              (unsigned)i,
+                                              (unsigned)type->rec_group);
+        }
+
+        {
+            wasm_recgroup_t* group = &mod->rec_groups[type->rec_group];
+
+            if (i < group->first_type || i >= group->first_type + group->num_types) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u is outside rec group %u bounds",
+                                                  (unsigned)i,
+                                                  (unsigned)type->rec_group);
+            }
+        }
+
+        for (j = 0; j < type->num_supertypes; j++) {
+            uint32_t super_idx = type->supertypes[j];
+            wasm_comptype_t* supertype;
+
+            if (super_idx >= mod->num_types) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u supertype %u out of range",
+                                                  (unsigned)i,
+                                                  (unsigned)super_idx);
+            }
+            if (super_idx >= i) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u supertype %u must have a lower index",
+                                                  (unsigned)i,
+                                                  (unsigned)super_idx);
+            }
+
+            supertype = &mod->types[super_idx];
+            if (supertype->is_final) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u cannot extend final type %u",
+                                                  (unsigned)i,
+                                                  (unsigned)super_idx);
+            }
+            if (type->kind != supertype->kind) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u kind does not match supertype %u",
+                                                  (unsigned)i,
+                                                  (unsigned)super_idx);
+            }
+            if (!wasm__is_comptype_immediate_subtype(mod, type, supertype)) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "type %u is not a valid subtype of %u",
+                                                  (unsigned)i,
+                                                  (unsigned)super_idx);
+            }
+        }
+    }
+
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
     uint32_t i, j;
 
@@ -6341,6 +6618,16 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         return NULL;
     }
 
+    err = wasm__canonicalize_types(mod);
+    if (err != WASM_OK) {
+        WASM__LOAD_FAIL("canonicalize_types");
+    }
+
+    err = wasm__validate_types(mod);
+    if (err != WASM_OK) {
+        WASM__LOAD_FAIL("validate_types");
+    }
+
     err = wasm__validate_structural(mod);
     if (err != WASM_OK) {
         WASM__LOAD_FAIL("validate_structural");
@@ -7675,7 +7962,6 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x11: { /* call_indirect */
                 uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
-                wasm_functype_t* actual_type;
                 wasm_functype_t* cft;
                 wasm_func_t* callee;
                 wasm_table_t* table;
@@ -7694,10 +7980,9 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 ci = table->elems[tvi].of.funcref;
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
-                actual_type = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 cft = wasm__module_functype(mod, ti);
-                if (!actual_type || !cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__functype_equal(actual_type, cft))
+                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!wasm__type_equal(mod, callee->type_idx, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (cft->num_params > 8) {
                     call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
@@ -7790,7 +8075,6 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x13: { /* return_call_indirect */
                 uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
-                wasm_functype_t* actual_type;
                 wasm_functype_t* cft;
                 wasm_table_t* table;
                 wasm_value_t* tail_args = tail_args_buf;
@@ -7811,10 +8095,9 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 ci = table->elems[tvi].of.funcref;
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
-                actual_type = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 cft = wasm__module_functype(mod, ti);
-                if (!actual_type || !cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__functype_equal(actual_type, cft))
+                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!wasm__type_equal(mod, callee->type_idx, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
