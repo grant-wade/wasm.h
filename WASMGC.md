@@ -212,32 +212,32 @@
 
 **Goal**: Wire everything together, update public API, test.
 
-**6.1 Import/export updates**
+**[DONE] 6.1 Import/export updates**
 
 - Table imports/exports with GC reference types
 - Global imports/exports with GC reference types
 - Validate imported type compatibility using subtyping
 
-**6.2 Table operations with GC types**
+**[DONE] 6.2 Table operations with GC types**
 
 - Tables can hold `anyref`, `eqref`, `structref`, `arrayref`, `i31ref` — update table init, `table.get`/`table.set`, elem segment application
 - GC collector must trace table entries as roots
 
-**6.3 Public API additions**
+**[DONE] 6.3 Public API additions**
 
 - `wasm_gc_collect(wasm_runtime_t* rt)` — manual collection trigger
 - Introspection: `wasm_type_kind(mod, type_idx)` → func/struct/array
 - Struct/array field count, field types for tooling
-- Consider: `wasm_struct_new`, `wasm_array_new` host-side allocation helpers
+- Add `wasm_struct_new`, `wasm_array_new` host-side allocation helpers
 
-**6.4 Feature gating**
+**[DONE] 6.4 Feature gating**
 
 - All GC functionality gated behind `WASM_FEATURE_GC`
 - GC implies `WASM_FEATURE_REFERENCE_TYPES` and typed function references as prerequisites
 - Update `WASM__IMPLEMENTED_FEATURES` mask
 - Update `wasm__feature_name`
 
-**6.5 Header/documentation updates**
+**[DONE] 6.5 Header/documentation updates**
 
 - Update the header comment to list GC support
 - Update compatibility notes

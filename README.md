@@ -102,7 +102,7 @@ At a high level it gives you:
 - tables and indirect calls
 - trap and error reporting through `wasm_error_t` and `wasm_error_string`
 
-The current scope is the Wasm MVP execution model plus a focused subset of newer proposals. In practice that means the core numeric types, imports/exports, control flow, globals, multi-memory linear memory, tables, bulk memory, reference types, multi-value, sign-extension, non-trapping truncation, mutable globals, and extended const expressions are implemented, while SIMD, threads, GC, tail calls, and exceptions are intentionally out of scope.
+The current scope is the Wasm MVP execution model plus a focused subset of newer proposals. In practice that means the core numeric types, imports/exports, control flow, globals, multi-memory linear memory, tables, bulk memory, reference types, GC, multi-value, sign-extension, non-trapping truncation, mutable globals, extended const expressions, tail calls, exceptions, and SIMD are implemented, while threads remain out of scope.
 
 Internally, the runtime is a straightforward stack-based interpreter. `wasm_runtime_t` holds imports, execution stack state, and error state; `wasm_module_t` owns decoded types, functions, exports, globals, table state, and memory for one loaded module.
 
@@ -110,6 +110,8 @@ Relevant configuration points:
 
 - `WASM_MAX_STACK` defaults to `4096`
 - `WASM_MAX_CALL_DEPTH` defaults to `512`
+- `WASM_GC_HEAP_SIZE` defaults to `4 * 1024 * 1024`
+- `WASM_GC_ALLOC(sz)` / `WASM_GC_FREE(p)` let you override GC arena allocation separately from the general allocator hooks
 
 The minimal usage flow is:
 
@@ -131,12 +133,15 @@ if (mod != NULL) {
 	if (wasm_call(mod, "main", args, 1, &result, 1) == WASM_OK) {
 		/* use result */
 	}
+	wasm_gc_collect(&rt);
 	wasm_free_module(mod);
 }
 
 wasm_destroy(&rt);
 ```
 
+
+For GC-aware tooling you can introspect composite types with `wasm_type_count`, `wasm_type_kind`, `wasm_struct_type_field`, and `wasm_array_type_field`. Host code can also allocate managed values directly with `wasm_struct_new` and `wasm_array_new` when it needs to seed globals, tables, or other runtime state with GC objects.
 
 ## Build And Test
 

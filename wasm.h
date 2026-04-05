@@ -10,6 +10,8 @@
  *   #define WASM_REALLOC(p, sz)  my_realloc(p, sz)
  *   #define WASM_FREE(p)         my_free(p)
  *   #define WASM_CALLOC(n, sz)   my_calloc(n, sz)
+ *   #define WASM_GC_ALLOC(sz)    my_gc_alloc(sz)
+ *   #define WASM_GC_FREE(p)      my_gc_free(p)
  *   #define WASM_IMPL
  *   #include "wasm.h"
  *
@@ -22,6 +24,7 @@
  *   wasm_value_t result;
  *   wasm_call(mod, "main", args, 1, &result, 1);
  *   printf("result = %d\n", result.of.i32);
+ *   wasm_gc_collect(&rt);
  *
  * INTROSPECTION:
  *   uint32_t export_count = wasm_export_count(mod);
@@ -57,9 +60,9 @@
  *   - Linear memories with bounds checks, indexed memory access, and memory.grow
  *   - Tables, call_indirect, and reference-type table operations
  *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
- *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, tail calls, exceptions, and SIMD
+ *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, tail calls, exceptions, SIMD, and GC
  *   - Load-time validation plus runtime-configurable feature gating
- *   - No threads or GC
+ *   - No threads
  */
 
 #ifndef WASM_H
@@ -372,7 +375,8 @@ typedef struct wasm_arraytype_t {
 typedef enum wasm_comptype_kind_t {
     WASM_COMP_FUNC = 0,
     WASM_COMP_STRUCT = 1,
-    WASM_COMP_ARRAY = 2
+    WASM_COMP_ARRAY = 2,
+    WASM_COMP_INVALID = 0xFF
 } wasm_comptype_kind_t;
 
 typedef struct wasm_comptype_t {
@@ -618,12 +622,26 @@ int32_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint32_t 
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint32_t wasm_memory_size(wasm_module_t* mod);
 int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages);
+uint32_t wasm_table_count(wasm_module_t* mod);
+wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx);
+const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx);
+uint32_t wasm_global_count(wasm_module_t* mod);
+wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx);
+const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx);
+int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx);
 uint32_t wasm_export_count(wasm_module_t* mod);
 const char* wasm_export_name(wasm_module_t* mod, uint32_t index);
 wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
 uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index);
 int wasm_find_export(wasm_module_t* mod, const char* name,
                      wasm_export_kind_t* out_kind, uint32_t* out_index);
+uint32_t wasm_type_count(wasm_module_t* mod);
+wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx);
+const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx);
+uint32_t wasm_struct_type_field_count(wasm_module_t* mod, uint32_t type_idx);
+const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type_idx,
+                                               uint32_t field_idx);
+const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx);
 uint32_t wasm_func_count(wasm_module_t* mod);
 uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx);
 uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx);
@@ -631,6 +649,12 @@ wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
                                     uint32_t param_idx);
 wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
                                      uint32_t result_idx);
+wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
+                             const wasm_value_t* field_values, uint32_t num_fields,
+                             wasm_value_t* out_ref);
+wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
+                            const wasm_value_t* elem_values, uint32_t num_elems,
+                            wasm_value_t* out_ref);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -910,6 +934,22 @@ static wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag) {
         return WASM_ERR_MALFORMED;
     }
 
+    if ((flag & WASM_FEATURE_GC) != 0) {
+        mod->required_features |= WASM_FEATURE_REFERENCE_TYPES;
+        if ((WASM__IMPLEMENTED_FEATURES & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "feature '%s' is not implemented",
+                          wasm__feature_name(WASM_FEATURE_REFERENCE_TYPES));
+            return WASM_ERR_MALFORMED;
+        }
+        if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "feature '%s' is disabled",
+                          wasm__feature_name(WASM_FEATURE_REFERENCE_TYPES));
+            return WASM_ERR_MALFORMED;
+        }
+    }
+
     return WASM_OK;
 }
 
@@ -1102,6 +1142,32 @@ static int wasm__runtime_value_matches_type(const wasm_module_t* mod,
                                             const wasm_value_t* value,
                                             wasm_valtype_t expected_type,
                                             const wasm_reftype_t* expected_ref);
+static wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
+                                         const wasm_reftype_t* reftype);
+static int wasm__get_effective_reftype(const wasm_module_t* mod,
+                                       wasm_valtype_t type,
+                                       const wasm_reftype_t* ref_type,
+                                       wasm_reftype_t* out_reftype);
+static int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
+                                          wasm_valtype_t subtype,
+                                          const wasm_reftype_t* subtype_ref,
+                                          wasm_valtype_t supertype,
+                                          const wasm_reftype_t* supertype_ref);
+static int wasm__typed_valtype_equal(const wasm_module_t* mod,
+                                     wasm_valtype_t lhs,
+                                     const wasm_reftype_t* lhs_ref,
+                                     wasm_valtype_t rhs,
+                                     const wasm_reftype_t* rhs_ref);
+static int wasm__functype_is_subtype(const wasm_module_t* mod,
+                                     const wasm_functype_t* subtype,
+                                     const wasm_functype_t* supertype);
+static int wasm__globaltype_matches_import(const wasm_module_t* mod,
+                                           wasm_valtype_t actual_type,
+                                           const wasm_reftype_t* actual_ref,
+                                           int actual_mutable,
+                                           wasm_valtype_t expected_type,
+                                           const wasm_reftype_t* expected_ref,
+                                           int expected_mutable);
 
 static size_t wasm__align_up_size(size_t value, size_t alignment) {
     size_t remainder;
@@ -1200,7 +1266,7 @@ static wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* field) 
         case WASM_TYPE_V128:
             return wasm_v128_zero();
         default:
-            return wasm_ref_null(field->storage.of.valtype);
+            return wasm__typed_ref_null(field->storage.of.valtype, &field->storage.ref_type);
     }
 }
 
@@ -1505,6 +1571,30 @@ static int wasm__is_heap_gc_ref_value(const wasm_value_t* value) {
 
 static int wasm__value_matches_type(const wasm_value_t* value, wasm_valtype_t type) {
     return wasm__is_valtype_subtype(NULL, value->type, type);
+}
+
+static wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
+                                         const wasm_reftype_t* reftype) {
+    wasm_valtype_t null_type = type;
+
+    if (reftype && reftype->has_type_index) {
+        wasm_valtype_t concrete_type = reftype->type ? reftype->type : type;
+
+        switch (concrete_type) {
+            case WASM_TYPE_FUNCREF:
+                null_type = WASM_TYPE_NOFUNC;
+                break;
+            case WASM_TYPE_EXTERNREF:
+                null_type = WASM_TYPE_NOEXTERN;
+                break;
+            default:
+                null_type = WASM_TYPE_NONE;
+                break;
+        }
+    }
+
+    if (null_type == WASM_TYPE_VOID) null_type = WASM_TYPE_ANYREF;
+    return wasm_ref_null(null_type);
 }
 
 static wasm_value_t wasm__default_value(wasm_valtype_t type) {
@@ -1855,6 +1945,107 @@ static int wasm__runtime_value_matches_type(const wasm_module_t* mod,
 
     if (!wasm__is_valtype_subtype(mod, actual_ref.type, expected_type)) return 0;
     return wasm__reftype_is_subtype(mod, &actual_ref, &effective_expected);
+}
+
+static int wasm__get_effective_reftype(const wasm_module_t* mod,
+                                       wasm_valtype_t type,
+                                       const wasm_reftype_t* ref_type,
+                                       wasm_reftype_t* out_reftype) {
+    if (!wasm__is_ref_type(type)) {
+        wasm__clear_reftype(out_reftype);
+        return 0;
+    }
+
+    if (ref_type && wasm__has_reftype_info(ref_type)) {
+        *out_reftype = *ref_type;
+        if (out_reftype->has_type_index && mod != NULL) {
+            wasm_reftype_t resolved = *out_reftype;
+
+            if (wasm__resolve_reftype((wasm_module_t*)mod, &resolved) == WASM_OK)
+                *out_reftype = resolved;
+        }
+        if (out_reftype->type == WASM_TYPE_VOID) out_reftype->type = type;
+        return 1;
+    }
+
+    wasm__clear_reftype(out_reftype);
+    out_reftype->type = type;
+    out_reftype->nullable = 1;
+    return 1;
+}
+
+static int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
+                                          wasm_valtype_t subtype,
+                                          const wasm_reftype_t* subtype_ref,
+                                          wasm_valtype_t supertype,
+                                          const wasm_reftype_t* supertype_ref) {
+    wasm_reftype_t effective_subtype;
+    wasm_reftype_t effective_supertype;
+
+    if (!wasm__is_valtype_subtype(mod, subtype, supertype)) return 0;
+    if (!wasm__is_ref_type(subtype) || !wasm__is_ref_type(supertype)) return 1;
+    if (!wasm__get_effective_reftype(mod, subtype, subtype_ref, &effective_subtype) ||
+        !wasm__get_effective_reftype(mod, supertype, supertype_ref, &effective_supertype))
+        return 1;
+    return wasm__reftype_is_subtype(mod, &effective_subtype, &effective_supertype);
+}
+
+static int wasm__typed_valtype_equal(const wasm_module_t* mod,
+                                     wasm_valtype_t lhs,
+                                     const wasm_reftype_t* lhs_ref,
+                                     wasm_valtype_t rhs,
+                                     const wasm_reftype_t* rhs_ref) {
+    return wasm__typed_valtype_is_subtype(mod, lhs, lhs_ref, rhs, rhs_ref) &&
+           wasm__typed_valtype_is_subtype(mod, rhs, rhs_ref, lhs, lhs_ref);
+}
+
+static int wasm__functype_is_subtype(const wasm_module_t* mod,
+                                     const wasm_functype_t* subtype,
+                                     const wasm_functype_t* supertype) {
+    uint32_t i;
+
+    if (!subtype || !supertype) return 0;
+    if (subtype->num_params != supertype->num_params || subtype->num_results != supertype->num_results)
+        return 0;
+
+    for (i = 0; i < subtype->num_params; i++) {
+        const wasm_reftype_t* subtype_ref = subtype->param_reftypes ? &subtype->param_reftypes[i] : NULL;
+        const wasm_reftype_t* supertype_ref = supertype->param_reftypes ? &supertype->param_reftypes[i] : NULL;
+
+        if (!wasm__typed_valtype_is_subtype(mod,
+                                            supertype->params[i],
+                                            supertype_ref,
+                                            subtype->params[i],
+                                            subtype_ref))
+            return 0;
+    }
+
+    for (i = 0; i < subtype->num_results; i++) {
+        const wasm_reftype_t* subtype_ref = subtype->result_reftypes ? &subtype->result_reftypes[i] : NULL;
+        const wasm_reftype_t* supertype_ref = supertype->result_reftypes ? &supertype->result_reftypes[i] : NULL;
+
+        if (!wasm__typed_valtype_is_subtype(mod,
+                                            subtype->results[i],
+                                            subtype_ref,
+                                            supertype->results[i],
+                                            supertype_ref))
+            return 0;
+    }
+
+    return 1;
+}
+
+static int wasm__globaltype_matches_import(const wasm_module_t* mod,
+                                           wasm_valtype_t actual_type,
+                                           const wasm_reftype_t* actual_ref,
+                                           int actual_mutable,
+                                           wasm_valtype_t expected_type,
+                                           const wasm_reftype_t* expected_ref,
+                                           int expected_mutable) {
+    if (actual_mutable != expected_mutable) return 0;
+    if (expected_mutable)
+        return wasm__typed_valtype_equal(mod, actual_type, actual_ref, expected_type, expected_ref);
+    return wasm__typed_valtype_is_subtype(mod, actual_type, actual_ref, expected_type, expected_ref);
 }
 
 static wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
@@ -2648,16 +2839,25 @@ static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, w
     return WASM_OK;
 }
 
-static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
-                                                    wasm_valtype_t expected_type,
-                                                    wasm_value_t* out_value) {
+static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
+                                                     wasm__init_expr_stack_t* stack,
+                                                     wasm_valtype_t expected_type,
+                                                     const wasm_reftype_t* expected_ref,
+                                                     wasm_value_t* out_value) {
     wasm_value_t value;
 
     if (stack->size == 0) return WASM_ERR_MALFORMED;
     value = stack->values[--stack->size];
-    if (!wasm__value_matches_type(&value, expected_type)) return WASM_ERR_TYPE_MISMATCH;
+    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
+        return WASM_ERR_TYPE_MISMATCH;
     *out_value = value;
     return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
+                                                    wasm_valtype_t expected_type,
+                                                    wasm_value_t* out_value) {
+    return wasm__init_expr_stack_pop_expect(NULL, stack, expected_type, NULL, out_value);
 }
 
 static int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs) {
@@ -2819,7 +3019,8 @@ static wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
 
     table->elems = (wasm_value_t*)WASM_MALLOC(table->size * sizeof(wasm_value_t));
     if (!table->elems) return WASM_ERR_OOM;
-    for (i = 0; i < table->size; i++) table->elems[i] = wasm_ref_null(table->reftype);
+    for (i = 0; i < table->size; i++)
+        table->elems[i] = wasm__typed_ref_null(table->reftype, &table->reftype_info);
     return WASM_OK;
 }
 
@@ -4427,7 +4628,11 @@ static wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
         if (segment->is_passive || segment->is_declarative) continue;
         if (segment->table_index >= mod->num_tables) return WASM_ERR_MALFORMED;
         table = &mod->tables[segment->table_index];
-        if (!wasm__is_valtype_subtype(mod, segment->elem_type, table->reftype))
+        if (!wasm__typed_valtype_is_subtype(mod,
+                                            segment->elem_type,
+                                            &segment->elem_ref_type,
+                                            table->reftype,
+                                            &table->reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
         if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, table->size))
             return WASM_ERR_OUT_OF_BOUNDS;
@@ -4564,7 +4769,7 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 reftype.nullable = 1;
                 type = reftype.type ? reftype.type : WASM_TYPE_ANYREF;
 
-                value = wasm_ref_null(type);
+                value = wasm__typed_ref_null(type, &reftype);
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }
@@ -4612,7 +4817,11 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                                     (field->storage.kind == WASM_STORAGE_PACKED) ? WASM_TYPE_I32
                                                                                  : field->storage.of.valtype;
 
-                                err = wasm__init_expr_stack_pop_typed(&stack, expected_type, &field_value);
+                                err = wasm__init_expr_stack_pop_expect(mod,
+                                                                       &stack,
+                                                                       expected_type,
+                                                                       &field->storage.ref_type,
+                                                                       &field_value);
                                 if (err != WASM_OK) break;
                                 err = wasm__gc_struct_store_field(object, st, i - 1, field_value);
                                 if (err != WASM_OK) break;
@@ -4656,7 +4865,11 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                                     (atype->field.storage.kind == WASM_STORAGE_PACKED) ? WASM_TYPE_I32
                                                                                        : atype->field.storage.of.valtype;
 
-                                err = wasm__init_expr_stack_pop_typed(&stack, expected_type, &init_value);
+                                err = wasm__init_expr_stack_pop_expect(mod,
+                                                                       &stack,
+                                                                       expected_type,
+                                                                       &atype->field.storage.ref_type,
+                                                                       &init_value);
                                 if (err != WASM_OK) break;
                                 err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &length_value);
                                 if (err != WASM_OK) break;
@@ -4709,7 +4922,11 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                                     (atype->field.storage.kind == WASM_STORAGE_PACKED) ? WASM_TYPE_I32
                                                                                        : atype->field.storage.of.valtype;
 
-                                err = wasm__init_expr_stack_pop_typed(&stack, expected_type, &elem_value);
+                                err = wasm__init_expr_stack_pop_expect(mod,
+                                                                       &stack,
+                                                                       expected_type,
+                                                                       &atype->field.storage.ref_type,
+                                                                       &elem_value);
                                 if (err != WASM_OK) break;
                                 err = wasm__gc_array_store_element(object, atype, i - 1, elem_value);
                                 if (err != WASM_OK) break;
@@ -5113,7 +5330,7 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             for (j = 0; j < mod->rt->num_imports; j++) {
                 if (strcmp(mod->rt->imports[j].module, mn) == 0 && strcmp(mod->rt->imports[j].name, fn) == 0) {
                     if (!wasm__functype_is_unspecified(&mod->rt->imports[j].type) &&
-                        !wasm__functype_equal(&mod->rt->imports[j].type, import_type)) {
+                        !wasm__functype_is_subtype(mod, &mod->rt->imports[j].type, import_type)) {
                         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                                       "function import type mismatch: %.64s.%.64s", mn, fn);
                         return WASM_ERR_TYPE_MISMATCH;
@@ -5174,13 +5391,22 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
                 WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", mn, fn);
                 return WASM_ERR_UNKNOWN_IMPORT;
             }
-            if (gimp->type != type || gimp->is_mutable != (int)is_mutable ||
-                ((wasm__has_reftype_info(&gimp->ref_type) || wasm__has_reftype_info(&ref_type)) &&
-                 !wasm__reftype_equal(&gimp->ref_type, &ref_type))) {
+            if (!wasm__globaltype_matches_import(mod,
+                                                 gimp->type,
+                                                 &gimp->ref_type,
+                                                 gimp->is_mutable,
+                                                 type,
+                                                 &ref_type,
+                                                 (int)is_mutable)) {
                 WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global import type mismatch: %.64s.%.64s", mn, fn);
                 return WASM_ERR_TYPE_MISMATCH;
             }
             if (!gimp->value) return WASM_ERR_MALFORMED;
+            if (!wasm__runtime_value_matches_type(mod, gimp->value, gimp->type, &gimp->ref_type)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "global import value mismatch: %.64s.%.64s", mn, fn);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) return WASM_ERR_OOM;
 
             mod->globals[gi].type = type;
@@ -5188,7 +5414,6 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             mod->globals[gi].is_mutable = is_mutable;
             mod->globals[gi].is_import = 1;
             mod->globals[gi].import_value = gimp->value;
-            mod->globals[gi].import_value->type = type;
             mod->num_global_imports++;
         } else if (kind == 0x04) {
             uint32_t tag_index;
@@ -5281,7 +5506,11 @@ static wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader
         }
         err = wasm__eval_init_expr(mod, r, global_index, &value);
         if (err != WASM_OK) return err;
-        if (!wasm__value_matches_type(&value, mod->globals[global_index].type)) return WASM_ERR_TYPE_MISMATCH;
+        if (!wasm__runtime_value_matches_type(mod,
+                                              &value,
+                                              mod->globals[global_index].type,
+                                              &mod->globals[global_index].ref_type))
+            return WASM_ERR_TYPE_MISMATCH;
         wasm__global_set_value(&mod->globals[global_index], value);
     }
     return WASM_OK;
@@ -5385,7 +5614,11 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             if (uses_expr) {
                 err = wasm__eval_init_expr(mod, r, mod->num_globals, &value);
                 if (err != WASM_OK) return err;
-                if (!wasm__value_matches_type(&value, segment->elem_type)) return WASM_ERR_TYPE_MISMATCH;
+                if (!wasm__runtime_value_matches_type(mod,
+                                                      &value,
+                                                      segment->elem_type,
+                                                      &segment->elem_ref_type))
+                    return WASM_ERR_TYPE_MISMATCH;
             } else {
                 uint32_t func_index = wasm__read_leb128_u32(r);
                 if (func_index >= mod->num_funcs) return WASM_ERR_MALFORMED;
@@ -5892,7 +6125,11 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                                   (unsigned)segment->table_index);
             }
             table = &mod->tables[segment->table_index];
-            if (!wasm__is_valtype_subtype(mod, segment->elem_type, table->reftype)) {
+            if (!wasm__typed_valtype_is_subtype(mod,
+                                                segment->elem_type,
+                                                &segment->elem_ref_type,
+                                                table->reftype,
+                                                &table->reftype_info)) {
                 return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                                   "element segment %u type mismatch with table %u",
                                                   (unsigned)i,
@@ -6014,21 +6251,7 @@ static wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
 static int wasm__validator_get_effective_reftype(wasm_valtype_t type,
                                                  const wasm_reftype_t* ref_type,
                                                  wasm_reftype_t* out) {
-    if (!wasm__is_ref_type(type)) {
-        wasm__clear_reftype(out);
-        return 0;
-    }
-
-    if (ref_type && wasm__has_reftype_info(ref_type)) {
-        *out = *ref_type;
-        if (out->type == WASM_TYPE_VOID) out->type = type;
-        return 1;
-    }
-
-    wasm__clear_reftype(out);
-    out->type = type;
-    out->nullable = 1;
-    return 1;
+    return wasm__get_effective_reftype(NULL, type, ref_type, out);
 }
 
 static int wasm__validator_type_matches(const wasm__validator_t* v,
@@ -11275,7 +11498,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         table = &mod->tables[table_idx];
                         segment = &mod->elem_segments[elem_idx];
                         if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
-                        if (!wasm__is_valtype_subtype(mod, segment->elem_type, table->reftype))
+                        if (!wasm__typed_valtype_is_subtype(mod,
+                                                            segment->elem_type,
+                                                            &segment->elem_ref_type,
+                                                            table->reftype,
+                                                            &table->reftype_info))
                             WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
                             !wasm__range_in_bounds_u64(dst_offset, len, table->size))
@@ -11313,7 +11540,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         if (dst_table_idx >= mod->num_tables || src_table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         dst_table = &mod->tables[dst_table_idx];
                         src_table = &mod->tables[src_table_idx];
-                        if (!wasm__is_valtype_subtype(mod, src_table->reftype, dst_table->reftype))
+                        if (!wasm__typed_valtype_is_subtype(mod,
+                                                            src_table->reftype,
+                                                            &src_table->reftype_info,
+                                                            dst_table->reftype,
+                                                            &dst_table->reftype_info))
                             WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
                             !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))
@@ -11339,7 +11570,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         table = &mod->tables[table_idx];
-                        if (!wasm__value_matches_type(&init_value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                        if (!wasm__runtime_value_matches_type(mod,
+                                                              &init_value,
+                                                              table->reftype,
+                                                              &table->reftype_info))
+                            WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         old_size = table->size;
                         delta = (uint32_t)delta_value.of.i32;
                         if (delta == 0) {
@@ -11381,7 +11616,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         table = &mod->tables[table_idx];
-                        if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                        if (!wasm__runtime_value_matches_type(mod,
+                                                              &value,
+                                                              table->reftype,
+                                                              &table->reftype_info))
+                            WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         if (!wasm__range_in_bounds_u64(dst_offset, len, table->size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         if (len > 0) {
                             if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
@@ -12187,12 +12426,20 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x24: {
                 uint32_t x = wasm__read_leb128_u32(&cf->r);
+                wasm_value_t value;
+
                 if (!mod->globals[x].is_mutable) {
                     WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)x);
                     err = WASM_ERR_TYPE_MISMATCH;
                     goto cleanup;
                 }
-                wasm__global_set_value(&mod->globals[x], WASM__POP(rt));
+                value = WASM__POP(rt);
+                if (!wasm__runtime_value_matches_type(mod,
+                                                      &value,
+                                                      mod->globals[x].type,
+                                                      &mod->globals[x].ref_type))
+                    WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                wasm__global_set_value(&mod->globals[x], value);
                 break;
             }
             case 0x25: {
@@ -12221,7 +12468,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 value = WASM__POP(rt);
                 index = WASM__POP(rt);
                 element_index = (uint32_t)index.of.i32;
-                if (!wasm__value_matches_type(&value, table->reftype)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                if (!wasm__runtime_value_matches_type(mod,
+                                                      &value,
+                                                      table->reftype,
+                                                      &table->reftype_info))
+                    WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                 if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 table->elems[element_index] = value;
                 break;
@@ -12448,7 +12699,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 err = wasm__read_heaptype(mod, &cf->r, &reftype);
                 if (err != WASM_OK) goto cleanup;
                 type = reftype.type ? reftype.type : WASM_TYPE_ANYREF;
-                WASM__PUSH(rt, wasm_ref_null(type));
+                WASM__PUSH(rt, wasm__typed_ref_null(type, &reftype));
                 break;
             }
             case 0xD1: {
@@ -13452,6 +13703,39 @@ int32_t wasm_memory_grow(wasm_module_t* mod, uint32_t delta_pages) {
     return wasm_memory_grow_at(mod, 0, delta_pages);
 }
 
+uint32_t wasm_table_count(wasm_module_t* mod) {
+    return mod ? mod->num_tables : 0;
+}
+
+wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx) {
+    if (!mod || table_idx >= mod->num_tables) return WASM_TYPE_VOID;
+    return mod->tables[table_idx].reftype;
+}
+
+const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx) {
+    if (!mod || table_idx >= mod->num_tables) return NULL;
+    return &mod->tables[table_idx].reftype_info;
+}
+
+uint32_t wasm_global_count(wasm_module_t* mod) {
+    return mod ? mod->num_globals : 0;
+}
+
+wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx) {
+    if (!mod || global_idx >= mod->num_globals) return WASM_TYPE_VOID;
+    return mod->globals[global_idx].type;
+}
+
+const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx) {
+    if (!mod || global_idx >= mod->num_globals) return NULL;
+    return &mod->globals[global_idx].ref_type;
+}
+
+int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx) {
+    if (!mod || global_idx >= mod->num_globals) return 0;
+    return mod->globals[global_idx].is_mutable;
+}
+
 uint32_t wasm_export_count(wasm_module_t* mod) {
     return mod ? mod->num_exports : 0;
 }
@@ -13486,6 +13770,39 @@ int wasm_find_export(wasm_module_t* mod, const char* name,
     }
 
     return 0;
+}
+
+uint32_t wasm_type_count(wasm_module_t* mod) {
+    return mod ? mod->num_types : 0;
+}
+
+wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types) return WASM_COMP_INVALID;
+    return mod->types[type_idx].kind;
+}
+
+const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx) {
+    return wasm__module_const_functype(mod, type_idx);
+}
+
+uint32_t wasm_struct_type_field_count(wasm_module_t* mod, uint32_t type_idx) {
+    const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
+    return st ? st->num_fields : 0;
+}
+
+const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type_idx,
+                                               uint32_t field_idx) {
+    const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
+
+    if (!st || field_idx >= st->num_fields) return NULL;
+    return &st->fields[field_idx];
+}
+
+const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx) {
+    const wasm_arraytype_t* at = wasm__module_const_arraytype(mod, type_idx);
+
+    if (!at) return NULL;
+    return &at->field;
 }
 
 uint32_t wasm_func_count(wasm_module_t* mod) {
@@ -13530,6 +13847,74 @@ wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
     if (!ft) return WASM_TYPE_VOID;
     if (result_idx >= ft->num_results) return WASM_TYPE_VOID;
     return ft->results[result_idx];
+}
+
+wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
+                             const wasm_value_t* field_values, uint32_t num_fields,
+                             wasm_value_t* out_ref) {
+    const wasm_structtype_t* st;
+    wasm_gc_struct_t* object;
+    uint32_t i;
+
+    if (!mod || !out_ref) return WASM_ERR_MALFORMED;
+
+    st = wasm__module_const_structtype(mod, type_idx);
+    if (!st) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "type %u is not a struct type", (unsigned)type_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    if (num_fields != st->num_fields || (num_fields > 0 && !field_values)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                      "struct type %u expects %u fields, got %u",
+                      (unsigned)type_idx,
+                      (unsigned)st->num_fields,
+                      (unsigned)num_fields);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+
+    object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
+    if (!object) return WASM_ERR_OOM;
+
+    for (i = 0; i < st->num_fields; i++) {
+        wasm_error_t err = wasm__gc_struct_store_field(object, st, i, field_values[i]);
+        if (err != WASM_OK) return err;
+    }
+
+    *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+    return WASM_OK;
+}
+
+wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
+                            const wasm_value_t* elem_values, uint32_t num_elems,
+                            wasm_value_t* out_ref) {
+    const wasm_arraytype_t* at;
+    wasm_gc_array_t* object;
+    uint32_t i;
+
+    if (!mod || !out_ref) return WASM_ERR_MALFORMED;
+
+    at = wasm__module_const_arraytype(mod, type_idx);
+    if (!at) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "type %u is not an array type", (unsigned)type_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    if (num_elems > 0 && !elem_values) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                      "array values are required for %u elements",
+                      (unsigned)num_elems);
+        return WASM_ERR_MALFORMED;
+    }
+
+    object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
+    if (!object) return WASM_ERR_OOM;
+
+    for (i = 0; i < num_elems; i++) {
+        wasm_error_t err = wasm__gc_array_store_element(object, at, i, elem_values[i]);
+        if (err != WASM_OK) return err;
+    }
+
+    *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+    return WASM_OK;
 }
 
 const char* wasm_error_string(wasm_error_t err) {
