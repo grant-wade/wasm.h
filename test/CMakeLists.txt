@@ -5,11 +5,31 @@ if(NOT WL_ENABLE_EMCC_TESTS)
     return()
 endif()
 
-find_program(WL_EMCC_EXECUTABLE NAMES emcc)
+set(WL_EMCC_SEARCH_HINTS)
+if(DEFINED ENV{EMSDK})
+    list(APPEND WL_EMCC_SEARCH_HINTS
+        "$ENV{EMSDK}"
+        "$ENV{EMSDK}/upstream/emscripten"
+    )
+endif()
+if(DEFINED ENV{EMSCRIPTEN})
+    list(APPEND WL_EMCC_SEARCH_HINTS "$ENV{EMSCRIPTEN}")
+endif()
+
+find_program(WL_EMCC_EXECUTABLE
+    NAMES emcc emcc.bat emcc.py
+    HINTS ${WL_EMCC_SEARCH_HINTS}
+    DOC "Path to emcc used for Emscripten-based Wasm fixture tests."
+)
 if(NOT WL_EMCC_EXECUTABLE)
-    message(STATUS "emcc not found; skipping emcc fixture targets.")
+    message(STATUS
+        "emcc not found; skipping emcc fixture targets "
+        "(searched for emcc, emcc.bat, emcc.py; EMSDK='$ENV{EMSDK}'; EMSCRIPTEN='$ENV{EMSCRIPTEN}')."
+    )
     return()
 endif()
+
+message(STATUS "Using emcc fixture compiler: ${WL_EMCC_EXECUTABLE}")
 
 set(WL_EMCC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/out")
 set(WL_EMCC_OUTPUTS)
@@ -37,7 +57,10 @@ function(wl_add_emcc_case name)
     set(WL_EMCC_LIST_LINES ${WL_EMCC_LIST_LINES} "  ${name} ${runner_args_text}" PARENT_SCOPE)
 
     add_test(NAME "emcc.${name}" COMMAND $<TARGET_FILE:wasm_runner> "${output}" ${WL_CASE_RUNNER_ARGS})
-    set_tests_properties("emcc.${name}" PROPERTIES LABELS "emcc")
+    set_tests_properties("emcc.${name}" PROPERTIES
+        LABELS "emcc"
+        FIXTURES_REQUIRED "emcc-built"
+    )
 endfunction()
 
 wl_add_emcc_case(basic_add RUNNER_ARGS call-i32 wl_case 10 EMCC_FLAGS -O0)
@@ -53,6 +76,15 @@ wl_add_emcc_case(stdout_print RUNNER_ARGS call-stdout wl_case stdout-fixture-ok 
 wl_add_emcc_case(unresolved_import RUNNER_ARGS load-fail EMCC_FLAGS -O0 -Wl,--allow-undefined)
 
 add_custom_target(wasm-emcc-build DEPENDS wasm_runner ${WL_EMCC_OUTPUTS})
+
+add_test(
+    NAME emcc.build
+    COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} --config $<CONFIG> --target wasm-emcc-build
+)
+set_tests_properties(emcc.build PROPERTIES
+    LABELS "emcc"
+    FIXTURES_SETUP "emcc-built"
+)
 
 add_custom_target(wasm-emcc-run
     COMMAND ${CMAKE_COMMAND}
