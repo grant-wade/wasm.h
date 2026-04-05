@@ -597,6 +597,9 @@ struct wasm_runtime_t {
     size_t frame_arena_offset;
     wasm__call_frame_t* call_frames;
     uint32_t call_frame_sp;
+    uint32_t backtrace_depth;
+    uint32_t backtrace_func_indices[WASM_MAX_CALL_DEPTH];
+    uint32_t backtrace_offsets[WASM_MAX_CALL_DEPTH];
 };
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -678,6 +681,10 @@ wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t* out_val);
 wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t val);
+void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size);
+uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
+wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
+                                      uint32_t* out_func_idx, uint32_t* out_offset);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -9212,6 +9219,7 @@ struct wasm__call_frame_t {
     wasm_value_t* results_dst;
     uint32_t num_results;
     size_t arena_saved;
+    uint32_t current_offset;
 };
 
 static wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt) {
@@ -9225,6 +9233,72 @@ static void wasm__call_frame_stack_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->call_frames);
     rt->call_frames = NULL;
     rt->call_frame_sp = 0;
+}
+
+static void wasm__clear_backtrace(wasm_runtime_t* rt) {
+    if (!rt) return;
+    rt->backtrace_depth = 0;
+}
+
+static uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
+    ptrdiff_t offset;
+
+    if (!cf || !cf->func || !cf->func->code) return 0;
+    if (cf->current_offset <= cf->func->code_len) return cf->current_offset;
+    if (!cf->r.ptr || cf->r.ptr < cf->func->code) return 0;
+    offset = cf->r.ptr - cf->func->code;
+    if (offset < 0) return 0;
+    if ((uint32_t)offset > cf->func->code_len) return cf->func->code_len;
+    return (uint32_t)offset;
+}
+
+static void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_frame_sp) {
+    uint32_t depth;
+    uint32_t i;
+
+    if (!rt) return;
+    if (rt->call_frame_sp <= base_frame_sp) {
+        rt->backtrace_depth = 0;
+        return;
+    }
+
+    depth = rt->call_frame_sp - base_frame_sp;
+    if (depth > WASM_MAX_CALL_DEPTH) depth = WASM_MAX_CALL_DEPTH;
+    rt->backtrace_depth = depth;
+    for (i = 0; i < depth; i++) {
+        const wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1u - i];
+
+        rt->backtrace_func_indices[i] = cf->func_idx;
+        rt->backtrace_offsets[i] = wasm__call_frame_offset(cf);
+    }
+}
+
+static uint32_t wasm__visible_call_stack_depth(const wasm_runtime_t* rt) {
+    if (!rt) return 0;
+    if (rt->call_frame_sp > 0) return rt->call_frame_sp;
+    return rt->backtrace_depth;
+}
+
+static int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
+                                         uint32_t depth,
+                                         uint32_t* out_func_idx,
+                                         uint32_t* out_offset) {
+    if (!rt) return 0;
+
+    if (rt->call_frame_sp > 0) {
+        const wasm__call_frame_t* cf;
+
+        if (depth >= rt->call_frame_sp) return 0;
+        cf = &rt->call_frames[rt->call_frame_sp - 1u - depth];
+        if (out_func_idx) *out_func_idx = cf->func_idx;
+        if (out_offset) *out_offset = wasm__call_frame_offset(cf);
+        return 1;
+    }
+
+    if (depth >= rt->backtrace_depth) return 0;
+    if (out_func_idx) *out_func_idx = rt->backtrace_func_indices[depth];
+    if (out_offset) *out_offset = rt->backtrace_offsets[depth];
+    return 1;
 }
 
 static void wasm__gc_mark_object(wasm_gc_header_t* object);
@@ -10334,6 +10408,7 @@ static void wasm__init_call_frame(wasm__call_frame_t* cf,
     cf->results_dst = results_dst;
     cf->num_results = num_results;
     cf->arena_saved = rt->frame_arena_offset;
+    cf->current_offset = 0;
 
     labels[cf->lsp].continuation = cf->r.end;
     labels[cf->lsp].handler_ptr = NULL;
@@ -10379,6 +10454,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
     while (cf->r.ptr < cf->r.end) {
         const uint8_t* op_at = cf->r.ptr;
         uint8_t op = wasm__read_u8(&cf->r);
+
+        cf->current_offset = (uint32_t)(op_at - func->code);
         switch (op) {
             case 0x00:
                 WASM__TRAP(WASM_ERR_UNREACHABLE);
@@ -13636,6 +13713,8 @@ static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     }
 
 cleanup:
+    if (err != WASM_OK && rt->call_frame_sp > base_frame_sp)
+        wasm__capture_backtrace(rt, base_frame_sp);
     if (next_args_owned && next_args) WASM_FREE(next_args);
     while (rt->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
@@ -13666,6 +13745,8 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results) {
     wasm_functype_t* ft;
+
+    if (mod && mod->rt) wasm__clear_backtrace(mod->rt);
 
     if (func_idx >= mod->num_funcs) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);
@@ -14651,6 +14732,65 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
     }
 
     return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
+}
+
+void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
+    uint32_t depth;
+    size_t used = 0;
+    uint32_t i;
+
+    if (!buffer || buffer_size == 0) return;
+
+    buffer[0] = '\0';
+    if (!rt) return;
+
+    depth = wasm__visible_call_stack_depth(rt);
+    for (i = 0; i < depth; i++) {
+        uint32_t func_idx;
+        uint32_t offset;
+        int written;
+
+        if (!wasm__visible_call_frame_info(rt, i, &func_idx, &offset)) break;
+        written = wasm__snprintf(buffer + used, buffer_size - used,
+                                 "#%u func[%u] at offset 0x%04X%s",
+                                 (unsigned)i,
+                                 (unsigned)func_idx,
+                                 (unsigned)offset,
+                                 (i + 1u < depth) ? "\n" : "");
+        if (written < 0) break;
+        if ((size_t)written >= buffer_size - used) {
+            used = buffer_size - 1u;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    buffer[used] = '\0';
+}
+
+uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt) {
+    return wasm__visible_call_stack_depth(rt);
+}
+
+wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
+                                      uint32_t* out_func_idx, uint32_t* out_offset) {
+    uint32_t stack_depth;
+
+    if (!rt || !out_func_idx || !out_offset) {
+        if (rt)
+            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "invalid call frame query arguments");
+        return WASM_ERR_MALFORMED;
+    }
+
+    stack_depth = wasm__visible_call_stack_depth(rt);
+    if (!wasm__visible_call_frame_info(rt, depth, out_func_idx, out_offset)) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
+                      "call frame depth %u out of range (depth=%u)",
+                      (unsigned)depth, (unsigned)stack_depth);
+        return WASM_ERR_MALFORMED;
+    }
+
+    return WASM_OK;
 }
 
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,

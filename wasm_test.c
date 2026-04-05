@@ -6374,6 +6374,136 @@ WL_TEST(test_div_by_zero) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_public_backtrace_helpers_capture_traps) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t bad_arg;
+    wasm_error_t err;
+    uint32_t func_idx;
+    uint32_t offset;
+    char backtrace[256];
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body0 = { 0 };
+        wasm_builder_t body1 = { 0 };
+        wasm_builder_t body2 = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit_leb128_u32(&body0, 0);
+        emit(&body0, 0x10);
+        emit_leb128_u32(&body0, 1);
+        emit(&body0, 0x0B);
+        emit_leb128_u32(&sec, body0.len);
+        emit_bytes(&sec, body0.buf, body0.len);
+
+        emit_leb128_u32(&body1, 0);
+        emit(&body1, 0x10);
+        emit_leb128_u32(&body1, 2);
+        emit(&body1, 0x0B);
+        emit_leb128_u32(&sec, body1.len);
+        emit_bytes(&sec, body1.buf, body1.len);
+
+        emit_leb128_u32(&body2, 0);
+        emit(&body2, 0x00);
+        emit(&body2, 0x0B);
+        emit_leb128_u32(&sec, body2.len);
+        emit_bytes(&sec, body2.buf, body2.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 0, "%s", "expected empty initial backtrace");
+
+    err = wasm_call(m, "run", NULL, 0, NULL, 0);
+    WL_CHECK_MSG(t, err == WASM_ERR_UNREACHABLE, "%s", "expected unreachable trap");
+
+    WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 3);
+
+    err = wasm_get_call_frame_info(&rt, 0, &func_idx, &offset);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, (int32_t)func_idx, 2);
+        WASM_CHECK_I32(t, (int32_t)offset, 0);
+    }
+
+    err = wasm_get_call_frame_info(&rt, 1, &func_idx, &offset);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, (int32_t)func_idx, 1);
+        WASM_CHECK_I32(t, (int32_t)offset, 0);
+    }
+
+    err = wasm_get_call_frame_info(&rt, 2, &func_idx, &offset);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, (int32_t)func_idx, 0);
+        WASM_CHECK_I32(t, (int32_t)offset, 0);
+    }
+
+    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    WL_CHECK_MSG(t, strstr(backtrace, "#0 func[2] at offset 0x0000") != NULL,
+                 "%s", "expected top frame in formatted backtrace");
+    WL_CHECK_MSG(t, strstr(backtrace, "#1 func[1] at offset 0x0000") != NULL,
+                 "%s", "expected middle frame in formatted backtrace");
+    WL_CHECK_MSG(t, strstr(backtrace, "#2 func[0] at offset 0x0000") != NULL,
+                 "%s", "expected root frame in formatted backtrace");
+
+    err = wasm_get_call_frame_info(&rt, 3, &func_idx, &offset);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected out-of-range frame query rejection");
+
+    bad_arg = wasm_i32(7);
+    err = wasm_call(m, "run", &bad_arg, 1, NULL, 0);
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected signature mismatch rejection");
+    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 0, "%s", "expected backtrace reset before a non-executing call failure");
+
+    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    WL_CHECK_MSG(t, backtrace[0] == '\0', "%s", "expected empty backtrace string after reset");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_set_immutable_global_rejected) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -11240,6 +11370,7 @@ int main(void) {
         { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
+        { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
         { "public api: exported globals can be read and updated safely", test_public_global_helpers },
     };

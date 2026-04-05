@@ -100,7 +100,7 @@ At a high level it gives you:
 - registering C callbacks and globals as Wasm imports
 - linear memory support, including multiple memories and indexed `memory.grow`
 - tables and indirect calls
-- trap and error reporting through `wasm_error_t` and `wasm_error_string`
+- trap and error reporting through `wasm_error_t`, `wasm_error_string`, and call-stack backtrace helpers
 
 The current scope is the Wasm MVP execution model plus a focused subset of newer proposals. In practice that means the core numeric types, imports/exports, control flow, globals, multi-memory linear memory, tables, bulk memory, reference types, GC, multi-value, sign-extension, non-trapping truncation, mutable globals, extended const expressions, tail calls, exceptions, and SIMD are implemented, while threads remain out of scope.
 
