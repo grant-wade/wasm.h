@@ -400,8 +400,15 @@ struct wasm_module_t {
 #ifndef WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE
 #define WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE 1024u
 #endif
+#ifndef WASM__FRAME_ARENA_MIN_SIZE
+#define WASM__FRAME_ARENA_MIN_SIZE (4u * 1024u * 1024u)
+#endif
 #ifndef WASM_FRAME_ARENA_SIZE
-#define WASM_FRAME_ARENA_SIZE ((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE)
+#define WASM_FRAME_ARENA_SIZE                                                                  \
+        ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE) >         \
+            (size_t)WASM__FRAME_ARENA_MIN_SIZE)                                                       \
+                 ? ((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE)      \
+                 : (size_t)WASM__FRAME_ARENA_MIN_SIZE)
 #endif
 
 struct wasm_runtime_t {
@@ -3182,6 +3189,7 @@ static void wasm__arena_reset(wasm_runtime_t* rt, size_t saved_offset) {
 
 static wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt);
 static void wasm__call_frame_stack_destroy(wasm_runtime_t* rt);
+static wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod);
 
 wasm_error_t wasm_init(wasm_runtime_t* rt) {
     size_t arena_size;
@@ -6039,6 +6047,120 @@ typedef struct wasm__label_t {
     uint8_t active_catch;
 } wasm__label_t;
 
+static int wasm__size_mul(size_t a, size_t b, size_t* out) {
+    if (a != 0 && b > ((size_t)-1) / a) return 0;
+    *out = a * b;
+    return 1;
+}
+
+static int wasm__size_add(size_t a, size_t b, size_t* out) {
+    if (a > ((size_t)-1) - b) return 0;
+    *out = a + b;
+    return 1;
+}
+
+static int wasm__size_align(size_t value, size_t alignment, size_t* out) {
+    size_t remainder;
+
+    if (alignment <= 1) {
+        *out = value;
+        return 1;
+    }
+
+    remainder = value % alignment;
+    if (remainder == 0) {
+        *out = value;
+        return 1;
+    }
+
+    return wasm__size_add(value, alignment - remainder, out);
+}
+
+static int wasm__frame_storage_size(uint32_t num_locals,
+                                    uint32_t max_labels,
+                                    size_t* out) {
+    size_t locals_bytes = 0;
+    size_t labels_bytes;
+    size_t total_bytes;
+
+    if (num_locals > 0) {
+        if (!wasm__size_mul((size_t)num_locals, sizeof(wasm_value_t), &locals_bytes)) return 0;
+        if (!wasm__size_align(locals_bytes, sizeof(void*), &locals_bytes)) return 0;
+    }
+
+    if (max_labels == 0) max_labels = 1;
+    if (!wasm__size_mul((size_t)max_labels, sizeof(wasm__label_t), &labels_bytes)) return 0;
+    if (!wasm__size_align(labels_bytes, sizeof(void*), &labels_bytes)) return 0;
+    if (!wasm__size_add(locals_bytes, labels_bytes, &total_bytes)) return 0;
+
+    *out = total_bytes;
+    return 1;
+}
+
+static int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out) {
+    size_t max_frame_bytes = 0;
+    size_t total_bytes;
+    uint32_t i;
+
+    if (!mod || !out) return 0;
+
+    for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
+        wasm_func_t* func = &mod->funcs[i];
+        size_t frame_bytes;
+        uint32_t max_labels = func->max_label_depth ? func->max_label_depth : 1u;
+
+        if (!wasm__frame_storage_size(func->num_locals, max_labels, &frame_bytes)) return 0;
+        if (frame_bytes > max_frame_bytes) max_frame_bytes = frame_bytes;
+    }
+
+    if (max_frame_bytes == 0) {
+        *out = (size_t)WASM_FRAME_ARENA_SIZE;
+        return 1;
+    }
+
+    if (!wasm__size_mul(max_frame_bytes, (size_t)WASM_MAX_CALL_DEPTH, &total_bytes)) return 0;
+    if (total_bytes < (size_t)WASM_FRAME_ARENA_SIZE) total_bytes = (size_t)WASM_FRAME_ARENA_SIZE;
+
+    *out = total_bytes;
+    return 1;
+}
+
+static wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size) {
+    uint8_t* arena;
+
+    if (size <= rt->frame_arena_size) return WASM_OK;
+    if (rt->call_frame_sp != 0) {
+        WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
+                      "cannot grow frame arena while %u call frames are active",
+                      (unsigned)rt->call_frame_sp);
+        return WASM_ERR_CALL_STACK_EXHAUSTED;
+    }
+
+    arena = (uint8_t*)WASM_REALLOC(rt->frame_arena, size);
+    if (!arena) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM,
+                      "failed to reserve %zu-byte frame arena",
+                      size);
+        return WASM_ERR_OOM;
+    }
+
+    rt->frame_arena = arena;
+    rt->frame_arena_size = size;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod) {
+    size_t required_size;
+
+    if (!mod || !mod->rt) return WASM_OK;
+    if (!wasm__module_frame_arena_requirement(mod, &required_size)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "frame arena size overflow");
+        return WASM_ERR_OOM;
+    }
+
+    return wasm__reserve_frame_arena(mod->rt, required_size);
+}
+
 struct wasm__call_frame_t {
     uint32_t func_idx;
     uint32_t sp_base;
@@ -6121,6 +6243,7 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           wasm_value_t* results_dst,
                                           uint32_t num_results) {
     wasm_runtime_t* rt = mod->rt;
+    wasm_error_t err;
     wasm_func_t* func;
     wasm_functype_t* ft;
     wasm__call_frame_t* cf;
@@ -6130,7 +6253,17 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     size_t arena_saved;
     uint32_t i;
 
-    if (rt->call_frame_sp >= WASM_MAX_CALL_DEPTH) return WASM_ERR_CALL_STACK_EXHAUSTED;
+    if (rt->call_frame_sp == 0) {
+        err = wasm__ensure_module_frame_arena(mod);
+        if (err != WASM_OK) return err;
+    }
+
+    if (rt->call_frame_sp >= WASM_MAX_CALL_DEPTH) {
+        WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
+                      "call frame depth exceeded limit %u",
+                      (unsigned)WASM_MAX_CALL_DEPTH);
+        return WASM_ERR_CALL_STACK_EXHAUSTED;
+    }
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
 
     func = &mod->funcs[func_idx];

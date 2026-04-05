@@ -5426,6 +5426,90 @@ WL_TEST(test_frame_arena_allocator) {
     WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected arena offset 0, got %zu", rt.frame_arena_offset);
 }
 
+WL_TEST(test_runtime_grows_frame_arena_for_execution) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+    size_t required_size = 0;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'r');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 1);
+        emit(&body, 0x7E);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm__module_frame_arena_requirement(m, &required_size), "%s", "expected arena sizing for module to succeed");
+    WL_CHECK_MSG(t, required_size > 64, "expected module to require more than 64 bytes, got %zu", required_size);
+    WL_CHECK_MSG(t, rt.frame_arena_size == 64, "expected load to preserve undersized arena until execution, got %zu", rt.frame_arena_size);
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        WL_CHECK_MSG(t, rt.frame_arena_size >= required_size,
+                     "expected runtime arena to grow to at least %zu bytes, got %zu",
+                     required_size,
+                     rt.frame_arena_size);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_validation_rejects_duplicate_export_names) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -7664,6 +7748,7 @@ int main(void) {
         { "feature gate: disabled tail calls reject module load", test_feature_gate_tail_call_disabled },
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "runtime: frame arena alloc/reset/destroy are well-formed", test_frame_arena_allocator },
+        { "runtime: top-level execution grows the frame arena for validated modules", test_runtime_grows_frame_arena_for_execution },
         { "validation: duplicate export names are rejected at load", test_validation_rejects_duplicate_export_names },
         { "validation: invalid start signature is rejected at load", test_validation_rejects_invalid_start_signature },
         { "validation: stack type errors are rejected at load", test_validation_rejects_stack_type_errors },
