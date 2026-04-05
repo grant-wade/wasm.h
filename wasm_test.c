@@ -170,10 +170,10 @@ static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
 }
 
 #define wasm_init(rt) wasm_test_init_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
-#define wasm_init_config(rt, config)                                                                  \
-    wasm_test_init_with_config_checked(t,                                                             \
-                                       (rt),                                                          \
-                                       (config),                                                      \
+#define wasm_init_config(rt, config)             \
+    wasm_test_init_with_config_checked(t,        \
+                                       (rt),     \
+                                       (config), \
                                        ((t) && (t)->case_name) ? (t)->case_name : __func__)
 #define wasm_destroy(rt) wasm_test_destroy_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
 
@@ -906,6 +906,7 @@ static int wasm_test_begin_stream_capture(wasm_test_stream_capture* capture, FIL
     capture->stream_fd = WASM_TEST_FILENO(stream);
     if (capture->stream_fd < 0) return 0;
 
+    fflush(stream);
     capture->saved_fd = WASM_TEST_DUP(capture->stream_fd);
     if (capture->saved_fd < 0) return 0;
 
@@ -6296,9 +6297,7 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
     }
 
     WL_CHECK_MSG(t, wasm__module_frame_arena_requirement(m, &required_size), "%s", "expected arena sizing for module to succeed");
-    WL_CHECK_MSG(t, wasm__frame_storage_size(m->funcs[0].num_locals,
-                                             m->funcs[0].max_label_depth ? m->funcs[0].max_label_depth : 1u,
-                                             &frame_bytes),
+    WL_CHECK_MSG(t, wasm__frame_storage_size(m->funcs[0].num_locals, m->funcs[0].max_label_depth ? m->funcs[0].max_label_depth : 1u, &frame_bytes),
                  "%s",
                  "expected frame sizing for function to succeed");
     WL_CHECK_MSG(t, wasm__size_mul(frame_bytes, (size_t)cfg.max_call_depth, &expected_size),
@@ -7141,12 +7140,24 @@ WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
 WL_TEST(test_public_wasi_stub_helpers) {
     static const uint8_t wasi_message[] = "hello wasi\n";
     static const uint8_t wasi_iov[] = {
-        64u, 0u, 0u, 0u,
-        (uint8_t)sizeof(wasi_message) - 1u, 0u, 0u, 0u,
+        64u,
+        0u,
+        0u,
+        0u,
+        (uint8_t)sizeof(wasi_message) - 1u,
+        0u,
+        0u,
+        0u,
     };
     static const uint8_t wasi_seek_initial[8] = {
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
     };
 
     wasm_builder_t mod = { 0 };
@@ -7422,21 +7433,66 @@ WL_TEST(test_public_wasi_stub_helpers) {
 
 WL_TEST(test_public_wasi_metadata_helpers) {
     static const uint8_t random_sentinel[16] = {
-        0xAAu, 0xAAu, 0xAAu, 0xAAu,
-        0xAAu, 0xAAu, 0xAAu, 0xAAu,
-        0xAAu, 0xAAu, 0xAAu, 0xAAu,
-        0xAAu, 0xAAu, 0xAAu, 0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
+        0xAAu,
     };
     static const uint8_t stats_sentinel[24] = {
-        0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
     };
     static const uint8_t size_sentinel[16] = {
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
-        0xFFu, 0xFFu, 0xFFu, 0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
+        0xFFu,
     };
 
     wasm_builder_t mod = { 0 };

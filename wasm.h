@@ -87,8 +87,8 @@
 
 #include <float.h>
 #include <limits.h>
-#include <stddef.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifndef UINT32_MAX
@@ -956,7 +956,7 @@ static int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     if (len > 0 && !dst) return 0;
 
 #if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
-    for (i = 0; i < len; ) {
+    for (i = 0; i < len;) {
         unsigned int value;
         size_t chunk = len - i;
 
@@ -6638,7 +6638,7 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
 
 #define WASM__TYPE_BOT ((wasm_valtype_t)0xFF)
 
-typedef struct wasm__val_frame_t {
+struct wasm__val_frame_t {
     uint8_t opcode;
     uint32_t height;
     const wasm_valtype_t* param_types;
@@ -6654,7 +6654,7 @@ typedef struct wasm__val_frame_t {
     int in_catch;
     int seen_catch_all;
     int seen_delegate;
-} wasm__val_frame_t;
+};
 
 typedef struct wasm__validator_t {
     wasm_module_t* mod;
@@ -9277,11 +9277,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 goto done;
         }
 
-        if (v.r.malformed)
-            {
-                err = wasm__validator_error(&v, at, "malformed immediate");
-                goto done;
-            }
+        if (v.r.malformed) {
+            err = wasm__validator_error(&v, at, "malformed immediate");
+            goto done;
+        }
     }
 
     if (v.fp != 0) {
@@ -14305,9 +14304,9 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 }
 
 static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
-                                               const char* name,
-                                               uint32_t* out_index,
-                                               const wasm_functype_t** out_type) {
+                                                const char* name,
+                                                uint32_t* out_index,
+                                                const wasm_functype_t** out_type) {
     wasm_export_kind_t kind;
     uint32_t index;
     const wasm_functype_t* type;
@@ -14345,9 +14344,9 @@ static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
 }
 
 static wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
-                                                 const char* name,
-                                                 wasm_global_t** out_global,
-                                                 uint32_t* out_index) {
+                                                  const char* name,
+                                                  wasm_global_t** out_global,
+                                                  uint32_t* out_index) {
     wasm_export_kind_t kind;
     uint32_t index;
 
@@ -14533,8 +14532,10 @@ static wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
                                         wasm_error_t err,
                                         const char* prefix,
                                         const char* detail) {
-    if (rt && detail) WASM__SET_ERR(rt, err, "%s: %s", prefix, detail);
-    else if (rt) WASM__SET_ERR(rt, err, "%s", prefix);
+    if (rt && detail)
+        WASM__SET_ERR(rt, err, "%s: %s", prefix, detail);
+    else if (rt)
+        WASM__SET_ERR(rt, err, "%s", prefix);
     return err;
 }
 
