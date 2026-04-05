@@ -933,3 +933,4 @@ The key difference from the current recursive model: unwinding doesn't rely on C
 2. **The label cleanup dance.** Currently `wasm__clear_label` frees `caught_values`. With arena allocation, you need to decide whether exception payloads live in the arena (and get bulk-freed) or remain individually malloced. Arena is cleaner but means caught_values lifetimes must not outlive the frame.
 
 3. **The `cf` pointer invalidation risk.** If `call_frames` is a flat array, `cf` stays valid across pushes. But if you ever realloc the frame array, all `cf` pointers are dangling. Fix: allocate frame array once at init to `WASM_MAX_CALL_DEPTH` size, never realloc.
+

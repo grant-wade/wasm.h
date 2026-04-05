@@ -404,11 +404,11 @@ struct wasm_module_t {
 #define WASM__FRAME_ARENA_MIN_SIZE (4u * 1024u * 1024u)
 #endif
 #ifndef WASM_FRAME_ARENA_SIZE
-#define WASM_FRAME_ARENA_SIZE                                                                  \
-        ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE) >         \
-            (size_t)WASM__FRAME_ARENA_MIN_SIZE)                                                       \
-                 ? ((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE)      \
-                 : (size_t)WASM__FRAME_ARENA_MIN_SIZE)
+#define WASM_FRAME_ARENA_SIZE                                                             \
+    ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE) >    \
+      (size_t)WASM__FRAME_ARENA_MIN_SIZE)                                                 \
+         ? ((size_t)WASM_MAX_CALL_DEPTH * (size_t)WASM__FRAME_ARENA_ESTIMATED_FRAME_SIZE) \
+         : (size_t)WASM__FRAME_ARENA_MIN_SIZE)
 #endif
 
 struct wasm_runtime_t {
