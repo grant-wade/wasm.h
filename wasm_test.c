@@ -7573,6 +7573,256 @@ WL_TEST(test_call_indirect_uses_structural_type_equality) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_type_section_parses_composite_types) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 3);
+
+        emit(&sec, 0x4E);
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x50);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+        emit(&sec, 0x78);
+        emit(&sec, 0x01);
+
+        emit(&sec, 0x5E);
+        emit(&sec, 0x77);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 7);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, m->num_types == 4, "expected 4 types, got %u", (unsigned)m->num_types);
+    WL_CHECK_MSG(t, m->num_rec_groups == 3, "expected 3 rec groups, got %u", (unsigned)m->num_rec_groups);
+
+    WL_CHECK_MSG(t, m->types[0].kind == WASM_COMP_STRUCT, "type 0 kind = %u", (unsigned)m->types[0].kind);
+    WL_CHECK_MSG(t, m->types[1].kind == WASM_COMP_STRUCT, "type 1 kind = %u", (unsigned)m->types[1].kind);
+    WL_CHECK_MSG(t, m->types[2].kind == WASM_COMP_ARRAY, "type 2 kind = %u", (unsigned)m->types[2].kind);
+    WL_CHECK_MSG(t, m->types[3].kind == WASM_COMP_FUNC, "type 3 kind = %u", (unsigned)m->types[3].kind);
+
+    WL_CHECK_MSG(t, m->rec_groups[0].first_type == 0 && m->rec_groups[0].num_types == 2,
+                 "unexpected rec group 0: first=%u count=%u",
+                 (unsigned)m->rec_groups[0].first_type,
+                 (unsigned)m->rec_groups[0].num_types);
+    WL_CHECK_MSG(t, m->rec_groups[1].first_type == 2 && m->rec_groups[1].num_types == 1,
+                 "unexpected rec group 1: first=%u count=%u",
+                 (unsigned)m->rec_groups[1].first_type,
+                 (unsigned)m->rec_groups[1].num_types);
+    WL_CHECK_MSG(t, m->rec_groups[2].first_type == 3 && m->rec_groups[2].num_types == 1,
+                 "unexpected rec group 2: first=%u count=%u",
+                 (unsigned)m->rec_groups[2].first_type,
+                 (unsigned)m->rec_groups[2].num_types);
+
+    WL_CHECK_MSG(t, m->types[1].num_supertypes == 1, "expected subtype to record one supertype");
+    WL_CHECK_MSG(t, m->types[1].supertypes != NULL && m->types[1].supertypes[0] == 0,
+                 "%s", "expected subtype to point at type 0");
+    WL_CHECK_MSG(t, m->types[1].is_final == 0, "%s", "sub type should not be final by default");
+    WL_CHECK_MSG(t, m->types[0].of.struct_.num_fields == 1, "%s", "struct field count mismatch");
+    WL_CHECK_MSG(t, m->types[1].of.struct_.num_fields == 2, "%s", "sub-struct field count mismatch");
+    WL_CHECK_MSG(t, m->types[1].of.struct_.fields[1].storage.kind == WASM_STORAGE_PACKED,
+                 "%s", "expected packed storage on subtype field");
+    WL_CHECK_MSG(t, m->types[1].of.struct_.fields[1].storage.of.packed_type == WASM_PACKED_I8,
+                 "%s", "expected i8 packed field");
+    WL_CHECK_MSG(t, m->types[1].of.struct_.fields[1].is_mutable == 1,
+                 "%s", "expected mutable subtype field");
+    WL_CHECK_MSG(t, m->types[2].of.array.field.storage.kind == WASM_STORAGE_PACKED,
+                 "%s", "expected packed array storage");
+    WL_CHECK_MSG(t, m->types[2].of.array.field.storage.of.packed_type == WASM_PACKED_I16,
+                 "%s", "expected i16 packed array element");
+
+    WL_CHECK_MSG(t, wasm_func_param_count(m, 0) == 0, "%s", "function param count mismatch");
+    WL_CHECK_MSG(t, wasm_func_result_count(m, 0) == 1, "%s", "function result count mismatch");
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_type_section_respects_feature_gate) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x5F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    wasm_disable_feature(&rt, WASM_FEATURE_GC);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected GC-disabled runtime to reject GC type section");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "garbage collection") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_control_target_scan_accepts_signed_i32_const_leb) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, INT32_MIN);
+        emit(&body, 0x1A);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_validation_rejects_long_u32_leb128) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -7739,6 +7989,9 @@ int main(void) {
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
+        { "wasmgc: composite type sections parse rec/sub/struct/array forms", test_gc_type_section_parses_composite_types },
+        { "wasmgc: GC type syntax is feature-gated", test_gc_type_section_respects_feature_gate },
+        { "loader: control-target scan accepts signed i32.const encodings", test_control_target_scan_accepts_signed_i32_const_leb },
         { "exceptions: typed catch receives payload values", test_exception_try_catch_payload },
         { "exceptions: catch_all handles unmatched tags", test_exception_catch_all },
         { "exceptions: rethrow forwards to outer catches", test_exception_rethrow },

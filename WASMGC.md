@@ -4,7 +4,7 @@
 
 **Goal**: Replace flat `wasm_functype_t` type array with heterogeneous composite types supporting rec groups and subtyping.
 
-**1.1 New type definitions**
+**[DONE] 1.1 New type definitions**
 
 - Add `wasm_fieldtype_t` (storagetype + mutability), `wasm_packedtype_t` (i8, i16)
 - Add `wasm_comptype_t` (func | struct | array) with subtype info (supertype indices, finality flag)
@@ -13,7 +13,7 @@
 - Extend `wasm_valtype_t` enum with new abstract heap types: `any` (0x12), `eq` (0x13), `i31` (0x14), `struct` (0x15), `array` (0x16), `none` (0x0F), `noextern` (0x0E), `nofunc` (0x0D)
 - Extend `wasm_export_kind_t` if needed (tags already covered)
 
-**1.2 Type section decoder**
+**[DONE] 1.2 Type section decoder**
 
 - Modify `wasm__decode_type_section` to handle new binary opcodes: `0x4E` (rec), `0x50` (sub), `0x4F` (sub final), `0x5F` (struct), `0x5E` (array)
 - Parse rec groups: each `rec` entry defines N types at consecutive indices
@@ -22,7 +22,7 @@
 - Parse struct field types including packed storage types (i8=0x78, i16=0x77)
 - Store results in `mod->types` as `wasm_comptype_t*`, update `mod->num_types` to count individual types (not rec groups)
 
-**1.3 Replace `wasm_functype_t` usage throughout**
+**[DONE] 1.3 Replace `wasm_functype_t` usage throughout**
 
 - Anywhere the codebase does `mod->types[idx]` expecting a functype, route through an `expand()` helper that asserts/checks `kind == WASM_COMP_FUNC`
 - Update `wasm_func_param_count`, `wasm_func_result_count`, `wasm_func_param_type`, `wasm_func_result_type` to go through `expand()`
@@ -34,7 +34,7 @@
 - Heap types are encoded as s33 — positive values are type indices, negative values are abstract types
 - Update `wasm__read_reftype`, `wasm__read_blocktype`, and anywhere else that reads a valtype from the binary
 
-**1.5 Free/cleanup**
+**[DONE] 1.5 Free/cleanup**
 
 - Update `wasm_free_module` to free struct field arrays, supertype vectors, rec group metadata
 - Update `wasm__free_functype` or replace with `wasm__free_comptype`

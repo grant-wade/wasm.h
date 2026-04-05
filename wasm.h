@@ -146,9 +146,18 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_TAIL_CALL (1u << 8)
 #define WASM_FEATURE_EXCEPTIONS (1u << 9)
 #define WASM_FEATURE_SIMD (1u << 10)
+#define WASM_FEATURE_GC (1u << 11)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
+    WASM_TYPE_NOFUNC = 0x0D,
+    WASM_TYPE_NOEXTERN = 0x0E,
+    WASM_TYPE_NONE = 0x0F,
+    WASM_TYPE_ANYREF = 0x12,
+    WASM_TYPE_EQREF = 0x13,
+    WASM_TYPE_I31REF = 0x14,
+    WASM_TYPE_STRUCTREF = 0x15,
+    WASM_TYPE_ARRAYREF = 0x16,
     WASM_TYPE_EXTERNREF = 0x6F,
     WASM_TYPE_FUNCREF = 0x70,
     WASM_TYPE_V128 = 0x7B,
@@ -247,6 +256,62 @@ typedef struct wasm_functype_t {
     wasm_valtype_t* params;
     wasm_valtype_t* results;
 } wasm_functype_t;
+
+typedef enum wasm_packedtype_t {
+    WASM_PACKED_I16 = 0x77,
+    WASM_PACKED_I8 = 0x78
+} wasm_packedtype_t;
+
+typedef enum wasm_storagetype_kind_t {
+    WASM_STORAGE_VALTYPE = 0,
+    WASM_STORAGE_PACKED = 1
+} wasm_storagetype_kind_t;
+
+typedef struct wasm_storagetype_t {
+    wasm_storagetype_kind_t kind;
+    union {
+        wasm_valtype_t valtype;
+        wasm_packedtype_t packed_type;
+    } of;
+} wasm_storagetype_t;
+
+typedef struct wasm_fieldtype_t {
+    wasm_storagetype_t storage;
+    int is_mutable;
+} wasm_fieldtype_t;
+
+typedef struct wasm_structtype_t {
+    uint32_t num_fields;
+    wasm_fieldtype_t* fields;
+} wasm_structtype_t;
+
+typedef struct wasm_arraytype_t {
+    wasm_fieldtype_t field;
+} wasm_arraytype_t;
+
+typedef enum wasm_comptype_kind_t {
+    WASM_COMP_FUNC = 0,
+    WASM_COMP_STRUCT = 1,
+    WASM_COMP_ARRAY = 2
+} wasm_comptype_kind_t;
+
+typedef struct wasm_comptype_t {
+    wasm_comptype_kind_t kind;
+    uint32_t num_supertypes;
+    uint32_t* supertypes;
+    uint32_t rec_group;
+    int is_final;
+    union {
+        wasm_functype_t func;
+        wasm_structtype_t struct_;
+        wasm_arraytype_t array;
+    } of;
+} wasm_comptype_t;
+
+typedef struct wasm_recgroup_t {
+    uint32_t first_type;
+    uint32_t num_types;
+} wasm_recgroup_t;
 
 /* ── Import binding ───────────────────────────────────────────────── */
 typedef struct wasm_import_t {
@@ -361,8 +426,10 @@ typedef struct wasm__exception_state_t {
 /* ── Module ───────────────────────────────────────────────────────── */
 struct wasm_module_t {
     wasm_runtime_t* rt;
-    wasm_functype_t* types;
+    wasm_comptype_t* types;
     uint32_t num_types;
+    wasm_recgroup_t* rec_groups;
+    uint32_t num_rec_groups;
     wasm_func_t* funcs;
     uint32_t num_funcs;
     wasm_export_t* exports;
@@ -691,8 +758,8 @@ static void wasm__store_le64(void* p, uint64_t v) {
     (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-     WASM_FEATURE_SIMD)
+    WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
+    WASM_FEATURE_SIMD | WASM_FEATURE_GC)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -718,6 +785,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "exceptions";
         case WASM_FEATURE_SIMD:
             return "SIMD";
+        case WASM_FEATURE_GC:
+            return "garbage collection";
         default:
             return "unknown feature";
     }
@@ -907,8 +976,25 @@ static wasm_value_t wasm__u64_bits(uint64_t value) {
     return result;
 }
 
+static int wasm__is_gc_ref_type(wasm_valtype_t type) {
+    switch (type) {
+        case WASM_TYPE_NOFUNC:
+        case WASM_TYPE_NOEXTERN:
+        case WASM_TYPE_NONE:
+        case WASM_TYPE_ANYREF:
+        case WASM_TYPE_EQREF:
+        case WASM_TYPE_I31REF:
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ARRAYREF:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static int wasm__is_ref_type(wasm_valtype_t type) {
-    return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF;
+    return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF ||
+           wasm__is_gc_ref_type(type);
 }
 
 static int wasm__is_vector_type(wasm_valtype_t type) {
@@ -1065,13 +1151,31 @@ static double wasm__nearest_f64(double value) {
 }
 
 static wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
-    if (wasm__is_ref_type(type)) return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+    if (type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF)
+        return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+    if (wasm__is_gc_ref_type(type)) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+        if (err != WASM_OK) return err;
+        return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+    }
     if (wasm__is_vector_type(type)) return wasm__require_feature(mod, WASM_FEATURE_SIMD);
     return WASM_OK;
 }
 
+static int wasm__is_packedtype_byte(uint8_t byte) {
+    return byte == 0x77 || byte == 0x78;
+}
+
 static int wasm__is_valtype_byte(uint8_t byte) {
     switch (byte) {
+        case 0x0D:
+        case 0x0E:
+        case 0x0F:
+        case 0x12:
+        case 0x13:
+        case 0x14:
+        case 0x15:
+        case 0x16:
         case 0x6F:
         case 0x70:
         case 0x7B:
@@ -1092,6 +1196,35 @@ static void wasm__free_functype(wasm_functype_t* ft) {
     ft->results = NULL;
     ft->num_params = 0;
     ft->num_results = 0;
+}
+
+static void wasm__free_structtype(wasm_structtype_t* st) {
+    WASM_FREE(st->fields);
+    st->fields = NULL;
+    st->num_fields = 0;
+}
+
+static void wasm__free_comptype(wasm_comptype_t* type) {
+    WASM_FREE(type->supertypes);
+    type->supertypes = NULL;
+    type->num_supertypes = 0;
+
+    switch (type->kind) {
+        case WASM_COMP_FUNC:
+            wasm__free_functype(&type->of.func);
+            break;
+        case WASM_COMP_STRUCT:
+            wasm__free_structtype(&type->of.struct_);
+            break;
+        case WASM_COMP_ARRAY:
+            break;
+        default:
+            break;
+    }
+
+    type->kind = WASM_COMP_FUNC;
+    type->rec_group = 0;
+    type->is_final = 0;
 }
 
 static wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src) {
@@ -1138,6 +1271,211 @@ static int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_functype_
         if (lhs->results[i] != rhs->results[i]) return 0;
     }
     return 1;
+}
+
+static int wasm__functype_is_unspecified(const wasm_functype_t* ft) {
+    return ft && ft->num_params == 0 && ft->num_results == 0 &&
+           ft->params == NULL && ft->results == NULL;
+}
+
+static wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
+    if (!type || type->kind != WASM_COMP_FUNC) return NULL;
+    return &type->of.func;
+}
+
+static const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type) {
+    if (!type || type->kind != WASM_COMP_FUNC) return NULL;
+    return &type->of.func;
+}
+
+static wasm_functype_t* wasm__module_functype(wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types) return NULL;
+    return wasm__type_as_functype(&mod->types[type_idx]);
+}
+
+static const wasm_functype_t* wasm__module_const_functype(const wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types) return NULL;
+    return wasm__type_as_const_functype(&mod->types[type_idx]);
+}
+
+static wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
+    uint32_t base;
+    size_t new_count;
+    wasm_comptype_t* types;
+
+    if (count == 0) {
+        if (out_base) *out_base = mod->num_types;
+        return WASM_OK;
+    }
+    if (count > UINT32_MAX - mod->num_types) return WASM_ERR_OOM;
+
+    base = mod->num_types;
+    new_count = (size_t)base + (size_t)count;
+    types = (wasm_comptype_t*)WASM_REALLOC(mod->types, new_count * sizeof(*types));
+    if (!types) return WASM_ERR_OOM;
+
+    mod->types = types;
+    memset(mod->types + base, 0, count * sizeof(*mod->types));
+    mod->num_types = base + count;
+    if (out_base) *out_base = base;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
+    uint32_t base;
+    size_t new_count;
+    wasm_recgroup_t* groups;
+
+    if (count == 0) {
+        if (out_base) *out_base = mod->num_rec_groups;
+        return WASM_OK;
+    }
+    if (count > UINT32_MAX - mod->num_rec_groups) return WASM_ERR_OOM;
+
+    base = mod->num_rec_groups;
+    new_count = (size_t)base + (size_t)count;
+    groups = (wasm_recgroup_t*)WASM_REALLOC(mod->rec_groups, new_count * sizeof(*groups));
+    if (!groups) return WASM_ERR_OOM;
+
+    mod->rec_groups = groups;
+    memset(mod->rec_groups + base, 0, count * sizeof(*mod->rec_groups));
+    mod->num_rec_groups = base + count;
+    if (out_base) *out_base = base;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
+    uint32_t p;
+
+    ft->num_params = wasm__read_leb128_u32(r);
+    if (ft->num_params > 0) {
+        ft->params = (wasm_valtype_t*)WASM_MALLOC(ft->num_params * sizeof(wasm_valtype_t));
+        if (!ft->params) return WASM_ERR_OOM;
+    }
+    for (p = 0; p < ft->num_params; p++) {
+        ft->params[p] = (wasm_valtype_t)wasm__read_u8(r);
+        if (!wasm__is_value_type(ft->params[p])) return WASM_ERR_MALFORMED;
+        {
+            wasm_error_t err = wasm__require_valtype_feature(mod, ft->params[p]);
+            if (err != WASM_OK) return err;
+        }
+    }
+
+    ft->num_results = wasm__read_leb128_u32(r);
+    if (ft->num_results > 1) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE);
+        if (err != WASM_OK) return err;
+    }
+    if (ft->num_results > 0) {
+        ft->results = (wasm_valtype_t*)WASM_MALLOC(ft->num_results * sizeof(wasm_valtype_t));
+        if (!ft->results) return WASM_ERR_OOM;
+    }
+    for (p = 0; p < ft->num_results; p++) {
+        ft->results[p] = (wasm_valtype_t)wasm__read_u8(r);
+        if (!wasm__is_value_type(ft->results[p])) return WASM_ERR_MALFORMED;
+        {
+            wasm_error_t err = wasm__require_valtype_feature(mod, ft->results[p]);
+            if (err != WASM_OK) return err;
+        }
+    }
+
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
+                                            wasm__reader_t* r,
+                                            wasm_storagetype_t* out_type) {
+    uint8_t byte = wasm__read_u8(r);
+
+    if (wasm__is_packedtype_byte(byte)) {
+        out_type->kind = WASM_STORAGE_PACKED;
+        out_type->of.packed_type = (wasm_packedtype_t)byte;
+        return WASM_OK;
+    }
+
+    if (!wasm__is_value_type((wasm_valtype_t)byte)) return WASM_ERR_MALFORMED;
+    out_type->kind = WASM_STORAGE_VALTYPE;
+    out_type->of.valtype = (wasm_valtype_t)byte;
+    return wasm__require_valtype_feature(mod, out_type->of.valtype);
+}
+
+static wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
+                                           wasm__reader_t* r,
+                                           wasm_fieldtype_t* field) {
+    uint8_t mutability;
+    wasm_error_t err = wasm__read_storage_type(mod, r, &field->storage);
+    if (err != WASM_OK) return err;
+
+    mutability = wasm__read_u8(r);
+    if (mutability > 1) return WASM_ERR_MALFORMED;
+    field->is_mutable = (int)mutability;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
+                                               wasm__reader_t* r,
+                                               uint8_t opcode,
+                                               wasm_comptype_t* type) {
+    switch (opcode) {
+        case 0x60:
+            type->kind = WASM_COMP_FUNC;
+            return wasm__decode_functype(mod, r, &type->of.func);
+        case 0x5F: {
+            uint32_t i;
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+            if (err != WASM_OK) return err;
+
+            type->kind = WASM_COMP_STRUCT;
+            type->of.struct_.num_fields = wasm__read_leb128_u32(r);
+            if (type->of.struct_.num_fields > 0) {
+                type->of.struct_.fields = (wasm_fieldtype_t*)WASM_CALLOC(
+                    type->of.struct_.num_fields, sizeof(wasm_fieldtype_t));
+                if (!type->of.struct_.fields) return WASM_ERR_OOM;
+            }
+            for (i = 0; i < type->of.struct_.num_fields; i++) {
+                err = wasm__decode_fieldtype(mod, r, &type->of.struct_.fields[i]);
+                if (err != WASM_OK) return err;
+            }
+            return WASM_OK;
+        }
+        case 0x5E: {
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+            if (err != WASM_OK) return err;
+
+            type->kind = WASM_COMP_ARRAY;
+            return wasm__decode_fieldtype(mod, r, &type->of.array.field);
+        }
+        default:
+            return WASM_ERR_MALFORMED;
+    }
+}
+
+static wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
+                                            wasm__reader_t* r,
+                                            uint8_t opcode,
+                                            uint32_t rec_group_idx,
+                                            wasm_comptype_t* type) {
+    memset(type, 0, sizeof(*type));
+    type->rec_group = rec_group_idx;
+    type->is_final = 1;
+
+    if (opcode == 0x50 || opcode == 0x4F) {
+        uint32_t i;
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+        if (err != WASM_OK) return err;
+
+        type->is_final = (opcode == 0x4F);
+        type->num_supertypes = wasm__read_leb128_u32(r);
+        if (type->num_supertypes > 0) {
+            type->supertypes = (uint32_t*)WASM_MALLOC(type->num_supertypes * sizeof(uint32_t));
+            if (!type->supertypes) return WASM_ERR_OOM;
+        }
+        for (i = 0; i < type->num_supertypes; i++)
+            type->supertypes[i] = wasm__read_leb128_u32(r);
+        opcode = wasm__read_u8(r);
+    }
+
+    return wasm__decode_comptype_body(mod, r, opcode, type);
 }
 
 static wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
@@ -3095,6 +3433,8 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                     err = WASM_ERR_MALFORMED;
                     break;
                 }
+                err = wasm__require_valtype_feature(mod, type);
+                if (err != WASM_OK) break;
 
                 value = wasm_ref_null(type);
                 err = wasm__init_expr_stack_push(&stack, value);
@@ -3286,47 +3626,41 @@ void wasm_enable_all_features(wasm_runtime_t* rt) {
 /* ── Section decoders ─────────────────────────────────────────────── */
 
 static wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
-    uint32_t i, p;
-    if (count > 0) {
-        mod->types = (wasm_functype_t*)WASM_CALLOC(count, sizeof(wasm_functype_t));
-        if (!mod->types) return WASM_ERR_OOM;
-    }
-    mod->num_types = count;
-    for (i = 0; i < count; i++) {
-        wasm_functype_t* ft = &mod->types[i];
-        if (wasm__read_u8(r) != 0x60) return WASM_ERR_MALFORMED;
-        ft->num_params = wasm__read_leb128_u32(r);
-        if (ft->num_params > 0) {
-            ft->params = (wasm_valtype_t*)WASM_MALLOC(ft->num_params * sizeof(wasm_valtype_t));
-            if (!ft->params) return WASM_ERR_OOM;
+    uint32_t entry_count = wasm__read_leb128_u32(r);
+    uint32_t entry_index;
+
+    for (entry_index = 0; entry_index < entry_count; entry_index++) {
+        uint8_t opcode = wasm__read_u8(r);
+        uint32_t group_index;
+        uint32_t first_type;
+        uint32_t group_size = 1;
+        uint32_t i;
+        wasm_error_t err;
+
+        if (opcode == 0x4E) {
+            err = wasm__require_feature(mod, WASM_FEATURE_GC);
+            if (err != WASM_OK) return err;
+            group_size = wasm__read_leb128_u32(r);
+            if (group_size == 0) return WASM_ERR_MALFORMED;
         }
-        for (p = 0; p < ft->num_params; p++) {
-            ft->params[p] = (wasm_valtype_t)wasm__read_u8(r);
-            if (!wasm__is_value_type(ft->params[p])) return WASM_ERR_MALFORMED;
-            {
-                wasm_error_t err = wasm__require_valtype_feature(mod, ft->params[p]);
-                if (err != WASM_OK) return err;
-            }
-        }
-        ft->num_results = wasm__read_leb128_u32(r);
-        if (ft->num_results > 1) {
-            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE);
+
+        err = wasm__append_rec_groups(mod, 1, &group_index);
+        if (err != WASM_OK) return err;
+        err = wasm__append_types(mod, group_size, &first_type);
+        if (err != WASM_OK) return err;
+
+        mod->rec_groups[group_index].first_type = first_type;
+        mod->rec_groups[group_index].num_types = group_size;
+
+        for (i = 0; i < group_size; i++) {
+            wasm_comptype_t* type = &mod->types[first_type + i];
+            uint8_t entry_opcode = (opcode == 0x4E) ? wasm__read_u8(r) : opcode;
+
+            err = wasm__decode_type_entry(mod, r, entry_opcode, group_index, type);
             if (err != WASM_OK) return err;
         }
-        if (ft->num_results > 0) {
-            ft->results = (wasm_valtype_t*)WASM_MALLOC(ft->num_results * sizeof(wasm_valtype_t));
-            if (!ft->results) return WASM_ERR_OOM;
-        }
-        for (p = 0; p < ft->num_results; p++) {
-            ft->results[p] = (wasm_valtype_t)wasm__read_u8(r);
-            if (!wasm__is_value_type(ft->results[p])) return WASM_ERR_MALFORMED;
-            {
-                wasm_error_t err = wasm__require_valtype_feature(mod, ft->results[p]);
-                if (err != WASM_OK) return err;
-            }
-        }
     }
+
     return WASM_OK;
 }
 
@@ -3343,13 +3677,21 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
         if (kind == 0x00) {
             uint32_t ti = wasm__read_leb128_u32(r);
             uint32_t fi;
+            const wasm_functype_t* import_type = wasm__module_const_functype(mod, ti);
 
+            if (!import_type) return WASM_ERR_MALFORMED;
             if (wasm__append_funcs(mod, 1, &fi) != WASM_OK) return WASM_ERR_OOM;
             mod->funcs[fi].type_idx = ti;
             mod->funcs[fi].is_import = 1;
             mod->num_func_imports++;
             for (j = 0; j < mod->rt->num_imports; j++) {
                 if (strcmp(mod->rt->imports[j].module, mn) == 0 && strcmp(mod->rt->imports[j].name, fn) == 0) {
+                    if (!wasm__functype_is_unspecified(&mod->rt->imports[j].type) &&
+                        !wasm__functype_equal(&mod->rt->imports[j].type, import_type)) {
+                        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                                      "function import type mismatch: %.64s.%.64s", mn, fn);
+                        return WASM_ERR_TYPE_MISMATCH;
+                    }
                     mod->funcs[fi].host_func = mod->rt->imports[j].func;
                     mod->funcs[fi].host_userdata = mod->rt->imports[j].userdata;
                     break;
@@ -3367,6 +3709,8 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
             if (err != WASM_OK) return err;
             if (!wasm__is_ref_type(reftype)) return WASM_ERR_MALFORMED;
+            err = wasm__require_valtype_feature(mod, reftype);
+            if (err != WASM_OK) return err;
             if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
             table = &mod->tables[table_index];
             table->reftype = reftype;
@@ -3462,6 +3806,10 @@ static wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_
         uint8_t lf;
         table->reftype = (wasm_valtype_t)wasm__read_u8(r);
         if (!wasm__is_ref_type(table->reftype)) return WASM_ERR_MALFORMED;
+        {
+            wasm_error_t err = wasm__require_valtype_feature(mod, table->reftype);
+            if (err != WASM_OK) return err;
+        }
         lf = wasm__read_u8(r);
         table->size = wasm__read_leb128_u32(r);
         table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
@@ -3593,6 +3941,8 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             if (err != WASM_OK) return err;
             err = wasm__read_reftype(r, &segment->elem_type);
             if (err != WASM_OK) return err;
+            err = wasm__require_valtype_feature(mod, segment->elem_type);
+            if (err != WASM_OK) return err;
         } else if ((flags & 0x03) != 0) {
             err = wasm__require_feature(mod, WASM_FEATURE_BULK_MEMORY);
             if (err != WASM_OK) return err;
@@ -3635,7 +3985,8 @@ static wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t
         const uint8_t* ls;
         wasm_functype_t* ft;
         if (fidx >= mod->num_funcs) return WASM_ERR_MALFORMED;
-        ft = &mod->types[mod->funcs[fidx].type_idx];
+        ft = wasm__module_functype(mod, mod->funcs[fidx].type_idx);
+        if (!ft) return WASM_ERR_MALFORMED;
         ndecls = wasm__read_leb128_u32(r);
         ls = r->ptr;
         for (d = 0; d < ndecls; d++) {
@@ -3820,7 +4171,12 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                               (unsigned)mod->num_types);
         }
 
-        tag_type = &mod->types[mod->tags[i].type_idx];
+        tag_type = wasm__module_functype(mod, mod->tags[i].type_idx);
+        if (!tag_type) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "tag %u type must reference a function type",
+                                              (unsigned)i);
+        }
         if (tag_type->num_results != 0) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                               "tag %u type must not declare results",
@@ -3913,7 +4269,11 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                               "start function index %u out of range",
                                               (unsigned)mod->start_func);
         }
-        start_type = &mod->types[mod->funcs[mod->start_func].type_idx];
+        start_type = wasm__module_functype(mod, mod->funcs[mod->start_func].type_idx);
+        if (!start_type) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "start function must reference a function type");
+        }
         if (start_type->num_params != 0 || start_type->num_results != 0) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                               "start function must have signature [] -> []");
@@ -4953,7 +5313,14 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
 static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
     wasm_func_t* func = &mod->funcs[func_idx];
-    wasm_functype_t* ft = &mod->types[func->type_idx];
+    wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
+
+    if (!ft) {
+        return wasm__set_validation_error(mod->rt, func_idx, 0,
+                                          "function %u type index %u is not a function type",
+                                          (unsigned)func_idx,
+                                          (unsigned)func->type_idx);
+    }
 
     memset(&v, 0, sizeof(v));
     v.mod = mod;
@@ -5109,7 +5476,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     return wasm__validator_error(&v, at, "unexpected catch");
                 if (tag_index >= mod->num_tags)
                     return wasm__validator_error(&v, at, "tag %u out of range", (unsigned)tag_index);
-                tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
+                if (!tag_type)
+                    return wasm__validator_error(&v, at, "tag %u does not reference a function type",
+                                                 (unsigned)tag_index);
                 err = wasm__validator_finish_try_arm(&v, at, frame);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push_many(&v, at, tag_type->params, tag_type->num_params);
@@ -5124,7 +5494,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 if (tag_index >= mod->num_tags)
                     return wasm__validator_error(&v, at, "tag %u out of range", (unsigned)tag_index);
-                tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
+                if (!tag_type)
+                    return wasm__validator_error(&v, at, "tag %u does not reference a function type",
+                                                 (unsigned)tag_index);
                 err = wasm__validator_check_types(&v, at, tag_type->params, tag_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= tag_type->num_params;
@@ -5238,7 +5611,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm_functype_t* callee_type;
                 if (callee >= mod->num_funcs)
                     return wasm__validator_error(&v, at, "call target %u out of range", (unsigned)callee);
-                callee_type = &mod->types[mod->funcs[callee].type_idx];
+                callee_type = wasm__module_functype(mod, mod->funcs[callee].type_idx);
+                if (!callee_type)
+                    return wasm__validator_error(&v, at, "call target %u does not use a function type",
+                                                 (unsigned)callee);
                 err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
@@ -5260,7 +5636,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 }
                 if (mod->tables[table_idx].reftype != WASM_TYPE_FUNCREF)
                     return wasm__validator_error(&v, at, "call_indirect requires a funcref table");
-                callee_type = &mod->types[type_idx];
+                callee_type = wasm__module_functype(mod, type_idx);
+                if (!callee_type)
+                    return wasm__validator_error(&v, at, "call_indirect type index %u is not a function type",
+                                                 (unsigned)type_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
@@ -5278,7 +5657,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 if (callee >= mod->num_funcs)
                     return wasm__validator_error(&v, at, "call target %u out of range", (unsigned)callee);
-                callee_type = &mod->types[mod->funcs[callee].type_idx];
+                callee_type = wasm__module_functype(mod, mod->funcs[callee].type_idx);
+                if (!callee_type)
+                    return wasm__validator_error(&v, at, "call target %u does not use a function type",
+                                                 (unsigned)callee);
                 err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
                 if (err != WASM_OK) return err;
                 v.sp -= callee_type->num_params;
@@ -5304,7 +5686,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 }
                 if (mod->tables[table_idx].reftype != WASM_TYPE_FUNCREF)
                     return wasm__validator_error(&v, at, "call_indirect requires a funcref table");
-                callee_type = &mod->types[type_idx];
+                callee_type = wasm__module_functype(mod, type_idx);
+                if (!callee_type)
+                    return wasm__validator_error(&v, at, "call_indirect type index %u is not a function type",
+                                                 (unsigned)type_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_check_types(&v, at, callee_type->params, callee_type->num_params);
@@ -5766,6 +6151,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 err = wasm__read_reftype(&v.r, &reftype);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "invalid reftype");
+                err = wasm__require_valtype_feature(mod, reftype);
+                if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
                 err = wasm__validator_push(&v, at, reftype);
                 if (err != WASM_OK) return err;
                 break;
@@ -5866,6 +6253,14 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     mod->rt = rt;
     mod->start_func = UINT32_MAX;
 
+#define WASM__LOAD_FAIL(stage_literal)                                                     \
+    do {                                                                                   \
+        if (rt->last_error == WASM_OK)                                                     \
+            WASM__SET_ERR(rt, err, "%s: %s", stage_literal, wasm_error_string(err));      \
+        wasm_free_module(mod);                                                             \
+        return NULL;                                                                       \
+    } while (0)
+
     while (r.ptr < r.end && err == WASM_OK) {
         uint8_t sid = wasm__read_u8(&r);
         uint32_t ssz = wasm__read_leb128_u32(&r);
@@ -5948,20 +6343,17 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
 
     err = wasm__validate_structural(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("validate_structural");
     }
 
     err = wasm__validate_code(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("validate_code");
     }
 
     err = wasm__build_module_control_targets(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("build_control_targets");
     }
 
     if (mod->num_memories > 0) {
@@ -5970,8 +6362,7 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         for (mi = 0; mi < mod->num_memories; mi++) {
             err = wasm__init_memory_storage(&mod->memories[mi]);
             if (err != WASM_OK) {
-                wasm_free_module(mod);
-                return NULL;
+                WASM__LOAD_FAIL("init_memory_storage");
             }
         }
     }
@@ -5980,29 +6371,27 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         for (ti = 0; ti < mod->num_tables; ti++) {
             err = wasm__init_table_storage(&mod->tables[ti]);
             if (err != WASM_OK) {
-                wasm_free_module(mod);
-                return NULL;
+                WASM__LOAD_FAIL("init_table_storage");
             }
         }
     }
 
     err = wasm__apply_active_data_segments(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("apply_active_data_segments");
     }
 
     err = wasm__apply_active_elem_segments(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("apply_active_elem_segments");
     }
 
     err = wasm__run_startup(mod);
     if (err != WASM_OK) {
-        wasm_free_module(mod);
-        return NULL;
+        WASM__LOAD_FAIL("run_startup");
     }
+
+#undef WASM__LOAD_FAIL
 
     return mod;
 }
@@ -6010,8 +6399,9 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
 void wasm_free_module(wasm_module_t* mod) {
     uint32_t i;
     if (!mod) return;
-    for (i = 0; i < mod->num_types; i++) wasm__free_functype(&mod->types[i]);
+    for (i = 0; i < mod->num_types; i++) wasm__free_comptype(&mod->types[i]);
     WASM_FREE(mod->types);
+    WASM_FREE(mod->rec_groups);
     for (i = 0; i < mod->num_funcs; i++) {
         WASM_FREE(mod->funcs[i].locals);
         WASM_FREE(mod->funcs[i].control_targets);
@@ -6268,7 +6658,8 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_ERR_MALFORMED;
-    ft = &mod->types[func->type_idx];
+    ft = wasm__module_functype(mod, func->type_idx);
+    if (!ft) return WASM_ERR_MALFORMED;
     max_labels = func->max_label_depth ? func->max_label_depth : 1;
     arena_saved = rt->frame_arena_offset;
 
@@ -6442,7 +6833,8 @@ static wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, 
 
         if (wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE) != WASM_OK) return WASM_ERR_MALFORMED;
         if (type_idx < 0 || (uint32_t)type_idx >= mod->num_types) return WASM_ERR_MALFORMED;
-        ft = &mod->types[(uint32_t)type_idx];
+        ft = wasm__module_functype(mod, (uint32_t)type_idx);
+        if (!ft) return WASM_ERR_MALFORMED;
         blocktype->param_arity = ft->num_params;
         blocktype->result_arity = ft->num_results;
         blocktype->params = ft->params;
@@ -6476,10 +6868,12 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x24:
         case 0x25:
         case 0x26:
-        case 0x41:
         case 0x3F:
         case 0x40:
             wasm__read_leb128_u32(r);
+            break;
+        case 0x41:
+            wasm__read_leb128_i32(r);
             break;
         case 0x42:
             wasm__read_leb128_i64(r);
@@ -7151,7 +7545,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 int j;
 
                 if (tag_index >= mod->num_tags) WASM__TRAP(WASM_ERR_MALFORMED);
-                tag_type = &mod->types[mod->tags[tag_index].type_idx];
+                tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
+                if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (tag_type->num_params > 8) {
                     payload = (wasm_value_t*)WASM_MALLOC(tag_type->num_params * sizeof(wasm_value_t));
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
@@ -7231,7 +7626,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
             case 0x10: { /* call */
                 uint32_t ci = wasm__read_leb128_u32(&cf->r);
-                wasm_functype_t* cft = &mod->types[mod->funcs[ci].type_idx];
+                wasm_functype_t* cft;
                 wasm_value_t* call_args = tail_args_buf;
                 wasm_value_t call_results_buf[8];
                 wasm_value_t* call_results = call_results_buf;
@@ -7240,6 +7635,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
+                cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
+                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
                     call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
@@ -7297,10 +7694,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 ci = table->elems[tvi].of.funcref;
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
-                actual_type = &mod->types[mod->funcs[ci].type_idx];
-                if (!wasm__functype_equal(actual_type, &mod->types[ti]))
+                actual_type = wasm__module_functype(mod, mod->funcs[ci].type_idx);
+                cft = wasm__module_functype(mod, ti);
+                if (!actual_type || !cft) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!wasm__functype_equal(actual_type, cft))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                cft = &mod->types[ti];
                 if (cft->num_params > 8) {
                     call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
@@ -7348,7 +7746,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
-                cft = &mod->types[mod->funcs[ci].type_idx];
+                cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
+                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
                     tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
@@ -7412,11 +7811,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 ci = table->elems[tvi].of.funcref;
                 if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 callee = &mod->funcs[ci];
-                actual_type = &mod->types[mod->funcs[ci].type_idx];
-                if (!wasm__functype_equal(actual_type, &mod->types[ti]))
+                actual_type = wasm__module_functype(mod, mod->funcs[ci].type_idx);
+                cft = wasm__module_functype(mod, ti);
+                if (!actual_type || !cft) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!wasm__functype_equal(actual_type, cft))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
-                cft = &mod->types[ti];
                 if (cft->num_params > 8) {
                     tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
@@ -8791,6 +9191,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 wasm_valtype_t type;
                 err = wasm__read_reftype(&cf->r, &type);
                 if (err != WASM_OK) goto cleanup;
+                err = wasm__require_valtype_feature(mod, type);
+                if (err != WASM_OK) goto cleanup;
                 WASM__PUSH(rt, wasm_ref_null(type));
                 break;
             }
@@ -9708,7 +10110,13 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
         return WASM_ERR_MALFORMED;
     }
 
-    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    ft = wasm__module_functype(mod, mod->funcs[func_idx].type_idx);
+    if (!ft) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                      "function %u does not reference a function type",
+                      (unsigned)func_idx);
+        return WASM_ERR_MALFORMED;
+    }
     if (num_args != ft->num_params || num_results < ft->num_results ||
         (ft->num_params > 0 && !args) || (ft->num_results > 0 && !results)) {
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
@@ -9816,7 +10224,8 @@ uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx) {
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return 0;
-    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    ft = wasm__module_functype(mod, mod->funcs[func_idx].type_idx);
+    if (!ft) return 0;
     return ft->num_params;
 }
 
@@ -9824,7 +10233,8 @@ uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx) {
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return 0;
-    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    ft = wasm__module_functype(mod, mod->funcs[func_idx].type_idx);
+    if (!ft) return 0;
     return ft->num_results;
 }
 
@@ -9833,7 +10243,8 @@ wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return WASM_TYPE_VOID;
-    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    ft = wasm__module_functype(mod, mod->funcs[func_idx].type_idx);
+    if (!ft) return WASM_TYPE_VOID;
     if (param_idx >= ft->num_params) return WASM_TYPE_VOID;
     return ft->params[param_idx];
 }
@@ -9843,7 +10254,8 @@ wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return WASM_TYPE_VOID;
-    ft = &mod->types[mod->funcs[func_idx].type_idx];
+    ft = wasm__module_functype(mod, mod->funcs[func_idx].type_idx);
+    if (!ft) return WASM_TYPE_VOID;
     if (result_idx >= ft->num_results) return WASM_TYPE_VOID;
     return ft->results[result_idx];
 }
