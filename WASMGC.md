@@ -81,7 +81,7 @@
 - Update `wasm__validator_pop_expect` to accept subtypes
 - The `WASM__TYPE_BOT` sentinel becomes `none`/`nofunc`/`noextern` depending on hierarchy
 
-**3.2 Validate new instructions (0xFB prefix)**
+**[DONE] 3.2 Validate new instructions (0xFB prefix)**
 
 - Add `wasm__validator_validate_gc` handler (parallel to existing `wasm__validator_validate_simd`, `wasm__validator_validate_prefixed`)
 - Struct ops (0xFB00–0xFB05): check type index expands to struct, validate field index, check mutability for sets, packed signedness
