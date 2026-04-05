@@ -6086,6 +6086,8 @@ static void wasm__clear_label(wasm__label_t* label) {
 #define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
 #define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
+#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
+#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
 
 static void wasm__init_call_frame(wasm__call_frame_t* cf,
                                   wasm_runtime_t* rt,
@@ -6097,11 +6099,12 @@ static void wasm__init_call_frame(wasm__call_frame_t* cf,
                                   wasm_value_t* results_dst,
                                   uint32_t num_results);
 
-static wasm_error_t wasm__handle_exception(wasm_module_t* mod,
-                                           wasm__label_t* labels,
-                                           uint32_t* label_sp,
-                                           wasm__reader_t* r,
-                                           uint32_t sp_base);
+static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
+                                                    wasm__label_t* labels,
+                                                    uint32_t* label_sp,
+                                                    wasm__reader_t* r,
+                                                    uint32_t sp_base);
+static wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
 
 static void wasm__clear_call_frame(wasm__call_frame_t* cf) {
     if (!cf) return;
@@ -6200,21 +6203,21 @@ static wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_fr
     return WASM_OK;
 }
 
-static wasm_error_t wasm__unwind_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp) {
+static wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp) {
     wasm_runtime_t* rt = mod->rt;
 
     while (rt->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
         wasm_error_t err;
 
-        wasm__arena_reset(rt, cf->arena_saved);
-        rt->call_frame_sp--;
-        if (rt->call_frame_sp == base_frame_sp) return WASM__ERR_EXCEPTION;
-
-        cf = &rt->call_frames[rt->call_frame_sp - 1];
-        err = wasm__handle_exception(mod, cf->labels, &cf->lsp, &cf->r, cf->sp_base);
+        err = wasm__handle_exception_in_frame(mod, cf->labels, &cf->lsp, &cf->r, cf->sp_base);
         if (err == WASM_OK) return WASM_OK;
         if (err != WASM__ERR_EXCEPTION) return err;
+
+        wasm__clear_call_frame(cf);
+        rt->sp = cf->sp_base;
+        wasm__arena_reset(rt, cf->arena_saved);
+        rt->call_frame_sp--;
     }
 
     return WASM__ERR_EXCEPTION;
@@ -6629,11 +6632,11 @@ static int wasm__find_rethrow_label(const wasm__label_t* labels,
     return 0;
 }
 
-static wasm_error_t wasm__handle_exception(wasm_module_t* mod,
-                                           wasm__label_t* labels,
-                                           uint32_t* label_sp,
-                                           wasm__reader_t* r,
-                                           uint32_t sp_base) {
+static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
+                                                    wasm__label_t* labels,
+                                                    uint32_t* label_sp,
+                                                    wasm__reader_t* r,
+                                                    uint32_t sp_base) {
     wasm_runtime_t* rt = mod->rt;
     uint32_t idx = *label_sp;
 
@@ -6785,10 +6788,9 @@ static wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* l
         goto cleanup;    \
     } while (0)
 
-static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
-                               wasm_value_t* args, uint32_t num_args,
-                               wasm_value_t* results, uint32_t num_results,
-                               uint32_t depth);
+static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
+                                 wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results);
 
 static void wasm__init_call_frame(wasm__call_frame_t* cf,
                                   wasm_runtime_t* rt,
@@ -6835,9 +6837,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm_value_t** next_args,
                                       uint32_t* next_num_args,
                                       int* next_args_owned,
-                                      int* restart_flag,
                                       wasm_value_t* tail_args_buf,
-                                      uint32_t depth);
+                                      uint32_t base_frame_sp);
 
 static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm__call_frame_t* cf,
@@ -6845,16 +6846,13 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm_value_t** next_args,
                                       uint32_t* next_num_args,
                                       int* next_args_owned,
-                                      int* restart_flag,
                                       wasm_value_t* tail_args_buf,
-                                      uint32_t depth) {
+                                      uint32_t base_frame_sp) {
     wasm_runtime_t* rt = mod->rt;
     wasm_func_t* func;
     uint32_t sp_base;
     uint32_t i;
     wasm_error_t err = WASM_OK;
-
-    (void)depth;
 
     if (!cf) return WASM_ERR_MALFORMED;
     func = cf->func;
@@ -7024,9 +7022,9 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 err = wasm__set_exception_state(&rt->pending_exception, tag_index, payload, tag_type->num_params);
                 if (payload != payload_buf) WASM_FREE(payload);
                 if (err != WASM_OK) goto cleanup;
-                err = wasm__handle_exception(mod, cf->labels, &cf->lsp, &cf->r, sp_base);
-                if (err == WASM_OK) break;
-                if (err == WASM__ERR_EXCEPTION) goto cleanup_frame;
+                err = wasm__handle_exception_frames(mod, base_frame_sp);
+                if (err == WASM_OK) return WASM__ERR_RESUME_FRAME;
+                if (err == WASM__ERR_EXCEPTION) return err;
                 goto cleanup;
             }
             case 0x09: { /* rethrow */
@@ -7044,9 +7042,9 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     rt->sp = cf->labels[cf->lsp - 1].sp_base;
                     cf->lsp--;
                 }
-                err = wasm__handle_exception(mod, cf->labels, &cf->lsp, &cf->r, sp_base);
-                if (err == WASM_OK) break;
-                if (err == WASM__ERR_EXCEPTION) goto cleanup_frame;
+                err = wasm__handle_exception_frames(mod, base_frame_sp);
+                if (err == WASM_OK) return WASM__ERR_RESUME_FRAME;
+                if (err == WASM__ERR_EXCEPTION) return err;
                 goto cleanup;
             }
             case 0x0B:
@@ -7137,7 +7135,6 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 *next_args = call_args;
                 *next_num_args = cft->num_params;
                 *next_args_owned = (call_args != tail_args_buf);
-                *restart_flag = 0;
                 return WASM__ERR_CALL_FRAME;
                 break;
             }
@@ -7199,7 +7196,6 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 *next_args = call_args;
                 *next_num_args = cft->num_params;
                 *next_args_owned = (call_args != tail_args_buf);
-                *restart_flag = 0;
                 return WASM__ERR_CALL_FRAME;
                 break;
             }
@@ -7252,8 +7248,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 *next_args = tail_args;
                 *next_num_args = cft->num_params;
                 *next_args_owned = (tail_args != tail_args_buf);
-                *restart_flag = 1;
-                err = WASM__ERR_CALL_FRAME;
+                err = WASM__ERR_TAIL_CALL_FRAME;
                 goto cleanup_frame;
             }
             case 0x13: { /* return_call_indirect */
@@ -7321,8 +7316,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 *next_args = tail_args;
                 *next_num_args = cft->num_params;
                 *next_args_owned = (tail_args != tail_args_buf);
-                *restart_flag = 1;
-                err = WASM__ERR_CALL_FRAME;
+                err = WASM__ERR_TAIL_CALL_FRAME;
                 goto cleanup_frame;
             }
 
@@ -9455,10 +9449,9 @@ cleanup_frame:
     return err;
 }
 
-static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
-                               wasm_value_t* args, uint32_t num_args,
-                               wasm_value_t* results, uint32_t num_results,
-                               uint32_t depth) {
+static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
+                                 wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results) {
     wasm_runtime_t* rt = mod->rt;
     wasm_func_t* func;
     uint32_t base_frame_sp = rt->call_frame_sp;
@@ -9467,9 +9460,7 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
     uint32_t next_func_idx = 0;
     uint32_t next_num_args = 0;
     int next_args_owned = 0;
-    int restart = 0;
     wasm_error_t err = WASM_OK;
-    (void)depth;
 
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
 
@@ -9483,7 +9474,6 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
     while (rt->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
 
-        restart = 0;
         next_args = NULL;
         next_num_args = 0;
         next_args_owned = 0;
@@ -9491,18 +9481,26 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
 
         err = wasm__interp_loop(mod, cf,
                                 &next_func_idx, &next_args, &next_num_args,
-                                &next_args_owned, &restart, request_args_buf, depth);
+                                &next_args_owned, request_args_buf, base_frame_sp);
 
         if (err == WASM__ERR_CALL_FRAME) {
-            wasm_value_t* next_results_dst = NULL;
-            uint32_t next_result_count = 0;
-
-            if (restart) {
-                next_results_dst = cf->results_dst;
-                next_result_count = cf->num_results;
-                wasm__arena_reset(rt, cf->arena_saved);
-                rt->call_frame_sp--;
+            err = wasm__push_call_frame(mod, next_func_idx, next_args, next_num_args,
+                                        NULL, 0);
+            if (next_args_owned && next_args) {
+                WASM_FREE(next_args);
+                next_args = NULL;
+                next_args_owned = 0;
             }
+            if (err != WASM_OK) goto cleanup;
+            continue;
+        }
+
+        if (err == WASM__ERR_TAIL_CALL_FRAME) {
+            wasm_value_t* next_results_dst = cf->results_dst;
+            uint32_t next_result_count = cf->num_results;
+
+            wasm__arena_reset(rt, cf->arena_saved);
+            rt->call_frame_sp--;
 
             err = wasm__push_call_frame(mod, next_func_idx, next_args, next_num_args,
                                         next_results_dst, next_result_count);
@@ -9527,11 +9525,9 @@ static wasm_error_t wasm__exec(wasm_module_t* mod, uint32_t func_idx,
             continue;
         }
 
-        if (err == WASM__ERR_EXCEPTION) {
-            err = wasm__unwind_exception_frames(mod, base_frame_sp);
-            if (err == WASM_OK) continue;
-            goto cleanup;
-        }
+        if (err == WASM__ERR_RESUME_FRAME) continue;
+
+        if (err == WASM__ERR_EXCEPTION) goto cleanup;
 
         if (err != WASM_OK) goto cleanup;
     }
@@ -9583,7 +9579,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     }
 
     {
-        wasm_error_t err = wasm__exec(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results, 0);
+        wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
         if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
         return err;
     }
