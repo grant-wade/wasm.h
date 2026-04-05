@@ -961,11 +961,11 @@ static size_t wasm_test_end_stream_capture(wasm_test_stream_capture* capture,
     return bytes_read;
 }
 
-static wasm_error_t host_print(wasm_runtime_t* rt,
+static wasm_error_t host_print(wasm_module_t* mod,
                                const wasm_value_t* args, uint32_t num_args,
                                wasm_value_t* results, uint32_t num_results,
                                void* userdata) {
-    (void)rt;
+    (void)mod;
     (void)results;
     (void)num_results;
     (void)userdata;
@@ -974,11 +974,11 @@ static wasm_error_t host_print(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t host_gc_subtype_identity(wasm_runtime_t* rt,
+static wasm_error_t host_gc_subtype_identity(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
-    (void)rt;
+    (void)mod;
     (void)args;
     (void)num_args;
     (void)userdata;
@@ -987,16 +987,68 @@ static wasm_error_t host_gc_subtype_identity(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t host_fmt_add(wasm_runtime_t* rt,
+static wasm_error_t host_fmt_add(wasm_module_t* mod,
                                  const wasm_value_t* args, uint32_t num_args,
                                  wasm_value_t* results, uint32_t num_results,
                                  void* userdata) {
     int32_t bias = userdata ? *(const int32_t*)userdata : 0;
 
-    (void)rt;
+    (void)mod;
     host_fmt_add_called = 1;
     if (num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32 + bias);
+    return WASM_OK;
+}
+
+static wasm_module_t* host_userdata_seen_module;
+static void* host_userdata_seen_value;
+
+static wasm_error_t host_capture_module_userdata(wasm_module_t* mod,
+                                                 const wasm_value_t* args, uint32_t num_args,
+                                                 wasm_value_t* results, uint32_t num_results,
+                                                 void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+
+    host_userdata_seen_module = mod;
+    host_userdata_seen_value = wasm_module_get_userdata(mod);
+    return WASM_OK;
+}
+
+static wasm_error_t host_module_userdata_add(wasm_module_t* mod,
+                                             const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results,
+                                             void* userdata) {
+    int32_t bias = 0;
+
+    (void)userdata;
+
+    if (!mod || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    if (wasm_module_get_userdata(mod)) bias = *(const int32_t*)wasm_module_get_userdata(mod);
+
+    results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32 + bias);
+    return WASM_OK;
+}
+
+static wasm_error_t host_peek_i32_from_memory(wasm_module_t* mod,
+                                              const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results,
+                                              void* userdata) {
+    int32_t value = 0;
+    wasm_error_t err;
+
+    (void)userdata;
+
+    if (!mod || !args || !results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    if (args[0].of.i32 < 0) return WASM_ERR_TYPE_MISMATCH;
+
+    err = wasm_memory_read(mod, 0, (uint32_t)args[0].of.i32, &value, sizeof(value));
+    if (err != WASM_OK) return err;
+
+    results[0] = wasm_i32(value);
     return WASM_OK;
 }
 
@@ -1112,6 +1164,274 @@ WL_TEST(test_host_import) {
     }
 
     wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_module_userdata_api) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    int module_context = 1234;
+
+    host_userdata_seen_module = NULL;
+    host_userdata_seen_value = NULL;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 7);
+        emit(&sec, 'c');
+        emit(&sec, 'a');
+        emit(&sec, 'p');
+        emit(&sec, 't');
+        emit(&sec, 'u');
+        emit(&sec, 'r');
+        emit(&sec, 'e');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'r');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x10);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    {
+        wasm_import_t imp;
+
+        memset(&imp, 0, sizeof(imp));
+        imp.module = "env";
+        imp.name = "capture";
+        imp.func = host_capture_module_userdata;
+        wasm_register_import(&rt, &imp);
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == NULL,
+                 "%s", "module userdata should default to null");
+    wasm_module_set_userdata(m, &module_context);
+    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == &module_context,
+                 "%s", "module userdata getter should return the stored pointer");
+
+    err = wasm_call(m, "run", NULL, 0, NULL, 0);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, host_userdata_seen_module == m,
+                     "%s", "host callback should see the calling module");
+        WL_CHECK_MSG(t, host_userdata_seen_value == &module_context,
+                     "%s", "host callback should see the module userdata");
+    }
+
+    wasm_module_set_userdata(m, NULL);
+    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == NULL,
+                 "%s", "module userdata should clear back to null");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_module_userdata_api_multiple_modules) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m1;
+    wasm_module_t* m2;
+    wasm_error_t err;
+    int ctx1 = 11;
+    int ctx2 = 22;
+
+    host_userdata_seen_module = NULL;
+    host_userdata_seen_value = NULL;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 7);
+        emit(&sec, 'c');
+        emit(&sec, 'a');
+        emit(&sec, 'p');
+        emit(&sec, 't');
+        emit(&sec, 'u');
+        emit(&sec, 'r');
+        emit(&sec, 'e');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'r');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x10);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    {
+        wasm_import_t imp;
+
+        memset(&imp, 0, sizeof(imp));
+        imp.module = "env";
+        imp.name = "capture";
+        imp.func = host_capture_module_userdata;
+        wasm_register_import(&rt, &imp);
+    }
+
+    m1 = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m1 != NULL, "%s", rt.error_msg);
+    if (m1 == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m2 = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m2 != NULL, "%s", rt.error_msg);
+    if (m2 == NULL) {
+        wasm_free_module(m1);
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_module_set_userdata(m1, &ctx1);
+    wasm_module_set_userdata(m2, &ctx2);
+
+    err = wasm_call(m1, "run", NULL, 0, NULL, 0);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, host_userdata_seen_module == m1,
+                     "%s", "shared host import should receive the first module instance");
+        WL_CHECK_MSG(t, host_userdata_seen_value == &ctx1,
+                     "%s", "shared host import should read the first module userdata");
+    }
+
+    host_userdata_seen_module = NULL;
+    host_userdata_seen_value = NULL;
+
+    err = wasm_call(m2, "run", NULL, 0, NULL, 0);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WL_CHECK_MSG(t, host_userdata_seen_module == m2,
+                     "%s", "shared host import should receive the second module instance");
+        WL_CHECK_MSG(t, host_userdata_seen_value == &ctx2,
+                     "%s", "shared host import should read the second module userdata");
+    }
+
+    wasm_free_module(m2);
+    wasm_free_module(m1);
     wasm_destroy(&rt);
 }
 
@@ -1320,6 +1640,220 @@ WL_TEST(test_bind_host_func_api) {
         WL_CHECK_MSG(t, host_fmt_add_called, "%s", "expected bound host function to run");
         WASM_CHECK_I32(t, result, 18);
     }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_bind_host_func_uses_module_userdata) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    int32_t bias = 6;
+    int32_t result = 0;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 2);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'a');
+        emit(&sec, 'd');
+        emit(&sec, 'd');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 9);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 4);
+        emit(&body, 0x10);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    err = wasm_bind_host_func(&rt, "env", "add", "ii(i)", host_module_userdata_add, NULL);
+    WASM_CHECK_OK(t, err);
+    if (err != WASM_OK) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call_fmt(m, "run", "(i)", &result);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result, 13);
+    }
+
+    wasm_module_set_userdata(m, &bias);
+    err = wasm_call_fmt(m, "run", "(i)", &result);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result, 19);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_host_callback_module_reads_memory) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_import_t imp;
+    wasm_error_t err;
+    int32_t result = 0;
+    static const uint8_t data_bytes[4] = { 0x78, 0x56, 0x34, 0x12 };
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 'p');
+        emit(&sec, 'e');
+        emit(&sec, 'e');
+        emit(&sec, 'k');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "peek", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 8);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "env";
+    imp.name = "peek";
+    imp.func = host_peek_i32_from_memory;
+    err = wasm_register_import(&rt, &imp);
+    WASM_CHECK_OK(t, err);
+    if (err != WASM_OK) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call_fmt(m, "peek", "i(i)", (int32_t)8, &result);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result, 0x12345678);
+    }
+
+    err = wasm_call_fmt(m, "peek", "i(i)", (int32_t)(WASM_PAGE_SIZE - 2u), &result);
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
+                 "%s", "expected host callback memory read to preserve out-of-bounds errors");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -12574,8 +13108,11 @@ int main(void) {
         { "introspection: exports and signatures are queryable", test_introspection_helpers },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
+        { "public api: module userdata is visible in host callbacks", test_module_userdata_api },
+        { "public api: shared host imports still see the right module instance", test_module_userdata_api_multiple_modules },
         { "public api: format-call packs ints and floats", test_format_call_api },
         { "public api: bind_host_func registers typed callbacks", test_bind_host_func_api },
+        { "public api: bind_host_func callbacks can read module userdata", test_bind_host_func_uses_module_userdata },
         { "global import: mutable env.counter is read and updated by reference", test_imported_mutable_global },
         { "global init expr: global.get can read imported globals", test_global_init_expr_global_get_import },
         { "global init expr: i32 add/mul runs in initializer", test_global_init_expr_extended_i32_arithmetic },
@@ -12586,6 +13123,7 @@ int main(void) {
         { "element offset expr: add runs before active table init", test_element_offset_extended_const_expr },
         { "memory: store 99 at offset 0, load it back", test_memory },
         { "public api: safe memory read/write/string helpers", test_public_memory_helpers },
+        { "public api: module-first host callbacks can read guest memory", test_host_callback_module_reads_memory },
         { "multi-memory: indexed load/store and memory APIs", test_multi_memory_indexed_access },
         { "multi-memory: indexed bulk ops plus size/grow", test_multi_memory_bulk_ops_and_growth },
         { "bulk memory: passive data, copy/fill/drop semantics", test_bulk_memory_ops },

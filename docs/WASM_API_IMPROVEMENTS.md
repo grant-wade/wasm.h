@@ -249,8 +249,8 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
 
 ---
 
-### Phase 8: Module Userdata (Context Management)
-**The Problem:** Right now, a host function (`wasm_host_func_t`) receives `rt` and a global `userdata` pointer registered at the *runtime* level. But what if the host is a game engine, and you have 50 monsters, each running their own `wasm_module_t`? Inside the host callback, it is very hard to know *which* module/monster called the function.
+### [DONE] Phase 8: Module Userdata (Context Management)
+**The Problem:** Host imports often need instance-local context. If a game engine has 50 monsters, each backed by a different `wasm_module_t`, the host callback needs an explicit way to know which module invoked it and to retrieve that module's opaque host state.
 
 **The Solution:** Add an opaque `void* userdata` to the `wasm_module_t` itself.
 
@@ -260,12 +260,13 @@ void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);
 void* wasm_module_get_userdata(wasm_module_t* mod);
 
 // Inside a host function callback, developers can now do:
-// my_monster_t* monster = (my_monster_t*)wasm_module_get_userdata(cf->module);
+// my_monster_t* monster = (my_monster_t*)wasm_module_get_userdata(mod);
+// wasm_runtime_t* rt = mod->rt;
 ```
 
 **Implementation Strategy:**
-*   This is trivial: just add `void* host_userdata;` to `wasm_module_t`.
-*   *Note:* Your host function signature currently doesn't pass the `wasm_module_t*` (it only passes `wasm_runtime_t* rt`). You might want to update the signature of `wasm_host_func_t` to include the calling module, or expose a function `wasm_get_current_module(rt)` that peeks at the top of the call frame stack to find the active module.
+*   `wasm_module_t` now carries an opaque `void* host_userdata` slot with public `wasm_module_set_userdata()` / `wasm_module_get_userdata()` accessors.
+*   `wasm_host_func_t` now receives the calling `wasm_module_t*` directly. Callbacks that need runtime services can reach them through `mod->rt`, while module-local context stays explicit through `wasm_module_get_userdata(mod)`.
 
 ---
 

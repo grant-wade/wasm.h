@@ -330,7 +330,7 @@ typedef struct wasm_reftype_t {
 
 /* ── Host function callback ───────────────────────────────────────── */
 typedef wasm_error_t (*wasm_host_func_t)(
-    wasm_runtime_t* rt,
+    wasm_module_t* mod,
     const wasm_value_t* args, uint32_t num_args,
     wasm_value_t* results, uint32_t num_results,
     void* userdata);
@@ -522,6 +522,7 @@ typedef struct wasm__exception_state_t {
 /* ── Module ───────────────────────────────────────────────────────── */
 struct wasm_module_t {
     wasm_runtime_t* rt;
+    void* host_userdata;
     wasm_comptype_t* types;
     uint32_t num_types;
     wasm_recgroup_t* rec_groups;
@@ -617,7 +618,6 @@ struct wasm_runtime_t {
     wasm__call_frame_t* call_frames;
     uint32_t max_call_frames;
     uint32_t call_frame_sp;
-    wasm_module_t* current_module;
     wasm_valtype_t* validator_stack;
     wasm_reftype_t* validator_stack_reftypes;
     wasm__val_frame_t* validator_frames;
@@ -714,6 +714,8 @@ wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
 void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
 uint64_t wasm_get_fuel(wasm_runtime_t* rt);
+void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);
+void* wasm_module_get_userdata(wasm_module_t* mod);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus
@@ -10886,18 +10888,8 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
                                            wasm_value_t* results,
                                            uint32_t num_results,
                                            void* userdata) {
-    wasm_runtime_t* rt;
-    wasm_module_t* saved_module;
-    wasm_error_t err;
-
     if (!mod || !mod->rt || !host_func) return WASM_ERR_MALFORMED;
-
-    rt = mod->rt;
-    saved_module = rt->current_module;
-    rt->current_module = mod;
-    err = host_func(rt, args, num_args, results, num_results, userdata);
-    rt->current_module = saved_module;
-    return err;
+    return host_func(mod, args, num_args, results, num_results, userdata);
 }
 
 static void wasm__init_call_frame(wasm__call_frame_t* cf,
@@ -14739,21 +14731,16 @@ static void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, ui
     if (results && num_results > 0) results[0] = wasm_i32((int32_t)errno_code);
 }
 
-static wasm_error_t wasm__wasi_get_memory0(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
                                            const char* op_name,
-                                           wasm_module_t** out_mod,
                                            wasm_memory_t** out_memory,
                                            uint64_t* out_mem_size) {
-    wasm_module_t* mod;
+    wasm_runtime_t* rt;
     wasm_memory_t* memory;
 
-    if (!rt || !op_name || !out_mod || !out_memory || !out_mem_size) return WASM_ERR_MALFORMED;
+    if (!mod || !mod->rt || !op_name || !out_memory || !out_mem_size) return WASM_ERR_MALFORMED;
 
-    mod = rt->current_module;
-    if (!mod) {
-        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "wasi %s called without an active module", op_name);
-        return WASM_ERR_MALFORMED;
-    }
+    rt = mod->rt;
 
     memory = wasm__memory_at(mod, 0);
     if (!memory) {
@@ -14761,7 +14748,6 @@ static wasm_error_t wasm__wasi_get_memory0(wasm_runtime_t* rt,
         return WASM_ERR_MALFORMED;
     }
 
-    *out_mod = mod;
     *out_memory = memory;
     *out_mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
     return WASM_OK;
@@ -14803,24 +14789,22 @@ static const char* wasm__wasi_string_list_at_env(uint32_t index) {
     return wasm__platform_wasi_env_at(index);
 }
 
-static uint32_t wasm__wasi_string_sizes_get(wasm_runtime_t* rt,
+static uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
                                             wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn,
                                             uint32_t count_ptr,
                                             uint32_t size_ptr,
                                             wasm_value_t* results,
                                             uint32_t num_results) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint64_t total_size;
     uint32_t count;
     wasm_error_t err;
 
-    err = wasm__wasi_get_memory0(rt, "string sizes_get", &mod, &memory, &mem_size);
+    err = wasm__wasi_get_memory0(mod, "string sizes_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    (void)mod;
     count = count_fn ? count_fn() : 0u;
     total_size = wasm__wasi_string_list_size(count_fn, at_fn);
     if (total_size == UINT64_MAX || total_size > UINT32_MAX) {
@@ -14839,14 +14823,13 @@ static uint32_t wasm__wasi_string_sizes_get(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static uint32_t wasm__wasi_string_list_get(wasm_runtime_t* rt,
+static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
                                            wasm__wasi_string_count_fn count_fn,
                                            wasm__wasi_string_at_fn at_fn,
                                            uint32_t entries_ptr,
                                            uint32_t data_ptr,
                                            wasm_value_t* results,
                                            uint32_t num_results) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint64_t strings_size;
@@ -14855,10 +14838,9 @@ static uint32_t wasm__wasi_string_list_get(wasm_runtime_t* rt,
     uint32_t cursor;
     wasm_error_t err;
 
-    err = wasm__wasi_get_memory0(rt, "string get", &mod, &memory, &mem_size);
+    err = wasm__wasi_get_memory0(mod, "string get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    (void)mod;
     count = count_fn ? count_fn() : 0u;
     strings_size = wasm__wasi_string_list_size(count_fn, at_fn);
     if (strings_size == UINT64_MAX || strings_size > UINT32_MAX) {
@@ -14890,7 +14872,7 @@ static int wasm__wasi_is_stdio_fd(uint32_t fd) {
     return fd == WASM__WASI_FD_STDIN || fd == WASM__WASI_FD_STDOUT || fd == WASM__WASI_FD_STDERR;
 }
 
-static wasm_error_t wasm__wasi_args_sizes_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_args_sizes_get(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
@@ -14902,7 +14884,7 @@ static wasm_error_t wasm__wasi_args_sizes_get(wasm_runtime_t* rt,
         return WASM_OK;
     }
 
-    return wasm__wasi_string_sizes_get(rt,
+    return wasm__wasi_string_sizes_get(mod,
                                        wasm__wasi_string_list_count_args,
                                        wasm__wasi_string_list_at_args,
                                        (uint32_t)args[0].of.i32,
@@ -14911,7 +14893,7 @@ static wasm_error_t wasm__wasi_args_sizes_get(wasm_runtime_t* rt,
                                        num_results);
 }
 
-static wasm_error_t wasm__wasi_args_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_args_get(wasm_module_t* mod,
                                         const wasm_value_t* args, uint32_t num_args,
                                         wasm_value_t* results, uint32_t num_results,
                                         void* userdata) {
@@ -14923,7 +14905,7 @@ static wasm_error_t wasm__wasi_args_get(wasm_runtime_t* rt,
         return WASM_OK;
     }
 
-    return wasm__wasi_string_list_get(rt,
+    return wasm__wasi_string_list_get(mod,
                                       wasm__wasi_string_list_count_args,
                                       wasm__wasi_string_list_at_args,
                                       (uint32_t)args[0].of.i32,
@@ -14932,7 +14914,7 @@ static wasm_error_t wasm__wasi_args_get(wasm_runtime_t* rt,
                                       num_results);
 }
 
-static wasm_error_t wasm__wasi_environ_sizes_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_environ_sizes_get(wasm_module_t* mod,
                                                  const wasm_value_t* args, uint32_t num_args,
                                                  wasm_value_t* results, uint32_t num_results,
                                                  void* userdata) {
@@ -14944,7 +14926,7 @@ static wasm_error_t wasm__wasi_environ_sizes_get(wasm_runtime_t* rt,
         return WASM_OK;
     }
 
-    return wasm__wasi_string_sizes_get(rt,
+    return wasm__wasi_string_sizes_get(mod,
                                        wasm__wasi_string_list_count_env,
                                        wasm__wasi_string_list_at_env,
                                        (uint32_t)args[0].of.i32,
@@ -14953,11 +14935,10 @@ static wasm_error_t wasm__wasi_environ_sizes_get(wasm_runtime_t* rt,
                                        num_results);
 }
 
-static wasm_error_t wasm__wasi_fd_write(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_fd_write(wasm_module_t* mod,
                                         const wasm_value_t* args, uint32_t num_args,
                                         wasm_value_t* results, uint32_t num_results,
                                         void* userdata) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     FILE* stream;
     uint64_t mem_size;
@@ -14971,9 +14952,9 @@ static wasm_error_t wasm__wasi_fd_write(wasm_runtime_t* rt,
 
     (void)userdata;
 
-    if (!rt || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
 
-    err = wasm__wasi_get_memory0(rt, "fd_write", &mod, &memory, &mem_size);
+    err = wasm__wasi_get_memory0(mod, "fd_write", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
     if (args[1].of.i32 < 0 || args[2].of.i32 < 0 || args[3].of.i32 < 0) {
@@ -15035,11 +15016,11 @@ static wasm_error_t wasm__wasi_fd_write(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_proc_exit(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_proc_exit(wasm_module_t* mod,
                                          const wasm_value_t* args, uint32_t num_args,
                                          wasm_value_t* results, uint32_t num_results,
                                          void* userdata) {
-    (void)rt;
+    (void)mod;
     (void)args;
     (void)results;
     (void)userdata;
@@ -15048,13 +15029,13 @@ static wasm_error_t wasm__wasi_proc_exit(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_fd_close(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,
                                         const wasm_value_t* args, uint32_t num_args,
                                         wasm_value_t* results, uint32_t num_results,
                                         void* userdata) {
     uint32_t fd;
 
-    (void)rt;
+    (void)mod;
     (void)userdata;
 
     if (!results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -15071,11 +15052,10 @@ static wasm_error_t wasm__wasi_fd_close(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_fd_seek(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_fd_seek(wasm_module_t* mod,
                                        const wasm_value_t* args, uint32_t num_args,
                                        wasm_value_t* results, uint32_t num_results,
                                        void* userdata) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint32_t fd;
@@ -15085,9 +15065,9 @@ static wasm_error_t wasm__wasi_fd_seek(wasm_runtime_t* rt,
 
     (void)userdata;
 
-    if (!rt || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
 
-    err = wasm__wasi_get_memory0(rt, "fd_seek", &mod, &memory, &mem_size);
+    err = wasm__wasi_get_memory0(mod, "fd_seek", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
     if (args[0].of.i32 < 0 || args[2].of.i32 < 0 || args[3].of.i32 < 0) {
@@ -15117,7 +15097,7 @@ static wasm_error_t wasm__wasi_fd_seek(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_environ_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_environ_get(wasm_module_t* mod,
                                            const wasm_value_t* args, uint32_t num_args,
                                            wasm_value_t* results, uint32_t num_results,
                                            void* userdata) {
@@ -15129,7 +15109,7 @@ static wasm_error_t wasm__wasi_environ_get(wasm_runtime_t* rt,
         return WASM_OK;
     }
 
-    return wasm__wasi_string_list_get(rt,
+    return wasm__wasi_string_list_get(mod,
                                       wasm__wasi_string_list_count_env,
                                       wasm__wasi_string_list_at_env,
                                       (uint32_t)args[0].of.i32,
@@ -15138,11 +15118,10 @@ static wasm_error_t wasm__wasi_environ_get(wasm_runtime_t* rt,
                                       num_results);
 }
 
-static wasm_error_t wasm__wasi_fd_fdstat_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint32_t fd;
@@ -15151,11 +15130,10 @@ static wasm_error_t wasm__wasi_fd_fdstat_get(wasm_runtime_t* rt,
 
     (void)userdata;
 
-    if (!rt || !args || !results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    err = wasm__wasi_get_memory0(rt, "fd_fdstat_get", &mod, &memory, &mem_size);
+    if (!mod || !args || !results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    err = wasm__wasi_get_memory0(mod, "fd_fdstat_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    (void)mod;
     if (args[0].of.i32 < 0 || args[1].of.i32 < 0) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -15182,11 +15160,10 @@ static wasm_error_t wasm__wasi_fd_fdstat_get(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_random_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
                                           const wasm_value_t* args, uint32_t num_args,
                                           wasm_value_t* results, uint32_t num_results,
                                           void* userdata) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint32_t buf_ptr;
@@ -15195,11 +15172,10 @@ static wasm_error_t wasm__wasi_random_get(wasm_runtime_t* rt,
 
     (void)userdata;
 
-    if (!rt || !args || !results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    err = wasm__wasi_get_memory0(rt, "random_get", &mod, &memory, &mem_size);
+    if (!mod || !args || !results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    err = wasm__wasi_get_memory0(mod, "random_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    (void)mod;
     if (args[0].of.i32 < 0 || args[1].of.i32 < 0) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -15220,11 +15196,10 @@ static wasm_error_t wasm__wasi_random_get(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__wasi_clock_time_get(wasm_runtime_t* rt,
+static wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
-    wasm_module_t* mod;
     wasm_memory_t* memory;
     uint64_t mem_size;
     uint64_t timestamp;
@@ -15234,11 +15209,10 @@ static wasm_error_t wasm__wasi_clock_time_get(wasm_runtime_t* rt,
 
     (void)userdata;
 
-    if (!rt || !args || !results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    err = wasm__wasi_get_memory0(rt, "clock_time_get", &mod, &memory, &mem_size);
+    if (!mod || !args || !results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    err = wasm__wasi_get_memory0(mod, "clock_time_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    (void)mod;
     if (args[0].of.i32 < 0 || args[2].of.i32 < 0) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -15936,6 +15910,15 @@ void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
 
 uint64_t wasm_get_fuel(wasm_runtime_t* rt) {
     return rt ? rt->fuel : 0;
+}
+
+void wasm_module_set_userdata(wasm_module_t* mod, void* userdata) {
+    if (!mod) return;
+    mod->host_userdata = userdata;
+}
+
+void* wasm_module_get_userdata(wasm_module_t* mod) {
+    return mod ? mod->host_userdata : NULL;
 }
 
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
