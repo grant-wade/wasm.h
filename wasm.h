@@ -58,7 +58,7 @@
  *
  * COMPATIBILITY:
  *   - C99 or later (no compiler extensions required)
- *   - GCC, Clang, MSVC (2015+), TCC, Intel ICC, PGI/NVHPC
+ *   - GCC, Clang, MSVC (2015+), TCC
  *   - Windows, Linux, macOS, *BSD, bare-metal (with libc)
  *   - Little-endian and big-endian
  *   - 32-bit and 64-bit

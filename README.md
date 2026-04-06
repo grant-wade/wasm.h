@@ -19,7 +19,7 @@ At a high level, `wasm.h` gives you:
 - GC-aware host interop helpers for struct and array references
 - optional built-in WASI stubs for common `wasi_snapshot_preview1` imports
 
-The runtime covers the Wasm MVP plus a focused set of newer proposals already implemented in the interpreter. In practice that includes imports/exports, globals, tables, multi-memory, bulk memory, reference types, GC, multi-value, sign-extension, non-trapping float-to-int conversions, mutable globals, extended const expressions, tail calls, exceptions, SIMD, and the current validation/runtime configuration surface in `wasm.h`.
+The runtime covers the Wasm MVP plus a focused set of newer proposals already implemented in the interpreter. In practice that includes imports/exports, globals, tables, multi-memory, bulk memory, reference types, GC, multi-value, sign-extension, non-trapping float-to-int conversions, mutable globals, extended const expressions, tail calls, exceptions, SIMD (currently lacks platform intrinsics for actual speed), and the current validation/runtime configuration surface in `wasm.h`.
 
 
 ## Quick start
@@ -40,8 +40,7 @@ Then initialize a runtime, load a module, and call an export:
 int main(void) {
 	wasm_runtime_t rt;
 	wasm_module_t *mod;
-	wasm_value_t args[1];
-	wasm_value_t result;
+	int32_t result;
 
 	if (wasm_init(&rt, NULL) != WASM_OK) {
 		return 1;
@@ -57,18 +56,22 @@ int main(void) {
 		return 1;
 	}
 
-	args[0] = wasm_i32(42);
-	if (wasm_call(mod, "main", args, 1, &result, 1) != WASM_OK) {
+	if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK) {
 		wasm_free_module(mod);
 		wasm_destroy(&rt);
 		return 1;
 	}
+
+	/* use result */
+    printf("result: %d\n", result);
 
 	wasm_free_module(mod);
 	wasm_destroy(&rt);
 	return 0;
 }
 ```
+
+The format string uses `args(results)` syntax, so `"i(i)"` means one `i32` argument and one `i32` result.
 
 Useful public APIs beyond the basic load-and-call path include:
 
