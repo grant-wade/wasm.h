@@ -151,13 +151,17 @@ For GC-aware tooling you can introspect composite types with `wasm_type_count`, 
 ./wasm2api path/to/module.wasm my_module
 ```
 
+If the module imports host functions or globals, the generated header also includes a
+`<prefix>_imports_t` struct and the init entry points take a `const <prefix>_imports_t*`
+argument so the host can wire those bindings before the module is loaded.
+
 If you want the generated API to carry the module bytes in its `.c` file, use `--embed`:
 
 ```sh
 ./wasm2api --embed path/to/module.wasm my_module
 ```
 
-That mode adds `<prefix>_init_embedded(wasm_runtime_t* rt)` and `<prefix>_embedded_wasm(size_t* out_len)` so callers can initialize the module without knowing a runtime file path.
+That mode adds `<prefix>_init_embedded(...)` and `<prefix>_embedded_wasm(size_t* out_len)` so callers can initialize the module without knowing a runtime file path.
 
 ## `wasm.c`
 

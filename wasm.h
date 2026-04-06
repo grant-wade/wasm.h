@@ -418,6 +418,25 @@ typedef struct wasm_import_t {
     void* userdata;
 } wasm_import_t;
 
+typedef enum wasm_import_kind_t {
+    WASM_IMPORT_FUNC = 0x00,
+    WASM_IMPORT_TABLE = 0x01,
+    WASM_IMPORT_MEM = 0x02,
+    WASM_IMPORT_GLOBAL = 0x03,
+    WASM_IMPORT_TAG = 0x04
+} wasm_import_kind_t;
+
+typedef struct wasm_import_info_t {
+    char* module;
+    char* name;
+    wasm_import_kind_t kind;
+    uint32_t index;
+    uint32_t type_index;
+    wasm_valtype_t type;
+    wasm_reftype_t ref_type;
+    int is_mutable;
+} wasm_import_info_t;
+
 typedef struct wasm_global_import_t {
     const char* module;
     const char* name;
@@ -540,6 +559,8 @@ struct wasm_module_t {
     uint32_t num_rec_groups;
     wasm_func_t* funcs;
     uint32_t num_funcs;
+    wasm_import_info_t* imports;
+    uint32_t num_imports;
     wasm_export_t* exports;
     uint32_t num_exports;
     wasm_global_t* globals;
@@ -685,6 +706,8 @@ const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_id
 int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx);
 wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val);
 wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t val);
+uint32_t wasm_import_count(wasm_module_t* mod);
+const wasm_import_info_t* wasm_import_info(wasm_module_t* mod, uint32_t index);
 uint32_t wasm_export_count(wasm_module_t* mod);
 const char* wasm_export_name(wasm_module_t* mod, uint32_t index);
 wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
@@ -1551,6 +1574,19 @@ static wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name) {
     r->ptr += len;
     *out_name = name;
     return WASM_OK;
+}
+
+static char* wasm__strdup(const char* text) {
+    size_t len;
+    char* copy;
+
+    if (!text) return NULL;
+    len = strlen(text);
+    copy = (char*)WASM_MALLOC(len + 1u);
+    if (!copy) return NULL;
+    if (len > 0u) memcpy(copy, text, len);
+    copy[len] = '\0';
+    return copy;
 }
 
 static wasm_value_t wasm__u32_bits(uint32_t value) {
@@ -3353,6 +3389,30 @@ static wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint3
     mod->funcs = funcs;
     memset(mod->funcs + base, 0, count * sizeof(wasm_func_t));
     mod->num_funcs = base + count;
+    return WASM_OK;
+}
+
+static void wasm__free_import_info(wasm_import_info_t* info) {
+    if (!info) return;
+    WASM_FREE(info->module);
+    WASM_FREE(info->name);
+    wasm__clear_reftype(&info->ref_type);
+    memset(info, 0, sizeof(*info));
+}
+
+static wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
+    uint32_t base = mod->num_imports;
+    wasm_import_info_t* infos;
+
+    if (base_out) *base_out = base;
+    if (count == 0) return WASM_OK;
+
+    infos = (wasm_import_info_t*)WASM_REALLOC(mod->imports, (base + count) * sizeof(wasm_import_info_t));
+    if (!infos) return WASM_ERR_OOM;
+
+    mod->imports = infos;
+    memset(mod->imports + base, 0, count * sizeof(wasm_import_info_t));
+    mod->num_imports = base + count;
     return WASM_OK;
 }
 
@@ -5479,9 +5539,10 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
 static wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
                                                       const char* module,
                                                       const char* name) {
-    uint32_t i;
+    uint32_t i = rt ? rt->num_global_imports : 0u;
 
-    for (i = 0; i < rt->num_global_imports; i++) {
+    while (i > 0u) {
+        i--;
         if (strcmp(rt->global_imports[i].module, module) == 0 &&
             strcmp(rt->global_imports[i].name, name) == 0)
             return &rt->global_imports[i];
@@ -5764,7 +5825,15 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
 void wasm_destroy(wasm_runtime_t* rt) {
     uint32_t i;
 
-    for (i = 0; i < rt->num_imports; i++) wasm__free_functype(&rt->imports[i].type);
+    for (i = 0; i < rt->num_imports; i++) {
+        WASM_FREE((void*)rt->imports[i].module);
+        WASM_FREE((void*)rt->imports[i].name);
+        wasm__free_functype(&rt->imports[i].type);
+    }
+    for (i = 0; i < rt->num_global_imports; i++) {
+        WASM_FREE((void*)rt->global_imports[i].module);
+        WASM_FREE((void*)rt->global_imports[i].name);
+    }
     WASM_FREE(rt->imports);
     WASM_FREE(rt->global_imports);
     WASM_FREE(rt->validator_stack);
@@ -5784,6 +5853,11 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
     wasm_import_t copy;
     wasm_error_t err;
 
+    if (!rt || !imp || !imp->module || !imp->name || !imp->func) {
+        if (rt) WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid function import");
+        return WASM_ERR_MALFORMED;
+    }
+
     if (rt->num_imports >= rt->cap_imports) {
         uint32_t new_cap = rt->cap_imports ? rt->cap_imports * 2 : 16;
         wasm_import_t* a = (wasm_import_t*)WASM_REALLOC(rt->imports, new_cap * sizeof(wasm_import_t));
@@ -5793,12 +5867,21 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = imp->module;
-    copy.name = imp->name;
+    copy.module = wasm__strdup(imp->module);
+    copy.name = wasm__strdup(imp->name);
+    if (!copy.module || !copy.name) {
+        WASM_FREE((void*)copy.module);
+        WASM_FREE((void*)copy.name);
+        return WASM_ERR_OOM;
+    }
     copy.func = imp->func;
     copy.userdata = imp->userdata;
     err = wasm__copy_functype(&copy.type, &imp->type);
-    if (err != WASM_OK) return err;
+    if (err != WASM_OK) {
+        WASM_FREE((void*)copy.module);
+        WASM_FREE((void*)copy.name);
+        return err;
+    }
 
     rt->imports[rt->num_imports++] = copy;
     return WASM_OK;
@@ -5807,7 +5890,7 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp) {
     wasm_global_import_t copy;
 
-    if (!imp || !imp->module || !imp->name || !imp->value) {
+    if (!rt || !imp || !imp->module || !imp->name || !imp->value) {
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid global import");
         return WASM_ERR_MALFORMED;
     }
@@ -5822,8 +5905,13 @@ wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_i
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = imp->module;
-    copy.name = imp->name;
+    copy.module = wasm__strdup(imp->module);
+    copy.name = wasm__strdup(imp->name);
+    if (!copy.module || !copy.name) {
+        WASM_FREE((void*)copy.module);
+        WASM_FREE((void*)copy.name);
+        return WASM_ERR_OOM;
+    }
     copy.type = imp->type;
     copy.ref_type = imp->ref_type;
     copy.is_mutable = imp->is_mutable;
@@ -5905,46 +5993,63 @@ static wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__reader
 
 static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_leb128_u32(r);
-    uint32_t i, j;
+    uint32_t i;
 
     for (i = 0; i < count; i++) {
-        char mn[128], fn[128];
+        uint32_t import_index;
+        wasm_import_info_t* info;
         uint8_t kind;
-        wasm__read_name(r, mn, sizeof(mn));
-        wasm__read_name(r, fn, sizeof(fn));
+        wasm_error_t err;
+        wasm_error_t append_err = wasm__append_import_infos(mod, 1, &import_index);
+
+        if (append_err != WASM_OK) return append_err;
+
+        info = &mod->imports[import_index];
+        info->type_index = UINT32_MAX;
+        err = wasm__read_name_owned(r, &info->module);
+        if (err != WASM_OK) return err;
+        err = wasm__read_name_owned(r, &info->name);
+        if (err != WASM_OK) return err;
         kind = wasm__read_u8(r);
+        info->kind = (wasm_import_kind_t)kind;
         if (kind == 0x00) {
             uint32_t ti = wasm__read_leb128_u32(r);
             uint32_t fi;
             const wasm_functype_t* import_type = wasm__module_const_functype(mod, ti);
+            uint32_t j;
 
             if (!import_type) return WASM_ERR_MALFORMED;
             if (wasm__append_funcs(mod, 1, &fi) != WASM_OK) return WASM_ERR_OOM;
             mod->funcs[fi].type_idx = ti;
             mod->funcs[fi].is_import = 1;
             mod->num_func_imports++;
-            for (j = 0; j < mod->rt->num_imports; j++) {
-                if (strcmp(mod->rt->imports[j].module, mn) == 0 && strcmp(mod->rt->imports[j].name, fn) == 0) {
-                    if (!wasm__functype_is_unspecified(&mod->rt->imports[j].type) &&
-                        !wasm__functype_is_subtype(mod, &mod->rt->imports[j].type, import_type)) {
+            info->index = fi;
+            info->type_index = ti;
+            for (j = mod->rt->num_imports; j > 0u; j--) {
+                uint32_t binding_index = j - 1u;
+
+                if (strcmp(mod->rt->imports[binding_index].module, info->module) == 0 &&
+                    strcmp(mod->rt->imports[binding_index].name, info->name) == 0) {
+                    if (!wasm__functype_is_unspecified(&mod->rt->imports[binding_index].type) &&
+                        !wasm__functype_is_subtype(mod, &mod->rt->imports[binding_index].type, import_type)) {
                         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                                      "function import type mismatch: %.64s.%.64s", mn, fn);
+                                      "function import type mismatch: %.64s.%.64s", info->module, info->name);
                         return WASM_ERR_TYPE_MISMATCH;
                     }
-                    mod->funcs[fi].host_func = mod->rt->imports[j].func;
-                    mod->funcs[fi].host_userdata = mod->rt->imports[j].userdata;
+                    mod->funcs[fi].host_func = mod->rt->imports[binding_index].func;
+                    mod->funcs[fi].host_userdata = mod->rt->imports[binding_index].userdata;
                     break;
                 }
             }
             if (!mod->funcs[fi].host_func) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", mn, fn);
+                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
                 return WASM_ERR_UNKNOWN_IMPORT;
             }
         } else if (kind == 0x01) {
             uint32_t table_index;
             wasm_table_t* table;
             uint8_t lf;
-            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+            err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
             if (err != WASM_OK) return err;
             if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
             table = &mod->tables[table_index];
@@ -5953,6 +6058,9 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             lf = wasm__read_u8(r);
             table->size = wasm__read_leb128_u32(r);
             table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
+            info->index = table_index;
+            info->type = table->reftype;
+            info->ref_type = table->reftype_info;
         } else if (kind == 0x02) {
             uint32_t memory_index;
             wasm_memory_t* memory;
@@ -5960,19 +6068,19 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
 
             if (wasm__append_memories(mod, 1, &memory_index) != WASM_OK) return WASM_ERR_OOM;
             if (mod->num_memories > 1) {
-                wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
+                err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
                 if (err != WASM_OK) return err;
             }
             memory = &mod->memories[memory_index];
             memory->pages = wasm__read_leb128_u32(r);
             memory->max_pages = (lf & 1) ? wasm__read_leb128_u32(r) : 65536;
+            info->index = memory_index;
         } else if (kind == 0x03) {
             uint32_t gi;
             wasm_global_import_t* gimp;
             wasm_valtype_t type;
             wasm_reftype_t ref_type;
             uint8_t is_mutable;
-            wasm_error_t err;
 
             err = wasm__read_valtype(mod, r, &type, &ref_type);
             if (err != WASM_OK) return err;
@@ -5982,9 +6090,9 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
                 if (feature_err != WASM_OK) return feature_err;
             }
 
-            gimp = wasm__find_global_import(mod->rt, mn, fn);
+            gimp = wasm__find_global_import(mod->rt, info->module, info->name);
             if (!gimp) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", mn, fn);
+                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
                 return WASM_ERR_UNKNOWN_IMPORT;
             }
             if (!wasm__globaltype_matches_import(mod,
@@ -5994,13 +6102,13 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
                                                  type,
                                                  &ref_type,
                                                  (int)is_mutable)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global import type mismatch: %.64s.%.64s", mn, fn);
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global import type mismatch: %.64s.%.64s", info->module, info->name);
                 return WASM_ERR_TYPE_MISMATCH;
             }
             if (!gimp->value) return WASM_ERR_MALFORMED;
             if (!wasm__runtime_value_matches_type(mod, gimp->value, gimp->type, &gimp->ref_type)) {
                 WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "global import value mismatch: %.64s.%.64s", mn, fn);
+                              "global import value mismatch: %.64s.%.64s", info->module, info->name);
                 return WASM_ERR_TYPE_MISMATCH;
             }
             if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) return WASM_ERR_OOM;
@@ -6011,14 +6119,20 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             mod->globals[gi].is_import = 1;
             mod->globals[gi].import_value = gimp->value;
             mod->num_global_imports++;
+            info->index = gi;
+            info->type = type;
+            info->ref_type = ref_type;
+            info->is_mutable = (int)is_mutable;
         } else if (kind == 0x04) {
             uint32_t tag_index;
-            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
 
+            err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
             if (err != WASM_OK) return err;
             if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
             if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
             mod->tags[tag_index].type_idx = wasm__read_leb128_u32(r);
+            info->index = tag_index;
+            info->type_index = mod->tags[tag_index].type_idx;
         } else {
             return WASM_ERR_MALFORMED;
         }
@@ -9672,6 +9786,8 @@ void wasm_free_module(wasm_module_t* mod) {
         WASM_FREE(mod->funcs[i].control_targets);
     }
     WASM_FREE(mod->funcs);
+    for (i = 0; i < mod->num_imports; i++) wasm__free_import_info(&mod->imports[i]);
+    WASM_FREE(mod->imports);
     WASM_FREE(mod->exports);
     WASM_FREE(mod->globals);
     WASM_FREE(mod->tags);
@@ -15678,6 +15794,15 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
 
 uint32_t wasm_export_count(wasm_module_t* mod) {
     return mod ? mod->num_exports : 0;
+}
+
+uint32_t wasm_import_count(wasm_module_t* mod) {
+    return mod ? mod->num_imports : 0;
+}
+
+const wasm_import_info_t* wasm_import_info(wasm_module_t* mod, uint32_t index) {
+    if (!mod || index >= mod->num_imports) return NULL;
+    return &mod->imports[index];
 }
 
 const char* wasm_export_name(wasm_module_t* mod, uint32_t index) {

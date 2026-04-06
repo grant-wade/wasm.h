@@ -1219,6 +1219,116 @@ WL_TEST(test_host_import) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_import_introspection_api) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_import_t func_imp;
+    wasm_global_import_t global_imp;
+    wasm_value_t imported_counter = wasm_i32(7);
+    const wasm_import_info_t* info;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 5);
+        emit(&sec, 'p');
+        emit(&sec, 'r');
+        emit(&sec, 'i');
+        emit(&sec, 'n');
+        emit(&sec, 't');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 0);
+
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'e');
+        emit(&sec, 'n');
+        emit(&sec, 'v');
+        emit_leb128_u32(&sec, 7);
+        emit(&sec, 'c');
+        emit(&sec, 'o');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 't');
+        emit(&sec, 'e');
+        emit(&sec, 'r');
+        emit(&sec, 0x03);
+        emit(&sec, 0x7F);
+        emit(&sec, 0x00);
+
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&func_imp, 0, sizeof(func_imp));
+    func_imp.module = "env";
+    func_imp.name = "print";
+    func_imp.func = host_print;
+    wasm_register_import(&rt, &func_imp);
+
+    memset(&global_imp, 0, sizeof(global_imp));
+    global_imp.module = "env";
+    global_imp.name = "counter";
+    global_imp.type = WASM_TYPE_I32;
+    global_imp.value = &imported_counter;
+    wasm_register_global_import(&rt, &global_imp);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WASM_CHECK_I32(t, (int32_t)wasm_import_count(m), 2);
+
+    info = wasm_import_info(m, 0);
+    WL_CHECK_MSG(t, info != NULL, "%s", "expected function import metadata");
+    if (info) {
+        WL_CHECK_MSG(t, strcmp(info->module, "env") == 0, "%s", "wrong function import module name");
+        WL_CHECK_MSG(t, strcmp(info->name, "print") == 0, "%s", "wrong function import name");
+        WL_CHECK_MSG(t, info->kind == WASM_IMPORT_FUNC, "%s", "wrong function import kind");
+        WASM_CHECK_I32(t, (int32_t)info->index, 0);
+        WASM_CHECK_I32(t, (int32_t)info->type_index, 0);
+    }
+
+    info = wasm_import_info(m, 1);
+    WL_CHECK_MSG(t, info != NULL, "%s", "expected global import metadata");
+    if (info) {
+        WL_CHECK_MSG(t, strcmp(info->module, "env") == 0, "%s", "wrong global import module name");
+        WL_CHECK_MSG(t, strcmp(info->name, "counter") == 0, "%s", "wrong global import name");
+        WL_CHECK_MSG(t, info->kind == WASM_IMPORT_GLOBAL, "%s", "wrong global import kind");
+        WASM_CHECK_I32(t, (int32_t)info->index, 0);
+        WL_CHECK_MSG(t, info->type == WASM_TYPE_I32, "%s", "wrong global import type");
+        WL_CHECK_MSG(t, info->is_mutable == 0, "%s", "expected immutable global import");
+    }
+
+    WL_CHECK_MSG(t, wasm_import_info(m, 2) == NULL, "%s", "out-of-range import metadata should be null");
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_module_userdata_api) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -13160,6 +13270,7 @@ int main(void) {
         { "introspection: exports, custom sections, and signatures are queryable", test_introspection_helpers },
         { "factorial(10) == 3628800", test_factorial },
         { "host import: env.print(42)", test_host_import },
+        { "public api: import metadata is queryable", test_import_introspection_api },
         { "public api: module userdata is visible in host callbacks", test_module_userdata_api },
         { "public api: shared host imports still see the right module instance", test_module_userdata_api_multiple_modules },
         { "public api: format-call packs ints and floats", test_format_call_api },
