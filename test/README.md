@@ -8,10 +8,12 @@ The intent is not to require green results today. It is a regression and compati
 
 - `fixtures/*.c` — source files compiled by `emcc`
 - `spec/` — git submodule mirror of the official WebAssembly testsuite
-- `runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export
+- `fixture_runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export
+- `spectest_runner.c` — native host runner that replays `wast2json` command streams against `wasm.h`
+- `spectest_support.wat` — shared `spectest` globals, table, and memory used by the official testsuite
 - `CMakeLists.txt` — defines the runner, fixture compilation, and CTest integration
 
-The `spec/` subtree is not wired into CTest yet. The current integration plan for `.wast`-driven spec execution lives in [../docs/WASM_SPEC_TESTSUITE_PLAN.md](../docs/WASM_SPEC_TESTSUITE_PLAN.md).
+The `spec/` subtree is wired into CTest through `tools/wast2json` and the native `spectest_runner`. Each top-level `.wast` file gets a matching `spectest.<name>` CTest entry, and the generated `.json`, `.wasm`, and `.wat` parts are materialized once up front through a shared fixture so the runtime cases can run in parallel.
 
 The runner binds the built-in WASI stubs automatically, so fixtures that call `printf`/`puts` through `wasi_snapshot_preview1.fd_write` can run without extra setup.
 
@@ -24,6 +26,9 @@ cmake -S . -B build
 cmake --build build --target wasm-emcc-build
 cmake --build build --target wasm-emcc-run
 cmake --build build --target wasm-emcc-run-strict
+cmake --build build --target wasm-spectest-build
+cmake --build build --target wasm-spectest-run
+cmake --build build --target wasm-spectest-run-strict
 ```
 
 Or directly in this directory:
@@ -33,11 +38,18 @@ cmake -S .. -B ../build
 cmake --build ../build --target wasm-emcc-build
 cmake --build ../build --target wasm-emcc-run
 cmake --build ../build --target wasm-emcc-run-strict
+cmake --build ../build --target wasm-spectest-build
+cmake --build ../build --target wasm-spectest-run
+cmake --build ../build --target wasm-spectest-run-strict
 ```
 
 `run` always completes and prints a pass/fail summary even if the current interpreter cannot load or execute some modules.
 
 `run-strict` returns a failing exit code if any fixture fails.
+
+The spectest targets behave the same way, but failures can come from either the local WABT conversion step or the runtime harness itself. That is intentional: it keeps failures attributed to a specific source `.wast` file instead of collapsing everything into one monolithic job.
+
+If the local `wast2json` build cannot compile a particular `.wast` file, the build fixture now records that as a skipped spectest case instead of failing the whole build or stopping later spec files from running.
 
 If you still use `make`, the local and root Makefiles now forward to these CMake targets instead of maintaining separate build rules.
 

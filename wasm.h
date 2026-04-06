@@ -564,6 +564,12 @@ typedef struct wasm_memory_import_t {
     wasm_memory_t* memory;
 } wasm_memory_import_t;
 
+typedef struct wasm_tag_import_t {
+    const char* module;
+    const char* name;
+    wasm_functype_t type;
+} wasm_tag_import_t;
+
 typedef struct wasm_tag_t {
     uint32_t type_idx;
 } wasm_tag_t;
@@ -670,6 +676,9 @@ struct wasm_runtime_t {
     wasm_memory_import_t* memory_imports;
     uint32_t num_memory_imports;
     uint32_t cap_memory_imports;
+    wasm_tag_import_t* tag_imports;
+    uint32_t num_tag_imports;
+    uint32_t cap_tag_imports;
     wasm_value_t* stack;
     uint32_t max_stack;
     uint32_t sp;
@@ -707,6 +716,7 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
 wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_import_t* imp);
 wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_import_t* imp);
+wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_t* imp);
 void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_enable_all_features(wasm_runtime_t* rt);
@@ -776,6 +786,8 @@ wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
                                     uint32_t param_idx);
 wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
                                      uint32_t result_idx);
+uint32_t wasm_tag_count(wasm_module_t* mod);
+const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx);
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref);
@@ -5700,6 +5712,21 @@ static wasm_memory_import_t* wasm__find_memory_import(wasm_runtime_t* rt,
     return NULL;
 }
 
+static wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
+                                                const char* module,
+                                                const char* name) {
+    uint32_t i = rt ? rt->num_tag_imports : 0u;
+
+    while (i > 0u) {
+        i--;
+        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
+            strcmp(rt->tag_imports[i].name, name) == 0)
+            return &rt->tag_imports[i];
+    }
+
+    return NULL;
+}
+
 /* ── Init / Destroy ───────────────────────────────────────────────── */
 
 static void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
@@ -5991,10 +6018,16 @@ void wasm_destroy(wasm_runtime_t* rt) {
         WASM_FREE((void*)rt->memory_imports[i].module);
         WASM_FREE((void*)rt->memory_imports[i].name);
     }
+    for (i = 0; i < rt->num_tag_imports; i++) {
+        WASM_FREE((void*)rt->tag_imports[i].module);
+        WASM_FREE((void*)rt->tag_imports[i].name);
+        wasm__free_functype(&rt->tag_imports[i].type);
+    }
     WASM_FREE(rt->imports);
     WASM_FREE(rt->global_imports);
     WASM_FREE(rt->table_imports);
     WASM_FREE(rt->memory_imports);
+    WASM_FREE(rt->tag_imports);
     WASM_FREE(rt->validator_stack);
     WASM_FREE(rt->validator_stack_reftypes);
     WASM_FREE(rt->validator_frames);
@@ -6150,6 +6183,44 @@ wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_i
     }
 
     rt->memory_imports[rt->num_memory_imports++] = copy;
+    return WASM_OK;
+}
+
+wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_t* imp) {
+    wasm_tag_import_t copy;
+    wasm_error_t err;
+
+    if (!rt || !imp || !imp->module || !imp->name) {
+        if (rt) WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid tag import");
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (rt->num_tag_imports >= rt->cap_tag_imports) {
+        uint32_t new_cap = rt->cap_tag_imports ? rt->cap_tag_imports * 2 : 16;
+        wasm_tag_import_t* a =
+            (wasm_tag_import_t*)WASM_REALLOC(rt->tag_imports, new_cap * sizeof(wasm_tag_import_t));
+        if (!a) return WASM_ERR_OOM;
+        rt->tag_imports = a;
+        rt->cap_tag_imports = new_cap;
+    }
+
+    memset(&copy, 0, sizeof(copy));
+    copy.module = wasm__strdup(imp->module);
+    copy.name = wasm__strdup(imp->name);
+    if (!copy.module || !copy.name) {
+        WASM_FREE((void*)copy.module);
+        WASM_FREE((void*)copy.name);
+        return WASM_ERR_OOM;
+    }
+
+    err = wasm__copy_functype(&copy.type, &imp->type);
+    if (err != WASM_OK) {
+        WASM_FREE((void*)copy.module);
+        WASM_FREE((void*)copy.name);
+        return err;
+    }
+
+    rt->tag_imports[rt->num_tag_imports++] = copy;
     return WASM_OK;
 }
 
@@ -6403,12 +6474,29 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
             info->is_mutable = (int)is_mutable;
         } else if (kind == 0x04) {
             uint32_t tag_index;
+            uint32_t type_index;
+            wasm_tag_import_t* timp;
+            const wasm_functype_t* import_type;
 
             err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
             if (err != WASM_OK) return err;
             if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+            type_index = wasm__read_leb128_u32(r);
+            import_type = wasm__module_const_functype(mod, type_index);
+            if (!import_type) return WASM_ERR_MALFORMED;
+            timp = wasm__find_tag_import(mod->rt, info->module, info->name);
+            if (!timp) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
+                return WASM_ERR_UNKNOWN_IMPORT;
+            }
+            if (!wasm__functype_equal(&timp->type, import_type)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "tag import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
-            mod->tags[tag_index].type_idx = wasm__read_leb128_u32(r);
+            mod->tags[tag_index].type_idx = type_index;
             info->index = tag_index;
             info->type_index = mod->tags[tag_index].type_idx;
         } else {
@@ -16258,6 +16346,15 @@ wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
     if (!ft) return WASM_TYPE_VOID;
     if (result_idx >= ft->num_results) return WASM_TYPE_VOID;
     return ft->results[result_idx];
+}
+
+uint32_t wasm_tag_count(wasm_module_t* mod) {
+    return mod ? mod->num_tags : 0;
+}
+
+const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
+    if (!mod || tag_idx >= mod->num_tags) return NULL;
+    return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
 }
 
 static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {

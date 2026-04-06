@@ -34,6 +34,8 @@ Use `wasm.h` like a normal single-header C library:
 Then initialize a runtime, load a module, and call an export:
 
 ```c
+#include <stdio.h>
+
 #define WASM_IMPL
 #include "wasm.h"
 
