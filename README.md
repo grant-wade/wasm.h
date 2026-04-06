@@ -169,7 +169,7 @@ Useful targets:
 
 This table tracks the current finished WebAssembly proposals against the actual `wasm.h` runtime surface. The status here is specifically about this C runtime, not the JS API or text-format tooling.
 
-| Proposal | Status in `wasm.h` | Notes |
+| Proposal | Status | Notes |
 | --- | --- | --- |
 | MVP | Implemented | Core load, validate, instantiate, and execute support. |
 | Import/Export of Mutable Globals | Implemented | Includes mutable globals and imported global support. |
