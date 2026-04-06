@@ -7,8 +7,11 @@ The intent is not to require green results today. It is a regression and compati
 ## Layout
 
 - `fixtures/*.c` — source files compiled by `emcc`
+- `spec/` — git submodule mirror of the official WebAssembly testsuite
 - `runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export
 - `CMakeLists.txt` — defines the runner, fixture compilation, and CTest integration
+
+The `spec/` subtree is not wired into CTest yet. The current integration plan for `.wast`-driven spec execution lives in [../docs/WASM_SPEC_TESTSUITE_PLAN.md](../docs/WASM_SPEC_TESTSUITE_PLAN.md).
 
 The runner binds the built-in WASI stubs automatically, so fixtures that call `printf`/`puts` through `wasi_snapshot_preview1.fd_write` can run without extra setup.
 

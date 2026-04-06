@@ -69,6 +69,7 @@ wl_add_native_executable(wasm2api wasm2api.c)
 wl_add_native_executable(wasm wasm.c)
 
 add_subdirectory(examples)
+add_subdirectory(tools)
 
 if(BUILD_TESTING)
     add_test(NAME wl_test COMMAND wl_test)
@@ -80,6 +81,9 @@ if(BUILD_TESTING)
     add_subdirectory(test)
 
     set(WL_CHECK_TARGET_DEPS wl_test wasm_test)
+    if(TARGET wabt-tools)
+        list(APPEND WL_CHECK_TARGET_DEPS wabt-tools)
+    endif()
     if(TARGET wasm-emcc-build)
         list(APPEND WL_CHECK_TARGET_DEPS wasm-emcc-build)
     endif()
