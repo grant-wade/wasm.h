@@ -79,7 +79,7 @@ add_custom_target(wasm-emcc-build DEPENDS wasm_runner ${WL_EMCC_OUTPUTS})
 
 add_test(
     NAME emcc.build
-    COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} --config $<CONFIG> --target wasm-emcc-build
+    COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} ${WL_BUILD_CONFIG_ARGS} --target wasm-emcc-build
 )
 set_tests_properties(emcc.build PROPERTIES
     LABELS "emcc"
@@ -91,14 +91,14 @@ add_custom_target(wasm-emcc-run
             -DWL_CTEST_COMMAND:FILEPATH=${CMAKE_CTEST_COMMAND}
             -DWL_CTEST_BINARY_DIR:PATH=${PROJECT_BINARY_DIR}
             -DWL_CTEST_LABEL:STRING=emcc
-            -DWL_CTEST_CONFIG:STRING=$<CONFIG>
+            $<$<BOOL:${WL_GENERATOR_IS_MULTI_CONFIG}>:-DWL_CTEST_CONFIG:STRING=$<CONFIG>>
             -P ${PROJECT_SOURCE_DIR}/cmake/RunCTestNoFail.cmake
     DEPENDS wasm-emcc-build
     USES_TERMINAL
 )
 
 add_custom_target(wasm-emcc-run-strict
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} -L emcc -C $<CONFIG>
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} -L emcc ${WL_CTEST_CONFIG_ARGS}
     DEPENDS wasm-emcc-build
     USES_TERMINAL
 )

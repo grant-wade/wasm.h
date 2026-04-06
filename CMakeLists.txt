@@ -50,6 +50,14 @@ if(WL_HAVE_LIBM)
     target_link_libraries(wl_math INTERFACE m)
 endif()
 
+get_property(WL_GENERATOR_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+set(WL_BUILD_CONFIG_ARGS)
+set(WL_CTEST_CONFIG_ARGS)
+if(WL_GENERATOR_IS_MULTI_CONFIG)
+    list(APPEND WL_BUILD_CONFIG_ARGS --config $<CONFIG>)
+    list(APPEND WL_CTEST_CONFIG_ARGS -C $<CONFIG>)
+endif()
+
 function(wl_add_native_executable target)
     add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE wl_project_options wl_math)
@@ -77,7 +85,7 @@ if(BUILD_TESTING)
     endif()
 
     add_custom_target(check
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} -C $<CONFIG>
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} ${WL_CTEST_CONFIG_ARGS}
         DEPENDS ${WL_CHECK_TARGET_DEPS}
         USES_TERMINAL
     )

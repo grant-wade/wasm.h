@@ -17,16 +17,27 @@
  *
  * QUICK START:
  *   wasm_runtime_t rt;
- *   wasm_init(&rt, NULL);
- *   wasm_module_t *mod = wasm_load(&rt, bytecode, bytecode_len);
+ *   wasm_module_t *mod;
  *   wasm_value_t args[1];
- *   args[0] = wasm_i32(42);
  *   wasm_value_t result;
- *   wasm_call(mod, "main", args, 1, &result, 1);
- *   printf("result = %d\n", result.of.i32);
- *   wasm_gc_collect(&rt);
+ *
+ *   if (wasm_init(&rt, NULL) != WASM_OK) return 1;
+ *   mod = wasm_load(&rt, bytecode, bytecode_len);
+ *   if (mod == NULL) {
+ *       wasm_destroy(&rt);
+ *       return 1;
+ *   }
+ *
+ *   args[0] = wasm_i32(42);
+ *   if (wasm_call(mod, "main", args, 1, &result, 1) == WASM_OK) {
+ *       printf("result = %d\n", result.of.i32);
+ *   }
+ *
+ *   wasm_free_module(mod);
+ *   wasm_destroy(&rt);
  *
  * INTROSPECTION:
+ *   After a successful wasm_load() into mod:
  *   uint32_t export_count = wasm_export_count(mod);
  *   for (uint32_t i = 0; i < export_count; i++) {
  *       printf("export %s kind=%u index=%u\n",
@@ -42,8 +53,6 @@
  *              (unsigned)wasm_func_result_count(mod, func_idx));
  *       wasm_call_index(mod, func_idx, args, 1, &result, 1);
  *   }
- *   wasm_free_module(mod);
- *   wasm_destroy(&rt);
  *
  * LICENSE: MIT
  *
@@ -57,10 +66,11 @@
  * Targets: Wasm 1.0 plus selected post-MVP proposals
  *   - i32, i64, f32, f64, funcref, and externref values
  *   - Imports/exports, including imported and mutable globals
- *   - Linear memories with bounds checks, indexed memory access, and memory.grow
+ *   - Multiple linear memories with bounds checks, indexed memory access, and memory.grow
  *   - Tables, call_indirect, and reference-type table operations
  *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
- *   - Bulk memory, sign-extension ops, trunc_sat conversions, extended const exprs, tail calls, exceptions, SIMD, and GC
+ *   - Bulk memory, sign-extension ops, non-trapping float-to-int conversions, extended const exprs, tail calls, exceptions, SIMD, and GC
+ *   - Optional WASI stub bindings for common wasi_snapshot_preview1 imports
  *   - Load-time validation plus runtime-configurable feature gating
  *   - No threads
  */
