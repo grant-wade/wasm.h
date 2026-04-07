@@ -1653,11 +1653,68 @@ static double wasm__read_f64(wasm__reader_t* r) {
     return v;
 }
 
+static int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
+    uint32_t i = 0;
+
+    while (i < len) {
+        uint8_t lead = bytes[i++];
+
+        if (lead < 0x80u) continue;
+        if (lead < 0xC2u) return 0;
+
+        if (lead < 0xE0u) {
+            if (i >= len) return 0;
+            if ((bytes[i++] & 0xC0u) != 0x80u) return 0;
+            continue;
+        }
+
+        if (lead < 0xF0u) {
+            uint8_t b1;
+            uint8_t b2;
+
+            if (i + 1u >= len) return 0;
+            b1 = bytes[i++];
+            b2 = bytes[i++];
+            if ((b1 & 0xC0u) != 0x80u || (b2 & 0xC0u) != 0x80u) return 0;
+            if (lead == 0xE0u && b1 < 0xA0u) return 0;
+            if (lead == 0xEDu && b1 >= 0xA0u) return 0;
+            continue;
+        }
+
+        if (lead < 0xF5u) {
+            uint8_t b1;
+            uint8_t b2;
+            uint8_t b3;
+
+            if (i + 2u >= len) return 0;
+            b1 = bytes[i++];
+            b2 = bytes[i++];
+            b3 = bytes[i++];
+            if ((b1 & 0xC0u) != 0x80u || (b2 & 0xC0u) != 0x80u || (b3 & 0xC0u) != 0x80u)
+                return 0;
+            if (lead == 0xF0u && b1 < 0x90u) return 0;
+            if (lead == 0xF4u && b1 >= 0x90u) return 0;
+            continue;
+        }
+
+        return 0;
+    }
+
+    return 1;
+}
+
 static void wasm__read_name(wasm__reader_t* r, char* buf, size_t bufsz) {
     uint32_t len = wasm__read_leb128_u32(r);
     uint32_t copy = len < (uint32_t)(bufsz - 1) ? len : (uint32_t)(bufsz - 1);
 
     if (r->malformed || !wasm__has(r, len)) {
+        buf[0] = '\0';
+        r->ptr = r->end;
+        r->malformed = 1;
+        return;
+    }
+
+    if (!wasm__is_valid_utf8(r->ptr, len)) {
         buf[0] = '\0';
         r->ptr = r->end;
         r->malformed = 1;
@@ -1677,6 +1734,11 @@ static wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name) {
     *out_name = NULL;
 
     if (r->malformed || !wasm__has(r, len)) {
+        r->ptr = r->end;
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (!wasm__is_valid_utf8(r->ptr, len)) {
         r->ptr = r->end;
         return WASM_ERR_MALFORMED;
     }
@@ -5636,8 +5698,6 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 uint32_t global_index = wasm__read_leb128_u32(r);
                 const wasm_global_t* global;
 
-                err = wasm__require_feature(mod, WASM_FEATURE_EXTENDED_CONST);
-                if (err != WASM_OK) break;
                 if (global_index >= max_global_index) {
                     WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown global %u", (unsigned)global_index);
                     err = WASM_ERR_MALFORMED;
@@ -5645,6 +5705,12 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 }
 
                 global = &mod->globals[global_index];
+                if (!global->is_import &&
+                    (!mod->rt || (mod->rt->enabled_features & WASM_FEATURE_EXTENDED_CONST) == 0)) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown global %u", (unsigned)global_index);
+                    err = WASM_ERR_MALFORMED;
+                    break;
+                }
                 if (global->is_mutable) {
                     WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "constant expression required");
                     err = WASM_ERR_TYPE_MISMATCH;

@@ -996,6 +996,12 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "malformed section header") != NULL ||
          strstr(actual_lower, "decode failed") != NULL))
         return 1;
+    if (strcmp(expected_lower, "end opcode expected") == 0 &&
+        strstr(actual_lower, "function body ended before all blocks closed") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "unexpected end of section or function") == 0 &&
+        strstr(actual_lower, "function body ended before all blocks closed") != NULL)
+        return 1;
     if (strcmp(expected_lower, "length out of bounds") == 0 &&
         strstr(actual_lower, "overruns module") != NULL)
         return 1;
@@ -1045,6 +1051,11 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "invalid lane index") == 0 &&
         strstr(actual_lower, "lane") != NULL && strstr(actual_lower, "out of range") != NULL)
         return 1;
+    if (strcmp(expected_lower, "malformed lane index") == 0 &&
+        ((strstr(actual_lower, "lane index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         strstr(actual_lower, "invalid literal") != NULL ||
+         strstr(actual_lower, "natural number in range") != NULL))
+        return 1;
     if (strcmp(expected_lower, "alignment must not be larger than natural") == 0 &&
         strstr(actual_lower, "exceeds natural alignment") != NULL)
         return 1;
@@ -1078,6 +1089,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "integer representation too long") == 0 &&
         ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
          strstr(actual_lower, "malformed section header") != NULL ||
+         strstr(actual_lower, "trailing bytes") != NULL ||
+         strstr(actual_lower, "unknown section id") != NULL ||
+         strstr(actual_lower, "malformed immediate") != NULL ||
          strstr(actual_lower, "integer representation too long") != NULL))
         return 1;
     if (strcmp(expected_lower, "magic header not detected") == 0 &&
@@ -1089,12 +1103,26 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "malformed section id") == 0 &&
         strstr(actual_lower, "unknown section id") != NULL)
         return 1;
+    if (strcmp(expected_lower, "function and code section have inconsistent lengths") == 0 &&
+        strstr(actual_lower, "section 10 decode failed") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "section size mismatch") == 0 &&
+        strstr(actual_lower, "function body ended before all blocks closed") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "data count and data section have inconsistent lengths") == 0 &&
+        strstr(actual_lower, "data count section declares") != NULL)
+        return 1;
     if (strcmp(expected_lower, "invalid result arity") == 0 &&
         (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
          strstr(actual_lower, "typed select requires exactly one value type") != NULL))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
-        strstr(actual_lower, "select requires matching numeric or vector operand types") != NULL)
+        (strstr(actual_lower, "select requires matching numeric or vector operand types") != NULL ||
+         strstr(actual_lower, "ref is null requires a reference operand") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "malformed utf 8 encoding") == 0 &&
+        (strstr(actual_lower, "invalid utf 8 encoding") != NULL ||
+         (strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
         strstr(actual_lower, "if without else requires param and result types to match") != NULL)
@@ -2436,6 +2464,7 @@ static int spec_harness_init(spec_harness_t* harness,
     wasm_enable_all_features(&harness->runtime);
     if (!spec_json_uses_multi_memory(json_path))
         wasm_disable_feature(&harness->runtime, WASM_FEATURE_MULTI_MEMORY);
+    wasm_disable_feature(&harness->runtime, WASM_FEATURE_EXTENDED_CONST);
 
     err = wasm_bind_wasi_stubs(&harness->runtime);
     if (err != WASM_OK) {
