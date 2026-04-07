@@ -236,6 +236,7 @@ WASM_INLINE wasm_value_t wasm_i32(int32_t v) {
     r.of.i32 = v;
     return r;
 }
+
 WASM_INLINE wasm_value_t wasm_i64(int64_t v) {
     wasm_value_t r;
     r.type = WASM_TYPE_I64;
@@ -480,10 +481,16 @@ typedef struct wasm_func_t {
     uint32_t code_len;
     wasm__control_target_t* control_targets;
     uint32_t max_label_depth;
+    uint32_t funcref_id;
     int is_import;
     wasm_host_func_t host_func;
     void* host_userdata;
 } wasm_func_t;
+
+typedef struct wasm_func_ref_t {
+    struct wasm_module_t* module;
+    uint32_t func_idx;
+} wasm_func_ref_t;
 
 /* ── Export entry ──────────────────────────────────────────────────── */
 typedef enum wasm_export_kind_t {
@@ -674,6 +681,9 @@ struct wasm_runtime_t {
     wasm_import_t* imports;
     uint32_t num_imports;
     uint32_t cap_imports;
+    wasm_func_ref_t* func_refs;
+    uint32_t num_func_refs;
+    uint32_t cap_func_refs;
     wasm_global_import_t* global_imports;
     uint32_t num_global_imports;
     uint32_t cap_global_imports;
@@ -1468,6 +1478,17 @@ static wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag) {
         }
     }
 
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__require_multi_memory(wasm_module_t* mod) {
+    if ((mod->rt->enabled_features & WASM_FEATURE_MULTI_MEMORY) == 0 ||
+        (WASM__IMPLEMENTED_FEATURES & WASM_FEATURE_MULTI_MEMORY) == 0) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "multiple memories");
+        return WASM_ERR_MALFORMED;
+    }
+
+    mod->required_features |= WASM_FEATURE_MULTI_MEMORY;
     return WASM_OK;
 }
 
@@ -2323,6 +2344,42 @@ static float wasm__nearest_f32(float value) {
 
 static double wasm__nearest_f64(double value) {
     return nearbyint(value);
+}
+
+static float wasm__f32_abs_bits(float value) {
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    bits &= 0x7FFFFFFFu;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static float wasm__f32_neg_bits(float value) {
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    bits ^= 0x80000000u;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static double wasm__f64_abs_bits(double value) {
+    uint64_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    bits &= UINT64_C(0x7FFFFFFFFFFFFFFF);
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static double wasm__f64_neg_bits(double value) {
+    uint64_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    bits ^= UINT64_C(0x8000000000000000);
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 static wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
@@ -3542,6 +3599,7 @@ static int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs) {
 static wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
     uint32_t base = mod->num_funcs;
     wasm_func_t* funcs;
+    uint32_t i;
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
@@ -3551,6 +3609,7 @@ static wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint3
 
     mod->funcs = funcs;
     memset(mod->funcs + base, 0, count * sizeof(wasm_func_t));
+    for (i = 0; i < count; i++) mod->funcs[base + i].funcref_id = UINT32_MAX;
     mod->num_funcs = base + count;
     return WASM_OK;
 }
@@ -3651,6 +3710,91 @@ static const wasm_table_t* wasm__table_actual_const(const wasm_table_t* table) {
     while (table && table->is_import && table->import_table && table->import_table != table)
         table = table->import_table;
     return table;
+}
+
+static wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
+                                                    wasm_module_t* mod,
+                                                    uint32_t func_idx,
+                                                    uint32_t* out_ref_id) {
+    uint32_t i;
+
+    if (!rt || !mod || !out_ref_id) return WASM_ERR_MALFORMED;
+
+    for (i = 0; i < rt->num_func_refs; i++) {
+        if (rt->func_refs[i].module == mod && rt->func_refs[i].func_idx == func_idx) {
+            *out_ref_id = i;
+            return WASM_OK;
+        }
+    }
+
+    if (rt->num_func_refs >= rt->cap_func_refs) {
+        uint32_t new_cap = rt->cap_func_refs ? rt->cap_func_refs * 2u : 64u;
+        wasm_func_ref_t* refs =
+            (wasm_func_ref_t*)WASM_REALLOC(rt->func_refs, new_cap * sizeof(*rt->func_refs));
+
+        if (!refs) return WASM_ERR_OOM;
+        rt->func_refs = refs;
+        rt->cap_func_refs = new_cap;
+    }
+
+    rt->func_refs[rt->num_func_refs].module = mod;
+    rt->func_refs[rt->num_func_refs].func_idx = func_idx;
+    *out_ref_id = rt->num_func_refs++;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
+                                             uint32_t func_idx,
+                                             uint32_t* out_ref_id) {
+    wasm_func_t* func;
+    wasm_error_t err;
+
+    if (!mod || !mod->rt || !out_ref_id || func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
+
+    func = &mod->funcs[func_idx];
+    if (func->funcref_id != UINT32_MAX) {
+        *out_ref_id = func->funcref_id;
+        return WASM_OK;
+    }
+
+    err = wasm__runtime_register_func_ref(mod->rt, mod, func_idx, &func->funcref_id);
+    if (err != WASM_OK) return err;
+    *out_ref_id = func->funcref_id;
+    return WASM_OK;
+}
+
+static int wasm__resolve_func_ref(const wasm_runtime_t* rt,
+                                  uint32_t ref_id,
+                                  wasm_module_t** out_module,
+                                  uint32_t* out_func_idx) {
+    if (!rt || ref_id >= rt->num_func_refs) return 0;
+    if (out_module) *out_module = rt->func_refs[ref_id].module;
+    if (out_func_idx) *out_func_idx = rt->func_refs[ref_id].func_idx;
+    return 1;
+}
+
+static wasm_error_t wasm__make_funcref(wasm_module_t* mod,
+                                       uint32_t func_idx,
+                                       wasm_value_t* out_value) {
+    uint32_t ref_id;
+    wasm_error_t err;
+
+    if (!out_value) return WASM_ERR_MALFORMED;
+    err = wasm__ensure_func_ref_id(mod, func_idx, &ref_id);
+    if (err != WASM_OK) return err;
+    *out_value = wasm_funcref(ref_id);
+    return WASM_OK;
+}
+
+static int wasm__functype_equal_across_modules(const wasm_module_t* lhs_mod,
+                                               uint32_t lhs_type_idx,
+                                               const wasm_module_t* rhs_mod,
+                                               uint32_t rhs_type_idx) {
+    const wasm_functype_t* lhs = wasm__module_const_functype(lhs_mod, lhs_type_idx);
+    const wasm_functype_t* rhs = wasm__module_const_functype(rhs_mod, rhs_type_idx);
+
+    if (!lhs || !rhs) return 0;
+    return wasm__functype_equal(lhs, rhs);
 }
 
 static wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory) {
@@ -5610,15 +5754,20 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
             }
             case 0xD2: {
                 uint32_t func_index = wasm__read_leb128_u32(r);
+                wasm_value_t funcref;
 
                 err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) break;
                 if (func_index >= mod->num_funcs) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown function %u",
+                                  (unsigned)func_index);
                     err = WASM_ERR_MALFORMED;
                     break;
                 }
 
-                err = wasm__init_expr_stack_push(&stack, wasm_funcref(func_index));
+                err = wasm__make_funcref(mod, func_index, &funcref);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(&stack, funcref);
                 break;
             }
             case 0xFB: {
@@ -6221,6 +6370,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
         wasm__free_functype(&rt->tag_imports[i].type);
     }
     WASM_FREE(rt->imports);
+    WASM_FREE(rt->func_refs);
     WASM_FREE(rt->global_imports);
     WASM_FREE(rt->table_imports);
     WASM_FREE(rt->memory_imports);
@@ -6666,7 +6816,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
 
         if (wasm__append_memories(mod, 1, &memory_index) != WASM_OK) return WASM_ERR_OOM;
         if (mod->num_memories > 1) {
-            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
+            wasm_error_t err = wasm__require_multi_memory(mod);
             if (err != WASM_OK) return err;
         }
         memory = &mod->memories[memory_index];
@@ -6714,6 +6864,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         err = wasm__read_valtype(mod, r, &type, &ref_type);
         if (err != WASM_OK) return err;
         is_mutable = wasm__read_u8(r);
+        if (is_mutable > 1) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "malformed mutability");
+            return WASM_ERR_MALFORMED;
+        }
         if (is_mutable) {
             wasm_error_t feature_err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
             if (feature_err != WASM_OK) return feature_err;
@@ -6839,7 +6993,6 @@ static wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader
                 wasm_import_info_t* info;
                 uint8_t entry_kind = compact_kind;
                 wasm_error_t append_err = wasm__append_import_infos(mod, 1, &import_index);
-
                 if (append_err != WASM_OK) {
                     WASM_FREE(module_name);
                     return append_err;
@@ -6928,7 +7081,7 @@ static wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader
 
     if (wasm__append_memories(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     if (mod->num_memories > 1) {
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_MEMORY);
+        wasm_error_t err = wasm__require_multi_memory(mod);
         if (err != WASM_OK) return err;
     }
 
@@ -6957,11 +7110,15 @@ static wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader
                                  &mod->globals[global_index].ref_type);
         if (err != WASM_OK) return err;
         mod->globals[global_index].is_mutable = wasm__read_u8(r);
+        if (mod->globals[global_index].is_mutable > 1) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "malformed mutability");
+            return WASM_ERR_MALFORMED;
+        }
         if (mod->globals[global_index].is_mutable) {
             err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
             if (err != WASM_OK) return err;
         }
-        err = wasm__eval_init_expr(mod, r, global_index, &value);
+        err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &value);
         if (err != WASM_OK) return err;
         if (!wasm__runtime_value_matches_type(mod,
                                               &value,
@@ -7041,7 +7198,7 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             wasm_value_t offset_value;
 
             segment->table_index = (flags & 0x02) ? wasm__read_leb128_u32(r) : 0;
-            err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+            err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
             if (err != WASM_OK) return err;
             if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
             segment->offset = (uint32_t)offset_value.of.i32;
@@ -7073,7 +7230,7 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             wasm_value_t value;
 
             if (uses_expr) {
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &value);
+                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &value);
                 if (err != WASM_OK) return err;
                 if (!wasm__runtime_value_matches_type(mod,
                                                       &value,
@@ -7082,8 +7239,13 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
                     return WASM_ERR_TYPE_MISMATCH;
             } else {
                 uint32_t func_index = wasm__read_leb128_u32(r);
-                if (func_index >= mod->num_funcs) return WASM_ERR_MALFORMED;
-                value = wasm_funcref(func_index);
+                if (func_index >= mod->num_funcs) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown function %u",
+                                  (unsigned)func_index);
+                    return WASM_ERR_MALFORMED;
+                }
+                err = wasm__make_funcref(mod, func_index, &value);
+                if (err != WASM_OK) return err;
             }
             segment->elems[j] = value;
         }
@@ -7160,8 +7322,11 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
                 wasm_value_t offset_value;
                 wasm_memory_t* memory;
 
-                if (mod->num_memories == 0) return WASM_ERR_MALFORMED;
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (mod->num_memories == 0) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown memory %u", 0u);
+                    return WASM_ERR_MALFORMED;
+                }
+                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
                 if (err != WASM_OK) return err;
                 segment->memory_index = 0;
                 memory = &mod->memories[segment->memory_index];
@@ -7182,8 +7347,12 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
                 err = wasm__require_feature(mod, WASM_FEATURE_BULK_MEMORY);
                 if (err != WASM_OK) return err;
                 segment->memory_index = wasm__read_leb128_u32(r);
-                if (segment->memory_index >= mod->num_memories) return WASM_ERR_MALFORMED;
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+                if (segment->memory_index >= mod->num_memories) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown memory %u",
+                                  (unsigned)segment->memory_index);
+                    return WASM_ERR_MALFORMED;
+                }
+                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
                 if (err != WASM_OK) return err;
                 memory = &mod->memories[segment->memory_index];
                 if (offset_value.type != wasm__memory_index_type(memory)) return WASM_ERR_TYPE_MISMATCH;
@@ -7499,7 +7668,7 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
     for (i = 0; i < mod->num_memories; i++) {
         wasm_memory_t* memory = &mod->memories[i];
 
-        if (memory->max_pages != 0 && memory->pages > memory->max_pages) {
+        if (memory->pages > memory->max_pages) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                               "memory %u min %llu exceeds max %llu",
                                               (unsigned)i,
@@ -7927,6 +8096,19 @@ static wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
     }
 
     return WASM_OK;
+}
+
+static uint32_t wasm__validator_stack_floor_after_checked(const wasm__validator_t* v,
+                                                          uint32_t count) {
+    const wasm__val_frame_t* frame = &v->frames[v->fp - 1];
+    uint32_t available = v->sp - frame->height;
+
+    if (count >= available) return frame->height;
+    return v->sp - count;
+}
+
+static void wasm__validator_consume_checked(wasm__validator_t* v, uint32_t count) {
+    v->sp = wasm__validator_stack_floor_after_checked(v, count);
 }
 
 static void wasm__validator_mark_unreachable(wasm__validator_t* v) {
@@ -9407,6 +9589,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             case 0x02:
             case 0x03: {
                 wasm__blocktype_t blocktype;
+                uint32_t entry_height;
 
                 err = wasm__read_blocktype(mod, &v.r, &blocktype);
                 if (err != WASM_OK) return wasm__validator_error(&v, at, "%s", mod->rt->error_msg);
@@ -9415,10 +9598,11 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
+                entry_height = wasm__validator_stack_floor_after_checked(&v, blocktype.param_arity);
                 if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
-                v.frames[v.fp].height = v.sp - blocktype.param_arity;
+                v.frames[v.fp].height = entry_height;
                 v.frames[v.fp].param_types = blocktype.params;
                 v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
@@ -9444,6 +9628,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x04: {
                 wasm__blocktype_t blocktype;
+                uint32_t entry_height;
 
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
@@ -9454,10 +9639,11 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
+                entry_height = wasm__validator_stack_floor_after_checked(&v, blocktype.param_arity);
                 if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
-                v.frames[v.fp].height = v.sp - blocktype.param_arity;
+                v.frames[v.fp].height = entry_height;
                 v.frames[v.fp].param_types = blocktype.params;
                 v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
@@ -9510,6 +9696,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x06: {
                 wasm__blocktype_t blocktype;
+                uint32_t entry_height;
 
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
                 if (err != WASM_OK) return err;
@@ -9520,10 +9707,11 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         blocktype.param_reftypes,
                                                         blocktype.param_arity);
                 if (err != WASM_OK) return err;
+                entry_height = wasm__validator_stack_floor_after_checked(&v, blocktype.param_arity);
                 if (v.fp >= v.frame_capacity)
                     return wasm__validator_error(&v, at, "control stack overflow");
                 v.frames[v.fp].opcode = op;
-                v.frames[v.fp].height = v.sp - blocktype.param_arity;
+                v.frames[v.fp].height = entry_height;
                 v.frames[v.fp].param_types = blocktype.params;
                 v.frames[v.fp].param_reftypes = blocktype.param_reftypes;
                 v.frames[v.fp].num_params = blocktype.param_arity;
@@ -9591,7 +9779,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         tag_type->param_reftypes,
                                                         tag_type->num_params);
                 if (err != WASM_OK) return err;
-                v.sp -= tag_type->num_params;
+                wasm__validator_consume_checked(&v, tag_type->num_params);
                 wasm__validator_mark_unreachable(&v);
                 break;
             }
@@ -9733,7 +9921,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         callee_type->param_reftypes,
                                                         callee_type->num_params);
                 if (err != WASM_OK) return err;
-                v.sp -= callee_type->num_params;
+                wasm__validator_consume_checked(&v, callee_type->num_params);
                 err = wasm__validator_push_many_typed(&v, at,
                                                       callee_type->results,
                                                       callee_type->result_reftypes,
@@ -9766,7 +9954,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         callee_type->param_reftypes,
                                                         callee_type->num_params);
                 if (err != WASM_OK) return err;
-                v.sp -= callee_type->num_params;
+                wasm__validator_consume_checked(&v, callee_type->num_params);
                 err = wasm__validator_push_many_typed(&v, at,
                                                       callee_type->results,
                                                       callee_type->result_reftypes,
@@ -9791,7 +9979,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         callee_type->param_reftypes,
                                                         callee_type->num_params);
                 if (err != WASM_OK) return err;
-                v.sp -= callee_type->num_params;
+                wasm__validator_consume_checked(&v, callee_type->num_params);
                 err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
                 if (err != WASM_OK) return err;
                 wasm__validator_mark_unreachable(&v);
@@ -9825,7 +10013,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                         callee_type->param_reftypes,
                                                         callee_type->num_params);
                 if (err != WASM_OK) return err;
-                v.sp -= callee_type->num_params;
+                wasm__validator_consume_checked(&v, callee_type->num_params);
                 err = wasm__validator_check_tail_results(&v, at, ft, callee_type);
                 if (err != WASM_OK) return err;
                 wasm__validator_mark_unreachable(&v);
@@ -10784,6 +10972,7 @@ static wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod) {
 }
 
 struct wasm__call_frame_t {
+    wasm_module_t* module;
     uint32_t func_idx;
     uint32_t sp_base;
     wasm_value_t* locals;
@@ -11182,6 +11371,7 @@ static void wasm__clear_label(wasm__label_t* label) {
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
 
 static void wasm__init_call_frame(wasm__call_frame_t* cf,
+                                  wasm_module_t* mod,
                                   wasm_runtime_t* rt,
                                   uint32_t func_idx,
                                   wasm_func_t* func,
@@ -11268,7 +11458,7 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];
-    wasm__init_call_frame(cf, rt, func_idx, func, ft, locals, labels, results_dst, num_results);
+    wasm__init_call_frame(cf, mod, rt, func_idx, func, ft, locals, labels, results_dst, num_results);
     cf->arena_saved = arena_saved;
 
     for (i = 0; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
@@ -11326,7 +11516,7 @@ static wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t b
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
         wasm_error_t err;
 
-        err = wasm__handle_exception_in_frame(mod, cf->labels, &cf->lsp, &cf->r, cf->sp_base);
+        err = wasm__handle_exception_in_frame(cf->module, cf->labels, &cf->lsp, &cf->r, cf->sp_base);
         if (err == WASM_OK) return WASM_OK;
         if (err != WASM__ERR_EXCEPTION) return err;
 
@@ -11997,6 +12187,7 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
 }
 
 static void wasm__init_call_frame(wasm__call_frame_t* cf,
+                                  wasm_module_t* mod,
                                   wasm_runtime_t* rt,
                                   uint32_t func_idx,
                                   wasm_func_t* func,
@@ -12006,6 +12197,7 @@ static void wasm__init_call_frame(wasm__call_frame_t* cf,
                                   wasm_value_t* results_dst,
                                   uint32_t num_results) {
     memset(cf, 0, sizeof(*cf));
+    cf->module = mod;
     cf->func_idx = func_idx;
     cf->sp_base = rt->sp;
     cf->locals = locals;
@@ -12038,6 +12230,7 @@ static void wasm__init_call_frame(wasm__call_frame_t* cf,
 
 static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm__call_frame_t* cf,
+                                      wasm_module_t** next_module,
                                       uint32_t* next_func_idx,
                                       wasm_value_t** next_args,
                                       uint32_t* next_num_args,
@@ -12047,6 +12240,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
 static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm__call_frame_t* cf,
+                                      wasm_module_t** next_module,
                                       uint32_t* next_func_idx,
                                       wasm_value_t** next_args,
                                       uint32_t* next_num_args,
@@ -12347,6 +12541,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     break;
                 }
 
+                if (next_module) *next_module = mod;
                 *next_func_idx = ci;
                 *next_args = call_args;
                 *next_num_args = cft->num_params;
@@ -12356,6 +12551,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x11: { /* call_indirect */
                 uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
+                wasm_module_t* callee_mod;
                 wasm_functype_t* cft;
                 wasm_func_t* callee;
                 wasm_table_t* table;
@@ -12372,12 +12568,13 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
                 if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
-                ci = table->elems[tvi].of.funcref;
-                if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &mod->funcs[ci];
+                if (!wasm__resolve_func_ref(rt, table->elems[tvi].of.funcref, &callee_mod, &ci))
+                    WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                callee = &callee_mod->funcs[ci];
                 cft = wasm__module_functype(mod, ti);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__type_equal(mod, callee->type_idx, ti))
+                if (!wasm__functype_equal_across_modules(callee_mod, callee->type_idx, mod, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (cft->num_params > 8) {
                     call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
@@ -12395,7 +12592,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     }
                     if (cft->num_results > 0)
                         memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
-                    err = wasm__invoke_host_func(mod, callee->host_func,
+                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
                                                  call_args, cft->num_params,
                                                  call_results, cft->num_results,
                                                  callee->host_userdata);
@@ -12409,6 +12606,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     break;
                 }
 
+                if (next_module) *next_module = callee_mod;
                 *next_func_idx = ci;
                 *next_args = call_args;
                 *next_num_args = cft->num_params;
@@ -12463,6 +12661,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 }
 
                 rt->sp = sp_base;
+                if (next_module) *next_module = mod;
                 *next_func_idx = ci;
                 *next_args = tail_args;
                 *next_num_args = cft->num_params;
@@ -12472,6 +12671,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x13: { /* return_call_indirect */
                 uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
+                wasm_module_t* callee_mod;
                 wasm_functype_t* cft;
                 wasm_table_t* table;
                 wasm_value_t* tail_args = tail_args_buf;
@@ -12490,12 +12690,13 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
                 if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
-                ci = table->elems[tvi].of.funcref;
-                if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &mod->funcs[ci];
+                if (!wasm__resolve_func_ref(rt, table->elems[tvi].of.funcref, &callee_mod, &ci))
+                    WASM__TRAP(WASM_ERR_MALFORMED);
+                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                callee = &callee_mod->funcs[ci];
                 cft = wasm__module_functype(mod, ti);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__type_equal(mod, callee->type_idx, ti))
+                if (!wasm__functype_equal_across_modules(callee_mod, callee->type_idx, mod, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
@@ -12514,7 +12715,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     }
                     if (cft->num_results > 0)
                         memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
-                    err = wasm__invoke_host_func(mod, callee->host_func,
+                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
                                                  tail_args, cft->num_params,
                                                  tail_results, cft->num_results,
                                                  callee->host_userdata);
@@ -12532,6 +12733,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 }
 
                 rt->sp = sp_base;
+                if (next_module) *next_module = callee_mod;
                 *next_func_idx = ci;
                 *next_args = tail_args;
                 *next_num_args = cft->num_params;
@@ -13251,7 +13453,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         table = wasm__table_at(mod, table_idx);
                         if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                         segment = &mod->elem_segments[elem_idx];
-                        if (segment->is_declarative) WASM__TRAP(WASM_ERR_TRAP);
+                        if (segment->is_declarative) {
+                            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "out of bounds table access");
+                            err = WASM_ERR_TRAP;
+                            goto cleanup;
+                        }
                         if (!wasm__typed_valtype_is_subtype(mod,
                                                             segment->elem_type,
                                                             &segment->elem_ref_type,
@@ -14484,8 +14690,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0xD2: {
                 uint32_t func_index = wasm__read_leb128_u32(&cf->r);
+                wasm_value_t funcref;
                 if (func_index >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                WASM__PUSH(rt, wasm_funcref(func_index));
+                err = wasm__make_funcref(mod, func_index, &funcref);
+                if (err != WASM_OK) goto cleanup;
+                WASM__PUSH(rt, funcref);
                 break;
             }
             case 0xD3: {
@@ -14905,12 +15114,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             /* f32 arithmetic */
             case 0x8B: {
                 wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32((float)fabs((double)a.of.f32)));
+                WASM__PUSH(rt, wasm_f32(wasm__f32_abs_bits(a.of.f32)));
                 break;
             }
             case 0x8C: {
                 wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f32(-a.of.f32));
+                WASM__PUSH(rt, wasm_f32(wasm__f32_neg_bits(a.of.f32)));
                 break;
             }
             case 0x8D: {
@@ -14931,9 +15140,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x90: {
                 wasm_value_t a = WASM__POP(rt);
-                double d = (double)a.of.f32, rd = floor(d + 0.5);
-                if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
-                WASM__PUSH(rt, wasm_f32((float)rd));
+                WASM__PUSH(rt, wasm_f32(wasm__nearest_f32(a.of.f32)));
                 break;
             }
             case 0x91: {
@@ -14988,12 +15195,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             /* f64 arithmetic */
             case 0x99: {
                 wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(fabs(a.of.f64)));
+                WASM__PUSH(rt, wasm_f64(wasm__f64_abs_bits(a.of.f64)));
                 break;
             }
             case 0x9A: {
                 wasm_value_t a = WASM__POP(rt);
-                WASM__PUSH(rt, wasm_f64(-a.of.f64));
+                WASM__PUSH(rt, wasm_f64(wasm__f64_neg_bits(a.of.f64)));
                 break;
             }
             case 0x9B: {
@@ -15014,9 +15221,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x9E: {
                 wasm_value_t a = WASM__POP(rt);
-                double d = a.of.f64, rd = floor(d + 0.5);
-                if (d + 0.5 == rd && fmod(rd, 2.0) != 0.0) rd -= 1.0;
-                WASM__PUSH(rt, wasm_f64(rd));
+                WASM__PUSH(rt, wasm_f64(wasm__nearest_f64(a.of.f64)));
                 break;
             }
             case 0x9F: {
@@ -15294,6 +15499,7 @@ static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     wasm_func_t* func;
     uint32_t base_frame_sp = rt->call_frame_sp;
     wasm_value_t request_args_buf[8];
+    wasm_module_t* next_module = NULL;
     wasm_value_t* next_args = NULL;
     uint32_t next_func_idx = 0;
     uint32_t next_num_args = 0;
@@ -15313,18 +15519,22 @@ static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
 
     while (rt->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
+        wasm_module_t* frame_mod = cf->module ? cf->module : mod;
 
+        next_module = NULL;
         next_args = NULL;
         next_num_args = 0;
         next_args_owned = 0;
         next_func_idx = 0;
 
-        err = wasm__interp_loop(mod, cf,
+        err = wasm__interp_loop(frame_mod, cf,
+                                &next_module,
                                 &next_func_idx, &next_args, &next_num_args,
                                 &next_args_owned, request_args_buf, base_frame_sp);
 
         if (err == WASM__ERR_CALL_FRAME) {
-            err = wasm__push_call_frame(mod, next_func_idx, next_args, next_num_args,
+            err = wasm__push_call_frame(next_module ? next_module : frame_mod,
+                                        next_func_idx, next_args, next_num_args,
                                         NULL, 0);
             if (next_args_owned && next_args) {
                 WASM_FREE(next_args);
@@ -15343,7 +15553,8 @@ static wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
             memset(cf, 0, sizeof(*cf));
             rt->call_frame_sp--;
 
-            err = wasm__push_call_frame(mod, next_func_idx, next_args, next_num_args,
+            err = wasm__push_call_frame(next_module ? next_module : frame_mod,
+                                        next_func_idx, next_args, next_num_args,
                                         next_results_dst, next_result_count);
             if (next_args_owned && next_args) {
                 WASM_FREE(next_args);

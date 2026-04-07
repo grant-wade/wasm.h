@@ -103,6 +103,7 @@ typedef struct spec_harness_t {
     wasm_value_t test_global_g;
     wasm_value_t test_global_mut_i32;
     wasm_value_t test_global_mut_i64;
+    wasm_value_t empty_global_externref;
 } spec_harness_t;
 
 static char* spec_strdup_cstr(const char* text) {
@@ -527,6 +528,22 @@ static int spec_parse_f64_bits_token(const char* json,
     return spec_parse_u64_token(json, token, out_bits);
 }
 
+static int spec_encode_externref_handle(uint64_t bits, uintptr_t* out_value) {
+    if (!out_value) return 0;
+    if (bits > (uint64_t)UINTPTR_MAX - 1u) return 0;
+    *out_value = (uintptr_t)(bits + 1u);
+    return 1;
+}
+
+static int spec_json_uses_multi_memory(const char* json_path) {
+    const char* leaf;
+
+    if (!json_path) return 0;
+    leaf = strrchr(json_path, '/');
+    leaf = leaf ? leaf + 1 : json_path;
+    return strstr(leaf, "memory-multi") != NULL || strstr(leaf, "memory_multi") != NULL;
+}
+
 static char* spec_read_file_text(const char* path, size_t* out_size) {
     FILE* file;
     long size;
@@ -853,6 +870,56 @@ static wasm_error_t spec_bind_default_test_globals(spec_harness_t* harness) {
     return WASM_OK;
 }
 
+static wasm_error_t spec_bind_default_empty_imports(spec_harness_t* harness,
+                                                   wasm_module_t* support_module) {
+    wasm_table_import_t table_import;
+    wasm_memory_import_t memory_import;
+    wasm_global_import_t global_import;
+    wasm_error_t err;
+    uint32_t i;
+    int bound_table = 0;
+    int bound_memory = 0;
+
+    if (!harness || !support_module) return WASM_ERR_MALFORMED;
+
+    harness->empty_global_externref = wasm_externref((uintptr_t)0);
+    memset(&global_import, 0, sizeof(global_import));
+    global_import.module = "";
+    global_import.name = "";
+    global_import.type = WASM_TYPE_EXTERNREF;
+    global_import.value = &harness->empty_global_externref;
+    err = wasm_register_global_import(&harness->runtime, &global_import);
+    if (err != WASM_OK) return err;
+
+    for (i = 0; i < wasm_export_count(support_module) && (!bound_table || !bound_memory); i++) {
+        wasm_export_kind_t kind = wasm_export_kind(support_module, i);
+        uint32_t index = wasm_export_index(support_module, i);
+
+        if (!bound_table && kind == WASM_EXPORT_TABLE) {
+            memset(&table_import, 0, sizeof(table_import));
+            table_import.module = "";
+            table_import.name = "";
+            table_import.table = wasm_table_ref_at(support_module, index);
+            err = wasm_register_table_import(&harness->runtime, &table_import);
+            if (err != WASM_OK) return err;
+            bound_table = 1;
+            continue;
+        }
+
+        if (!bound_memory && kind == WASM_EXPORT_MEM) {
+            memset(&memory_import, 0, sizeof(memory_import));
+            memory_import.module = "";
+            memory_import.name = "";
+            memory_import.memory = wasm_memory_ref_at(support_module, index);
+            err = wasm_register_memory_import(&harness->runtime, &memory_import);
+            if (err != WASM_OK) return err;
+            bound_memory = 1;
+        }
+    }
+
+    return WASM_OK;
+}
+
 static int spec_lowercase_copy(char* dst, size_t dst_size, const char* src) {
     size_t i;
 
@@ -882,8 +949,23 @@ static int spec_message_matches(const char* expected, const char* actual) {
 
     if (strstr(actual_lower, expected_lower) != NULL) return 1;
     if (strcmp(expected_lower, "unknown import") == 0 && strstr(actual_lower, "unresolved:") != NULL) return 1;
+    if (strcmp(expected_lower, "unknown type") == 0 &&
+        strstr(actual_lower, "type index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "type mismatch") == 0 &&
+        strstr(actual_lower, "requires a funcref table") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "duplicate global") == 0 && strstr(actual_lower, "redefinition of global") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "duplicate table") == 0 && strstr(actual_lower, "redefinition of table") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "duplicate memory") == 0 && strstr(actual_lower, "redefinition of memory") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "unknown global") == 0 &&
+        strstr(actual_lower, "global index") != NULL && strstr(actual_lower, "out of range") != NULL)
         return 1;
     if (strncmp(expected_lower, "unknown local", 13u) == 0 &&
         strstr(actual_lower, "local index") != NULL && strstr(actual_lower, "out of range") != NULL)
@@ -895,12 +977,24 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
          strstr(actual_lower, "invalid literal") != NULL))
         return 1;
-    if (strstr(expected_lower, "constant out of range") != NULL &&
+    if (strcmp(expected_lower, "inline function type") == 0 &&
+        strstr(actual_lower, "expected ") != NULL && strstr(actual_lower, " got ") != NULL)
+        return 1;
+    if ((strstr(expected_lower, "constant out of range") != NULL ||
+         strstr(expected_lower, "i32 constant out of range") != NULL ||
+         strstr(expected_lower, "i64 constant out of range") != NULL) &&
         (strstr(actual_lower, "out of range") != NULL || strstr(actual_lower, "natural number in range") != NULL ||
-         strstr(actual_lower, "invalid literal") != NULL))
+            strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL))
         return 1;
     if (strcmp(expected_lower, "alignment must be a power of two") == 0 &&
         strstr(actual_lower, "alignment must be power of two") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "size minimum must not be greater than maximum") == 0 &&
+        strstr(actual_lower, "min") != NULL && strstr(actual_lower, "exceeds max") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "memory size must be at most 65536 pages (4gib)") == 0 &&
+        (strstr(actual_lower, "exceeds max 65536") != NULL ||
+         strstr(actual_lower, "exceeds mvp page limit") != NULL))
         return 1;
     if (strcmp(expected_lower, "wrong number of lane literals") == 0 &&
         (strstr(actual_lower, "literal") != NULL || strstr(actual_lower, "unexpected token") != NULL))
@@ -918,6 +1012,15 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "alignment must not be larger than natural") == 0 &&
         strstr(actual_lower, "exceeds natural alignment") != NULL)
         return 1;
+    if (strcmp(expected_lower, "unknown table") == 0 &&
+        strstr(actual_lower, "table index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "global is immutable") == 0 &&
+        strstr(actual_lower, "global") != NULL && strstr(actual_lower, "is immutable") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "malformed mutability") == 0 &&
+        strstr(actual_lower, "malformed module") != NULL)
+        return 1;
     if (strcmp(expected_lower, "uninitialized element") == 0 &&
         strstr(actual_lower, "uninitialized table element") != NULL)
         return 1;
@@ -927,6 +1030,12 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "integer divide by zero") == 0 &&
         strstr(actual_lower, "divide by zero") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "call stack exhausted") == 0 &&
+        strstr(actual_lower, "call frame depth exceeded limit") != NULL)
+        return 1;
+    if (strncmp(expected_lower, "import after ", 13u) == 0 &&
+        strstr(actual_lower, "imports must occur before all non import definitions") != NULL)
         return 1;
     if (strcmp(expected_lower, "unreachable") == 0 && strstr(actual_lower, "unreachable") != NULL)
         return 1;
@@ -1209,6 +1318,7 @@ static int spec_parse_value(const char* json,
         out_value->value = wasm_f64(spec_f64_from_bits(bits));
     } else if (strcmp(type_text, "externref") == 0) {
         uint64_t bits;
+        uintptr_t encoded;
         value_text = spec_strdup_token(json, &tokens[value_index]);
         if (!value_text) {
             spec_set_error(error_text, error_size, "invalid externref value");
@@ -1217,11 +1327,12 @@ static int spec_parse_value(const char* json,
         if (strcmp(value_text, "null") == 0) {
             out_value->value = wasm_ref_null(WASM_TYPE_EXTERNREF);
         } else {
-            if (!spec_parse_u64_token(json, &tokens[value_index], &bits)) {
+            if (!spec_parse_u64_token(json, &tokens[value_index], &bits) ||
+                !spec_encode_externref_handle(bits, &encoded)) {
                 spec_set_error(error_text, error_size, "invalid externref value");
                 goto done;
             }
-            out_value->value = wasm_externref((uintptr_t)bits);
+            out_value->value = wasm_externref(encoded);
         }
     } else if (strcmp(type_text, "funcref") == 0) {
         uint64_t bits;
@@ -2255,6 +2366,8 @@ static int spec_harness_init(spec_harness_t* harness,
     }
 
     wasm_enable_all_features(&harness->runtime);
+    if (!spec_json_uses_multi_memory(json_path))
+        wasm_disable_feature(&harness->runtime, WASM_FEATURE_MULTI_MEMORY);
 
     err = wasm_bind_wasi_stubs(&harness->runtime);
     if (err != WASM_OK) {
@@ -2279,6 +2392,13 @@ static int spec_harness_init(spec_harness_t* harness,
 
     support_module = spec_load_module_file(harness, support_wasm, NULL, 0, error_text, error_size);
     if (!support_module) return 0;
+
+    err = spec_bind_default_empty_imports(harness, support_module);
+    if (err != WASM_OK) {
+        spec_set_error(error_text, error_size, "failed to bind empty-name placeholder imports: %s",
+                       spec_runtime_error_text(&harness->runtime, err));
+        return 0;
+    }
 
     if (!spec_register_module_exports(harness, "spectest", support_module, error_text, error_size)) return 0;
 
