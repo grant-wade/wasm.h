@@ -11909,9 +11909,9 @@ WL_TEST(test_gc_const_expr_supports_gc_alloc_ops) {
         emit_leb128_u32(&sec, 1);
         emit(&sec, 0x00);
         emit(&sec, 0x41);
-        emit_leb128_i32(&sec, 3);
-        emit(&sec, 0x41);
         emit_leb128_i32(&sec, 9);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 3);
         emit(&sec, 0xFB);
         emit_leb128_u32(&sec, 0x06);
         emit_leb128_u32(&sec, 1);
@@ -12531,9 +12531,9 @@ WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
         emit(&body, 0x6A);
 
         emit(&body, 0x41);
-        emit_leb128_i32(&body, 2);
-        emit(&body, 0x41);
         emit_leb128_i32(&body, 4);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 2);
         emit(&body, 0xFB);
         emit_leb128_u32(&body, 0x06);
         emit_leb128_u32(&body, 1);
@@ -13107,9 +13107,9 @@ WL_TEST(test_gc_validation_accepts_struct_and_array_gc_opcodes) {
         emit_leb128_u32(&body, 0);
         emit(&body, 0x1A);
         emit(&body, 0x41);
-        emit_leb128_i32(&body, 3);
-        emit(&body, 0x41);
         emit_leb128_i32(&body, 9);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 3);
         emit(&body, 0xFB);
         emit_leb128_u32(&body, 0x06);
         emit_leb128_u32(&body, 1);

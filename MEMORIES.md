@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 1
+Memory Version: 2
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -16,6 +16,9 @@ This file is the canonical checked-in snapshot of repo memory.
 - `wasm__read_memory_type()` must decode limits as `u32` unless the memory type itself has the Memory64 flag. Using runtime feature enablement to select `u64` decoding lets overlong MVP LEB encodings slip past `binary-leb128`.
 - Memarg parsing needs to preserve whether an explicit memory index immediate was encoded (`has_memory_index`), otherwise invalid MVP memarg flags can be misread as `memory 0` and fail later with unrelated validator errors.
 - `test/spectest_runner.c` intentionally normalizes many equivalent diagnostics; add aliases there only for semantically equivalent rejections, not for modules that actually load when spec says invalid.
+- Conditional branch validators (`br_if`, `br_on_null`, `br_on_non_null`, `br_on_cast`, `br_on_cast_fail`) need real pop/re-push fallthrough normalization of label arguments. Peeking without retyping preserves overly-specific refs and lets spec-invalid stack-shape cases load.
+- `br_on_cast` source-operand validation wants the actual operand to be a subtype of the declared source type, while `ref.test`/`ref.cast` still need the target type to be a subtype of the operand’s static type. Reusing one helper for both directions causes either `expected 0x15, got 0x15` false negatives or valid cast rejections.
+- Canonical GC type equality must include the declared supertype chain, not just the immediate struct/array/function body, or sibling types with matching fields collapse and make `br_on_cast` succeed when it should not.
 
 ## spectest-harness.md
 
@@ -24,6 +27,7 @@ This file is the canonical checked-in snapshot of repo memory.
 - `test/spectest_runner.c` consumes `wasm-tools json-from-wast` output directly, including positive `module` entries with `module_type: "text"` and optional `binary_filename` fields.
 - Text modules in positive and negative cases are compiled and validated through `wasm-tools parse` and `wasm-tools validate` from inside the runner when needed.
 - The runner parses wrapped signed integer spellings from JSON and intentionally normalizes only semantically equivalent diagnostics.
+- Spectest externref handles should be encoded away from the runtime's low-bit GC/i31 tags before `any.convert_extern`; otherwise host refs like `ref.extern 0` can be misclassified as `i31ref` in `br_on_cast`/`ref_cast` coverage.
 
 ## wasm-runtime.md
 

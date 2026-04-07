@@ -587,8 +587,8 @@ static int spec_parse_f64_bits_token(const char* json,
 
 static int spec_encode_externref_handle(uint64_t bits, uintptr_t* out_value) {
     if (!out_value) return 0;
-    if (bits > (uint64_t)UINTPTR_MAX - 1u) return 0;
-    *out_value = (uintptr_t)(bits + 1u);
+    if (bits > ((uint64_t)UINTPTR_MAX >> 2) - 1u) return 0;
+    *out_value = (uintptr_t)((bits + 1u) << 2);
     return 1;
 }
 
