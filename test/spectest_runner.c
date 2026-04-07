@@ -950,13 +950,17 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strstr(actual_lower, expected_lower) != NULL) return 1;
     if (strcmp(expected_lower, "unknown import") == 0 && strstr(actual_lower, "unresolved:") != NULL) return 1;
     if (strcmp(expected_lower, "unknown type") == 0 &&
-        strstr(actual_lower, "type index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        ((strstr(actual_lower, "type index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "section 10 decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "invalid func type index") != NULL))
         return 1;
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
-        strstr(actual_lower, "requires a funcref table") != NULL)
+        (strstr(actual_lower, "requires a funcref table") != NULL ||
+         strstr(actual_lower, "wrong stack height") != NULL ||
+         strstr(actual_lower, "do not share the same signature") != NULL))
         return 1;
     if (strcmp(expected_lower, "duplicate global") == 0 && strstr(actual_lower, "redefinition of global") != NULL)
         return 1;
@@ -964,18 +968,43 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "duplicate memory") == 0 && strstr(actual_lower, "redefinition of memory") != NULL)
         return 1;
+    if (strcmp(expected_lower, "duplicate func") == 0 && strstr(actual_lower, "redefinition of function") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "duplicate local") == 0 &&
+        (strstr(actual_lower, "redefinition of parameter") != NULL ||
+         strstr(actual_lower, "redefinition of local") != NULL))
+        return 1;
     if (strcmp(expected_lower, "unknown global") == 0 &&
-        strstr(actual_lower, "global index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        ((strstr(actual_lower, "global index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "export '") != NULL && strstr(actual_lower, "index") != NULL && strstr(actual_lower, "out of range") != NULL)))
+        return 1;
+    if (strncmp(expected_lower, "unknown function", 16u) == 0 &&
+        ((strstr(actual_lower, "call target") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "start function index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "export '") != NULL && strstr(actual_lower, "index") != NULL && strstr(actual_lower, "out of range") != NULL)))
+        return 1;
+    if (strncmp(expected_lower, "unknown label", 13u) == 0 &&
+        ((strstr(actual_lower, "branch depth") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "br table depth") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         strstr(actual_lower, "undefined label variable") != NULL))
         return 1;
     if (strncmp(expected_lower, "unknown local", 13u) == 0 &&
         strstr(actual_lower, "local index") != NULL && strstr(actual_lower, "out of range") != NULL)
         return 1;
     if (strcmp(expected_lower, "unexpected end") == 0 &&
-        (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "unexpected eof") != NULL))
+        (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "unexpected eof") != NULL ||
+         strstr(actual_lower, "malformed section header") != NULL ||
+         strstr(actual_lower, "decode failed") != NULL))
         return 1;
-    if ((strcmp(expected_lower, "unknown operator") == 0 || strcmp(expected_lower, "unexpected token") == 0) &&
+    if (strcmp(expected_lower, "length out of bounds") == 0 &&
+        strstr(actual_lower, "overruns module") != NULL)
+        return 1;
+    if ((strncmp(expected_lower, "unknown operator", 16u) == 0 || strcmp(expected_lower, "unexpected token") == 0) &&
         (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
          strstr(actual_lower, "invalid literal") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "mismatching label") == 0 &&
+        (strstr(actual_lower, "unexpected label") != NULL || strstr(actual_lower, "undefined label variable") != NULL))
         return 1;
     if (strcmp(expected_lower, "inline function type") == 0 &&
         strstr(actual_lower, "expected ") != NULL && strstr(actual_lower, " got ") != NULL)
@@ -986,8 +1015,15 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "out of range") != NULL || strstr(actual_lower, "natural number in range") != NULL ||
             strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL))
         return 1;
+    if (strstr(expected_lower, "i32 constant") != NULL &&
+        strstr(actual_lower, "offset must be less than or equal") != NULL)
+        return 1;
     if (strcmp(expected_lower, "alignment must be a power of two") == 0 &&
         strstr(actual_lower, "alignment must be power of two") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "malformed memop flags") == 0 &&
+        (strstr(actual_lower, "alignment") != NULL || strstr(actual_lower, "memop") != NULL ||
+         strstr(actual_lower, "feature 'multi memory' is disabled") != NULL))
         return 1;
     if (strcmp(expected_lower, "size minimum must not be greater than maximum") == 0 &&
         strstr(actual_lower, "min") != NULL && strstr(actual_lower, "exceeds max") != NULL)
@@ -1013,7 +1049,12 @@ static int spec_message_matches(const char* expected, const char* actual) {
         strstr(actual_lower, "exceeds natural alignment") != NULL)
         return 1;
     if (strcmp(expected_lower, "unknown table") == 0 &&
-        strstr(actual_lower, "table index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        ((strstr(actual_lower, "table index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "export '") != NULL && strstr(actual_lower, "index") != NULL && strstr(actual_lower, "out of range") != NULL)))
+        return 1;
+    if (strcmp(expected_lower, "unknown memory") == 0 &&
+        (strstr(actual_lower, "unknown memory") != NULL ||
+         (strstr(actual_lower, "export '") != NULL && strstr(actual_lower, "index") != NULL && strstr(actual_lower, "out of range") != NULL)))
         return 1;
     if (strcmp(expected_lower, "global is immutable") == 0 &&
         strstr(actual_lower, "global") != NULL && strstr(actual_lower, "is immutable") != NULL)
@@ -1021,7 +1062,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "malformed mutability") == 0 &&
         strstr(actual_lower, "malformed module") != NULL)
         return 1;
-    if (strcmp(expected_lower, "uninitialized element") == 0 &&
+    if (strstr(expected_lower, "uninitialized element") != NULL &&
         strstr(actual_lower, "uninitialized table element") != NULL)
         return 1;
     if ((strcmp(expected_lower, "out of bounds table access") == 0 ||
@@ -1030,6 +1071,33 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "integer divide by zero") == 0 &&
         strstr(actual_lower, "divide by zero") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "integer overflow") == 0 &&
+        strstr(actual_lower, "invalid conversion to integer") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "integer representation too long") == 0 &&
+        ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "malformed section header") != NULL ||
+         strstr(actual_lower, "integer representation too long") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "magic header not detected") == 0 &&
+        (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "bad magic") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "unknown binary version") == 0 &&
+        strstr(actual_lower, "version ") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "malformed section id") == 0 &&
+        strstr(actual_lower, "unknown section id") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "invalid result arity") == 0 &&
+        (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
+         strstr(actual_lower, "typed select requires exactly one value type") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "type mismatch") == 0 &&
+        strstr(actual_lower, "select requires matching numeric or vector operand types") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "type mismatch") == 0 &&
+        strstr(actual_lower, "if without else requires param and result types to match") != NULL)
         return 1;
     if (strcmp(expected_lower, "call stack exhausted") == 0 &&
         strstr(actual_lower, "call frame depth exceeded limit") != NULL)

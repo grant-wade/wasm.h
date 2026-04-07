@@ -4009,6 +4009,7 @@ static int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t
 typedef struct wasm__memarg_t {
     uint32_t align_log2;
     uint32_t memory_index;
+    uint8_t has_memory_index;
     uint64_t offset;
 } wasm__memarg_t;
 
@@ -4019,7 +4020,8 @@ static wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_mem
 
     out_memarg->align_log2 = flags & 0x3Fu;
     out_memarg->memory_index = 0;
-    if ((flags & 0x40u) != 0) out_memarg->memory_index = wasm__read_leb128_u32(r);
+    out_memarg->has_memory_index = (uint8_t)(((flags & 0x40u) != 0) ? 1u : 0u);
+    if (out_memarg->has_memory_index) out_memarg->memory_index = wasm__read_leb128_u32(r);
     out_memarg->offset = wasm__read_leb128_u64(r);
     return WASM_OK;
 }
@@ -6667,8 +6669,7 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
         if (err != WASM_OK) return err;
     }
 
-    use_u64_counts = (is_64 != 0) ||
-                     (mod && mod->rt && (mod->rt->enabled_features & WASM_FEATURE_MEMORY64) != 0);
+    use_u64_counts = (is_64 != 0);
 
     memset(memory, 0, sizeof(*memory));
     memory->is_64 = is_64;
@@ -7118,7 +7119,7 @@ static wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader
             err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
             if (err != WASM_OK) return err;
         }
-        err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &value);
+        err = wasm__eval_init_expr(mod, r, global_index, &value);
         if (err != WASM_OK) return err;
         if (!wasm__runtime_value_matches_type(mod,
                                               &value,
@@ -7198,7 +7199,7 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             wasm_value_t offset_value;
 
             segment->table_index = (flags & 0x02) ? wasm__read_leb128_u32(r) : 0;
-            err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
+            err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
             if (err != WASM_OK) return err;
             if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
             segment->offset = (uint32_t)offset_value.of.i32;
@@ -7230,7 +7231,7 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
             wasm_value_t value;
 
             if (uses_expr) {
-                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &value);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &value);
                 if (err != WASM_OK) return err;
                 if (!wasm__runtime_value_matches_type(mod,
                                                       &value,
@@ -7326,7 +7327,7 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
                     WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown memory %u", 0u);
                     return WASM_ERR_MALFORMED;
                 }
-                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
                 if (err != WASM_OK) return err;
                 segment->memory_index = 0;
                 memory = &mod->memories[segment->memory_index];
@@ -7352,7 +7353,7 @@ static wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t
                                   (unsigned)segment->memory_index);
                     return WASM_ERR_MALFORMED;
                 }
-                err = wasm__eval_init_expr(mod, r, mod->num_global_imports, &offset_value);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
                 if (err != WASM_OK) return err;
                 memory = &mod->memories[segment->memory_index];
                 if (offset_value.type != wasm__memory_index_type(memory)) return WASM_ERR_TYPE_MISMATCH;
@@ -8222,7 +8223,7 @@ static wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
         return wasm__validator_error(v, at, "alignment %u exceeds natural alignment %u",
                                      (unsigned)memarg.align_log2,
                                      (unsigned)max_align_log2);
-    if (memarg.memory_index != 0) {
+    if (memarg.has_memory_index) {
         err = wasm__validator_require_feature(v, at, WASM_FEATURE_MULTI_MEMORY);
         if (err != WASM_OK) return err;
     }
