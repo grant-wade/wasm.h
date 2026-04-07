@@ -7,6 +7,7 @@ find_program(WL_WASM_TOOLS_EXECUTABLE
 )
 
 set(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE OFF)
+set(WL_WASM_TOOLS_PARSE_AVAILABLE OFF)
 if(WL_WASM_TOOLS_EXECUTABLE)
     execute_process(
         COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" json-from-wast --help
@@ -16,16 +17,28 @@ if(WL_WASM_TOOLS_EXECUTABLE)
     )
     if(WL_WASM_TOOLS_JSON_FROM_WAST_RESULT EQUAL 0)
         set(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE ON)
-    else()
+    endif()
+
+    execute_process(
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" parse --help
+        RESULT_VARIABLE WL_WASM_TOOLS_PARSE_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(WL_WASM_TOOLS_PARSE_RESULT EQUAL 0)
+        set(WL_WASM_TOOLS_PARSE_AVAILABLE ON)
+    endif()
+
+    if(NOT WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE OR NOT WL_WASM_TOOLS_PARSE_AVAILABLE)
         message(STATUS
-            "wasm-tools found at ${WL_WASM_TOOLS_EXECUTABLE} but the json-from-wast subcommand is unavailable; skipping spectest targets."
+            "wasm-tools found at ${WL_WASM_TOOLS_EXECUTABLE} but required subcommands are unavailable; skipping spectest targets."
         )
     endif()
 else()
     message(STATUS "wasm-tools not found; skipping spectest targets.")
 endif()
 
-if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE)
+if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
     set(WL_SPECTEST_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/spec")
     set(WL_SPECTEST_SUPPORT_WASM "${CMAKE_CURRENT_BINARY_DIR}/spectest_support.wasm")
     set(WL_SPECTEST_FIXTURE "spectest-built")
@@ -38,13 +51,11 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE)
     add_custom_command(
         OUTPUT "${WL_SPECTEST_SUPPORT_WASM}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}"
-        COMMAND "${PROJECT_SOURCE_DIR}/tools/wat2wasm"
-                --enable-all
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" parse
                 "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
                 -o "${WL_SPECTEST_SUPPORT_WASM}"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
-            wabt-tools
         VERBATIM
     )
 
@@ -76,7 +87,6 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE)
             DEPENDS
                 "${WL_SPECTEST_FILE}"
                 ${PROJECT_SOURCE_DIR}/cmake/RunWast2JsonSafe.cmake
-                wabt-tools
             VERBATIM
         )
 
@@ -92,7 +102,7 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE)
             NAME "spectest.${WL_SPECTEST_NAME}"
             COMMAND $<TARGET_FILE:spectest_runner>
                     "${WL_SPECTEST_JSON}"
-                    "${PROJECT_SOURCE_DIR}/tools"
+                    "${WL_WASM_TOOLS_EXECUTABLE}"
                     "${WL_SPECTEST_SUPPORT_WASM}"
                     "${WL_SPECTEST_STATUS}"
         )

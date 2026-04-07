@@ -157,29 +157,8 @@ Useful targets:
 - `cmake --build build --target wasm-emcc-build`
 - `cmake --build build --target wasm-emcc-run`
 - `cmake --build build --target wasm-emcc-run-strict`
-- `cmake --build build --target wabt-tools`
 
-## WABT tools
-
-The repository can build the upstream [WABT](https://github.com/WebAssembly/wabt) command-line tools from the `tools/wabt` git submodule and copy the resulting executables into the top-level `tools/` directory.
-
-This happens on the normal project build as well, because `wabt-tools` is part of the default build graph.
-
-If the submodule is not initialized yet:
-
-```sh
-git submodule update --init --recursive tools/wabt
-```
-
-Then build the tools explicitly:
-
-```sh
-cmake -S . -B build
-cmake --build build --target wabt-tools
-./tools/wat2wasm --help
-```
-
-The copied executables in `tools/` are ignored by git so the folder can contain the checked-out `tools/wabt` submodule and the locally built helper binaries side by side. Spectest JSON generation no longer uses a bundled `wast2json`; it requires a system `wasm-tools` executable with the `json-from-wast` subcommand.
+Spectest support requires a system `wasm-tools` executable with both the `json-from-wast` and `parse` subcommands available.
 
 ## Repository layout
 

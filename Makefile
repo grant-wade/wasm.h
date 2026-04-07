@@ -12,7 +12,7 @@ endif
 
 NATIVE_TARGETS := wl_test wasm_test wasm2api wasm basic_add_demo
 
-.PHONY: all configure build test check clean wabt-tools wasm-emcc wasm-emcc-build wasm-emcc-run wasm-emcc-run-strict wasm-emcc-list $(NATIVE_TARGETS)
+.PHONY: all configure build test check clean wasm-emcc wasm-emcc-build wasm-emcc-run wasm-emcc-run-strict wasm-emcc-list $(NATIVE_TARGETS)
 
 all: test
 
@@ -29,9 +29,6 @@ check: test
 
 $(NATIVE_TARGETS): configure
 	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target $@ $(BUILD_ARGS)
-
-wabt-tools: configure
-	$(CMAKE) --build $(BUILD_DIR) $(BUILD_CONFIG_ARGS) --target wabt-tools $(BUILD_ARGS)
 
 wasm-emcc: wasm-emcc-run
 

@@ -94,7 +94,7 @@ typedef struct spec_harness_t {
     size_t cap_forwarded_funcs;
     wasm_module_t* last_module;
     const char* json_path;
-    const char* tools_dir;
+    const char* wasm_tools_path;
     const char* support_wasm;
     char* json_dir;
     const char* source_filename;
@@ -1848,21 +1848,15 @@ static int spec_compile_wat(spec_harness_t* harness,
                             char** compiler_output,
                             int* exit_code) {
     char* command;
-    char* wat2wasm_path;
     int ok;
 
-    wat2wasm_path = spec_path_join(harness->tools_dir, "wat2wasm");
-    if (!wat2wasm_path) return 0;
-
-    command = (char*)malloc(strlen(wat2wasm_path) + strlen(wat_path) + strlen(wasm_path) + 64u);
+    command = (char*)malloc(strlen(harness->wasm_tools_path) + strlen(wat_path) + strlen(wasm_path) + 80u);
     if (!command) {
-        free(wat2wasm_path);
         return 0;
     }
-    sprintf(command, "\"%s\" --enable-all \"%s\" -o \"%s\"", wat2wasm_path, wat_path, wasm_path);
+    sprintf(command, "\"%s\" parse \"%s\" -o \"%s\"", harness->wasm_tools_path, wat_path, wasm_path);
     ok = spec_run_command_capture(command, compiler_output, exit_code);
     free(command);
-    free(wat2wasm_path);
     return ok;
 }
 
@@ -2220,7 +2214,7 @@ static int spec_run_negative_module(spec_harness_t* harness,
         }
         sprintf(wasm_path, "%s.wasm", path);
         if (!spec_compile_wat(harness, path, wasm_path, &compiler_output, &compiler_exit)) {
-            spec_set_error(error_text, error_size, "failed to invoke wat2wasm");
+            spec_set_error(error_text, error_size, "failed to invoke wasm-tools parse");
             free(wasm_path);
             free(path);
             free(file_name);
@@ -2232,7 +2226,7 @@ static int spec_run_negative_module(spec_harness_t* harness,
             int matched = compiler_exit != 0 && spec_message_matches(expected_text, compiler_output);
             if (!matched) {
                 spec_set_error(error_text, error_size,
-                               "expected wat2wasm failure matching '%s' but got exit=%d output=%s",
+                               "expected wasm-tools parse failure matching '%s' but got exit=%d output=%s",
                                expected_text, compiler_exit, compiler_output ? compiler_output : "<none>");
             }
             free(compiler_output);
@@ -2247,7 +2241,7 @@ static int spec_run_negative_module(spec_harness_t* harness,
             int matched = spec_message_matches(expected_text, compiler_output);
             if (!matched) {
                 spec_set_error(error_text, error_size,
-                               "wat2wasm failed with '%s' (expected '%s')",
+                               "wasm-tools parse failed with '%s' (expected '%s')",
                                compiler_output ? compiler_output : "<none>", expected_text);
             }
             free(compiler_output);
@@ -2397,7 +2391,7 @@ static int spec_run_command(spec_harness_t* harness,
                 }
                 sprintf(load_path, "%s.wasm", path);
                 if (!spec_compile_wat(harness, path, load_path, &compiler_output, &compiler_exit)) {
-                    spec_set_error(command_error, sizeof(command_error), "failed to invoke wat2wasm");
+                    spec_set_error(command_error, sizeof(command_error), "failed to invoke wasm-tools parse");
                     free(file_name);
                     free(module_name);
                     free(module_type);
@@ -2408,7 +2402,7 @@ static int spec_run_command(spec_harness_t* harness,
                 }
                 if (compiler_exit != 0) {
                     spec_set_error(command_error, sizeof(command_error),
-                                   "wat2wasm failed with '%s'",
+                                   "wasm-tools parse failed with '%s'",
                                    compiler_output ? compiler_output : "<none>");
                     free(file_name);
                     free(module_name);
@@ -2563,7 +2557,7 @@ static void spec_harness_destroy(spec_harness_t* harness) {
 
 static int spec_harness_init(spec_harness_t* harness,
                              const char* json_path,
-                             const char* tools_dir,
+                             const char* wasm_tools_path,
                              const char* support_wasm,
                              char* error_text,
                              size_t error_size) {
@@ -2572,7 +2566,7 @@ static int spec_harness_init(spec_harness_t* harness,
 
     memset(harness, 0, sizeof(*harness));
     harness->json_path = json_path;
-    harness->tools_dir = tools_dir;
+    harness->wasm_tools_path = wasm_tools_path;
     harness->support_wasm = support_wasm;
     harness->json_dir = spec_dirname_dup(json_path);
     if (!harness->json_dir) {
@@ -2688,7 +2682,7 @@ cleanup:
 }
 
 static void spec_print_usage(const char* argv0) {
-    fprintf(stderr, "usage: %s <spec.json> <tools_dir> <spectest_support.wasm> [conversion.status]\n", argv0);
+    fprintf(stderr, "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> [conversion.status]\n", argv0);
 }
 
 int main(int argc, char** argv) {

@@ -50,8 +50,6 @@ if(WL_HAVE_LIBM)
     target_link_libraries(wl_math INTERFACE m)
 endif()
 
-include(${PROJECT_SOURCE_DIR}/cmake/CopyWabtTools.cmake)
-
 get_property(WL_GENERATOR_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 set(WL_BUILD_CONFIG_ARGS)
 set(WL_CTEST_CONFIG_ARGS)
@@ -72,43 +70,6 @@ wl_add_native_executable(wasm wasm.c)
 
 add_subdirectory(examples)
 
-set(WL_WABT_SOURCE_DIR "${PROJECT_SOURCE_DIR}/tools/wabt")
-set(WL_WABT_BINARY_DIR "${PROJECT_BINARY_DIR}/tools/wabt")
-wl_wabt_get_tool_names(WL_WABT_TOOL_TARGETS)
-
-if(EXISTS "${WL_WABT_SOURCE_DIR}/CMakeLists.txt")
-    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(BUILD_FUZZ_TOOLS OFF CACHE BOOL "" FORCE)
-    set(BUILD_LIBWASM OFF CACHE BOOL "" FORCE)
-    set(BUILD_TOOLS ON CACHE BOOL "" FORCE)
-    set(WABT_INSTALL_RULES OFF CACHE BOOL "" FORCE)
-    set(WERROR OFF CACHE BOOL "" FORCE)
-
-    add_subdirectory("${WL_WABT_SOURCE_DIR}" "${WL_WABT_BINARY_DIR}" EXCLUDE_FROM_ALL)
-
-    add_custom_target(wabt-tools ALL
-        COMMAND ${CMAKE_COMMAND}
-                -DWL_WABT_BUILD_DIR:PATH=${WL_WABT_BINARY_DIR}
-                -DWL_WABT_OUTPUT_DIR:PATH=${PROJECT_SOURCE_DIR}/tools
-                $<$<BOOL:${WL_GENERATOR_IS_MULTI_CONFIG}>:-DWL_WABT_CONFIG:STRING=$<CONFIG>>
-                -P ${PROJECT_SOURCE_DIR}/cmake/CopyWabtTools.cmake
-        DEPENDS ${WL_WABT_TOOL_TARGETS}
-        USES_TERMINAL
-        VERBATIM
-    )
-else()
-    message(STATUS
-        "tools/wabt is not initialized; 'wabt-tools' will fail until you run 'git submodule update --init --recursive tools/wabt'."
-    )
-
-    add_custom_target(wabt-tools ALL
-        COMMAND ${CMAKE_COMMAND} -E echo "error: tools/wabt is missing; run 'git submodule update --init --recursive tools/wabt'"
-        COMMAND ${CMAKE_COMMAND} -E false
-        COMMAND_ERROR_IS_FATAL ANY
-        VERBATIM
-    )
-endif()
-
 if(BUILD_TESTING)
     add_test(NAME wl_test COMMAND wl_test)
     set_tests_properties(wl_test PROPERTIES LABELS "unit")
@@ -119,9 +80,6 @@ if(BUILD_TESTING)
     add_subdirectory(test)
 
     set(WL_CHECK_TARGET_DEPS wl_test wasm_test)
-    if(TARGET wabt-tools)
-        list(APPEND WL_CHECK_TARGET_DEPS wabt-tools)
-    endif()
     if(TARGET wasm-spectest-build)
         list(APPEND WL_CHECK_TARGET_DEPS wasm-spectest-build)
     endif()
