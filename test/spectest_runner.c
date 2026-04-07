@@ -476,6 +476,37 @@ static int spec_parse_u64_token(const char* json,
     return 1;
 }
 
+static int spec_parse_wrapping_u64_token(const char* json,
+                                         const spec_json_token_t* token,
+                                         uint64_t* out_value) {
+    char* text;
+    char* endptr;
+
+    if (!json || !token || !out_value) return 0;
+    text = spec_strdup_token(json, token);
+    if (!text) return 0;
+
+    errno = 0;
+    if (text[0] == '-') {
+        long long value = strtoll(text, &endptr, 10);
+        if (errno != 0 || !endptr || *endptr != '\0') {
+            free(text);
+            return 0;
+        }
+        *out_value = (uint64_t)value;
+    } else {
+        unsigned long long value = strtoull(text, &endptr, 10);
+        if (errno != 0 || !endptr || *endptr != '\0') {
+            free(text);
+            return 0;
+        }
+        *out_value = (uint64_t)value;
+    }
+
+    free(text);
+    return 1;
+}
+
 static int spec_parse_f32_bits_token(const char* json,
                                      const spec_json_token_t* token,
                                      uint32_t* out_bits,
@@ -1259,7 +1290,7 @@ static int spec_parse_v128(const char* json,
             uint64_t lane_bits;
             int lane_index = spec_array_at(tokens, value_index, i);
 
-            if (!spec_parse_u64_token(json, &tokens[lane_index], &lane_bits)) {
+            if (!spec_parse_wrapping_u64_token(json, &tokens[lane_index], &lane_bits)) {
                 spec_set_error(error_text, error_size, "invalid v128 i8 lane");
                 return 0;
             }
@@ -1276,7 +1307,7 @@ static int spec_parse_v128(const char* json,
             uint16_t lane;
             int lane_index = spec_array_at(tokens, value_index, i);
 
-            if (!spec_parse_u64_token(json, &tokens[lane_index], &lane_bits)) {
+            if (!spec_parse_wrapping_u64_token(json, &tokens[lane_index], &lane_bits)) {
                 spec_set_error(error_text, error_size, "invalid v128 i16 lane");
                 return 0;
             }
@@ -1295,7 +1326,7 @@ static int spec_parse_v128(const char* json,
             uint32_t lane;
             int lane_index = spec_array_at(tokens, value_index, i);
 
-            if (!spec_parse_u64_token(json, &tokens[lane_index], &lane_bits)) {
+            if (!spec_parse_wrapping_u64_token(json, &tokens[lane_index], &lane_bits)) {
                 spec_set_error(error_text, error_size, "invalid v128 i32/f32 lane");
                 return 0;
             }
@@ -1337,7 +1368,7 @@ static int spec_parse_v128(const char* json,
             int lane_index = spec_array_at(tokens, value_index, i);
             int j;
 
-            if (!spec_parse_u64_token(json, &tokens[lane_index], &lane)) {
+            if (!spec_parse_wrapping_u64_token(json, &tokens[lane_index], &lane)) {
                 spec_set_error(error_text, error_size, "invalid v128 i64/f64 lane");
                 return 0;
             }
@@ -1405,14 +1436,14 @@ static int spec_parse_value(const char* json,
 
     if (strcmp(type_text, "i32") == 0) {
         uint64_t bits;
-        if (!spec_parse_u64_token(json, &tokens[value_index], &bits)) {
+        if (!spec_parse_wrapping_u64_token(json, &tokens[value_index], &bits)) {
             spec_set_error(error_text, error_size, "invalid i32 value");
             goto done;
         }
         out_value->value = wasm_i32((int32_t)(uint32_t)bits);
     } else if (strcmp(type_text, "i64") == 0) {
         uint64_t bits;
-        if (!spec_parse_u64_token(json, &tokens[value_index], &bits)) {
+        if (!spec_parse_wrapping_u64_token(json, &tokens[value_index], &bits)) {
             spec_set_error(error_text, error_size, "invalid i64 value");
             goto done;
         }
@@ -2309,9 +2340,16 @@ static int spec_run_command(spec_harness_t* harness,
     if (strcmp(type_text, "module") == 0) {
         char* file_name = NULL;
         char* module_name = NULL;
+        char* module_type = NULL;
+        char* binary_file_name = NULL;
         char* path = NULL;
+        char* load_path = NULL;
+        char* compiler_output = NULL;
         int file_index = spec_object_get(json, tokens, command_index, "filename");
         int name_index = spec_object_get(json, tokens, command_index, "name");
+        int module_type_index = spec_object_get(json, tokens, command_index, "module_type");
+        int binary_file_index = spec_object_get(json, tokens, command_index, "binary_filename");
+        int compiler_exit = -1;
 
         if (file_index < 0) {
             spec_set_error(command_error, sizeof(command_error), "missing module filename");
@@ -2320,18 +2358,77 @@ static int spec_run_command(spec_harness_t* harness,
 
         file_name = spec_strdup_token(json, &tokens[file_index]);
         module_name = name_index >= 0 ? spec_strdup_token(json, &tokens[name_index]) : NULL;
+        module_type = module_type_index >= 0 ? spec_strdup_token(json, &tokens[module_type_index]) : NULL;
+        binary_file_name = binary_file_index >= 0 ? spec_strdup_token(json, &tokens[binary_file_index]) : NULL;
         path = file_name ? spec_path_join(harness->json_dir, file_name) : NULL;
         if (!file_name || !path) {
             spec_set_error(command_error, sizeof(command_error), "out of memory resolving module path");
             free(file_name);
             free(module_name);
+            free(module_type);
+            free(binary_file_name);
             free(path);
             goto done;
         }
 
-        ok = spec_load_module_file(harness, path, module_name, 1, command_error, sizeof(command_error)) != NULL;
+        load_path = path;
+        if (module_type && strcmp(module_type, "text") == 0) {
+            if (binary_file_name) {
+                load_path = spec_path_join(harness->json_dir, binary_file_name);
+                if (!load_path) {
+                    spec_set_error(command_error, sizeof(command_error), "out of memory resolving text module binary path");
+                    free(file_name);
+                    free(module_name);
+                    free(module_type);
+                    free(binary_file_name);
+                    free(path);
+                    goto done;
+                }
+            } else {
+                load_path = (char*)malloc(strlen(path) + 6u);
+                if (!load_path) {
+                    spec_set_error(command_error, sizeof(command_error), "out of memory preparing temporary wasm path");
+                    free(file_name);
+                    free(module_name);
+                    free(module_type);
+                    free(binary_file_name);
+                    free(path);
+                    goto done;
+                }
+                sprintf(load_path, "%s.wasm", path);
+                if (!spec_compile_wat(harness, path, load_path, &compiler_output, &compiler_exit)) {
+                    spec_set_error(command_error, sizeof(command_error), "failed to invoke wat2wasm");
+                    free(file_name);
+                    free(module_name);
+                    free(module_type);
+                    free(binary_file_name);
+                    free(path);
+                    free(load_path);
+                    goto done;
+                }
+                if (compiler_exit != 0) {
+                    spec_set_error(command_error, sizeof(command_error),
+                                   "wat2wasm failed with '%s'",
+                                   compiler_output ? compiler_output : "<none>");
+                    free(file_name);
+                    free(module_name);
+                    free(module_type);
+                    free(binary_file_name);
+                    free(path);
+                    free(load_path);
+                    free(compiler_output);
+                    goto done;
+                }
+            }
+        }
+
+        ok = spec_load_module_file(harness, load_path, module_name, 1, command_error, sizeof(command_error)) != NULL;
+        free(compiler_output);
         free(file_name);
         free(module_name);
+        free(module_type);
+        free(binary_file_name);
+        if (load_path != path) free(load_path);
         free(path);
     } else if (strcmp(type_text, "register") == 0) {
         char* alias = NULL;
@@ -2555,11 +2652,11 @@ static int spec_run_file(spec_harness_t* harness) {
     spec_json_parser_init(&parser);
     token_count = spec_json_parse(&parser, json_text, json_size, tokens, json_size + 1u);
     if (token_count < 0) {
-        fprintf(stderr, "%s: failed to parse wast2json output\n", harness->json_path);
+        fprintf(stderr, "%s: failed to parse spectest JSON\n", harness->json_path);
         goto cleanup;
     }
     if (token_count == 0 || tokens[0].type != SPEC_JSON_OBJECT) {
-        fprintf(stderr, "%s: wast2json output root is not an object\n", harness->json_path);
+        fprintf(stderr, "%s: spectest JSON root is not an object\n", harness->json_path);
         goto cleanup;
     }
 
@@ -2591,7 +2688,7 @@ cleanup:
 }
 
 static void spec_print_usage(const char* argv0) {
-    fprintf(stderr, "usage: %s <spec.json> <tools_dir> <spectest_support.wasm> [wast2json.status]\n", argv0);
+    fprintf(stderr, "usage: %s <spec.json> <tools_dir> <spectest_support.wasm> [conversion.status]\n", argv0);
 }
 
 int main(int argc, char** argv) {
@@ -2605,7 +2702,7 @@ int main(int argc, char** argv) {
     }
 
     if (argc == 5 && spec_status_requests_skip(argv[4], error_text, sizeof(error_text))) {
-        fprintf(stderr, "skipped: %s\n", error_text[0] ? error_text : "wast2json failed for this spec file");
+        fprintf(stderr, "skipped: %s\n", error_text[0] ? error_text : "spectest JSON conversion failed for this spec file");
         return 125;
     }
 

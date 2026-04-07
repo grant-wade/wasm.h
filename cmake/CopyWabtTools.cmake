@@ -1,7 +1,6 @@
 function(wl_wabt_get_tool_names out_var)
     set(${out_var}
         wat2wasm
-        wast2json
         wasm2wat
         wasm2c
         wasm-stats

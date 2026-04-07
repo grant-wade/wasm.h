@@ -1,113 +1,139 @@
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
 
-set(WL_SPECTEST_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/spec")
-set(WL_SPECTEST_SUPPORT_WASM "${CMAKE_CURRENT_BINARY_DIR}/spectest_support.wasm")
-set(WL_SPECTEST_FIXTURE "spectest-built")
-
-cmake_host_system_information(RESULT WL_SPECTEST_PARALLEL_LEVEL QUERY NUMBER_OF_LOGICAL_CORES)
-if(NOT WL_SPECTEST_PARALLEL_LEVEL OR WL_SPECTEST_PARALLEL_LEVEL LESS 1)
-    set(WL_SPECTEST_PARALLEL_LEVEL 1)
-endif()
-
-add_custom_command(
-    OUTPUT "${WL_SPECTEST_SUPPORT_WASM}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}"
-    COMMAND "${PROJECT_SOURCE_DIR}/tools/wat2wasm"
-            --enable-all
-            "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
-            -o "${WL_SPECTEST_SUPPORT_WASM}"
-    DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
-        wabt-tools
-    VERBATIM
+find_program(WL_WASM_TOOLS_EXECUTABLE
+    NAMES wasm-tools
+    DOC "Path to the system wasm-tools executable used for spectest JSON generation."
 )
 
-add_custom_target(spectest-support-build DEPENDS "${WL_SPECTEST_SUPPORT_WASM}")
+set(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE OFF)
+if(WL_WASM_TOOLS_EXECUTABLE)
+    execute_process(
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" json-from-wast --help
+        RESULT_VARIABLE WL_WASM_TOOLS_JSON_FROM_WAST_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(WL_WASM_TOOLS_JSON_FROM_WAST_RESULT EQUAL 0)
+        set(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE ON)
+    else()
+        message(STATUS
+            "wasm-tools found at ${WL_WASM_TOOLS_EXECUTABLE} but the json-from-wast subcommand is unavailable; skipping spectest targets."
+        )
+    endif()
+else()
+    message(STATUS "wasm-tools not found; skipping spectest targets.")
+endif()
 
-file(GLOB WL_SPECTEST_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/spec/*.wast")
+if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE)
+    set(WL_SPECTEST_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/spec")
+    set(WL_SPECTEST_SUPPORT_WASM "${CMAKE_CURRENT_BINARY_DIR}/spectest_support.wasm")
+    set(WL_SPECTEST_FIXTURE "spectest-built")
 
-set(WL_SPECTEST_BUILD_TARGETS spectest_runner spectest-support-build)
-foreach(WL_SPECTEST_FILE IN LISTS WL_SPECTEST_FILES)
-    get_filename_component(WL_SPECTEST_NAME "${WL_SPECTEST_FILE}" NAME_WE)
-    string(MAKE_C_IDENTIFIER "${WL_SPECTEST_NAME}" WL_SPECTEST_ID)
-    set(WL_SPECTEST_JSON "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.json")
-    set(WL_SPECTEST_STATUS "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.status")
-    set(WL_SPECTEST_LOG "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.wast2json.log")
-    set(WL_SPECTEST_TARGET "spectest_case_${WL_SPECTEST_ID}")
+    cmake_host_system_information(RESULT WL_SPECTEST_PARALLEL_LEVEL QUERY NUMBER_OF_LOGICAL_CORES)
+    if(NOT WL_SPECTEST_PARALLEL_LEVEL OR WL_SPECTEST_PARALLEL_LEVEL LESS 1)
+        set(WL_SPECTEST_PARALLEL_LEVEL 1)
+    endif()
 
     add_custom_command(
-        OUTPUT
-            "${WL_SPECTEST_JSON}"
-            "${WL_SPECTEST_STATUS}"
-        BYPRODUCTS "${WL_SPECTEST_LOG}"
-        COMMAND ${CMAKE_COMMAND}
-                -DWL_WAST2JSON:FILEPATH=${PROJECT_SOURCE_DIR}/tools/wast2json
-                -DWL_INPUT:FILEPATH=${WL_SPECTEST_FILE}
-                -DWL_OUTPUT_JSON:FILEPATH=${WL_SPECTEST_JSON}
-                -DWL_STATUS:FILEPATH=${WL_SPECTEST_STATUS}
-                -DWL_LOG:FILEPATH=${WL_SPECTEST_LOG}
-                -P ${PROJECT_SOURCE_DIR}/cmake/RunWast2JsonSafe.cmake
+        OUTPUT "${WL_SPECTEST_SUPPORT_WASM}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}"
+        COMMAND "${PROJECT_SOURCE_DIR}/tools/wat2wasm"
+                --enable-all
+                "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
+                -o "${WL_SPECTEST_SUPPORT_WASM}"
         DEPENDS
-            "${WL_SPECTEST_FILE}"
-            ${PROJECT_SOURCE_DIR}/cmake/RunWast2JsonSafe.cmake
+            "${CMAKE_CURRENT_SOURCE_DIR}/spectest_support.wat"
             wabt-tools
         VERBATIM
     )
 
-    add_custom_target("${WL_SPECTEST_TARGET}"
-        DEPENDS
-            spectest_runner
-            spectest-support-build
-            "${WL_SPECTEST_JSON}"
-    )
-    list(APPEND WL_SPECTEST_BUILD_TARGETS "${WL_SPECTEST_TARGET}")
+    add_custom_target(spectest-support-build DEPENDS "${WL_SPECTEST_SUPPORT_WASM}")
+
+    file(GLOB WL_SPECTEST_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/spec/*.wast")
+
+    set(WL_SPECTEST_BUILD_TARGETS spectest_runner spectest-support-build)
+    foreach(WL_SPECTEST_FILE IN LISTS WL_SPECTEST_FILES)
+        get_filename_component(WL_SPECTEST_NAME "${WL_SPECTEST_FILE}" NAME_WE)
+        string(MAKE_C_IDENTIFIER "${WL_SPECTEST_NAME}" WL_SPECTEST_ID)
+        set(WL_SPECTEST_JSON "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.json")
+        set(WL_SPECTEST_STATUS "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.status")
+        set(WL_SPECTEST_LOG "${WL_SPECTEST_OUT_DIR}/${WL_SPECTEST_NAME}.json-from-wast.log")
+        set(WL_SPECTEST_TARGET "spectest_case_${WL_SPECTEST_ID}")
+
+        add_custom_command(
+            OUTPUT
+                "${WL_SPECTEST_JSON}"
+                "${WL_SPECTEST_STATUS}"
+            BYPRODUCTS "${WL_SPECTEST_LOG}"
+            COMMAND ${CMAKE_COMMAND}
+                    -DWL_WASM_TOOLS:FILEPATH=${WL_WASM_TOOLS_EXECUTABLE}
+                    -DWL_INPUT:FILEPATH=${WL_SPECTEST_FILE}
+                    -DWL_OUTPUT_JSON:FILEPATH=${WL_SPECTEST_JSON}
+                    -DWL_STATUS:FILEPATH=${WL_SPECTEST_STATUS}
+                    -DWL_LOG:FILEPATH=${WL_SPECTEST_LOG}
+                    -P ${PROJECT_SOURCE_DIR}/cmake/RunWast2JsonSafe.cmake
+            DEPENDS
+                "${WL_SPECTEST_FILE}"
+                ${PROJECT_SOURCE_DIR}/cmake/RunWast2JsonSafe.cmake
+                wabt-tools
+            VERBATIM
+        )
+
+        add_custom_target("${WL_SPECTEST_TARGET}"
+            DEPENDS
+                spectest_runner
+                spectest-support-build
+                "${WL_SPECTEST_JSON}"
+        )
+        list(APPEND WL_SPECTEST_BUILD_TARGETS "${WL_SPECTEST_TARGET}")
+
+        add_test(
+            NAME "spectest.${WL_SPECTEST_NAME}"
+            COMMAND $<TARGET_FILE:spectest_runner>
+                    "${WL_SPECTEST_JSON}"
+                    "${PROJECT_SOURCE_DIR}/tools"
+                    "${WL_SPECTEST_SUPPORT_WASM}"
+                    "${WL_SPECTEST_STATUS}"
+        )
+        set_tests_properties("spectest.${WL_SPECTEST_NAME}" PROPERTIES
+            LABELS "spectest"
+            FIXTURES_REQUIRED "${WL_SPECTEST_FIXTURE}"
+            SKIP_RETURN_CODE 125
+        )
+    endforeach()
+
+    add_custom_target(wasm-spectest-build DEPENDS ${WL_SPECTEST_BUILD_TARGETS})
 
     add_test(
-        NAME "spectest.${WL_SPECTEST_NAME}"
-        COMMAND $<TARGET_FILE:spectest_runner>
-                "${WL_SPECTEST_JSON}"
-                "${PROJECT_SOURCE_DIR}/tools"
-                "${WL_SPECTEST_SUPPORT_WASM}"
-                "${WL_SPECTEST_STATUS}"
+        NAME spectest.build
+        COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} ${WL_BUILD_CONFIG_ARGS} --target wasm-spectest-build
     )
-    set_tests_properties("spectest.${WL_SPECTEST_NAME}" PROPERTIES
-        LABELS "spectest"
-        FIXTURES_REQUIRED "${WL_SPECTEST_FIXTURE}"
-        SKIP_RETURN_CODE 125
+    set_tests_properties(spectest.build PROPERTIES
+        LABELS "spectest;build"
+        FIXTURES_SETUP "${WL_SPECTEST_FIXTURE}"
     )
-endforeach()
 
-add_custom_target(wasm-spectest-build DEPENDS ${WL_SPECTEST_BUILD_TARGETS})
+    add_custom_target(wasm-spectest-run
+        COMMAND ${CMAKE_COMMAND}
+                -DWL_CTEST_COMMAND:FILEPATH=${CMAKE_CTEST_COMMAND}
+                -DWL_CTEST_BINARY_DIR:PATH=${PROJECT_BINARY_DIR}
+                -DWL_CTEST_LABEL:STRING=spectest
+                -DWL_CTEST_PARALLEL:STRING=${WL_SPECTEST_PARALLEL_LEVEL}
+                $<$<BOOL:${WL_GENERATOR_IS_MULTI_CONFIG}>:-DWL_CTEST_CONFIG:STRING=$<CONFIG>>
+                -P ${PROJECT_SOURCE_DIR}/cmake/RunCTestNoFail.cmake
+        DEPENDS wasm-spectest-build
+        USES_TERMINAL
+    )
 
-add_test(
-    NAME spectest.build
-    COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} ${WL_BUILD_CONFIG_ARGS} --target wasm-spectest-build
-)
-set_tests_properties(spectest.build PROPERTIES
-    LABELS "spectest;build"
-    FIXTURES_SETUP "${WL_SPECTEST_FIXTURE}"
-)
+    add_custom_target(wasm-spectest-run-strict
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --parallel ${WL_SPECTEST_PARALLEL_LEVEL} --test-dir ${PROJECT_BINARY_DIR} -L spectest ${WL_CTEST_CONFIG_ARGS}
+        DEPENDS wasm-spectest-build
+        USES_TERMINAL
+    )
 
-add_custom_target(wasm-spectest-run
-    COMMAND ${CMAKE_COMMAND}
-            -DWL_CTEST_COMMAND:FILEPATH=${CMAKE_CTEST_COMMAND}
-            -DWL_CTEST_BINARY_DIR:PATH=${PROJECT_BINARY_DIR}
-            -DWL_CTEST_LABEL:STRING=spectest
-            -DWL_CTEST_PARALLEL:STRING=${WL_SPECTEST_PARALLEL_LEVEL}
-            $<$<BOOL:${WL_GENERATOR_IS_MULTI_CONFIG}>:-DWL_CTEST_CONFIG:STRING=$<CONFIG>>
-            -P ${PROJECT_SOURCE_DIR}/cmake/RunCTestNoFail.cmake
-    DEPENDS wasm-spectest-build
-    USES_TERMINAL
-)
-
-add_custom_target(wasm-spectest-run-strict
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --parallel ${WL_SPECTEST_PARALLEL_LEVEL} --test-dir ${PROJECT_BINARY_DIR} -L spectest ${WL_CTEST_CONFIG_ARGS}
-    DEPENDS wasm-spectest-build
-    USES_TERMINAL
-)
-
-add_custom_target(wasm-spectest DEPENDS wasm-spectest-run)
+    add_custom_target(wasm-spectest DEPENDS wasm-spectest-run)
+endif()
 
 if(NOT WL_ENABLE_EMCC_TESTS)
     message(STATUS "emcc fixture tests disabled (WL_ENABLE_EMCC_TESTS=OFF).")

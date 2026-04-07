@@ -176,10 +176,10 @@ Then build the tools explicitly:
 ```sh
 cmake -S . -B build
 cmake --build build --target wabt-tools
-./tools/wast2json --help
+./tools/wat2wasm --help
 ```
 
-The copied executables in `tools/` are ignored by git so the folder can contain the checked-out `tools/wabt` submodule and the locally built helper binaries side by side.
+The copied executables in `tools/` are ignored by git so the folder can contain the checked-out `tools/wabt` submodule and the locally built helper binaries side by side. Spectest JSON generation no longer uses a bundled `wast2json`; it requires a system `wasm-tools` executable with the `json-from-wast` subcommand.
 
 ## Repository layout
 
