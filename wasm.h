@@ -2697,6 +2697,8 @@ static int wasm__runtime_value_matches_type(const wasm_module_t* mod,
     }
     if (effective_expected.type == WASM_TYPE_VOID) effective_expected.type = expected_type;
 
+    if (actual_ref.nullable && effective_expected.nullable) return 1;
+
     if (!wasm__is_valtype_subtype(mod, actual_ref.type, expected_type)) return 0;
     return wasm__reftype_is_subtype(mod, &actual_ref, &effective_expected);
 }
@@ -8165,6 +8167,28 @@ static wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
                                                       const wasm_reftype_t* reftypes,
                                                       uint32_t count);
 
+static wasm_error_t wasm__validator_pop_direct_non_null_branch_operand(wasm__validator_t* v,
+                                                                       const uint8_t* at,
+                                                                       wasm_valtype_t* out_type,
+                                                                       wasm_reftype_t* out_source_ref,
+                                                                       wasm_reftype_t* out_target_ref) {
+    wasm_reftype_t actual_ref;
+    wasm_error_t err = wasm__validator_pop_any_typed(v, at, out_type, &actual_ref);
+
+    if (err != WASM_OK) return err;
+    if (*out_type == WASM__TYPE_BOT) {
+        wasm__clear_reftype(out_source_ref);
+        wasm__clear_reftype(out_target_ref);
+        return WASM_OK;
+    }
+    if (!wasm__validator_get_effective_reftype(*out_type, &actual_ref, out_source_ref))
+        return wasm__validator_error(v, at, "instruction requires a reference operand");
+    out_source_ref->nullable = 1;
+    *out_target_ref = *out_source_ref;
+    out_target_ref->nullable = 0;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__validator_push(wasm__validator_t* v,
                                          const uint8_t* at,
                                          wasm_valtype_t type) {
@@ -10932,6 +10956,85 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 err = wasm__validator_push(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 break;
+            case 0xD4: {
+                wasm_valtype_t actual_type;
+                wasm_reftype_t actual_ref;
+                wasm_reftype_t pushed_ref;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
+                if (err != WASM_OK) return err;
+                err = wasm__validator_pop_any_typed(&v, at, &actual_type, &actual_ref);
+                if (err != WASM_OK) return err;
+                if (actual_type == WASM__TYPE_BOT)
+                    err = wasm__validator_push(&v, at, WASM__TYPE_BOT);
+                else if (!wasm__validator_get_effective_reftype(actual_type, &actual_ref, &pushed_ref))
+                    err = wasm__validator_error(&v, at, "instruction requires a reference operand");
+                else {
+                    pushed_ref.nullable = 0;
+                    err = wasm__validator_push_typed(&v, at, actual_type, &pushed_ref);
+                }
+                if (err != WASM_OK) return err;
+                break;
+            }
+            case 0xD5:
+            case 0xD6: {
+                uint32_t depth = wasm__read_leb128_u32(&v.r);
+                const wasm__val_frame_t* target_frame;
+                const wasm_valtype_t* branch_types;
+                const wasm_reftype_t* branch_reftypes;
+                uint32_t branch_count;
+                wasm_valtype_t actual_type;
+                wasm_reftype_t source_ref;
+                wasm_reftype_t target_ref;
+                wasm_valtype_t branch_type;
+                wasm_reftype_t branch_ref;
+
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
+                if (err != WASM_OK) return err;
+                if (depth >= v.fp)
+                    return wasm__validator_error(&v, at, "branch depth %u out of range", (unsigned)depth);
+                err = wasm__validator_pop_direct_non_null_branch_operand(&v, at,
+                                                                         &actual_type,
+                                                                         &source_ref,
+                                                                         &target_ref);
+                if (err != WASM_OK) return err;
+
+                target_frame = &v.frames[v.fp - 1 - depth];
+                wasm__validator_branch_signature(target_frame, &branch_types, &branch_reftypes, &branch_count);
+                if (op == 0xD5) {
+                    err = wasm__validator_check_types_typed(&v, at,
+                                                            branch_types,
+                                                            branch_reftypes,
+                                                            branch_count);
+                    if (err != WASM_OK) return err;
+                    if (actual_type == WASM__TYPE_BOT)
+                        err = wasm__validator_push(&v, at, WASM__TYPE_BOT);
+                    else
+                        err = wasm__validator_push_typed(&v, at, target_ref.type, &target_ref);
+                    if (err != WASM_OK) return err;
+                } else {
+                    if (branch_count > 0) {
+                        err = wasm__validator_check_types_typed(&v, at,
+                                                                branch_types,
+                                                                branch_reftypes,
+                                                                branch_count - 1);
+                        if (err != WASM_OK) return err;
+                    }
+                    if (actual_type != WASM__TYPE_BOT) {
+                        branch_type = target_ref.type;
+                        branch_ref = target_ref;
+                        if (branch_count > 0 &&
+                            !wasm__validator_type_matches(&v,
+                                                          branch_type,
+                                                          &branch_ref,
+                                                          branch_types[branch_count - 1],
+                                                          branch_reftypes ? &branch_reftypes[branch_count - 1] : NULL)) {
+                            return wasm__validator_error(&v, at, "branch target label type mismatch");
+                        }
+                    }
+                }
+                break;
+            }
             case 0xFB:
                 err = wasm__validator_validate_gc(&v, at);
                 if (err != WASM_OK) return err;
@@ -12219,6 +12322,10 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
             wasm__skip_heaptype(r);
             break;
         case 0xD2:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0xD5:
+        case 0xD6:
             wasm__read_leb128_u32(r);
             break;
         case 0xFC:
@@ -13897,7 +14004,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__PUSH(rt, wasm_i32(matches ? 1 : 0));
                             break;
                         }
-                        if (!matches) WASM__TRAP(WASM_ERR_TRAP);
+                        if (!matches) {
+                            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "cast failure");
+                            err = WASM_ERR_TRAP;
+                            goto cleanup;
+                        }
                         WASM__PUSH(rt, wasm__runtime_cast_success_value(&target_ref, value));
                         break;
                     }
@@ -15418,6 +15529,62 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 else
                     equal = lhs.of.gc_ref == rhs.of.gc_ref;
                 WASM__PUSH(rt, wasm_i32(equal ? 1 : 0));
+                break;
+            }
+            case 0xD4: {
+                wasm_reftype_t actual_ref;
+                wasm_value_t value = WASM__POP(rt);
+
+                if (!wasm__runtime_value_reftype(mod, &value, &actual_ref)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                if (wasm__is_null_ref(&value)) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null reference");
+                    err = WASM_ERR_TRAP;
+                    goto cleanup;
+                }
+                actual_ref.nullable = 0;
+                WASM__PUSH(rt, wasm__runtime_cast_success_value(&actual_ref, value));
+                break;
+            }
+            case 0xD5:
+            case 0xD6: {
+                uint32_t depth = wasm__read_leb128_u32(&cf->r);
+                wasm_reftype_t source_ref;
+                wasm_reftype_t target_ref;
+                wasm_value_t value;
+                int matches;
+
+                if (depth >= cf->lsp) WASM__TRAP(WASM_ERR_MALFORMED);
+                value = WASM__POP(rt);
+                if (!wasm__runtime_value_reftype(mod, &value, &source_ref)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
+                source_ref.nullable = 1;
+                target_ref = source_ref;
+                target_ref.nullable = 0;
+                matches = !wasm__is_null_ref(&value);
+                if (matches) {
+                    value = wasm__runtime_cast_success_value(&target_ref, value);
+                    if (op == 0xD5) {
+                        WASM__PUSH(rt, value);
+                    } else {
+                        WASM__PUSH(rt, value);
+                        err = wasm__do_branch(rt,
+                                              cf->labels,
+                                              &cf->labels[cf->lsp - 1 - depth],
+                                              &cf->r,
+                                              &cf->lsp,
+                                              depth);
+                        if (err != WASM_OK) goto cleanup;
+                    }
+                } else if (op == 0xD5) {
+                    if (op == 0xD5) {
+                        err = wasm__do_branch(rt,
+                                              cf->labels,
+                                              &cf->labels[cf->lsp - 1 - depth],
+                                              &cf->r,
+                                              &cf->lsp,
+                                              depth);
+                        if (err != WASM_OK) goto cleanup;
+                    }
+                }
                 break;
             }
 

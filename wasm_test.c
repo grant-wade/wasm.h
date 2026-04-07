@@ -12762,6 +12762,13 @@ WL_TEST(test_gc_runtime_executes_cast_and_branch_cast_opcodes) {
         emit(&body, 0xD1);
         emit(&body, 0x6A);
 
+        emit(&body, 0x20);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0xD4);
+        emit(&body, 0xD1);
+        emit(&body, 0x45);
+        emit(&body, 0x6A);
+
         emit(&body, 0x0B);
 
         emit_leb128_u32(&sec, body.len);
@@ -12779,7 +12786,7 @@ WL_TEST(test_gc_runtime_executes_cast_and_branch_cast_opcodes) {
 
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
-    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 6);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -13259,6 +13266,11 @@ WL_TEST(test_gc_validation_accepts_cast_and_branch_cast_opcodes) {
         emit_leb128_i32(&body, 0);
         emit_leb128_i32(&body, 0);
         emit(&body, 0x0B);
+        emit(&body, 0x1A);
+
+        emit(&body, 0xD0);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0xD4);
         emit(&body, 0x1A);
 
         emit(&body, 0x0B);
