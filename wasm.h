@@ -528,6 +528,7 @@ typedef struct wasm_table_t {
     wasm_valtype_t reftype;
     wasm_reftype_t reftype_info;
     wasm_value_t* elems;
+    wasm_value_t default_value;
     uint32_t size;
     uint32_t max_size;
     int is_64;
@@ -4028,8 +4029,7 @@ static wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
 
     table->elems = (wasm_value_t*)WASM_MALLOC(table->size * sizeof(wasm_value_t));
     if (!table->elems) return WASM_ERR_OOM;
-    for (i = 0; i < table->size; i++)
-        table->elems[i] = wasm__typed_ref_null(table->reftype, &table->reftype_info);
+    for (i = 0; i < table->size; i++) table->elems[i] = table->default_value;
     return WASM_OK;
 }
 
@@ -6804,17 +6804,31 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
 static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
                                           wasm__reader_t* r,
                                           wasm_table_t* table) {
+    uint8_t leading;
+    uint8_t init_flags = 0;
     uint8_t flags;
     int has_max;
     int is_shared;
     int is_64;
+    int has_init_expr = 0;
     wasm_error_t err;
 
     memset(table, 0, sizeof(*table));
-    err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
-    if (err != WASM_OK) return err;
+    leading = wasm__read_u8(r);
+    if (leading == 0x40u) {
+        has_init_expr = 1;
+        init_flags = wasm__read_u8(r);
+        if (init_flags != 0x00u) return WASM_ERR_MALFORMED;
+        err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
+        if (err != WASM_OK) return err;
+        flags = wasm__read_u8(r);
+    } else {
+        r->ptr--;
+        err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
+        if (err != WASM_OK) return err;
+        flags = wasm__read_u8(r);
+    }
 
-    flags = wasm__read_u8(r);
     has_max = (flags & 0x01u) != 0;
     is_shared = (flags & 0x02u) != 0;
     is_64 = (flags & 0x04u) != 0;
@@ -6829,6 +6843,17 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     table->is_64 = is_64;
     table->size = wasm__read_leb128_u32(r);
     table->max_size = has_max ? wasm__read_leb128_u32(r) : UINT32_MAX;
+
+    table->default_value = wasm__typed_ref_null(table->reftype, &table->reftype_info);
+    if (has_init_expr) {
+        wasm_value_t init_value;
+
+        err = wasm__eval_init_expr(mod, r, UINT32_MAX, &init_value);
+        if (err != WASM_OK) return err;
+        if (!wasm__runtime_value_matches_type(mod, &init_value, table->reftype, &table->reftype_info))
+            return WASM_ERR_TYPE_MISMATCH;
+        table->default_value = init_value;
+    }
 
     if (r->malformed) return WASM_ERR_MALFORMED;
     return WASM_OK;

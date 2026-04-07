@@ -74,6 +74,21 @@ typedef struct spec_named_module_t {
     wasm_module_t* module;
 } spec_named_module_t;
 
+typedef struct spec_module_definition_t {
+    char* name;
+    char* load_path;
+} spec_module_definition_t;
+
+typedef struct spec_module_source_t {
+    char* file_name;
+    char* module_type;
+    char* binary_file_name;
+    char* path;
+    char* load_path;
+    char* compiler_output;
+    int compiler_exit;
+} spec_module_source_t;
+
 typedef struct spec_action_result_t {
     wasm_error_t err;
     char error_text[512];
@@ -86,6 +101,9 @@ typedef struct spec_harness_t {
     wasm_module_t** owned_modules;
     size_t num_owned_modules;
     size_t cap_owned_modules;
+    spec_module_definition_t* module_definitions;
+    size_t num_module_definitions;
+    size_t cap_module_definitions;
     spec_named_module_t* named_modules;
     size_t num_named_modules;
     size_t cap_named_modules;
@@ -754,6 +772,63 @@ static int spec_harness_reserve_named_modules(spec_harness_t* harness, size_t co
     return 1;
 }
 
+static int spec_harness_reserve_module_definitions(spec_harness_t* harness, size_t count) {
+    spec_module_definition_t* definitions;
+    size_t cap;
+
+    if (harness->num_module_definitions + count <= harness->cap_module_definitions) return 1;
+    cap = harness->cap_module_definitions ? harness->cap_module_definitions * 2u : 16u;
+    while (cap < harness->num_module_definitions + count) cap *= 2u;
+    definitions = (spec_module_definition_t*)realloc(harness->module_definitions,
+                                                     cap * sizeof(*definitions));
+    if (!definitions) return 0;
+    harness->module_definitions = definitions;
+    harness->cap_module_definitions = cap;
+    return 1;
+}
+
+static int spec_harness_set_module_definition(spec_harness_t* harness,
+                                              const char* name,
+                                              const char* load_path) {
+    size_t i;
+
+    for (i = 0; i < harness->num_module_definitions; i++) {
+        if (strcmp(harness->module_definitions[i].name, name) == 0) {
+            char* load_path_copy = spec_strdup_cstr(load_path);
+
+            if (!load_path_copy) return 0;
+            free(harness->module_definitions[i].load_path);
+            harness->module_definitions[i].load_path = load_path_copy;
+            return 1;
+        }
+    }
+
+    if (!spec_harness_reserve_module_definitions(harness, 1u)) return 0;
+    harness->module_definitions[harness->num_module_definitions].name = spec_strdup_cstr(name);
+    harness->module_definitions[harness->num_module_definitions].load_path = spec_strdup_cstr(load_path);
+    if (!harness->module_definitions[harness->num_module_definitions].name ||
+        !harness->module_definitions[harness->num_module_definitions].load_path) {
+        free(harness->module_definitions[harness->num_module_definitions].name);
+        free(harness->module_definitions[harness->num_module_definitions].load_path);
+        harness->module_definitions[harness->num_module_definitions].name = NULL;
+        harness->module_definitions[harness->num_module_definitions].load_path = NULL;
+        return 0;
+    }
+    harness->num_module_definitions++;
+    return 1;
+}
+
+static const char* spec_harness_find_module_definition(const spec_harness_t* harness, const char* name) {
+    size_t i;
+
+    if (!name || !*name) return NULL;
+    for (i = 0; i < harness->num_module_definitions; i++) {
+        if (strcmp(harness->module_definitions[i].name, name) == 0)
+            return harness->module_definitions[i].load_path;
+    }
+    return NULL;
+}
+
 static int spec_harness_set_module_name(spec_harness_t* harness,
                                         const char* name,
                                         wasm_module_t* module) {
@@ -782,6 +857,18 @@ static wasm_module_t* spec_harness_find_module(const spec_harness_t* harness, co
         if (strcmp(harness->named_modules[i].name, name) == 0) return harness->named_modules[i].module;
     }
     return NULL;
+}
+
+static void spec_module_source_dispose(spec_module_source_t* source) {
+    if (!source) return;
+    free(source->file_name);
+    free(source->module_type);
+    free(source->binary_file_name);
+    free(source->path);
+    free(source->load_path);
+    free(source->compiler_output);
+    memset(source, 0, sizeof(*source));
+    source->compiler_exit = -1;
 }
 
 static int spec_harness_reserve_forwarders(spec_harness_t* harness, size_t count) {
@@ -2071,6 +2158,103 @@ static wasm_module_t* spec_load_module_file(spec_harness_t* harness,
     return module;
 }
 
+static int spec_resolve_command_module_source(spec_harness_t* harness,
+                                              const char* json,
+                                              const spec_json_token_t* tokens,
+                                              int command_index,
+                                              spec_module_source_t* out_source,
+                                              char* error_text,
+                                              size_t error_size) {
+    int file_index = spec_object_get(json, tokens, command_index, "filename");
+    int module_type_index = spec_object_get(json, tokens, command_index, "module_type");
+    int binary_file_index = spec_object_get(json, tokens, command_index, "binary_filename");
+
+    memset(out_source, 0, sizeof(*out_source));
+    out_source->compiler_exit = -1;
+
+    if (file_index < 0) {
+        spec_set_error(error_text, error_size, "missing module filename");
+        return 0;
+    }
+
+    out_source->file_name = spec_strdup_token(json, &tokens[file_index]);
+    out_source->module_type = module_type_index >= 0 ? spec_strdup_token(json, &tokens[module_type_index]) : NULL;
+    out_source->binary_file_name =
+        binary_file_index >= 0 ? spec_strdup_token(json, &tokens[binary_file_index]) : NULL;
+    out_source->path = out_source->file_name ? spec_path_join(harness->json_dir, out_source->file_name) : NULL;
+    if (!out_source->file_name || !out_source->path) {
+        spec_set_error(error_text, error_size, "out of memory resolving module path");
+        spec_module_source_dispose(out_source);
+        return 0;
+    }
+
+    if (out_source->module_type && strcmp(out_source->module_type, "text") == 0) {
+        if (out_source->binary_file_name) {
+            out_source->load_path = spec_path_join(harness->json_dir, out_source->binary_file_name);
+            if (!out_source->load_path) {
+                spec_set_error(error_text, error_size,
+                               "out of memory resolving text module binary path");
+                spec_module_source_dispose(out_source);
+                return 0;
+            }
+        } else {
+            out_source->load_path = (char*)malloc(strlen(out_source->path) + 6u);
+            if (!out_source->load_path) {
+                spec_set_error(error_text, error_size, "out of memory preparing temporary wasm path");
+                spec_module_source_dispose(out_source);
+                return 0;
+            }
+            sprintf(out_source->load_path, "%s.wasm", out_source->path);
+            if (!spec_compile_wat(harness, out_source->path, out_source->load_path,
+                                  &out_source->compiler_output, &out_source->compiler_exit)) {
+                spec_set_error(error_text, error_size, "failed to invoke wasm-tools parse");
+                spec_module_source_dispose(out_source);
+                return 0;
+            }
+            if (out_source->compiler_exit != 0) {
+                spec_set_error(error_text, error_size,
+                               "wasm-tools parse failed with '%s'",
+                               out_source->compiler_output ? out_source->compiler_output : "<none>");
+                spec_module_source_dispose(out_source);
+                return 0;
+            }
+        }
+    } else {
+        out_source->load_path = spec_strdup_cstr(out_source->path);
+        if (!out_source->load_path) {
+            spec_set_error(error_text, error_size, "out of memory resolving module path");
+            spec_module_source_dispose(out_source);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int spec_validate_module_file(spec_harness_t* harness,
+                                     const char* path,
+                                     char* error_text,
+                                     size_t error_size) {
+    char* validator_output = NULL;
+    int validator_exit = -1;
+
+    if (!spec_validate_wasm(harness, path, &validator_output, &validator_exit)) {
+        spec_set_error(error_text, error_size, "failed to invoke wasm-tools validate");
+        free(validator_output);
+        return 0;
+    }
+
+    if (validator_exit != 0) {
+        spec_set_error(error_text, error_size, "wasm-tools validate failed with '%s'",
+                       validator_output ? validator_output : "<none>");
+        free(validator_output);
+        return 0;
+    }
+
+    free(validator_output);
+    return 1;
+}
+
 static int spec_execute_action(spec_harness_t* harness,
                                const char* json,
                                const spec_json_token_t* tokens,
@@ -2429,98 +2613,81 @@ static int spec_run_command(spec_harness_t* harness,
     memset(command_error, 0, sizeof(command_error));
 
     if (strcmp(type_text, "module") == 0) {
-        char* file_name = NULL;
         char* module_name = NULL;
-        char* module_type = NULL;
-        char* binary_file_name = NULL;
-        char* path = NULL;
-        char* load_path = NULL;
-        char* compiler_output = NULL;
-        int file_index = spec_object_get(json, tokens, command_index, "filename");
         int name_index = spec_object_get(json, tokens, command_index, "name");
-        int module_type_index = spec_object_get(json, tokens, command_index, "module_type");
-        int binary_file_index = spec_object_get(json, tokens, command_index, "binary_filename");
-        int compiler_exit = -1;
+        spec_module_source_t source;
 
-        if (file_index < 0) {
-            spec_set_error(command_error, sizeof(command_error), "missing module filename");
-            goto done;
-        }
-
-        file_name = spec_strdup_token(json, &tokens[file_index]);
         module_name = name_index >= 0 ? spec_strdup_token(json, &tokens[name_index]) : NULL;
-        module_type = module_type_index >= 0 ? spec_strdup_token(json, &tokens[module_type_index]) : NULL;
-        binary_file_name = binary_file_index >= 0 ? spec_strdup_token(json, &tokens[binary_file_index]) : NULL;
-        path = file_name ? spec_path_join(harness->json_dir, file_name) : NULL;
-        if (!file_name || !path) {
-            spec_set_error(command_error, sizeof(command_error), "out of memory resolving module path");
-            free(file_name);
+
+        if (!spec_resolve_command_module_source(harness, json, tokens, command_index,
+                                                &source, command_error, sizeof(command_error))) {
             free(module_name);
-            free(module_type);
-            free(binary_file_name);
-            free(path);
             goto done;
         }
 
-        load_path = path;
-        if (module_type && strcmp(module_type, "text") == 0) {
-            if (binary_file_name) {
-                load_path = spec_path_join(harness->json_dir, binary_file_name);
-                if (!load_path) {
-                    spec_set_error(command_error, sizeof(command_error), "out of memory resolving text module binary path");
-                    free(file_name);
-                    free(module_name);
-                    free(module_type);
-                    free(binary_file_name);
-                    free(path);
-                    goto done;
-                }
-            } else {
-                load_path = (char*)malloc(strlen(path) + 6u);
-                if (!load_path) {
-                    spec_set_error(command_error, sizeof(command_error), "out of memory preparing temporary wasm path");
-                    free(file_name);
-                    free(module_name);
-                    free(module_type);
-                    free(binary_file_name);
-                    free(path);
-                    goto done;
-                }
-                sprintf(load_path, "%s.wasm", path);
-                if (!spec_compile_wat(harness, path, load_path, &compiler_output, &compiler_exit)) {
-                    spec_set_error(command_error, sizeof(command_error), "failed to invoke wasm-tools parse");
-                    free(file_name);
-                    free(module_name);
-                    free(module_type);
-                    free(binary_file_name);
-                    free(path);
-                    free(load_path);
-                    goto done;
-                }
-                if (compiler_exit != 0) {
-                    spec_set_error(command_error, sizeof(command_error),
-                                   "wasm-tools parse failed with '%s'",
-                                   compiler_output ? compiler_output : "<none>");
-                    free(file_name);
-                    free(module_name);
-                    free(module_type);
-                    free(binary_file_name);
-                    free(path);
-                    free(load_path);
-                    free(compiler_output);
-                    goto done;
-                }
-            }
+        ok = spec_load_module_file(harness, source.load_path, module_name, 1,
+                                   command_error, sizeof(command_error)) != NULL;
+        free(module_name);
+        spec_module_source_dispose(&source);
+    } else if (strcmp(type_text, "module_definition") == 0) {
+        char* module_name = NULL;
+        int name_index = spec_object_get(json, tokens, command_index, "name");
+        spec_module_source_t source;
+
+        module_name = name_index >= 0 ? spec_strdup_token(json, &tokens[name_index]) : NULL;
+        if (!spec_resolve_command_module_source(harness, json, tokens, command_index,
+                                                &source, command_error, sizeof(command_error))) {
+            free(module_name);
+            goto done;
         }
 
-        ok = spec_load_module_file(harness, load_path, module_name, 1, command_error, sizeof(command_error)) != NULL;
-        free(compiler_output);
-        free(file_name);
+        ok = spec_validate_module_file(harness, source.load_path, command_error, sizeof(command_error));
+        if (ok && module_name && *module_name) {
+            ok = spec_harness_set_module_definition(harness, module_name, source.load_path);
+            if (!ok) spec_set_error(command_error, sizeof(command_error), "out of memory storing module definition");
+        }
+
         free(module_name);
-        free(module_type);
-        free(binary_file_name);
-        if (load_path != path) free(load_path);
-        free(path);
+        spec_module_source_dispose(&source);
+    } else if (strcmp(type_text, "module_instance") == 0) {
+        char* instance_name = NULL;
+        char* definition_name = NULL;
+        const char* load_path;
+        int instance_index = spec_object_get(json, tokens, command_index, "instance");
+        int module_index = spec_object_get(json, tokens, command_index, "module");
+
+        if (instance_index < 0) {
+            spec_set_error(command_error, sizeof(command_error), "missing module instance name");
+            goto done;
+        }
+        if (module_index < 0) {
+            spec_set_error(command_error, sizeof(command_error), "missing module definition reference");
+            goto done;
+        }
+
+        instance_name = spec_strdup_token(json, &tokens[instance_index]);
+        definition_name = spec_strdup_token(json, &tokens[module_index]);
+        if (!instance_name || !definition_name) {
+            spec_set_error(command_error, sizeof(command_error),
+                           "out of memory resolving module instance");
+            free(instance_name);
+            free(definition_name);
+            goto done;
+        }
+
+        load_path = spec_harness_find_module_definition(harness, definition_name);
+        if (!load_path) {
+            spec_set_error(command_error, sizeof(command_error),
+                           "unknown module definition %s", definition_name);
+            free(instance_name);
+            free(definition_name);
+            goto done;
+        }
+
+        ok = spec_load_module_file(harness, load_path, instance_name, 0,
+                                   command_error, sizeof(command_error)) != NULL;
+        free(instance_name);
+        free(definition_name);
     } else if (strcmp(type_text, "register") == 0) {
         char* alias = NULL;
         char* module_ref = NULL;
@@ -2639,10 +2806,15 @@ static void spec_harness_destroy(spec_harness_t* harness) {
 
     if (!harness) return;
 
+    for (i = 0; i < harness->num_module_definitions; i++) {
+        free(harness->module_definitions[i].name);
+        free(harness->module_definitions[i].load_path);
+    }
     for (i = 0; i < harness->num_named_modules; i++) free(harness->named_modules[i].name);
     for (i = 0; i < harness->num_owned_modules; i++) wasm_free_module(harness->owned_modules[i]);
 
     free(harness->owned_modules);
+    free(harness->module_definitions);
     free(harness->named_modules);
     free(harness->forwarded_funcs);
     free(harness->json_dir);
