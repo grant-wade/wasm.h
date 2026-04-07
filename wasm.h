@@ -3855,6 +3855,10 @@ static int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t li
     return offset <= limit && size <= (limit - offset);
 }
 
+static int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t mem_size) {
+    return wasm__range_in_bounds_u64(addr, width, mem_size);
+}
+
 typedef struct wasm__memarg_t {
     uint32_t align_log2;
     uint32_t memory_index;
@@ -5815,6 +5819,42 @@ static wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
     return NULL;
 }
 
+static int wasm__has_import_named(const wasm_runtime_t* rt,
+                                  const char* module,
+                                  const char* name) {
+    uint32_t i;
+
+    if (!rt || !module || !name) return 0;
+
+    for (i = 0; i < rt->num_imports; i++) {
+        if (strcmp(rt->imports[i].module, module) == 0 &&
+            strcmp(rt->imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_global_imports; i++) {
+        if (strcmp(rt->global_imports[i].module, module) == 0 &&
+            strcmp(rt->global_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        if (strcmp(rt->table_imports[i].module, module) == 0 &&
+            strcmp(rt->table_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_memory_imports; i++) {
+        if (strcmp(rt->memory_imports[i].module, module) == 0 &&
+            strcmp(rt->memory_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_tag_imports; i++) {
+        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
+            strcmp(rt->tag_imports[i].name, name) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
 static wasm_table_import_t* wasm__find_table_import(wasm_runtime_t* rt,
                                                     const char* module,
                                                     const char* name) {
@@ -6507,6 +6547,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             }
         }
         if (!mod->funcs[fi].host_func) {
+            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "function import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
@@ -6527,6 +6573,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
         timp = wasm__find_table_import(mod->rt, info->module, info->name);
         if (!timp) {
+            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "table import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
@@ -6569,6 +6621,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
         if (!mimp) {
+            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "memory import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
@@ -6608,6 +6666,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
 
         gimp = wasm__find_global_import(mod->rt, info->module, info->name);
         if (!gimp) {
+            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "global import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
@@ -6656,6 +6720,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         timp = wasm__find_tag_import(mod->rt, info->module, info->name);
         if (!timp) {
+            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                              "tag import type mismatch: %.64s.%.64s",
+                              info->module, info->name);
+                return WASM_ERR_TYPE_MISMATCH;
+            }
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
@@ -13303,12 +13373,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         switch (subop) {
                             case 0x00:
-                                if (addr + 16u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 16u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 memcpy(vector.of.v128, memory->data + addr, 16);
                                 break;
                             case 0x01:
                             case 0x02:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 for (lane = 0; lane < 8; lane++) {
                                     if (subop == 0x01)
                                         wasm__v128_set_i16(&vector, lane, (int8_t)memory->data[addr + lane]);
@@ -13318,7 +13388,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                 break;
                             case 0x03:
                             case 0x04:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 for (lane = 0; lane < 4; lane++) {
                                     uint16_t loaded = wasm__load_le16(memory->data + addr + lane * 2u);
                                     if (subop == 0x03)
@@ -13329,7 +13399,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                 break;
                             case 0x05:
                             case 0x06:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 for (lane = 0; lane < 2; lane++) {
                                     uint32_t loaded = wasm__load_le32(memory->data + addr + lane * 4u);
                                     if (subop == 0x05)
@@ -13339,36 +13409,36 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                 }
                                 break;
                             case 0x07:
-                                if (addr + 1u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 for (lane = 0; lane < 16; lane++) vector.of.v128[lane] = memory->data[addr];
                                 break;
                             case 0x08: {
                                 uint16_t loaded;
-                                if (addr + 2u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 loaded = wasm__load_le16(memory->data + addr);
                                 for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&vector, lane, loaded);
                                 break;
                             }
                             case 0x09: {
                                 uint32_t loaded;
-                                if (addr + 4u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 loaded = wasm__load_le32(memory->data + addr);
                                 for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&vector, lane, loaded);
                                 break;
                             }
                             case 0x0A: {
                                 uint64_t loaded;
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 loaded = wasm__load_le64(memory->data + addr);
                                 for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&vector, lane, loaded);
                                 break;
                             }
                             case 0x5C:
-                                if (addr + 4u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u32(&vector, 0, wasm__load_le32(memory->data + addr));
                                 break;
                             default:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u64(&vector, 0, wasm__load_le64(memory->data + addr));
                                 break;
                         }
@@ -13392,7 +13462,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
                         if (!wasm__memory_effective_addr(memory, &base, memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         msz = wasm__memory_byte_size(memory);
-                        if (addr + 16u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 16u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memcpy(memory->data + addr, vector.of.v128, 16);
                         break;
                     }
@@ -13652,19 +13722,19 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         switch (subop) {
                             case 0x54:
-                                if (addr + 1u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u8(&vector, lane, memory->data[addr]);
                                 break;
                             case 0x55:
-                                if (addr + 2u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u16(&vector, lane, wasm__load_le16(memory->data + addr));
                                 break;
                             case 0x56:
-                                if (addr + 4u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u32(&vector, lane, wasm__load_le32(memory->data + addr));
                                 break;
                             default:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__v128_set_u64(&vector, lane, wasm__load_le64(memory->data + addr));
                                 break;
                         }
@@ -13697,19 +13767,19 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         switch (subop) {
                             case 0x58:
-                                if (addr + 1u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 memory->data[addr] = wasm__v128_get_u8(&vector, lane);
                                 break;
                             case 0x59:
-                                if (addr + 2u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__store_le16(memory->data + addr, wasm__v128_get_u16(&vector, lane));
                                 break;
                             case 0x5A:
-                                if (addr + 4u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__store_le32(memory->data + addr, wasm__v128_get_u32(&vector, lane));
                                 break;
                             default:
-                                if (addr + 8u > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                                if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                                 wasm__store_le64(memory->data + addr, wasm__v128_get_u64(&vector, lane));
                                 break;
                         }
@@ -14142,14 +14212,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 switch (op) {
                     case 0x28: {
                         int32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = (int32_t)wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32(v));
                         break;
                     }
                     case 0x29: {
                         int64_t v;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = (int64_t)wasm__load_le64(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64(v));
                         break;
@@ -14157,7 +14227,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     case 0x2A: {
                         uint32_t b;
                         float v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le32(memory->data + addr);
                         memcpy(&v, &b, 4);
                         WASM__PUSH(rt, wasm_f32(v));
@@ -14166,66 +14236,66 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     case 0x2B: {
                         uint64_t b;
                         double v;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le64(memory->data + addr);
                         memcpy(&v, &b, 8);
                         WASM__PUSH(rt, wasm_f64(v));
                         break;
                     }
                     case 0x2C:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         WASM__PUSH(rt, wasm_i32((int32_t)(int8_t)memory->data[addr]));
                         break;
                     case 0x2D:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         WASM__PUSH(rt, wasm_i32((int32_t)memory->data[addr]));
                         break;
                     case 0x2E: {
                         int16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = (int16_t)wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32((int32_t)v));
                         break;
                     }
                     case 0x2F: {
                         uint16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i32((int32_t)v));
                         break;
                     }
                     case 0x30:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         WASM__PUSH(rt, wasm_i64((int64_t)(int8_t)memory->data[addr]));
                         break;
                     case 0x31:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         WASM__PUSH(rt, wasm_i64((int64_t)memory->data[addr]));
                         break;
                     case 0x32: {
                         int16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = (int16_t)wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x33: {
                         uint16_t v;
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = wasm__load_le16(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x34: {
                         int32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = (int32_t)wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
                     }
                     case 0x35: {
                         uint32_t v;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         v = wasm__load_le32(memory->data + addr);
                         WASM__PUSH(rt, wasm_i64((int64_t)v));
                         break;
@@ -14261,45 +14331,45 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 msz = wasm__memory_byte_size(memory);
                 switch (op) {
                     case 0x36:
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         wasm__store_le32(memory->data + addr, (uint32_t)val.of.i32);
                         break;
                     case 0x37:
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         wasm__store_le64(memory->data + addr, (uint64_t)val.of.i64);
                         break;
                     case 0x38: {
                         uint32_t b;
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memcpy(&b, &val.of.f32, 4);
                         wasm__store_le32(memory->data + addr, b);
                         break;
                     }
                     case 0x39: {
                         uint64_t b;
-                        if (addr + 8 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memcpy(&b, &val.of.f64, 8);
                         wasm__store_le64(memory->data + addr, b);
                         break;
                     }
                     case 0x3A:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memory->data[addr] = (uint8_t)val.of.i32;
                         break;
                     case 0x3B:
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         wasm__store_le16(memory->data + addr, (uint16_t)val.of.i32);
                         break;
                     case 0x3C:
-                        if (addr + 1 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         memory->data[addr] = (uint8_t)val.of.i64;
                         break;
                     case 0x3D:
-                        if (addr + 2 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         wasm__store_le16(memory->data + addr, (uint16_t)val.of.i64);
                         break;
                     case 0x3E:
-                        if (addr + 4 > msz) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         wasm__store_le32(memory->data + addr, (uint32_t)val.of.i64);
                         break;
                     default:
