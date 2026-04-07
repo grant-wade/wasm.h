@@ -530,7 +530,7 @@ typedef struct wasm_table_t {
     wasm_value_t* elems;
     wasm_value_t default_value;
     uint32_t size;
-    uint32_t max_size;
+    uint64_t max_size;
     int is_64;
     int is_import;
     struct wasm_table_t* import_table;
@@ -551,7 +551,7 @@ typedef struct wasm_elem_segment_t {
     wasm_value_t* elems;
     uint32_t num_elems;
     uint32_t table_index;
-    uint32_t offset;
+    uint64_t offset;
     int is_passive;
     int is_declarative;
     int is_dropped;
@@ -2817,8 +2817,8 @@ static int wasm__tabletype_matches_import(const wasm_module_t* mod,
                                           const wasm_table_t* actual_table,
                                           wasm_valtype_t expected_type,
                                           const wasm_reftype_t* expected_ref,
-                                          uint32_t expected_min,
-                                          uint32_t expected_max,
+                                          uint64_t expected_min,
+                                          uint64_t expected_max,
                                           int expected_is_64) {
     actual_table = wasm__table_actual_const(actual_table);
     if (!actual_table) return 0;
@@ -3997,6 +3997,26 @@ static wasm_valtype_t wasm__memory_index_type(const wasm_memory_t* memory) {
     return (memory && memory->is_64) ? WASM_TYPE_I64 : WASM_TYPE_I32;
 }
 
+static wasm_valtype_t wasm__table_index_type(const wasm_table_t* table) {
+    return (table && table->is_64) ? WASM_TYPE_I64 : WASM_TYPE_I32;
+}
+
+static wasm_valtype_t wasm__table_copy_size_type(const wasm_table_t* dst_table,
+                                                 const wasm_table_t* src_table) {
+    if ((dst_table && dst_table->is_64) && (src_table && src_table->is_64)) return WASM_TYPE_I64;
+    return WASM_TYPE_I32;
+}
+
+static uint64_t wasm__table_index_value(const wasm_table_t* table, const wasm_value_t* value) {
+    if (table && table->is_64) return (uint64_t)value->of.i64;
+    return (uint64_t)(uint32_t)value->of.i32;
+}
+
+static wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value) {
+    if (table && table->is_64) return wasm_i64((int64_t)value);
+    return wasm_i32((int32_t)value);
+}
+
 static uint64_t wasm__memory_page_limit(const wasm_memory_t* memory) {
     return (memory && memory->is_64) ? WASM_MEMORY64_MAX_PAGES : (uint64_t)WASM_MEMORY32_MAX_PAGES;
 }
@@ -4041,6 +4061,7 @@ static wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
 }
 
 static wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
+    size_t elem_count;
     uint32_t i;
 
     table = wasm__table_actual(table);
@@ -4048,8 +4069,11 @@ static wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
     if (table->size == 0) return WASM_OK;
     if (!wasm__is_ref_type(table->reftype)) return WASM_ERR_MALFORMED;
     if (table->elems) return WASM_OK;
+    elem_count = (size_t)table->size;
+    if ((uint64_t)elem_count * (uint64_t)sizeof(wasm_value_t) > (uint64_t)SIZE_MAX)
+        return WASM_ERR_OOM;
 
-    table->elems = (wasm_value_t*)WASM_MALLOC(table->size * sizeof(wasm_value_t));
+    table->elems = (wasm_value_t*)WASM_MALLOC(elem_count * sizeof(wasm_value_t));
     if (!table->elems) return WASM_ERR_OOM;
     for (i = 0; i < table->size; i++) table->elems[i] = table->default_value;
     return WASM_OK;
@@ -6863,8 +6887,24 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     }
 
     table->is_64 = is_64;
-    table->size = wasm__read_leb128_u32(r);
-    table->max_size = has_max ? wasm__read_leb128_u32(r) : UINT32_MAX;
+    if (is_64) {
+        uint64_t min_size = wasm__read_leb128_u64(r);
+
+        table->size = (uint32_t)min_size;
+        table->max_size = has_max ? wasm__read_leb128_u64(r) : UINT64_MAX;
+        if (min_size > UINT32_MAX) return WASM_ERR_OOM;
+    } else {
+        uint64_t min_size = wasm__read_leb128_u64(r);
+        uint64_t max_size = has_max ? wasm__read_leb128_u64(r) : UINT32_MAX;
+
+        if (r->malformed) return WASM_ERR_MALFORMED;
+        if (min_size > UINT32_MAX || max_size > UINT32_MAX) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "table size");
+            return WASM_ERR_MALFORMED;
+        }
+        table->size = (uint32_t)min_size;
+        table->max_size = max_size;
+    }
 
     table->default_value = wasm__typed_ref_null(table->reftype, &table->reftype_info);
     if (has_init_expr) {
@@ -6875,6 +6915,11 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
         if (!wasm__runtime_value_matches_type(mod, &init_value, table->reftype, &table->reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
         table->default_value = init_value;
+    } else if (!wasm__runtime_value_matches_type(mod,
+                                                 &table->default_value,
+                                                 table->reftype,
+                                                 &table->reftype_info)) {
+        return WASM_ERR_TYPE_MISMATCH;
     }
 
     if (r->malformed) return WASM_ERR_MALFORMED;
@@ -7365,12 +7410,14 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
 
         if (!(flags & 0x01)) {
             wasm_value_t offset_value;
+            wasm_table_t* table = NULL;
 
             segment->table_index = (flags & 0x02) ? wasm__read_leb128_u32(r) : 0;
+            if (segment->table_index < mod->num_tables) table = &mod->tables[segment->table_index];
             err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
             if (err != WASM_OK) return err;
-            if (offset_value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
-            segment->offset = (uint32_t)offset_value.of.i32;
+            if (offset_value.type != wasm__table_index_type(table)) return WASM_ERR_TYPE_MISMATCH;
+            segment->offset = wasm__table_index_value(table, &offset_value);
         }
 
         if (uses_expr) {
@@ -7863,12 +7910,12 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                               "table %u has invalid reftype 0x%X",
                                               (unsigned)i, (unsigned)table->reftype);
         }
-        if (table->max_size != UINT32_MAX && table->size > table->max_size) {
+        if (table->max_size != UINT64_MAX && (uint64_t)table->size > table->max_size) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "table %u min %u exceeds max %u",
+                                              "table %u min %llu exceeds max %llu",
                                               (unsigned)i,
-                                              (unsigned)table->size,
-                                              (unsigned)table->max_size);
+                                              (unsigned long long)table->size,
+                                              (unsigned long long)table->max_size);
         }
     }
 
@@ -8528,15 +8575,6 @@ static wasm_error_t wasm__validator_binary(wasm__validator_t* v,
     err = wasm__validator_pop_expect(v, at, lhs_type);
     if (err != WASM_OK) return err;
     return wasm__validator_push(v, at, out_type);
-}
-
-static wasm_error_t wasm__validator_pop_three_i32(wasm__validator_t* v,
-                                                  const uint8_t* at) {
-    wasm_error_t err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
-    if (err != WASM_OK) return err;
-    err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
-    if (err != WASM_OK) return err;
-    return wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
 }
 
 static wasm_error_t wasm__validator_read_typed_select(wasm__validator_t* v,
@@ -9759,7 +9797,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
                                               table->reftype,
                                               &table->reftype_info))
                 return wasm__validator_error(v, at, "table.init type mismatch");
-            return wasm__validator_pop_three_i32(v, at);
+            err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+            if (err != WASM_OK) return err;
+            err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+            if (err != WASM_OK) return err;
+            return wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
         }
         case 0x0D: {
             uint32_t elem_idx = wasm__read_leb128_u32(&v->r);
@@ -9773,18 +9815,28 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             uint32_t dst_table_idx = wasm__read_leb128_u32(&v->r);
             uint32_t src_table_idx = wasm__read_leb128_u32(&v->r);
             wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_BULK_MEMORY);
+            wasm_table_t* dst_table;
+            wasm_table_t* src_table;
+            wasm_valtype_t size_type;
             if (err != WASM_OK) return err;
             if (dst_table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "unknown table %u", (unsigned)dst_table_idx);
             if (src_table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "unknown table %u", (unsigned)src_table_idx);
+            dst_table = &v->mod->tables[dst_table_idx];
+            src_table = &v->mod->tables[src_table_idx];
             if (!wasm__validator_type_matches(v,
-                                              v->mod->tables[src_table_idx].reftype,
-                                              &v->mod->tables[src_table_idx].reftype_info,
-                                              v->mod->tables[dst_table_idx].reftype,
-                                              &v->mod->tables[dst_table_idx].reftype_info))
+                                              src_table->reftype,
+                                              &src_table->reftype_info,
+                                              dst_table->reftype,
+                                              &dst_table->reftype_info))
                 return wasm__validator_error(v, at, "table.copy type mismatch");
-            return wasm__validator_pop_three_i32(v, at);
+            size_type = wasm__table_copy_size_type(dst_table, src_table);
+            err = wasm__validator_pop_expect(v, at, size_type);
+            if (err != WASM_OK) return err;
+            err = wasm__validator_pop_expect(v, at, wasm__table_index_type(src_table));
+            if (err != WASM_OK) return err;
+            return wasm__validator_pop_expect(v, at, wasm__table_index_type(dst_table));
         }
         case 0x0F: {
             uint32_t table_idx = wasm__read_leb128_u32(&v->r);
@@ -9794,11 +9846,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             if (table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
             table = &v->mod->tables[table_idx];
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+            err = wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
             if (err != WASM_OK) return err;
             err = wasm__validator_pop_expect_typed(v, at, table->reftype, &table->reftype_info);
             if (err != WASM_OK) return err;
-            return wasm__validator_push(v, at, WASM_TYPE_I32);
+            return wasm__validator_push(v, at, wasm__table_index_type(table));
         }
         case 0x10: {
             uint32_t table_idx = wasm__read_leb128_u32(&v->r);
@@ -9806,7 +9858,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             if (err != WASM_OK) return err;
             if (table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
-            return wasm__validator_push(v, at, WASM_TYPE_I32);
+            return wasm__validator_push(v, at, wasm__table_index_type(&v->mod->tables[table_idx]));
         }
         case 0x11: {
             uint32_t table_idx = wasm__read_leb128_u32(&v->r);
@@ -9816,11 +9868,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             if (table_idx >= v->mod->num_tables)
                 return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
             table = &v->mod->tables[table_idx];
-            err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+            err = wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
             if (err != WASM_OK) return err;
             err = wasm__validator_pop_expect_typed(v, at, table->reftype, &table->reftype_info);
             if (err != WASM_OK) return err;
-            return wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+            return wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
         }
         default:
             return wasm__validator_error(v, at, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
@@ -10239,7 +10291,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!callee_type)
                     return wasm__validator_error(&v, at, "call_indirect type index %u is not a function type",
                                                  (unsigned)type_idx);
-                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
+                err = wasm__validator_pop_expect(&v, at, wasm__table_index_type(&mod->tables[table_idx]));
                 if (err != WASM_OK) return err;
                 err = wasm__validator_check_types_typed(&v, at,
                                                         callee_type->params,
@@ -10298,7 +10350,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!callee_type)
                     return wasm__validator_error(&v, at, "call_indirect type index %u is not a function type",
                                                  (unsigned)type_idx);
-                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
+                err = wasm__validator_pop_expect(&v, at, wasm__table_index_type(&mod->tables[table_idx]));
                 if (err != WASM_OK) return err;
                 err = wasm__validator_check_types_typed(&v, at,
                                                         callee_type->params,
@@ -10588,29 +10640,33 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x25: {
                 uint32_t table_idx = wasm__read_leb128_u32(&v.r);
+                wasm_table_t* table;
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) return err;
                 if (table_idx >= mod->num_tables)
                     return wasm__validator_error(&v, at, "unknown table %u", (unsigned)table_idx);
-                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
+                table = &mod->tables[table_idx];
+                err = wasm__validator_pop_expect(&v, at, wasm__table_index_type(table));
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push_typed(&v, at,
-                                                 mod->tables[table_idx].reftype,
-                                                 &mod->tables[table_idx].reftype_info);
+                                                 table->reftype,
+                                                 &table->reftype_info);
                 if (err != WASM_OK) return err;
                 break;
             }
             case 0x26: {
                 uint32_t table_idx = wasm__read_leb128_u32(&v.r);
+                wasm_table_t* table;
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) return err;
                 if (table_idx >= mod->num_tables)
                     return wasm__validator_error(&v, at, "unknown table %u", (unsigned)table_idx);
+                table = &mod->tables[table_idx];
                 err = wasm__validator_pop_expect_typed(&v, at,
-                                                       mod->tables[table_idx].reftype,
-                                                       &mod->tables[table_idx].reftype_info);
+                                                       table->reftype,
+                                                       &table->reftype_info);
                 if (err != WASM_OK) return err;
-                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
+                err = wasm__validator_pop_expect(&v, at, wasm__table_index_type(table));
                 if (err != WASM_OK) return err;
                 break;
             }
@@ -13217,7 +13273,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 break;
             }
             case 0x11: { /* call_indirect */
-                uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
+                uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, ci;
+                uint64_t tvi;
                 wasm_module_t* callee_mod;
                 wasm_functype_t* cft;
                 wasm_func_t* callee;
@@ -13228,10 +13285,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 int j;
                 table_idx = wasm__read_leb128_u32(&cf->r);
                 iv = WASM__POP(rt);
-                tvi = (uint32_t)iv.of.i32;
                 if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
+                tvi = wasm__table_index_value(table, &iv);
                 if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
                 if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
@@ -13337,7 +13394,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 goto cleanup_frame;
             }
             case 0x13: { /* return_call_indirect */
-                uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, tvi, ci;
+                uint32_t ti = wasm__read_leb128_u32(&cf->r), table_idx, ci;
+                uint64_t tvi;
                 wasm_module_t* callee_mod;
                 wasm_functype_t* cft;
                 wasm_table_t* table;
@@ -13350,10 +13408,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                 table_idx = wasm__read_leb128_u32(&cf->r);
                 iv = WASM__POP(rt);
-                tvi = (uint32_t)iv.of.i32;
                 if (ti >= mod->num_types || table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
+                tvi = wasm__table_index_value(table, &iv);
                 if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
                 if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
@@ -14285,7 +14343,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         wasm_value_t dst = WASM__POP(rt);
                         uint32_t len = (uint32_t)count.of.i32;
                         uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t dst_offset;
                         wasm_elem_segment_t* segment;
                         wasm_table_t* table;
                         uint32_t j;
@@ -14299,6 +14357,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
 
                         table = wasm__table_at(mod, table_idx);
                         if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
+                        dst_offset = wasm__table_index_value(table, &dst);
                         segment = &mod->elem_segments[elem_idx];
                         if (segment->is_declarative) {
                             WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "out of bounds table access");
@@ -14341,9 +14400,9 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         wasm_value_t count = WASM__POP(rt);
                         wasm_value_t src = WASM__POP(rt);
                         wasm_value_t dst = WASM__POP(rt);
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t src_offset = (uint32_t)src.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t len;
+                        uint64_t src_offset;
+                        uint64_t dst_offset;
                         wasm_table_t* dst_table;
                         wasm_table_t* src_table;
 
@@ -14351,6 +14410,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         dst_table = wasm__table_at(mod, dst_table_idx);
                         src_table = wasm__table_at(mod, src_table_idx);
                         if (!dst_table || !src_table) WASM__TRAP(WASM_ERR_MALFORMED);
+                        dst_offset = wasm__table_index_value(dst_table, &dst);
+                        src_offset = wasm__table_index_value(src_table, &src);
+                        len = (wasm__table_copy_size_type(dst_table, src_table) == WASM_TYPE_I64)
+                                  ? (uint64_t)count.of.i64
+                                  : (uint64_t)(uint32_t)count.of.i32;
                         if (!wasm__typed_valtype_is_subtype(mod,
                                                             src_table->reftype,
                                                             &src_table->reftype_info,
@@ -14373,11 +14437,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         wasm_value_t delta_value = WASM__POP(rt);
                         wasm_value_t init_value = WASM__POP(rt);
                         wasm_table_t* table;
-                        uint32_t old_size;
-                        uint32_t delta;
-                        uint32_t new_size;
+                        uint64_t old_size;
+                        uint64_t delta;
+                        uint64_t new_size;
                         wasm_value_t* new_elems;
                         uint32_t j;
+                        size_t alloc_count;
 
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         table = wasm__table_at(mod, table_idx);
@@ -14388,26 +14453,31 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                                               &table->reftype_info))
                             WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                         old_size = table->size;
-                        delta = (uint32_t)delta_value.of.i32;
+                        delta = wasm__table_index_value(table, &delta_value);
                         if (delta == 0) {
-                            WASM__PUSH(rt, wasm_i32((int32_t)old_size));
+                            WASM__PUSH(rt, wasm__table_index_result(table, old_size));
                             break;
                         }
-                        if ((table->max_size != UINT32_MAX && delta > table->max_size - old_size) ||
+                        if ((table->max_size != UINT64_MAX && delta > table->max_size - old_size) ||
                             delta > UINT32_MAX - old_size) {
-                            WASM__PUSH(rt, wasm_i32(-1));
+                            WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                             break;
                         }
                         new_size = old_size + delta;
-                        new_elems = (wasm_value_t*)WASM_REALLOC(table->elems, new_size * sizeof(wasm_value_t));
+                        if (new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
+                            WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
+                            break;
+                        }
+                        alloc_count = (size_t)new_size;
+                        new_elems = (wasm_value_t*)WASM_REALLOC(table->elems, alloc_count * sizeof(wasm_value_t));
                         if (!new_elems) {
-                            WASM__PUSH(rt, wasm_i32(-1));
+                            WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                             break;
                         }
                         table->elems = new_elems;
-                        table->size = new_size;
+                        table->size = (uint32_t)new_size;
                         for (j = old_size; j < new_size; j++) table->elems[j] = init_value;
-                        WASM__PUSH(rt, wasm_i32((int32_t)old_size));
+                        WASM__PUSH(rt, wasm__table_index_result(table, old_size));
                         break;
                     }
                     case 0x10: {
@@ -14417,7 +14487,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         table = wasm__table_at(mod, table_idx);
                         if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-                        WASM__PUSH(rt, wasm_i32((int32_t)table->size));
+                        WASM__PUSH(rt, wasm__table_index_result(table, table->size));
                         break;
                     }
                     case 0x11: {
@@ -14426,13 +14496,15 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         wasm_value_t value = WASM__POP(rt);
                         wasm_value_t dst = WASM__POP(rt);
                         wasm_table_t* table;
-                        uint32_t len = (uint32_t)count.of.i32;
-                        uint32_t dst_offset = (uint32_t)dst.of.i32;
+                        uint64_t len;
+                        uint64_t dst_offset;
                         uint32_t j;
 
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                         table = wasm__table_at(mod, table_idx);
                         if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
+                        len = wasm__table_index_value(table, &count);
+                        dst_offset = wasm__table_index_value(table, &dst);
                         if (!wasm__runtime_value_matches_type(mod,
                                                               &value,
                                                               table->reftype,
@@ -15265,13 +15337,13 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 uint32_t table_idx = wasm__read_leb128_u32(&cf->r);
                 wasm_table_t* table;
                 wasm_value_t index;
-                uint32_t element_index;
+                uint64_t element_index;
 
                 if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                 index = WASM__POP(rt);
-                element_index = (uint32_t)index.of.i32;
+                element_index = wasm__table_index_value(table, &index);
                 if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 WASM__PUSH(rt, table->elems[element_index]);
                 break;
@@ -15281,14 +15353,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 wasm_table_t* table;
                 wasm_value_t value;
                 wasm_value_t index;
-                uint32_t element_index;
+                uint64_t element_index;
 
                 if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                 value = WASM__POP(rt);
                 index = WASM__POP(rt);
-                element_index = (uint32_t)index.of.i32;
+                element_index = wasm__table_index_value(table, &index);
                 if (!wasm__runtime_value_matches_type(mod,
                                                       &value,
                                                       table->reftype,
