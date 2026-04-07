@@ -6669,8 +6669,12 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
         if (uses_expr) {
             err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
             if (err != WASM_OK) return err;
-            err = wasm__read_reftype(mod, r, &segment->elem_type, &segment->elem_ref_type);
-            if (err != WASM_OK) return err;
+
+            /* Flag 4 uses expression elements with an implicit funcref type. */
+            if (flags != 0x04) {
+                err = wasm__read_reftype(mod, r, &segment->elem_type, &segment->elem_ref_type);
+                if (err != WASM_OK) return err;
+            }
         } else if ((flags & 0x03) != 0) {
             err = wasm__require_feature(mod, WASM_FEATURE_BULK_MEMORY);
             if (err != WASM_OK) return err;
@@ -10052,6 +10056,10 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
                 WASM__SET_ERR(rt, WASM_ERR_INVALID_SECTION, "unknown section id %u", (unsigned)sid);
                 err = WASM_ERR_INVALID_SECTION;
                 break;
+        }
+        if (err != WASM_OK && rt->last_error == WASM_OK) {
+            WASM__SET_ERR(rt, err, "section %u decode failed: %s",
+                          (unsigned)sid, wasm_error_string(err));
         }
         if (err == WASM_OK && (sr.malformed || sr.ptr != sr.end)) {
             WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section %u has trailing bytes", (unsigned)sid);

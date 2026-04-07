@@ -4163,7 +4163,6 @@ WL_TEST(test_reference_types_table_ops) {
         emit(&sec, 0x41);
         emit_leb128_i32(&sec, 0);
         emit(&sec, 0x0B);
-        emit(&sec, 0x70);
         emit_leb128_u32(&sec, 1);
         emit(&sec, 0xD2);
         emit_leb128_u32(&sec, 0);
@@ -4548,6 +4547,137 @@ WL_TEST(test_reference_types_expr_element_segments) {
     WL_CHECK_MSG(t, err == WASM_ERR_TRAP, "%s", "expected dropped passive expr element segment to trap on table.init");
 
     wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_reference_types_active_expr_element_segment) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x70);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 3);
+        emit(&sec, 'r');
+        emit(&sec, 'u');
+        emit(&sec, 'n');
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 4);
+        emit(&sec, 0x41);
+        emit_leb128_i32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0xD2);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit_section(&mod, 9, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 77);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        body.len = 0;
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x11);
+        emit_leb128_u32(&body, 0);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, result.of.i32, 77);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_loader_reports_section_decode_errors) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 8);
+        emit_section(&mod, 9, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected malformed element section to fail load");
+    WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", "expected malformed decoder error code");
+    WL_CHECK_MSG(t, rt.error_msg[0] != '\0', "%s", "expected loader failure to populate error text");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "section 9 decode failed") != NULL,
+                 "%s", rt.error_msg[0] ? rt.error_msg : "missing decode failure context");
     wasm_destroy(&rt);
 }
 
@@ -13295,6 +13425,7 @@ int main(void) {
         { "bulk memory: table.init/copy out-of-bounds traps", test_bulk_memory_table_oob_traps },
         { "reference types: ref ops plus typed table get/set/grow/fill", test_reference_types_table_ops },
         { "reference types: expression-based passive/declarative elements", test_reference_types_expr_element_segments },
+        { "reference types: active expr element segments with implicit funcref load", test_reference_types_active_expr_element_segment },
         { "loop: sum(1..10) == 55", test_loop },
         { "call with 17 params survives dynamic signature storage", test_large_param_call },
         { "call with 5 results survives dynamic result storage", test_multi_result_call },
@@ -13368,6 +13499,7 @@ int main(void) {
         { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
         { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
         { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
+        { "validation: section decoder failures populate loader errors", test_loader_reports_section_decode_errors },
         { "validation: long u32 LEBs are rejected during load", test_validation_rejects_long_u32_leb128 },
         { "validation: long i32 LEBs are rejected during load", test_validation_rejects_long_i32_leb128 },
         { "validation: long i64 LEBs are rejected during load", test_validation_rejects_long_i64_leb128 },
