@@ -517,6 +517,7 @@ typedef struct wasm_table_t {
     wasm_value_t* elems;
     uint32_t size;
     uint32_t max_size;
+    int is_64;
     int is_import;
     struct wasm_table_t* import_table;
 } wasm_table_t;
@@ -2655,9 +2656,11 @@ static int wasm__tabletype_matches_import(const wasm_module_t* mod,
                                           wasm_valtype_t expected_type,
                                           const wasm_reftype_t* expected_ref,
                                           uint32_t expected_min,
-                                          uint32_t expected_max) {
+                                          uint32_t expected_max,
+                                          int expected_is_64) {
     actual_table = wasm__table_actual_const(actual_table);
     if (!actual_table) return 0;
+    if (actual_table->is_64 != expected_is_64) return 0;
     if (!wasm__typed_valtype_is_subtype(mod,
                                         actual_table->reftype,
                                         &actual_table->reftype_info,
@@ -6510,6 +6513,39 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
+static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
+                                          wasm__reader_t* r,
+                                          wasm_table_t* table) {
+    uint8_t flags;
+    int has_max;
+    int is_shared;
+    int is_64;
+    wasm_error_t err;
+
+    memset(table, 0, sizeof(*table));
+    err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
+    if (err != WASM_OK) return err;
+
+    flags = wasm__read_u8(r);
+    has_max = (flags & 0x01u) != 0;
+    is_shared = (flags & 0x02u) != 0;
+    is_64 = (flags & 0x04u) != 0;
+
+    if ((flags & ~0x07u) != 0) return WASM_ERR_MALFORMED;
+    if (is_shared) return WASM_ERR_MALFORMED;
+    if (is_64) {
+        err = wasm__require_feature(mod, WASM_FEATURE_MEMORY64);
+        if (err != WASM_OK) return err;
+    }
+
+    table->is_64 = is_64;
+    table->size = wasm__read_leb128_u32(r);
+    table->max_size = has_max ? wasm__read_leb128_u32(r) : UINT32_MAX;
+
+    if (r->malformed) return WASM_ERR_MALFORMED;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                             wasm__reader_t* r,
                                             wasm_import_info_t* info,
@@ -6561,16 +6597,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         wasm_table_t* table;
         wasm_table_import_t* timp;
         wasm_table_t* bound_table;
-        uint8_t lf;
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
         if (err != WASM_OK) return err;
         if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
         table = &mod->tables[table_index];
-        err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
+        err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
-        lf = wasm__read_u8(r);
-        table->size = wasm__read_leb128_u32(r);
-        table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
         timp = wasm__find_table_import(mod->rt, info->module, info->name);
         if (!timp) {
             if (wasm__has_import_named(mod->rt, info->module, info->name)) {
@@ -6589,7 +6621,8 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                             table->reftype,
                                             &table->reftype_info,
                                             table->size,
-                                            table->max_size)) {
+                                            table->max_size,
+                                            table->is_64)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                           "table import type mismatch: %.64s.%.64s",
                           info->module, info->name);
@@ -6599,6 +6632,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         table->import_table = bound_table;
         table->size = bound_table->size;
         table->max_size = bound_table->max_size;
+        table->is_64 = bound_table->is_64;
         table->elems = bound_table->elems;
         info->index = table_index;
         info->type = table->reftype;
@@ -6862,12 +6896,8 @@ static wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_
     if (wasm__append_tables(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     for (i = 0; i < count; i++) {
         wasm_table_t* table = &mod->tables[base + i];
-        uint8_t lf;
-        wasm_error_t err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
+        wasm_error_t err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
-        lf = wasm__read_u8(r);
-        table->size = wasm__read_leb128_u32(r);
-        table->max_size = (lf & 1) ? wasm__read_leb128_u32(r) : UINT32_MAX;
     }
     return WASM_OK;
 }

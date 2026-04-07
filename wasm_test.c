@@ -343,6 +343,20 @@ static void emit_memory_type(wasm_builder_t* b,
     }
 }
 
+static void emit_table_type(wasm_builder_t* b,
+                            wasm_valtype_t reftype,
+                            int is_64,
+                            int has_max,
+                            uint32_t initial_elems,
+                            uint32_t max_elems) {
+    uint8_t flags = (uint8_t)((has_max ? 0x01u : 0u) | (is_64 ? 0x04u : 0u));
+
+    emit(b, (uint8_t)reftype);
+    emit(b, flags);
+    emit_leb128_u32(b, initial_elems);
+    if (has_max) emit_leb128_u32(b, max_elems);
+}
+
 /* Emit a section: id + size + content */
 static void emit_section(wasm_builder_t* b, uint8_t id, const uint8_t* content, uint32_t len) {
     emit(b, id);
@@ -391,6 +405,25 @@ static void emit_import_func(wasm_builder_t* b, const char* module, const char* 
     emit_bytes(b, (const uint8_t*)name, name_len);
     emit(b, 0x00);
     emit_leb128_u32(b, type_index);
+}
+
+static void emit_import_table(wasm_builder_t* b,
+                              const char* module,
+                              const char* name,
+                              wasm_valtype_t reftype,
+                              int is_64,
+                              int has_max,
+                              uint32_t initial_elems,
+                              uint32_t max_elems) {
+    uint32_t module_len = (uint32_t)strlen(module);
+    uint32_t name_len = (uint32_t)strlen(name);
+
+    emit_leb128_u32(b, module_len);
+    emit_bytes(b, (const uint8_t*)module, module_len);
+    emit_leb128_u32(b, name_len);
+    emit_bytes(b, (const uint8_t*)name, name_len);
+    emit(b, 0x01);
+    emit_table_type(b, reftype, is_64, has_max, initial_elems, max_elems);
 }
 
 static void emit_malformed_uleb128_u32(wasm_builder_t* b) {
@@ -3582,6 +3615,47 @@ WL_TEST(test_memory64_rejects_i32_address_operands) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected Memory64 load to reject i32 address operands");
+    if (m) wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_table64_import_width_mismatch) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_error_t err;
+    wasm_table_t host_table;
+    wasm_table_import_t import_desc;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_import_table(&sec, "host", "table", WASM_TYPE_FUNCREF, 0, 1, 1, 1);
+        emit_section(&mod, 2, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+
+    memset(&host_table, 0, sizeof(host_table));
+    host_table.reftype = WASM_TYPE_FUNCREF;
+    host_table.reftype_info.type = WASM_TYPE_FUNCREF;
+    host_table.reftype_info.nullable = 1;
+    host_table.size = 1;
+    host_table.max_size = 1;
+    host_table.is_64 = 1;
+
+    memset(&import_desc, 0, sizeof(import_desc));
+    import_desc.module = "host";
+    import_desc.name = "table";
+    import_desc.table = &host_table;
+
+    err = wasm_register_table_import(&rt, &import_desc);
+    WASM_CHECK_OK(t, err);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected table32 import to reject table64 host binding");
     if (m) wasm_free_module(m);
     wasm_destroy(&rt);
 }
@@ -13654,6 +13728,7 @@ int main(void) {
         { "memory64: i64 load/store plus memory.size/memory.grow", test_memory64_basic_ops },
         { "memory64: active data offsets accept i64 init exprs", test_memory64_active_data_segment_offset },
         { "memory64: validator rejects i32 memory addresses", test_memory64_rejects_i32_address_operands },
+        { "table64: import width mismatch is rejected", test_table64_import_width_mismatch },
         { "bulk memory: passive data, copy/fill/drop semantics", test_bulk_memory_ops },
         { "bulk memory: table init/copy/drop and element segment forms", test_bulk_memory_table_ops },
         { "bulk memory: memory.init/copy out-of-bounds traps", test_bulk_memory_oob_traps },
