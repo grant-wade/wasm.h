@@ -257,6 +257,15 @@ static void emit_leb128_u32(wasm_builder_t* b, uint32_t val) {
     } while (val);
 }
 
+static void emit_leb128_u64(wasm_builder_t* b, uint64_t val) {
+    do {
+        uint8_t byte = (uint8_t)(val & 0x7Fu);
+        val >>= 7;
+        if (val) byte |= 0x80u;
+        emit(b, byte);
+    } while (val);
+}
+
 static void emit_leb128_i32(wasm_builder_t* b, int32_t val) {
     int more = 1;
     while (more) {
@@ -311,10 +320,27 @@ static void emit_memarg(wasm_builder_t* b,
                         uint32_t align_log2,
                         int has_memory_index,
                         uint32_t memory_index,
-                        uint32_t offset) {
+                        uint64_t offset) {
     emit_leb128_u32(b, align_log2 | (has_memory_index ? 0x40u : 0u));
     if (has_memory_index) emit_leb128_u32(b, memory_index);
-    emit_leb128_u32(b, offset);
+    emit_leb128_u64(b, offset);
+}
+
+static void emit_memory_type(wasm_builder_t* b,
+                             int is_64,
+                             int has_max,
+                             uint64_t initial_pages,
+                             uint64_t max_pages) {
+    uint8_t flags = (uint8_t)((has_max ? 0x01u : 0u) | (is_64 ? 0x04u : 0u));
+
+    emit(b, flags);
+    if (is_64) {
+        emit_leb128_u64(b, initial_pages);
+        if (has_max) emit_leb128_u64(b, max_pages);
+    } else {
+        emit_leb128_u32(b, (uint32_t)initial_pages);
+        if (has_max) emit_leb128_u32(b, (uint32_t)max_pages);
+    }
 }
 
 /* Emit a section: id + size + content */
@@ -3353,6 +3379,210 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
     WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), (int32_t)(2 * WASM_PAGE_SIZE));
 
     wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_memory64_basic_ops) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result;
+    wasm_error_t err;
+    int64_t old_pages;
+    uint8_t bytes[8] = { 0 };
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7E);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_memory_type(&sec, 1, 1, 1, 3);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x42);
+        emit_leb128_i64(&body, 8);
+        emit(&body, 0x42);
+        emit_leb128_i64(&body, 42);
+        emit(&body, 0x37);
+        emit_memarg(&body, 3, 0, 0, 0);
+
+        emit(&body, 0x3F);
+        emit_leb128_u32(&body, 0);
+
+        emit(&body, 0x42);
+        emit_leb128_i64(&body, 8);
+        emit(&body, 0x29);
+        emit_memarg(&body, 3, 0, 0, 0);
+        emit(&body, 0x7C);
+
+        emit(&body, 0x42);
+        emit_leb128_i64(&body, 1);
+        emit(&body, 0x40);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x7C);
+        emit(&body, 0x0B);
+
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, 44);
+
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), (int64_t)(2u * WASM_PAGE_SIZE));
+
+    err = wasm_memory_read(m, 0, 8, bytes, sizeof(bytes));
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) {
+        WASM_CHECK_I32(t, bytes[0], 42);
+        WASM_CHECK_I32(t, bytes[1], 0);
+    }
+
+    old_pages = wasm_memory_grow_at(m, 0, 1);
+    WASM_CHECK_I64(t, old_pages, 2);
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), (int64_t)(3u * WASM_PAGE_SIZE));
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_memory64_active_data_segment_offset) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_memory_type(&sec, 1, 0, 1, 0);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 'z', 0 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x42);
+        emit_leb128_i64(&sec, 4);
+        emit(&sec, 0x0B);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) {
+        uint8_t* memory = wasm_memory_data(m);
+
+        WL_CHECK_MSG(t, memory != NULL, "%s", "expected memory allocation");
+        if (memory) {
+            WASM_CHECK_I32(t, memory[4], 'z');
+            WASM_CHECK_I32(t, memory[5], 0);
+        }
+        wasm_free_module(m);
+    }
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_memory64_rejects_i32_address_operands) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_memory_type(&sec, 1, 0, 1, 0);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 0);
+        emit(&body, 0x28);
+        emit_memarg(&body, 2, 0, 0, 0);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected Memory64 load to reject i32 address operands");
+    if (m) wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
@@ -13421,6 +13651,9 @@ int main(void) {
         { "public api: module-first host callbacks can read guest memory", test_host_callback_module_reads_memory },
         { "multi-memory: indexed load/store and memory APIs", test_multi_memory_indexed_access },
         { "multi-memory: indexed bulk ops plus size/grow", test_multi_memory_bulk_ops_and_growth },
+        { "memory64: i64 load/store plus memory.size/memory.grow", test_memory64_basic_ops },
+        { "memory64: active data offsets accept i64 init exprs", test_memory64_active_data_segment_offset },
+        { "memory64: validator rejects i32 memory addresses", test_memory64_rejects_i32_address_operands },
         { "bulk memory: passive data, copy/fill/drop semantics", test_bulk_memory_ops },
         { "bulk memory: table init/copy/drop and element segment forms", test_bulk_memory_table_ops },
         { "bulk memory: memory.init/copy out-of-bounds traps", test_bulk_memory_oob_traps },

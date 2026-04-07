@@ -124,34 +124,24 @@ Representative cases:
 
 Several of these tests expect a broader `type mismatch` style failure, but the current validator rejects them through a different internal path. Even when the module is correctly rejected, exact spectest matching still fails.
 
-### 3. Memory64 Is Not Spectest-Compliant
+### 3. Memory64 Status
 
-The current run shows consistent `i32`/`i64` mismatches and related load failures across the `*64` corpus.
+`wasm.h` now implements the core Memory64 runtime surface: memory types decode with the `is64` flag, active data offsets accept `i64` init expressions, memory instructions validate against the target memory's index type, bulk-memory ops use the mixed-width rules, and the public memory helper APIs are 64-bit.
 
-Representative failures:
+A focused local CTest sweep now passes these Memory64-facing tests:
 
-- `address64`
-- `align64`
-- `binary_leb128_64`
-- `bulk64`
-- `call_indirect64`
-- `endianness64`
-- `float_memory64`
-- `load64`
-- `memory_copy64`
-- `memory_fill64`
-- `memory_grow64`
-- `memory_init64`
-- `memory_redundancy64`
-- `memory_trap64`
-- `table_copy64`
-- `table_fill64`
-- `table_grow64`
-- `table_size64`
+- `spectest.address64`
+- `spectest.memory_copy64`
+- `spectest.memory_fill64`
+- `spectest.memory_grow64`
+- `spectest.memory_init64`
 
-There is also a separate tooling problem: `memory64.wast` itself is currently skipped because local `wast2json` cannot translate it.
+Two caveats remain important:
 
-The practical status is simple: do not treat Memory64 as compliant based on the current spectest run.
+- `spectest.memory64` is still skipped locally because the bundled `wast2json` cannot translate `memory64.wast` in this environment.
+- `spectest.load64` is currently blocked by local WABT text parsing (`unknown operator "i32.load32"`) rather than by the `wasm.h` runtime itself.
+
+The practical status is: Memory64 is no longer "not implemented", but full spectest compliance is still not claimed until the remaining harness/tooling gaps are resolved and the broader `*64` corpus is rerun.
 
 ### 4. SIMD Support Is Partial At Best In Spectest Terms
 

@@ -677,13 +677,14 @@ static void wasm_cli_print_memories(wasm_module_t* mod) {
 
     for (i = 0; i < wasm_memory_count(mod); i++) {
         const char* export_name = wasm_cli_first_export_name(mod, WASM_EXPORT_MEM, i);
-        uint32_t size_bytes = wasm_memory_size_at(mod, i);
+        uint64_t size_bytes = wasm_memory_size_at(mod, i);
 
-        printf("[%u] pages=%u bytes=%u max_pages=%u",
+        printf("[%u] pages=%llu bytes=%llu max_pages=%llu%s",
                (unsigned)i,
-               (unsigned)mod->memories[i].pages,
-               (unsigned)size_bytes,
-               (unsigned)mod->memories[i].max_pages);
+               (unsigned long long)mod->memories[i].pages,
+               (unsigned long long)size_bytes,
+               (unsigned long long)mod->memories[i].max_pages,
+               mod->memories[i].is_64 ? " type=i64" : " type=i32");
         if (export_name) printf(" export=%s", export_name);
         fputc('\n', stdout);
     }
@@ -916,13 +917,13 @@ static int wasm_cli_global_set_cmd(wasm_module_t* mod, const char* export_name, 
     return wasm_cli_global_get_cmd(mod, export_name);
 }
 
-static void wasm_cli_hexdump(uint32_t base_offset, const uint8_t* data, size_t len) {
+static void wasm_cli_hexdump(uint64_t base_offset, const uint8_t* data, size_t len) {
     size_t row;
 
     for (row = 0; row < len; row += 16u) {
         size_t col;
 
-        printf("%08x  ", (unsigned)(base_offset + (uint32_t)row));
+        printf("%016llx  ", (unsigned long long)(base_offset + (uint64_t)row));
         for (col = 0; col < 16u; col++) {
             if (row + col < len)
                 printf("%02x ", (unsigned)data[row + col]);
@@ -941,7 +942,7 @@ static void wasm_cli_hexdump(uint32_t base_offset, const uint8_t* data, size_t l
 static int wasm_cli_memory_read_cmd(wasm_module_t* mod, const char* memory_index_text,
                                     const char* offset_text, const char* length_text) {
     uint32_t memory_index;
-    uint32_t offset;
+    uint64_t offset;
     size_t length;
     uint8_t* buffer;
     wasm_error_t err;
@@ -950,7 +951,7 @@ static int wasm_cli_memory_read_cmd(wasm_module_t* mod, const char* memory_index
         fprintf(stderr, "invalid memory index '%s'\n", memory_index_text);
         return 1;
     }
-    if (!wasm_cli_parse_u32(offset_text, &offset)) {
+    if (!wasm_cli_parse_u64(offset_text, &offset)) {
         fprintf(stderr, "invalid offset '%s'\n", offset_text);
         return 1;
     }
@@ -1013,7 +1014,7 @@ static void wasm_cli_print_escaped(const char* text) {
 static int wasm_cli_memory_string_cmd(wasm_module_t* mod, const char* memory_index_text,
                                       const char* offset_text, const char* max_len_text) {
     uint32_t memory_index;
-    uint32_t offset;
+    uint64_t offset;
     size_t max_len = 256u;
     char* buffer;
     wasm_error_t err;
@@ -1022,7 +1023,7 @@ static int wasm_cli_memory_string_cmd(wasm_module_t* mod, const char* memory_ind
         fprintf(stderr, "invalid memory index '%s'\n", memory_index_text);
         return 1;
     }
-    if (!wasm_cli_parse_u32(offset_text, &offset)) {
+    if (!wasm_cli_parse_u64(offset_text, &offset)) {
         fprintf(stderr, "invalid offset '%s'\n", offset_text);
         return 1;
     }

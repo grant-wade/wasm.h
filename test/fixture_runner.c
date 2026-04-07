@@ -233,9 +233,9 @@ int main(int argc, char** argv) {
         uint32_t memory_index;
 
         for (memory_index = 0; memory_index < wasm_memory_count(module); memory_index++) {
-            printf("memory[%u]: %u bytes\n",
+            printf("memory[%u]: %llu bytes\n",
                    (unsigned)memory_index,
-                   (unsigned)wasm_memory_size_at(module, memory_index));
+                   (unsigned long long)wasm_memory_size_at(module, memory_index));
         }
     }
 

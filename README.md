@@ -218,7 +218,7 @@ This table tracks the current finished WebAssembly proposals against the actual 
 | Branch Hinting | Not implemented | No branch-hint parsing or execution support today. |
 | Exception handling | Implemented | Includes tags, `try`, `catch`, `catch_all`, `rethrow`, and `delegate`. |
 | JS String Builtins | Out of scope | JS-host proposal; there is no dedicated support in this native runtime. |
-| Memory64 | Not implemented | Memory APIs and execution remain 32-bit-memory oriented. |
+| Memory64 | Implemented | Includes i64 memories, width-aware validation/execution, 64-bit memory helper APIs, and focused spectest/unit coverage; full spec-harness coverage is still in progress. |
 
 ## Notes on `wl.h`
 
