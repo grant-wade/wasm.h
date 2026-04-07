@@ -1,6 +1,4 @@
 #define WASM_IMPL
-#include "../wasm.h"
-
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -9,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../wasm.h"
 
 #if defined(_WIN32)
 #include <io.h>
@@ -988,7 +988,7 @@ static wasm_error_t spec_bind_default_test_globals(spec_harness_t* harness) {
 }
 
 static wasm_error_t spec_bind_default_empty_imports(spec_harness_t* harness,
-                                                   wasm_module_t* support_module) {
+                                                    wasm_module_t* support_module) {
     wasm_table_import_t table_import;
     wasm_memory_import_t memory_import;
     wasm_global_import_t global_import;
@@ -1145,9 +1145,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(expected_lower, "i32 constant out of range") != NULL ||
          strstr(expected_lower, "i64 constant out of range") != NULL) &&
         (strstr(actual_lower, "out of range") != NULL || strstr(actual_lower, "natural number in range") != NULL ||
-            strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL ||
-            strstr(actual_lower, "memory size must be at most") != NULL ||
-            strstr(actual_lower, "table size must be at most") != NULL))
+         strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL ||
+         strstr(actual_lower, "memory size must be at most") != NULL ||
+         strstr(actual_lower, "table size must be at most") != NULL))
         return 1;
     if (strstr(expected_lower, "i32 constant") != NULL &&
         (strstr(actual_lower, "offset must be less than or equal") != NULL ||
@@ -1655,9 +1655,12 @@ static int spec_parse_value(const char* json,
     } else if (strcmp(type_text, "anyref") == 0 || strcmp(type_text, "eqref") == 0 ||
                strcmp(type_text, "structref") == 0 || strcmp(type_text, "arrayref") == 0) {
         wasm_valtype_t ref_type = WASM_TYPE_ANYREF;
-        if (strcmp(type_text, "eqref") == 0) ref_type = WASM_TYPE_EQREF;
-        else if (strcmp(type_text, "structref") == 0) ref_type = WASM_TYPE_STRUCTREF;
-        else if (strcmp(type_text, "arrayref") == 0) ref_type = WASM_TYPE_ARRAYREF;
+        if (strcmp(type_text, "eqref") == 0)
+            ref_type = WASM_TYPE_EQREF;
+        else if (strcmp(type_text, "structref") == 0)
+            ref_type = WASM_TYPE_STRUCTREF;
+        else if (strcmp(type_text, "arrayref") == 0)
+            ref_type = WASM_TYPE_ARRAYREF;
         if (value_index < 0) {
             out_value->value = wasm_ref_null(ref_type);
             out_value->any_non_null_ref = 1;
@@ -1984,8 +1987,10 @@ static int spec_run_command_capture(const char* command, char** out_text, int* o
     text = spec_read_file_text(temp_path, NULL);
     SPEC_UNLINK(temp_path);
 
-    if (out_text) *out_text = text;
-    else free(text);
+    if (out_text)
+        *out_text = text;
+    else
+        free(text);
 
     if (out_exit_code) {
 #if defined(_WIN32)
@@ -2131,14 +2136,14 @@ static int spec_register_module_exports(spec_harness_t* harness,
     uint32_t i;
 
     for (i = 0; i < wasm_export_count(module); i++) {
-    const uint8_t* export_name_bytes;
-    size_t export_name_len = 0u;
+        const uint8_t* export_name_bytes;
+        size_t export_name_len = 0u;
         const char* export_name = wasm_export_name(module, i);
         wasm_export_kind_t kind = wasm_export_kind(module, i);
         uint32_t index = wasm_export_index(module, i);
 
-    export_name_bytes = wasm_export_name_bytes(module, i, &export_name_len);
-    if (export_name_bytes && memchr(export_name_bytes, '\0', export_name_len) != NULL) continue;
+        export_name_bytes = wasm_export_name_bytes(module, i, &export_name_len);
+        if (export_name_bytes && memchr(export_name_bytes, '\0', export_name_len) != NULL) continue;
 
         if (!spec_bind_export(harness, module_name, module, export_name, kind, index,
                               error_text, error_size))

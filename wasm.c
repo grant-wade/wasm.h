@@ -865,7 +865,7 @@ static int wasm_cli_call_index(wasm_module_t* mod, const char* func_index_text,
 
         exit_code = wasm_cli_print_results(results, ft->num_results);
 
-cleanup:
+    cleanup:
         free(args);
         free(results);
         return exit_code;

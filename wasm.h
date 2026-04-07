@@ -761,11 +761,11 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
 uint32_t wasm_memory_count(wasm_module_t* mod);
 wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
-                        uint64_t offset, void* dst, size_t len);
+                              uint64_t offset, void* dst, size_t len);
 wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
-                         uint64_t offset, const void* src, size_t len);
+                               uint64_t offset, const void* src, size_t len);
 wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
-                             uint64_t offset, char* dst, size_t max_len);
+                                    uint64_t offset, char* dst, size_t max_len);
 wasm_memory_t* wasm_memory_ref_at(wasm_module_t* mod, uint32_t memory_index);
 uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index);
 uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
@@ -1425,7 +1425,7 @@ static void wasm__store_le64(void* p, uint64_t v) {
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
      WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-    WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
+     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
 
 static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
@@ -6860,9 +6860,9 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
 }
 
 static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
-                                            wasm__reader_t* r,
-                                            wasm_import_info_t* info,
-                                            uint8_t kind) {
+                                             wasm__reader_t* r,
+                                             wasm_import_info_t* info,
+                                             uint8_t kind) {
     if (kind == 0x00) {
         uint32_t ti = wasm__read_leb128_u32(r);
         uint32_t fi;
@@ -9914,7 +9914,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (frame->opcode != 0x04 || frame->seen_else)
                     return wasm__validator_error(&v, at, "unexpected else");
                 err = wasm__validator_check_frame_results(&v, at, frame,
-                                                         "then branch leaves wrong stack height");
+                                                          "then branch leaves wrong stack height");
                 if (err != WASM_OK) return err;
                 v.sp = frame->height;
                 err = wasm__validator_push_many_typed(&v, at,
@@ -10045,7 +10045,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                  "if without else requires param and result types to match");
                 }
                 err = wasm__validator_check_frame_results(&v, at, &frame,
-                                                         "type mismatch: block leaves wrong stack height");
+                                                          "type mismatch: block leaves wrong stack height");
                 if (err != WASM_OK) return err;
                 v.sp = frame.height;
                 v.fp--;
@@ -10081,9 +10081,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 if (op == 0x0D) {
                     err = wasm__validator_materialize_missing_values(&v, at,
-                                                                    branch_types,
-                                                                    branch_reftypes,
-                                                                    branch_count);
+                                                                     branch_types,
+                                                                     branch_reftypes,
+                                                                     branch_count);
                     if (err != WASM_OK) return err;
                 }
                 if (op == 0x0C) wasm__validator_mark_unreachable(&v);

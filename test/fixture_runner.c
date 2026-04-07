@@ -1,9 +1,9 @@
 #define WASM_IMPL
-#include "../wasm.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../wasm.h"
 
 #if defined(_WIN32)
 #include <io.h>
@@ -257,14 +257,14 @@ int main(int argc, char** argv) {
         }
         export_name = argv[3];
         {
-        wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
-        if (err != WASM_OK) {
-            fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
+            if (err != WASM_OK) {
+                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                goto cleanup;
+            }
+            printf("call ok: %s() -> void\n", export_name);
+            exit_code = 0;
             goto cleanup;
-        }
-        printf("call ok: %s() -> void\n", export_name);
-        exit_code = 0;
-        goto cleanup;
         }
     }
 
@@ -276,16 +276,16 @@ int main(int argc, char** argv) {
         }
         export_name = argv[3];
         {
-        wasm_value_t result;
-        wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
-        if (err == WASM_OK) {
-            fprintf(stderr, "expected call failure but call succeeded with %d\n", result.of.i32);
+            wasm_value_t result;
+            wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
+            if (err == WASM_OK) {
+                fprintf(stderr, "expected call failure but call succeeded with %d\n", result.of.i32);
+                goto cleanup;
+            }
+            printf("expected call failure: %s\n",
+                   runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            exit_code = 0;
             goto cleanup;
-        }
-        printf("expected call failure: %s\n",
-               runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
-        exit_code = 0;
-        goto cleanup;
         }
     }
 
@@ -301,19 +301,19 @@ int main(int argc, char** argv) {
         expected_i32 = atoi(argv[4]);
 
         {
-        wasm_value_t result;
-        wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
-        if (err != WASM_OK) {
-            fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            wasm_value_t result;
+            wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
+            if (err != WASM_OK) {
+                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                goto cleanup;
+            }
+            printf("call ok: %s() -> %d\n", export_name, result.of.i32);
+            if (result.of.i32 != expected_i32) {
+                fprintf(stderr, "expected %d but got %d\n", expected_i32, result.of.i32);
+                goto cleanup;
+            }
+            exit_code = 0;
             goto cleanup;
-        }
-        printf("call ok: %s() -> %d\n", export_name, result.of.i32);
-        if (result.of.i32 != expected_i32) {
-            fprintf(stderr, "expected %d but got %d\n", expected_i32, result.of.i32);
-            goto cleanup;
-        }
-        exit_code = 0;
-        goto cleanup;
         }
     }
 
@@ -335,20 +335,20 @@ int main(int argc, char** argv) {
         }
 
         {
-        wasm_value_t result;
-        wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
-        if (err != WASM_OK) {
-            fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            wasm_value_t result;
+            wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
+            if (err != WASM_OK) {
+                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                goto cleanup;
+            }
+            printf("call ok: %s() -> %lld\n", export_name, (long long)result.of.i64);
+            if (result.of.i64 != expected_i64) {
+                fprintf(stderr, "expected %lld but got %lld\n",
+                        expected_i64, (long long)result.of.i64);
+                goto cleanup;
+            }
+            exit_code = 0;
             goto cleanup;
-        }
-        printf("call ok: %s() -> %lld\n", export_name, (long long)result.of.i64);
-        if (result.of.i64 != expected_i64) {
-            fprintf(stderr, "expected %lld but got %lld\n",
-                    expected_i64, (long long)result.of.i64);
-            goto cleanup;
-        }
-        exit_code = 0;
-        goto cleanup;
         }
     }
 
@@ -369,25 +369,25 @@ int main(int argc, char** argv) {
         }
 
         {
-        wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
-        if (!end_stdout_capture(&capture, &captured)) {
-            fprintf(stderr, "failed to finalize stdout capture\n");
-            goto cleanup;
-        }
-        if (err != WASM_OK) {
-            fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+            wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
+            if (!end_stdout_capture(&capture, &captured)) {
+                fprintf(stderr, "failed to finalize stdout capture\n");
+                goto cleanup;
+            }
+            if (err != WASM_OK) {
+                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                free(captured);
+                goto cleanup;
+            }
+            printf("call ok: %s() printed '%s'\n", export_name, captured);
+            if (strcmp(captured, argv[4]) != 0) {
+                fprintf(stderr, "expected stdout '%s' but got '%s'\n", argv[4], captured);
+                free(captured);
+                goto cleanup;
+            }
             free(captured);
+            exit_code = 0;
             goto cleanup;
-        }
-        printf("call ok: %s() printed '%s'\n", export_name, captured);
-        if (strcmp(captured, argv[4]) != 0) {
-            fprintf(stderr, "expected stdout '%s' but got '%s'\n", argv[4], captured);
-            free(captured);
-            goto cleanup;
-        }
-        free(captured);
-        exit_code = 0;
-        goto cleanup;
         }
     }
 
