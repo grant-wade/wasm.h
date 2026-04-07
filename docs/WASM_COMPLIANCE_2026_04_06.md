@@ -1,5 +1,7 @@
 # Wasm Spectest Compliance
 
+Historical note: this file is superseded by `docs/WASM_COMPLIANCE_2026_04_07.md`. The current local spectest harness uses `wasm-tools`, not local WABT tooling, so any WABT-specific wording below should be read as stale historical analysis rather than a description of the active setup.
+
 This document records the current end-to-end status of `wasm.h` against the WebAssembly spec testsuite as exercised by the local harness in `test/`.
 
 The goal here is accuracy, not aspiration. The runtime has broad internal unit coverage and many proposal-focused features under direct test, but the spectest run is the authoritative compatibility snapshot for real `.wast` inputs processed through local WABT tooling and executed by `test/spectest_runner.c`.
