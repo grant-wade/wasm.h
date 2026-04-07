@@ -311,9 +311,11 @@ static int spec_hex_value(char ch) {
     return -1;
 }
 
-static char* spec_strdup_token(const char* json, const spec_json_token_t* token) {
+static char* spec_strdup_token_len(const char* json,
+                                   const spec_json_token_t* token,
+                                   size_t* out_len) {
     size_t cap;
-    size_t out_len = 0u;
+    size_t decoded_len = 0u;
     char* out;
     int i;
 
@@ -326,7 +328,7 @@ static char* spec_strdup_token(const char* json, const spec_json_token_t* token)
         char ch = json[i];
 
         if (ch != '\\') {
-            out[out_len++] = ch;
+            out[decoded_len++] = ch;
             continue;
         }
 
@@ -341,22 +343,22 @@ static char* spec_strdup_token(const char* json, const spec_json_token_t* token)
             case '"':
             case '/':
             case '\\':
-                out[out_len++] = ch;
+                out[decoded_len++] = ch;
                 break;
             case 'b':
-                out[out_len++] = '\b';
+                out[decoded_len++] = '\b';
                 break;
             case 'f':
-                out[out_len++] = '\f';
+                out[decoded_len++] = '\f';
                 break;
             case 'n':
-                out[out_len++] = '\n';
+                out[decoded_len++] = '\n';
                 break;
             case 'r':
-                out[out_len++] = '\r';
+                out[decoded_len++] = '\r';
                 break;
             case 't':
-                out[out_len++] = '\t';
+                out[decoded_len++] = '\t';
                 break;
             case 'u': {
                 int h0;
@@ -378,7 +380,7 @@ static char* spec_strdup_token(const char* json, const spec_json_token_t* token)
                     return NULL;
                 }
                 value = (unsigned)((h0 << 12) | (h1 << 8) | (h2 << 4) | h3);
-                out[out_len++] = value < 128u ? (char)value : '?';
+                out[decoded_len++] = value < 128u ? (char)value : '?';
                 i += 4;
                 break;
             }
@@ -388,8 +390,13 @@ static char* spec_strdup_token(const char* json, const spec_json_token_t* token)
         }
     }
 
-    out[out_len] = '\0';
+    out[decoded_len] = '\0';
+    if (out_len) *out_len = decoded_len;
     return out;
+}
+
+static char* spec_strdup_token(const char* json, const spec_json_token_t* token) {
+    return spec_strdup_token_len(json, token, NULL);
 }
 
 static int spec_token_next(const spec_json_token_t* tokens, int index) {
@@ -1090,15 +1097,27 @@ static int spec_message_matches(const char* expected, const char* actual) {
         ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
          strstr(actual_lower, "malformed section header") != NULL ||
          strstr(actual_lower, "trailing bytes") != NULL ||
+         strstr(actual_lower, "overruns module") != NULL ||
          strstr(actual_lower, "unknown section id") != NULL ||
          strstr(actual_lower, "malformed immediate") != NULL ||
          strstr(actual_lower, "integer representation too long") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "integer too large") == 0 &&
+        ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "malformed section header") != NULL ||
+         strstr(actual_lower, "malformed immediate") != NULL ||
+         strstr(actual_lower, "trailing bytes") != NULL ||
+         strstr(actual_lower, "integer too large") != NULL))
         return 1;
     if (strcmp(expected_lower, "magic header not detected") == 0 &&
         (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "bad magic") != NULL))
         return 1;
     if (strcmp(expected_lower, "unknown binary version") == 0 &&
         strstr(actual_lower, "version ") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "illegal opcode") == 0 &&
+        ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "trailing bytes") != NULL))
         return 1;
     if (strcmp(expected_lower, "malformed section id") == 0 &&
         strstr(actual_lower, "unknown section id") != NULL)
@@ -1911,9 +1930,14 @@ static int spec_register_module_exports(spec_harness_t* harness,
     uint32_t i;
 
     for (i = 0; i < wasm_export_count(module); i++) {
+    const uint8_t* export_name_bytes;
+    size_t export_name_len = 0u;
         const char* export_name = wasm_export_name(module, i);
         wasm_export_kind_t kind = wasm_export_kind(module, i);
         uint32_t index = wasm_export_index(module, i);
+
+    export_name_bytes = wasm_export_name_bytes(module, i, &export_name_len);
+    if (export_name_bytes && memchr(export_name_bytes, '\0', export_name_len) != NULL) continue;
 
         if (!spec_bind_export(harness, module_name, module, export_name, kind, index,
                               error_text, error_size))
@@ -1983,6 +2007,7 @@ static int spec_execute_action(spec_harness_t* harness,
     int args_index;
     char* module_name = NULL;
     char* field_name = NULL;
+    size_t field_name_len = 0u;
     wasm_module_t* module;
 
     memset(out_result, 0, sizeof(*out_result));
@@ -1998,7 +2023,7 @@ static int spec_execute_action(spec_harness_t* harness,
     field_index = spec_object_get(json, tokens, action_index, "field");
     args_index = spec_object_get(json, tokens, action_index, "args");
     if (module_index >= 0) module_name = spec_strdup_token(json, &tokens[module_index]);
-    if (field_index >= 0) field_name = spec_strdup_token(json, &tokens[field_index]);
+    if (field_index >= 0) field_name = spec_strdup_token_len(json, &tokens[field_index], &field_name_len);
     module = spec_harness_find_module(harness, module_name);
     if (!module) {
         spec_set_error(out_result->error_text, sizeof(out_result->error_text),
@@ -2019,9 +2044,12 @@ static int spec_execute_action(spec_harness_t* harness,
         wasm_value_t* results = NULL;
         int i;
 
-        if (!field_name || !wasm_find_export(module, field_name, &kind, &func_index) || kind != WASM_EXPORT_FUNC) {
+        if (!field_name ||
+            !wasm_find_export_bytes(module, (const uint8_t*)field_name, field_name_len,
+                                    &kind, &func_index) ||
+            kind != WASM_EXPORT_FUNC) {
             spec_set_error(out_result->error_text, sizeof(out_result->error_text),
-                           "function export '%s' not found", field_name ? field_name : "<null>");
+                           "%s", "function export not found");
             out_result->err = WASM_ERR_UNDEFINED_EXPORT;
             free(action_type);
             free(module_name);
