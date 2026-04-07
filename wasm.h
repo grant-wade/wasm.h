@@ -5465,6 +5465,27 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }
+            case 0xFD: {
+                uint32_t subop = wasm__read_leb128_u32(r);
+
+                err = wasm__require_feature(mod, WASM_FEATURE_SIMD);
+                if (err != WASM_OK) break;
+                if (subop != 0x0C) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "constant expression required");
+                    err = WASM_ERR_TYPE_MISMATCH;
+                    break;
+                }
+                if (!wasm__has(r, 16)) {
+                    err = WASM_ERR_MALFORMED;
+                    break;
+                }
+                {
+                    wasm_value_t value = wasm_v128(r->ptr);
+                    r->ptr += 16;
+                    err = wasm__init_expr_stack_push(&stack, value);
+                }
+                break;
+            }
             case 0x23: {
                 uint32_t global_index = wasm__read_leb128_u32(r);
                 const wasm_global_t* global;
@@ -8909,6 +8930,7 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
         case 0x74:
         case 0x75:
         case 0x7A:
+        case 0x94:
         case 0x7C:
         case 0x7D:
         case 0x7E:
@@ -8954,12 +8976,16 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
         case 0x71:
         case 0x72:
         case 0x73:
+        case 0x76:
+        case 0x77:
         case 0x78:
         case 0x79:
         case 0x7B:
         case 0x82:
         case 0x85:
         case 0x86:
+        case 0x8E:
+        case 0x8F:
         case 0x90:
         case 0x91:
         case 0x92:
@@ -8989,6 +9015,12 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
         case 0xCE:
         case 0xD1:
         case 0xD5:
+        case 0xD6:
+        case 0xD7:
+        case 0xD8:
+        case 0xD9:
+        case 0xDA:
+        case 0xDB:
         case 0xDC:
         case 0xDD:
         case 0xDE:
@@ -13891,6 +13923,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     case 0x71:
                     case 0x72:
                     case 0x73:
+                    case 0x76:
+                    case 0x77:
                     case 0x78:
                     case 0x79:
                     case 0x7B: {

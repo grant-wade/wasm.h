@@ -47,9 +47,21 @@ typedef enum spec_float_expectation_t {
     SPEC_FLOAT_NAN_ARITHMETIC = 2
 } spec_float_expectation_t;
 
+typedef enum spec_v128_lane_type_t {
+    SPEC_V128_LANE_NONE = 0,
+    SPEC_V128_LANE_I8,
+    SPEC_V128_LANE_I16,
+    SPEC_V128_LANE_I32,
+    SPEC_V128_LANE_I64,
+    SPEC_V128_LANE_F32,
+    SPEC_V128_LANE_F64
+} spec_v128_lane_type_t;
+
 typedef struct spec_value_t {
     wasm_value_t value;
     spec_float_expectation_t float_expectation;
+    spec_v128_lane_type_t v128_lane_type;
+    spec_float_expectation_t v128_lane_expectation[4];
 } spec_value_t;
 
 typedef struct spec_forward_func_t {
@@ -456,6 +468,65 @@ static int spec_parse_u64_token(const char* json,
     return 1;
 }
 
+static int spec_parse_f32_bits_token(const char* json,
+                                     const spec_json_token_t* token,
+                                     uint32_t* out_bits,
+                                     spec_float_expectation_t* out_expectation) {
+    char* text;
+    uint64_t bits;
+
+    if (!json || !token || !out_bits) return 0;
+    if (out_expectation) *out_expectation = SPEC_FLOAT_EXACT;
+    text = spec_strdup_token(json, token);
+    if (!text) return 0;
+
+    if (strcmp(text, "nan:canonical") == 0) {
+        *out_bits = 0x7FC00000u;
+        if (out_expectation) *out_expectation = SPEC_FLOAT_NAN_CANONICAL;
+        free(text);
+        return 1;
+    }
+    if (strcmp(text, "nan:arithmetic") == 0) {
+        *out_bits = 0x7FC00000u;
+        if (out_expectation) *out_expectation = SPEC_FLOAT_NAN_ARITHMETIC;
+        free(text);
+        return 1;
+    }
+
+    free(text);
+    if (!spec_parse_u64_token(json, token, &bits) || bits > UINT32_MAX) return 0;
+    *out_bits = (uint32_t)bits;
+    return 1;
+}
+
+static int spec_parse_f64_bits_token(const char* json,
+                                     const spec_json_token_t* token,
+                                     uint64_t* out_bits,
+                                     spec_float_expectation_t* out_expectation) {
+    char* text;
+
+    if (!json || !token || !out_bits) return 0;
+    if (out_expectation) *out_expectation = SPEC_FLOAT_EXACT;
+    text = spec_strdup_token(json, token);
+    if (!text) return 0;
+
+    if (strcmp(text, "nan:canonical") == 0) {
+        *out_bits = UINT64_C(0x7FF8000000000000);
+        if (out_expectation) *out_expectation = SPEC_FLOAT_NAN_CANONICAL;
+        free(text);
+        return 1;
+    }
+    if (strcmp(text, "nan:arithmetic") == 0) {
+        *out_bits = UINT64_C(0x7FF8000000000000);
+        if (out_expectation) *out_expectation = SPEC_FLOAT_NAN_ARITHMETIC;
+        free(text);
+        return 1;
+    }
+
+    free(text);
+    return spec_parse_u64_token(json, token, out_bits);
+}
+
 static char* spec_read_file_text(const char* path, size_t* out_size) {
     FILE* file;
     long size;
@@ -814,11 +885,38 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
         return 1;
+    if (strncmp(expected_lower, "unknown local", 13u) == 0 &&
+        strstr(actual_lower, "local index") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
     if (strcmp(expected_lower, "unexpected end") == 0 &&
         (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "unexpected eof") != NULL))
         return 1;
+    if ((strcmp(expected_lower, "unknown operator") == 0 || strcmp(expected_lower, "unexpected token") == 0) &&
+        (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
+         strstr(actual_lower, "invalid literal") != NULL))
+        return 1;
+    if (strstr(expected_lower, "constant out of range") != NULL &&
+        (strstr(actual_lower, "out of range") != NULL || strstr(actual_lower, "natural number in range") != NULL ||
+         strstr(actual_lower, "invalid literal") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "alignment must be a power of two") == 0 &&
+        strstr(actual_lower, "alignment must be power of two") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "wrong number of lane literals") == 0 &&
+        (strstr(actual_lower, "literal") != NULL || strstr(actual_lower, "unexpected token") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "invalid lane length") == 0 &&
+        (strstr(actual_lower, "expected a natural number in range") != NULL ||
+         strstr(actual_lower, "unexpected token") != NULL))
+        return 1;
     if (strcmp(expected_lower, "offset out of range") == 0 &&
         strstr(actual_lower, "offset must be less than or equal") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "invalid lane index") == 0 &&
+        strstr(actual_lower, "lane") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "alignment must not be larger than natural") == 0 &&
+        strstr(actual_lower, "exceeds natural alignment") != NULL)
         return 1;
     if (strcmp(expected_lower, "uninitialized element") == 0 &&
         strstr(actual_lower, "uninitialized table element") != NULL)
@@ -908,14 +1006,19 @@ static int spec_parse_v128(const char* json,
                            const spec_json_token_t* tokens,
                            int value_index,
                            const char* lane_type,
-                           wasm_value_t* out_value,
+                           spec_value_t* out_value,
                            char* error_text,
                            size_t error_size) {
     uint8_t bytes[16];
     int i;
     int count;
 
+    if (!out_value) return 0;
+
     memset(bytes, 0, sizeof(bytes));
+    out_value->v128_lane_type = SPEC_V128_LANE_NONE;
+    for (i = 0; i < 4; i++) out_value->v128_lane_expectation[i] = SPEC_FLOAT_EXACT;
+
     if (value_index < 0 || tokens[value_index].type != SPEC_JSON_ARRAY) {
         spec_set_error(error_text, error_size, "v128 value must be an array");
         return 0;
@@ -923,6 +1026,7 @@ static int spec_parse_v128(const char* json,
 
     count = tokens[value_index].size;
     if (strcmp(lane_type, "i8") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_I8;
         if (count != 16) {
             spec_set_error(error_text, error_size, "v128 i8 expects 16 lanes");
             return 0;
@@ -938,6 +1042,7 @@ static int spec_parse_v128(const char* json,
             bytes[i] = (uint8_t)lane_bits;
         }
     } else if (strcmp(lane_type, "i16") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_I16;
         if (count != 8) {
             spec_set_error(error_text, error_size, "v128 i16 expects 8 lanes");
             return 0;
@@ -955,7 +1060,8 @@ static int spec_parse_v128(const char* json,
             bytes[i * 2] = (uint8_t)(lane & 0xFFu);
             bytes[i * 2 + 1] = (uint8_t)(lane >> 8);
         }
-    } else if (strcmp(lane_type, "i32") == 0 || strcmp(lane_type, "f32") == 0) {
+    } else if (strcmp(lane_type, "i32") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_I32;
         if (count != 4) {
             spec_set_error(error_text, error_size, "v128 i32/f32 expects 4 lanes");
             return 0;
@@ -975,7 +1081,29 @@ static int spec_parse_v128(const char* json,
             bytes[i * 4 + 2] = (uint8_t)((lane >> 16) & 0xFFu);
             bytes[i * 4 + 3] = (uint8_t)((lane >> 24) & 0xFFu);
         }
-    } else if (strcmp(lane_type, "i64") == 0 || strcmp(lane_type, "f64") == 0) {
+    } else if (strcmp(lane_type, "f32") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_F32;
+        if (count != 4) {
+            spec_set_error(error_text, error_size, "v128 i32/f32 expects 4 lanes");
+            return 0;
+        }
+        for (i = 0; i < 4; i++) {
+            uint32_t lane_bits;
+            spec_float_expectation_t lane_expectation;
+            int lane_index = spec_array_at(tokens, value_index, i);
+
+            if (!spec_parse_f32_bits_token(json, &tokens[lane_index], &lane_bits, &lane_expectation)) {
+                spec_set_error(error_text, error_size, "invalid v128 i32/f32 lane");
+                return 0;
+            }
+            out_value->v128_lane_expectation[i] = lane_expectation;
+            bytes[i * 4] = (uint8_t)(lane_bits & 0xFFu);
+            bytes[i * 4 + 1] = (uint8_t)((lane_bits >> 8) & 0xFFu);
+            bytes[i * 4 + 2] = (uint8_t)((lane_bits >> 16) & 0xFFu);
+            bytes[i * 4 + 3] = (uint8_t)((lane_bits >> 24) & 0xFFu);
+        }
+    } else if (strcmp(lane_type, "i64") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_I64;
         if (count != 2) {
             spec_set_error(error_text, error_size, "v128 i64/f64 expects 2 lanes");
             return 0;
@@ -991,12 +1119,31 @@ static int spec_parse_v128(const char* json,
             }
             for (j = 0; j < 8; j++) bytes[i * 8 + j] = (uint8_t)(lane >> (j * 8));
         }
+    } else if (strcmp(lane_type, "f64") == 0) {
+        out_value->v128_lane_type = SPEC_V128_LANE_F64;
+        if (count != 2) {
+            spec_set_error(error_text, error_size, "v128 i64/f64 expects 2 lanes");
+            return 0;
+        }
+        for (i = 0; i < 2; i++) {
+            uint64_t lane_bits;
+            spec_float_expectation_t lane_expectation;
+            int lane_index = spec_array_at(tokens, value_index, i);
+            int j;
+
+            if (!spec_parse_f64_bits_token(json, &tokens[lane_index], &lane_bits, &lane_expectation)) {
+                spec_set_error(error_text, error_size, "invalid v128 i64/f64 lane");
+                return 0;
+            }
+            out_value->v128_lane_expectation[i] = lane_expectation;
+            for (j = 0; j < 8; j++) bytes[i * 8 + j] = (uint8_t)(lane_bits >> (j * 8));
+        }
     } else {
         spec_set_error(error_text, error_size, "unsupported v128 lane type '%s'", lane_type);
         return 0;
     }
 
-    *out_value = wasm_v128(bytes);
+    out_value->value = wasm_v128(bytes);
     return 1;
 }
 
@@ -1047,45 +1194,19 @@ static int spec_parse_value(const char* json,
         }
         out_value->value = wasm_i64((int64_t)bits);
     } else if (strcmp(type_text, "f32") == 0) {
-        uint64_t bits;
-        value_text = spec_strdup_token(json, &tokens[value_index]);
-        if (!value_text) {
-            spec_set_error(error_text, error_size, "invalid f32 value");
+        uint32_t bits;
+        if (!spec_parse_f32_bits_token(json, &tokens[value_index], &bits, &out_value->float_expectation)) {
+            spec_set_error(error_text, error_size, "invalid f32 bit pattern");
             goto done;
         }
-        if (strcmp(value_text, "nan:canonical") == 0) {
-            out_value->float_expectation = SPEC_FLOAT_NAN_CANONICAL;
-            out_value->value = wasm_f32(spec_f32_from_bits(0x7FC00000u));
-        } else if (strcmp(value_text, "nan:arithmetic") == 0) {
-            out_value->float_expectation = SPEC_FLOAT_NAN_ARITHMETIC;
-            out_value->value = wasm_f32(spec_f32_from_bits(0x7FC00000u));
-        } else {
-            if (!spec_parse_u64_token(json, &tokens[value_index], &bits)) {
-                spec_set_error(error_text, error_size, "invalid f32 bit pattern");
-                goto done;
-            }
-            out_value->value = wasm_f32(spec_f32_from_bits((uint32_t)bits));
-        }
+        out_value->value = wasm_f32(spec_f32_from_bits(bits));
     } else if (strcmp(type_text, "f64") == 0) {
         uint64_t bits;
-        value_text = spec_strdup_token(json, &tokens[value_index]);
-        if (!value_text) {
-            spec_set_error(error_text, error_size, "invalid f64 value");
+        if (!spec_parse_f64_bits_token(json, &tokens[value_index], &bits, &out_value->float_expectation)) {
+            spec_set_error(error_text, error_size, "invalid f64 bit pattern");
             goto done;
         }
-        if (strcmp(value_text, "nan:canonical") == 0) {
-            out_value->float_expectation = SPEC_FLOAT_NAN_CANONICAL;
-            out_value->value = wasm_f64(spec_f64_from_bits(UINT64_C(0x7FF8000000000000)));
-        } else if (strcmp(value_text, "nan:arithmetic") == 0) {
-            out_value->float_expectation = SPEC_FLOAT_NAN_ARITHMETIC;
-            out_value->value = wasm_f64(spec_f64_from_bits(UINT64_C(0x7FF8000000000000)));
-        } else {
-            if (!spec_parse_u64_token(json, &tokens[value_index], &bits)) {
-                spec_set_error(error_text, error_size, "invalid f64 bit pattern");
-                goto done;
-            }
-            out_value->value = wasm_f64(spec_f64_from_bits(bits));
-        }
+        out_value->value = wasm_f64(spec_f64_from_bits(bits));
     } else if (strcmp(type_text, "externref") == 0) {
         uint64_t bits;
         value_text = spec_strdup_token(json, &tokens[value_index]);
@@ -1156,7 +1277,7 @@ static int spec_parse_value(const char* json,
             spec_set_error(error_text, error_size, "missing v128 lane type");
             goto done;
         }
-        if (!spec_parse_v128(json, tokens, value_index, lane_type, &out_value->value, error_text, error_size)) {
+        if (!spec_parse_v128(json, tokens, value_index, lane_type, out_value, error_text, error_size)) {
             goto done;
         }
     } else {
@@ -1273,6 +1394,28 @@ static int spec_values_match(const spec_value_t* expected,
             if (expected->value.of.gc_ref == actual->of.gc_ref) return 1;
             break;
         case WASM_TYPE_V128:
+            if (expected->v128_lane_type == SPEC_V128_LANE_F32) {
+                uint32_t lane;
+                for (lane = 0; lane < 4u; lane++) {
+                    if (!spec_f32_matches(wasm__v128_get_u32(actual, lane),
+                                          expected->v128_lane_expectation[lane],
+                                          wasm__v128_get_u32(&expected->value, lane)))
+                        break;
+                }
+                if (lane == 4u) return 1;
+                break;
+            }
+            if (expected->v128_lane_type == SPEC_V128_LANE_F64) {
+                uint32_t lane;
+                for (lane = 0; lane < 2u; lane++) {
+                    if (!spec_f64_matches(wasm__v128_get_u64(actual, lane),
+                                          expected->v128_lane_expectation[lane],
+                                          wasm__v128_get_u64(&expected->value, lane)))
+                        break;
+                }
+                if (lane == 2u) return 1;
+                break;
+            }
             if (memcmp(expected->value.of.v128, actual->of.v128, 16u) == 0) return 1;
             break;
         default:
