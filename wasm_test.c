@@ -2,7 +2,6 @@
  * test_wasm.c — Test harness for wasm.h single-header runtime
  *
  * Builds hand-crafted Wasm modules as byte arrays and executes them.
- * Compile: cc -O2 -o test_wasm test_wasm.c -lm
  */
 
 #define WL_IMPL
