@@ -4468,9 +4468,12 @@ WL_TEST(test_reference_types_table_ops) {
         emit(&sec, 0x41);
         emit_leb128_i32(&sec, 0);
         emit(&sec, 0x0B);
-        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
         emit(&sec, 0xD2);
         emit_leb128_u32(&sec, 0);
+        emit(&sec, 0x0B);
+        emit(&sec, 0xD2);
+        emit_leb128_u32(&sec, 1);
         emit(&sec, 0x0B);
 
         emit_leb128_u32(&sec, 6);
