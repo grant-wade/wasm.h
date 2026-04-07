@@ -86,6 +86,11 @@ typedef struct spec_harness_t {
     const char* support_wasm;
     char* json_dir;
     const char* source_filename;
+    wasm_value_t test_global_i32;
+    wasm_value_t test_global_f32;
+    wasm_value_t test_global_g;
+    wasm_value_t test_global_mut_i32;
+    wasm_value_t test_global_mut_i64;
 } spec_harness_t;
 
 static char* spec_strdup_cstr(const char* text) {
@@ -585,6 +590,12 @@ static const char* spec_runtime_error_text(const wasm_runtime_t* rt, wasm_error_
     return wasm_error_string(err);
 }
 
+static void spec_runtime_clear_error(wasm_runtime_t* rt) {
+    if (!rt) return;
+    rt->last_error = WASM_OK;
+    rt->error_msg[0] = '\0';
+}
+
 static void spec_action_result_dispose(spec_action_result_t* result) {
     if (!result) return;
     free(result->results);
@@ -720,6 +731,53 @@ static wasm_error_t spec_bind_print_imports(spec_harness_t* harness) {
                                                NULL);
         if (err != WASM_OK) return err;
     }
+
+    return WASM_OK;
+}
+
+static wasm_error_t spec_bind_default_test_globals(spec_harness_t* harness) {
+    wasm_global_import_t import_desc;
+    wasm_error_t err;
+
+    harness->test_global_i32 = wasm_i32(55);
+    harness->test_global_f32 = wasm_f32(44.0f);
+    harness->test_global_g = wasm_i32(0);
+    harness->test_global_mut_i32 = wasm_i32(66);
+    harness->test_global_mut_i64 = wasm_i64(66);
+
+    memset(&import_desc, 0, sizeof(import_desc));
+    import_desc.module = "test";
+
+    import_desc.name = "global-i32";
+    import_desc.type = WASM_TYPE_I32;
+    import_desc.value = &harness->test_global_i32;
+    err = wasm_register_global_import(&harness->runtime, &import_desc);
+    if (err != WASM_OK) return err;
+
+    import_desc.name = "global-f32";
+    import_desc.type = WASM_TYPE_F32;
+    import_desc.value = &harness->test_global_f32;
+    err = wasm_register_global_import(&harness->runtime, &import_desc);
+    if (err != WASM_OK) return err;
+
+    import_desc.name = "g";
+    import_desc.type = WASM_TYPE_I32;
+    import_desc.is_mutable = 1;
+    import_desc.value = &harness->test_global_g;
+    err = wasm_register_global_import(&harness->runtime, &import_desc);
+    if (err != WASM_OK) return err;
+
+    import_desc.name = "global-mut-i32";
+    import_desc.type = WASM_TYPE_I32;
+    import_desc.value = &harness->test_global_mut_i32;
+    err = wasm_register_global_import(&harness->runtime, &import_desc);
+    if (err != WASM_OK) return err;
+
+    import_desc.name = "global-mut-i64";
+    import_desc.type = WASM_TYPE_I64;
+    import_desc.value = &harness->test_global_mut_i64;
+    err = wasm_register_global_import(&harness->runtime, &import_desc);
+    if (err != WASM_OK) return err;
 
     return WASM_OK;
 }
@@ -1440,7 +1498,7 @@ static int spec_bind_export(spec_harness_t* harness,
         import_desc.type = *type;
         import_desc.func = spec_forward_import_call;
         import_desc.userdata = forward;
-        err = wasm_register_import(&harness->runtime, &import_desc);
+        err = wasm__register_import_internal(&harness->runtime, &import_desc, 0);
     } else if (kind == WASM_EXPORT_GLOBAL) {
         const wasm_reftype_t* ref_type = wasm_global_reftype(module, index);
         wasm_global_import_t import_desc;
@@ -1523,6 +1581,7 @@ static wasm_module_t* spec_load_module_bytes(spec_harness_t* harness,
                                              int update_last,
                                              char* error_text,
                                              size_t error_size) {
+    spec_runtime_clear_error(&harness->runtime);
     wasm_module_t* module = wasm_load(&harness->runtime, bytes, size);
 
     if (!module) {
@@ -1661,6 +1720,7 @@ static int spec_execute_action(spec_harness_t* harness,
             return 0;
         }
 
+        spec_runtime_clear_error(&harness->runtime);
         out_result->err = wasm_call_index(module, func_index, args, num_args, results, num_results);
         if (out_result->err != WASM_OK) {
             spec_set_error(out_result->error_text, sizeof(out_result->error_text), "%s",
@@ -1682,6 +1742,7 @@ static int spec_execute_action(spec_harness_t* harness,
             free(field_name);
             return 0;
         }
+        spec_runtime_clear_error(&harness->runtime);
         out_result->err = wasm_global_get(module, field_name, &results[0]);
         if (out_result->err != WASM_OK) {
             spec_set_error(out_result->error_text, sizeof(out_result->error_text), "%s",
@@ -2062,6 +2123,13 @@ static int spec_harness_init(spec_harness_t* harness,
     err = spec_bind_print_imports(harness);
     if (err != WASM_OK) {
         spec_set_error(error_text, error_size, "failed to bind spectest print imports: %s",
+                       spec_runtime_error_text(&harness->runtime, err));
+        return 0;
+    }
+
+    err = spec_bind_default_test_globals(harness);
+    if (err != WASM_OK) {
+        spec_set_error(error_text, error_size, "failed to bind default test globals: %s",
                        spec_runtime_error_text(&harness->runtime, err));
         return 0;
     }

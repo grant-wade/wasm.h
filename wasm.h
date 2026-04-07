@@ -714,6 +714,9 @@ struct wasm_runtime_t {
 void wasm_config_default(wasm_config_t* config);
 wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config);
 void wasm_destroy(wasm_runtime_t* rt);
+static wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
+                                                   const wasm_import_t* imp,
+                                                   int zeroed_type_is_unspecified);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
 wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_import_t* imp);
@@ -2875,6 +2878,22 @@ static void wasm__free_functype(wasm_functype_t* ft) {
     ft->num_results = 0;
 }
 
+static int wasm__functype_is_unspecified(const wasm_functype_t* ft) {
+    return ft && ft->num_params == UINT32_MAX && ft->num_results == UINT32_MAX;
+}
+
+static int wasm__functype_is_zeroed(const wasm_functype_t* ft) {
+    return ft && ft->num_params == 0 && ft->num_results == 0 &&
+           ft->params == NULL && ft->results == NULL &&
+           ft->param_reftypes == NULL && ft->result_reftypes == NULL;
+}
+
+static void wasm__functype_mark_unspecified(wasm_functype_t* ft) {
+    wasm__free_functype(ft);
+    ft->num_params = UINT32_MAX;
+    ft->num_results = UINT32_MAX;
+}
+
 static void wasm__free_structtype(wasm_structtype_t* st) {
     WASM_FREE(st->fields);
     st->fields = NULL;
@@ -2907,6 +2926,11 @@ static void wasm__free_comptype(wasm_comptype_t* type) {
 
 static wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src) {
     memset(dst, 0, sizeof(*dst));
+    if (wasm__functype_is_unspecified(src)) {
+        dst->num_params = UINT32_MAX;
+        dst->num_results = UINT32_MAX;
+        return WASM_OK;
+    }
     dst->num_params = src->num_params;
     dst->num_results = src->num_results;
 
@@ -3175,11 +3199,6 @@ static inline int wasm__is_subtype(const wasm_module_t* mod,
     return 0;
 }
 
-static int wasm__functype_is_unspecified(const wasm_functype_t* ft) {
-    return ft && ft->num_params == 0 && ft->num_results == 0 &&
-           ft->params == NULL && ft->results == NULL;
-}
-
 static wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_FUNC) return NULL;
     return &type->of.func;
@@ -3445,7 +3464,7 @@ static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm_value_t* out_value) {
     wasm_value_t value;
 
-    if (stack->size == 0) return WASM_ERR_MALFORMED;
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
     value = stack->values[--stack->size];
     if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
         return WASM_ERR_TYPE_MISMATCH;
@@ -3463,12 +3482,20 @@ static int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs) {
     return (int32_t)((uint32_t)lhs + (uint32_t)rhs);
 }
 
+static int32_t wasm__wrap_i32_sub(int32_t lhs, int32_t rhs) {
+    return (int32_t)((uint32_t)lhs - (uint32_t)rhs);
+}
+
 static int32_t wasm__wrap_i32_mul(int32_t lhs, int32_t rhs) {
     return (int32_t)((uint32_t)lhs * (uint32_t)rhs);
 }
 
 static int64_t wasm__wrap_i64_add(int64_t lhs, int64_t rhs) {
     return (int64_t)((uint64_t)lhs + (uint64_t)rhs);
+}
+
+static int64_t wasm__wrap_i64_sub(int64_t lhs, int64_t rhs) {
+    return (int64_t)((uint64_t)lhs - (uint64_t)rhs);
 }
 
 static int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs) {
@@ -5289,6 +5316,7 @@ static wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod) {
         if (!wasm__range_in_bounds_u64(segment->offset, segment->size, mem_size)) return WASM_ERR_OUT_OF_BOUNDS;
         if (segment->size > 0)
             memcpy(memory->data + segment->offset, segment->bytes, segment->size);
+        segment->size = 0;
     }
 
     return WASM_OK;
@@ -5318,6 +5346,7 @@ static wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
             if (!table->elems) return WASM_ERR_OUT_OF_BOUNDS;
             for (j = 0; j < segment->num_elems; j++) table->elems[segment->offset + j] = segment->elems[j];
         }
+        segment->num_elems = 0;
     }
 
     return WASM_OK;
@@ -5366,12 +5395,14 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 err = wasm__require_feature(mod, WASM_FEATURE_EXTENDED_CONST);
                 if (err != WASM_OK) break;
                 if (global_index >= max_global_index) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown global %u", (unsigned)global_index);
                     err = WASM_ERR_MALFORMED;
                     break;
                 }
 
                 global = &mod->globals[global_index];
-                if (!global->is_import && global->is_mutable) {
+                if (global->is_mutable) {
+                    WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "constant expression required");
                     err = WASM_ERR_TYPE_MISMATCH;
                     break;
                 }
@@ -5391,6 +5422,20 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 err = wasm__init_expr_stack_push(
                     &stack,
                     wasm_i32(wasm__wrap_i32_add(lhs.of.i32, rhs.of.i32)));
+                break;
+            }
+            case 0x6B: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__require_feature(mod, WASM_FEATURE_EXTENDED_CONST);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i32(wasm__wrap_i32_sub(lhs.of.i32, rhs.of.i32)));
                 break;
             }
             case 0x6C: {
@@ -5419,6 +5464,20 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 err = wasm__init_expr_stack_push(
                     &stack,
                     wasm_i64(wasm__wrap_i64_add(lhs.of.i64, rhs.of.i64)));
+                break;
+            }
+            case 0x7D: {
+                wasm_value_t rhs, lhs;
+
+                err = wasm__require_feature(mod, WASM_FEATURE_EXTENDED_CONST);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &rhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I64, &lhs);
+                if (err != WASM_OK) break;
+                err = wasm__init_expr_stack_push(
+                    &stack,
+                    wasm_i64(wasm__wrap_i64_sub(lhs.of.i64, rhs.of.i64)));
                 break;
             }
             case 0x7E: {
@@ -5645,13 +5704,15 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                         break;
                     }
                     default:
-                        err = WASM_ERR_MALFORMED;
+                        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "constant expression required");
+                        err = WASM_ERR_TYPE_MISMATCH;
                         break;
                 }
                 break;
             }
             default:
-                err = WASM_ERR_MALFORMED;
+                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "constant expression required");
+                err = WASM_ERR_TYPE_MISMATCH;
                 break;
         }
 
@@ -5660,7 +5721,7 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
 
     if (err == WASM_OK) {
         if (stack.size != 1)
-            err = WASM_ERR_MALFORMED;
+            err = WASM_ERR_TYPE_MISMATCH;
         else
             *out_value = stack.values[0];
     }
@@ -6043,7 +6104,9 @@ void wasm_destroy(wasm_runtime_t* rt) {
     memset(rt, 0, sizeof(*rt));
 }
 
-wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) {
+static wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
+                                                   const wasm_import_t* imp,
+                                                   int zeroed_type_is_unspecified) {
     wasm_import_t copy;
     wasm_error_t err;
 
@@ -6076,9 +6139,15 @@ wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) 
         WASM_FREE((void*)copy.name);
         return err;
     }
+    if (zeroed_type_is_unspecified && wasm__functype_is_zeroed(&imp->type))
+        wasm__functype_mark_unspecified(&copy.type);
 
     rt->imports[rt->num_imports++] = copy;
     return WASM_OK;
+}
+
+wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp) {
+    return wasm__register_import_internal(rt, imp, 1);
 }
 
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp) {
@@ -6307,7 +6376,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         const wasm_functype_t* import_type = wasm__module_const_functype(mod, ti);
         uint32_t j;
 
-        if (!import_type) return WASM_ERR_MALFORMED;
+        if (!import_type) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)ti);
+            return WASM_ERR_MALFORMED;
+        }
         if (wasm__append_funcs(mod, 1, &fi) != WASM_OK) return WASM_ERR_OOM;
         mod->funcs[fi].type_idx = ti;
         mod->funcs[fi].is_import = 1;
@@ -6469,7 +6541,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
         type_index = wasm__read_leb128_u32(r);
         import_type = wasm__module_const_functype(mod, type_index);
-        if (!import_type) return WASM_ERR_MALFORMED;
+        if (!import_type) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)type_index);
+            return WASM_ERR_MALFORMED;
+        }
         timp = wasm__find_tag_import(mod->rt, info->module, info->name);
         if (!timp) {
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
@@ -7296,8 +7371,7 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
             }
             if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, table->size)) {
                 return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "element segment %u does not fit declared table bounds",
-                                                  (unsigned)i);
+                                                  "out of bounds table access");
             }
         }
     }
@@ -7307,8 +7381,7 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
 
         if (segment->memory_index >= mod->num_memories && !(segment->is_passive && mod->num_memories == 0)) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "data segment %u memory index %u out of range",
-                                              (unsigned)i,
+                                              "unknown memory %u",
                                               (unsigned)segment->memory_index);
         }
         if (!segment->is_passive &&
@@ -7316,8 +7389,7 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                        segment->size,
                                        (uint64_t)mod->memories[segment->memory_index].pages * WASM_PAGE_SIZE)) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "data segment %u does not fit declared memory bounds",
-                                              (unsigned)i);
+                                              "out of bounds memory access");
         }
     }
 
@@ -7550,7 +7622,7 @@ static wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
 
     if (v->sp == frame->height) {
         if (!frame->unreachable)
-            return wasm__validator_error(v, at, "stack underflow");
+            return wasm__validator_error(v, at, "type mismatch: stack underflow");
         *out_type = WASM__TYPE_BOT;
         wasm__clear_reftype(out_ref_type);
         return WASM_OK;
@@ -7601,7 +7673,7 @@ static wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
 
         if (sp == frame->height) {
             if (!frame->unreachable)
-                return wasm__validator_error(v, at, "stack underflow");
+                return wasm__validator_error(v, at, "type mismatch: stack underflow");
             actual = WASM__TYPE_BOT;
             wasm__clear_reftype(&actual_ref);
         } else {
@@ -7734,7 +7806,7 @@ static wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
         if (err != WASM_OK) return err;
     }
     if (memarg.memory_index >= v->mod->num_memories)
-        return wasm__validator_error(v, at, "memory %u out of range", (unsigned)memarg.memory_index);
+        return wasm__validator_error(v, at, "unknown memory %u", (unsigned)memarg.memory_index);
     return WASM_OK;
 }
 
@@ -8847,16 +8919,16 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_BULK_MEMORY);
             if (err != WASM_OK) return err;
             v->mod->uses_data_count_section = 1;
-            if (data_idx >= v->mod->num_data_segments)
-                return wasm__validator_error(v, at, "data segment %u out of range", (unsigned)data_idx);
             if (mem_idx != 0) {
                 err = wasm__validator_require_feature(v, at, WASM_FEATURE_MULTI_MEMORY);
                 if (err != WASM_OK) return err;
             }
             if (v->mod->num_memories == 0)
-                return wasm__validator_error(v, at, "memory.init requires a memory");
+                return wasm__validator_error(v, at, "unknown memory %u", (unsigned)mem_idx);
             if (mem_idx >= v->mod->num_memories)
-                return wasm__validator_error(v, at, "memory %u out of range", (unsigned)mem_idx);
+                return wasm__validator_error(v, at, "unknown memory %u", (unsigned)mem_idx);
+            if (data_idx >= v->mod->num_data_segments)
+                return wasm__validator_error(v, at, "unknown data segment %u", (unsigned)data_idx);
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x09: {
@@ -8865,7 +8937,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             if (err != WASM_OK) return err;
             v->mod->uses_data_count_section = 1;
             if (data_idx >= v->mod->num_data_segments)
-                return wasm__validator_error(v, at, "data segment %u out of range", (unsigned)data_idx);
+                return wasm__validator_error(v, at, "unknown data segment %u", (unsigned)data_idx);
             return WASM_OK;
         }
         case 0x0A: {
@@ -8878,9 +8950,11 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
                 if (err != WASM_OK) return err;
             }
             if (v->mod->num_memories == 0)
-                return wasm__validator_error(v, at, "memory.copy requires a memory");
+                return wasm__validator_error(v, at, "unknown memory %u", (unsigned)dst_mem_idx);
             if (dst_mem_idx >= v->mod->num_memories || src_mem_idx >= v->mod->num_memories)
-                return wasm__validator_error(v, at, "memory.copy memory index out of range");
+                return wasm__validator_error(v, at,
+                                             "unknown memory %u",
+                                             (unsigned)(dst_mem_idx >= v->mod->num_memories ? dst_mem_idx : src_mem_idx));
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x0B: {
@@ -8892,9 +8966,9 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
                 if (err != WASM_OK) return err;
             }
             if (v->mod->num_memories == 0)
-                return wasm__validator_error(v, at, "memory.fill requires a memory");
+                return wasm__validator_error(v, at, "unknown memory %u", (unsigned)mem_idx);
             if (mem_idx >= v->mod->num_memories)
-                return wasm__validator_error(v, at, "memory %u out of range", (unsigned)mem_idx);
+                return wasm__validator_error(v, at, "unknown memory %u", (unsigned)mem_idx);
             return wasm__validator_pop_three_i32(v, at);
         }
         case 0x0C: {
@@ -8904,8 +8978,10 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_elem_segment_t* segment;
             wasm_table_t* table;
             if (err != WASM_OK) return err;
-            if (elem_idx >= v->mod->num_elem_segments || table_idx >= v->mod->num_tables)
-                return wasm__validator_error(v, at, "table.init index out of range");
+            if (table_idx >= v->mod->num_tables)
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
+            if (elem_idx >= v->mod->num_elem_segments)
+                return wasm__validator_error(v, at, "unknown elem segment %u", (unsigned)elem_idx);
             segment = &v->mod->elem_segments[elem_idx];
             table = &v->mod->tables[table_idx];
             if (!wasm__validator_type_matches(v,
@@ -8921,7 +8997,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_BULK_MEMORY);
             if (err != WASM_OK) return err;
             if (elem_idx >= v->mod->num_elem_segments)
-                return wasm__validator_error(v, at, "element segment %u out of range", (unsigned)elem_idx);
+                return wasm__validator_error(v, at, "unknown elem segment %u", (unsigned)elem_idx);
             return WASM_OK;
         }
         case 0x0E: {
@@ -8929,8 +9005,10 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             uint32_t src_table_idx = wasm__read_leb128_u32(&v->r);
             wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_BULK_MEMORY);
             if (err != WASM_OK) return err;
-            if (dst_table_idx >= v->mod->num_tables || src_table_idx >= v->mod->num_tables)
-                return wasm__validator_error(v, at, "table.copy index out of range");
+            if (dst_table_idx >= v->mod->num_tables)
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)dst_table_idx);
+            if (src_table_idx >= v->mod->num_tables)
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)src_table_idx);
             if (!wasm__validator_type_matches(v,
                                               v->mod->tables[src_table_idx].reftype,
                                               &v->mod->tables[src_table_idx].reftype_info,
@@ -8945,7 +9023,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_table_t* table;
             if (err != WASM_OK) return err;
             if (table_idx >= v->mod->num_tables)
-                return wasm__validator_error(v, at, "table %u out of range", (unsigned)table_idx);
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
             table = &v->mod->tables[table_idx];
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
@@ -8958,7 +9036,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_REFERENCE_TYPES);
             if (err != WASM_OK) return err;
             if (table_idx >= v->mod->num_tables)
-                return wasm__validator_error(v, at, "table %u out of range", (unsigned)table_idx);
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
             return wasm__validator_push(v, at, WASM_TYPE_I32);
         }
         case 0x11: {
@@ -8967,7 +9045,7 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
             wasm_table_t* table;
             if (err != WASM_OK) return err;
             if (table_idx >= v->mod->num_tables)
-                return wasm__validator_error(v, at, "table %u out of range", (unsigned)table_idx);
+                return wasm__validator_error(v, at, "unknown table %u", (unsigned)table_idx);
             table = &v->mod->tables[table_idx];
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
@@ -9252,7 +9330,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 }
                 if (!frame.unreachable) {
                     if (v.sp != frame.height + frame.num_results)
-                        return wasm__validator_error(&v, at, "block leaves wrong stack height");
+                        return wasm__validator_error(&v, at, "type mismatch: block leaves wrong stack height");
                     err = wasm__validator_check_types_typed(&v, at,
                                                             frame.result_types,
                                                             frame.result_reftypes,
@@ -9589,7 +9667,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) return err;
                 if (table_idx >= mod->num_tables)
-                    return wasm__validator_error(&v, at, "table %u out of range", (unsigned)table_idx);
+                    return wasm__validator_error(&v, at, "unknown table %u", (unsigned)table_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push_typed(&v, at,
@@ -9603,7 +9681,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) return err;
                 if (table_idx >= mod->num_tables)
-                    return wasm__validator_error(&v, at, "table %u out of range", (unsigned)table_idx);
+                    return wasm__validator_error(&v, at, "unknown table %u", (unsigned)table_idx);
                 err = wasm__validator_pop_expect_typed(&v, at,
                                                        mod->tables[table_idx].reftype,
                                                        &mod->tables[table_idx].reftype_info);
@@ -9629,7 +9707,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm_valtype_t result_type = WASM_TYPE_I32;
                 uint32_t max_align = 0;
                 if (mod->num_memories == 0)
-                    return wasm__validator_error(&v, at, "memory load requires a memory");
+                    return wasm__validator_error(&v, at, "unknown memory 0");
                 switch (op) {
                     case 0x28:
                         result_type = WASM_TYPE_I32;
@@ -9691,7 +9769,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm_valtype_t value_type = WASM_TYPE_I32;
                 uint32_t max_align = 0;
                 if (mod->num_memories == 0)
-                    return wasm__validator_error(&v, at, "memory store requires a memory");
+                    return wasm__validator_error(&v, at, "unknown memory 0");
                 switch (op) {
                     case 0x36:
                         value_type = WASM_TYPE_I32;
@@ -9741,13 +9819,13 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             case 0x3F: {
                 uint32_t mem_idx = wasm__read_leb128_u32(&v.r);
                 if (mod->num_memories == 0)
-                    return wasm__validator_error(&v, at, "memory.size requires a memory");
+                    return wasm__validator_error(&v, at, "unknown memory %u", (unsigned)mem_idx);
                 if (mem_idx != 0) {
                     err = wasm__validator_require_feature(&v, at, WASM_FEATURE_MULTI_MEMORY);
                     if (err != WASM_OK) return err;
                 }
                 if (mem_idx >= mod->num_memories)
-                    return wasm__validator_error(&v, at, "memory %u out of range", (unsigned)mem_idx);
+                    return wasm__validator_error(&v, at, "unknown memory %u", (unsigned)mem_idx);
                 err = wasm__validator_push(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 break;
@@ -9755,13 +9833,13 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             case 0x40: {
                 uint32_t mem_idx = wasm__read_leb128_u32(&v.r);
                 if (mod->num_memories == 0)
-                    return wasm__validator_error(&v, at, "memory.grow requires a memory");
+                    return wasm__validator_error(&v, at, "unknown memory %u", (unsigned)mem_idx);
                 if (mem_idx != 0) {
                     err = wasm__validator_require_feature(&v, at, WASM_FEATURE_MULTI_MEMORY);
                     if (err != WASM_OK) return err;
                 }
                 if (mem_idx >= mod->num_memories)
-                    return wasm__validator_error(&v, at, "memory %u out of range", (unsigned)mem_idx);
+                    return wasm__validator_error(&v, at, "unknown memory %u", (unsigned)mem_idx);
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push(&v, at, WASM_TYPE_I32);
@@ -12767,7 +12845,6 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         mem_size = (uint64_t)memory->pages * WASM_PAGE_SIZE;
 
                         segment = &mod->data_segments[data_idx];
-                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
                         if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
                             !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
                             WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
@@ -12784,7 +12861,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             goto cleanup;
                         }
 
-                        mod->data_segments[data_idx].is_dropped = 1;
+                        if (mod->data_segments[data_idx].is_passive) {
+                            mod->data_segments[data_idx].is_dropped = 1;
+                            mod->data_segments[data_idx].size = 0;
+                        }
                         break;
                     }
                     case 0x0A: {
@@ -12861,7 +12941,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         table = wasm__table_at(mod, table_idx);
                         if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                         segment = &mod->elem_segments[elem_idx];
-                        if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                        if (segment->is_declarative) WASM__TRAP(WASM_ERR_TRAP);
                         if (!wasm__typed_valtype_is_subtype(mod,
                                                             segment->elem_type,
                                                             &segment->elem_ref_type,
@@ -12886,7 +12966,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             goto cleanup;
                         }
 
-                        mod->elem_segments[elem_idx].is_dropped = 1;
+                        if (mod->elem_segments[elem_idx].is_passive) {
+                            mod->elem_segments[elem_idx].is_dropped = 1;
+                            mod->elem_segments[elem_idx].num_elems = 0;
+                        }
                         break;
                     }
                     case 0x0E: {
@@ -15441,7 +15524,7 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
     imp.func = callback;
     imp.userdata = userdata;
 
-    err = wasm_register_import(rt, &imp);
+    err = wasm__register_import_internal(rt, &imp, 0);
     wasm__free_functype(&type);
     return err;
 }

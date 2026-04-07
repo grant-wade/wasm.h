@@ -2173,7 +2173,7 @@ WL_TEST(test_global_init_expr_global_get_import) {
         emit(&sec, 'd');
         emit(&sec, 0x03);
         emit(&sec, 0x7F);
-        emit(&sec, 0x01);
+        emit(&sec, 0x00);
         emit_section(&mod, 2, sec.buf, sec.len);
     }
 
@@ -2234,7 +2234,7 @@ WL_TEST(test_global_init_expr_global_get_import) {
     imp.module = "env";
     imp.name = "seed";
     imp.type = WASM_TYPE_I32;
-    imp.is_mutable = 1;
+    imp.is_mutable = 0;
     imp.value = &imported_seed;
 
     err = wasm_register_global_import(&rt, &imp);
@@ -2533,7 +2533,7 @@ WL_TEST(test_data_offset_from_imported_global) {
         emit(&sec, 'r');
         emit(&sec, 0x03);
         emit(&sec, 0x7F);
-        emit(&sec, 0x01);
+        emit(&sec, 0x00);
         emit_section(&mod, 2, sec.buf, sec.len);
     }
 
@@ -2603,7 +2603,7 @@ WL_TEST(test_data_offset_from_imported_global) {
     imp.module = "env";
     imp.name = "__stack_pointer";
     imp.type = WASM_TYPE_I32;
-    imp.is_mutable = 1;
+    imp.is_mutable = 0;
     imp.value = &stack_pointer;
 
     err = wasm_register_global_import(&rt, &imp);
@@ -2676,7 +2676,7 @@ WL_TEST(test_data_offset_extended_const_expr) {
         emit(&sec, 'r');
         emit(&sec, 0x03);
         emit(&sec, 0x7F);
-        emit(&sec, 0x01);
+        emit(&sec, 0x00);
         emit_section(&mod, 2, sec.buf, sec.len);
     }
 
@@ -2752,7 +2752,7 @@ WL_TEST(test_data_offset_extended_const_expr) {
     imp.module = "env";
     imp.name = "__stack_pointer";
     imp.type = WASM_TYPE_I32;
-    imp.is_mutable = 1;
+    imp.is_mutable = 0;
     imp.value = &stack_pointer;
 
     err = wasm_register_global_import(&rt, &imp);
@@ -3552,7 +3552,8 @@ WL_TEST(test_bulk_memory_ops) {
     }
 
     err = wasm_call(m, "reuse", NULL, 0, &result, 1);
-    WL_CHECK_MSG(t, err == WASM_ERR_TRAP, "%s", "expected dropped passive segment to trap on memory.init");
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
+                 "%s", "expected dropped passive segment to behave like an empty segment on memory.init");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -3786,7 +3787,8 @@ WL_TEST(test_bulk_memory_table_ops) {
     }
 
     err = wasm_call(m, "reuse", NULL, 0, &result, 1);
-    WL_CHECK_MSG(t, err == WASM_ERR_TRAP, "%s", "expected dropped passive element segment to trap on table.init");
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
+                 "%s", "expected dropped passive element segment to behave like an empty segment on table.init");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -4543,7 +4545,8 @@ WL_TEST(test_reference_types_expr_element_segments) {
     }
 
     err = wasm_call(m, "reuse", NULL, 0, &result, 1);
-    WL_CHECK_MSG(t, err == WASM_ERR_TRAP, "%s", "expected dropped passive expr element segment to trap on table.init");
+    WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
+                 "%s", "expected dropped passive expr element segment to behave like an empty segment on table.init");
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -7316,7 +7319,7 @@ WL_TEST(test_validation_rejects_stack_type_errors) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected stack type error to fail validation");
-    WL_CHECK_MSG(t, strstr(rt.error_msg, "stack underflow") != NULL, "%s", rt.error_msg);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
 }
 
