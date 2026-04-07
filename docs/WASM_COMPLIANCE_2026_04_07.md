@@ -20,20 +20,20 @@ The goal here is accuracy, not aspiration. `wasm_test`, `wl_test`, and the emcc 
 | Total CTest entries | 272 | Includes unit tests, spectest build fixture, spectest cases, and emcc fixtures |
 | Spectest build fixture | 1 pass | `spectest.build` completed successfully |
 | Runnable spectest cases | 257 | One case per top-level `test/spec/*.wast` |
-| Spectest passes | 146 | Case passed end-to-end |
-| Spectest failures | 111 | Case ran and failed |
+| Spectest passes | 191 | Case passed end-to-end |
+| Spectest failures | 66 | Case ran and failed |
 | Spectest skips | 0 | No spectest case was skipped in this run |
 
 Useful percentages:
 
-- Spectest pass rate by case file: `146 / 257 = 56.8%`
-- Spectest non-failing rate by case file: `146 / 257 = 56.8%`
-- Overall CTest non-failing rate as reported by CTest: `161 / 272 = 59.2%`
+- Spectest pass rate by case file: `191 / 257 = 74.3%`
+- Spectest non-failing rate by case file: `191 / 257 = 74.3%`
+- Overall CTest non-failing rate as reported by CTest: `206 / 272 = 75.7%`
 
 Compared with the 2026-04-06 snapshot, the new run is materially better measured and materially greener:
 
-- spectest passes increased from `45` to `146`
-- spectest failures decreased from `183` to `111`
+- spectest passes increased from `45` to `191`
+- spectest failures decreased from `183` to `66`
 - spectest skips dropped from `29` to `0`
 
 That change matters. A year ago style coverage is no longer the right comparison point; the newer `main` spec corpus is now being exercised much more fully. Several proposal-heavy files that were previously hidden behind tooling skips now run end-to-end and either pass cleanly or fail with concrete runtime or validator diagnostics.
@@ -42,25 +42,22 @@ That change matters. A year ago style coverage is no longer the right comparison
 
 The current green set is now large enough that the exact pass list is more useful than a short hand-wavy summary.
 
-- `address64`, `align64`, `binary-gc`, `binary_leb128_64`, `block`, `br`, `bulk`, `bulk64`
-- `call`, `call_indirect`, `comments`, `const`, `conversions`, `custom`, `endianness`, `endianness64`
-- `exports`, `f32`, `f32_bitwise`, `f32_cmp`, `f64`, `f64_bitwise`, `f64_cmp`, `fac`
-- `float_exprs`, `float_literals`, `float_memory`, `float_memory64`, `float_misc`, `forward`, `func_ptrs`, `i32`
-- `i64`, `if`, `imports`, `inline-module`, `int_exprs`, `int_literals`, `labels`, `left-to-right`
-- `load`, `load64`, `local_get`, `local_set`, `local_tee`, `loop`, `memory-multi`, `memory64-imports`
-- `memory_copy`, `memory_copy64`, `memory_fill`, `memory_fill64`, `memory_grow64`, `memory_init`, `memory_init64`, `memory_redundancy`
-- `memory_redundancy64`, `memory_size`, `memory_trap`, `memory_trap64`, `names`, `nop`, `obsolete-keywords`, `ref_eq`
-- `ref_func`, `return`, `simd_align`, `simd_bit_shift`, `simd_bitwise`, `simd_boolean`, `simd_const`, `simd_conversions`
-- `simd_f32x4`, `simd_f32x4_arith`, `simd_f32x4_cmp`, `simd_f32x4_pmin_pmax`, `simd_f32x4_rounding`, `simd_f64x2`, `simd_f64x2_arith`, `simd_f64x2_cmp`
-- `simd_f64x2_pmin_pmax`, `simd_f64x2_rounding`, `simd_i16x8_arith`, `simd_i16x8_arith2`, `simd_i16x8_cmp`, `simd_i16x8_extadd_pairwise_i8x16`, `simd_i16x8_extmul_i8x16`, `simd_i16x8_q15mulr_sat_s`
-- `simd_i16x8_sat_arith`, `simd_i32x4_arith`, `simd_i32x4_arith2`, `simd_i32x4_cmp`, `simd_i32x4_dot_i16x8`, `simd_i32x4_extadd_pairwise_i16x8`, `simd_i32x4_extmul_i16x8`, `simd_i32x4_trunc_sat_f32x4`
-- `simd_i32x4_trunc_sat_f64x2`, `simd_i64x2_arith`, `simd_i64x2_arith2`, `simd_i64x2_cmp`, `simd_i64x2_extmul_i32x4`, `simd_i8x16_arith`, `simd_i8x16_arith2`, `simd_i8x16_cmp`
-- `simd_i8x16_sat_arith`, `simd_int_to_int_extend`, `simd_linking`, `simd_load`, `simd_load16_lane`, `simd_load32_lane`, `simd_load64_lane`, `simd_load8_lane`
-- `simd_load_extend`, `simd_load_splat`, `simd_load_zero`, `simd_memory-multi`, `simd_select`, `simd_splat`, `simd_store`, `simd_store16_lane`
-- `simd_store32_lane`, `simd_store64_lane`, `simd_store8_lane`, `skip-stack-guard-page`, `stack`, `start`, `store`, `switch`
-- `table-sub`, `table_copy`, `table_fill`, `table_get`, `table_grow`, `table_init`, `table_set`, `table_size`
-- `token`, `traps`, `type`, `type-canon`, `unreachable`, `unwind`, `utf8-custom-section-id`, `utf8-import-field`
-- `utf8-import-module`, `utf8-invalid-encoding`
+- `address`, `address0`, `address1`, `address64`, `align`, `align0`, `align64`, `binary-gc`, `binary0`, `binary_leb128_64`, `block`, `br`, `bulk`, `bulk64`
+- `call`, `call_indirect`, `comments`, `const`, `conversions`, `custom`, `data0`, `data1`, `data_drop0`, `endianness`, `endianness64`, `exports`, `exports0`
+- `f32`, `f32_bitwise`, `f32_cmp`, `f64`, `f64_bitwise`, `f64_cmp`, `fac`, `float_exprs`, `float_exprs0`, `float_exprs1`, `float_literals`, `float_memory`, `float_memory0`, `float_memory64`, `float_misc`
+- `forward`, `func_ptrs`, `i32`, `i64`, `if`, `imports`, `imports0`, `imports1`, `imports2`, `imports3`, `imports4`, `inline-module`
+- `int_exprs`, `int_literals`, `labels`, `left-to-right`, `linking`, `linking0`, `linking1`, `linking2`, `linking3`, `load`, `load0`, `load1`, `load2`, `load64`
+- `local_get`, `local_set`, `local_tee`, `loop`, `memory-multi`, `memory64-imports`, `memory_copy`, `memory_copy0`, `memory_copy1`, `memory_copy64`, `memory_fill`, `memory_fill0`, `memory_fill64`
+- `memory_grow`, `memory_grow64`, `memory_init`, `memory_init0`, `memory_init64`, `memory_redundancy`, `memory_redundancy64`, `memory_size`, `memory_size0`, `memory_size1`, `memory_size2`, `memory_size3`, `memory_size_import`
+- `memory_trap`, `memory_trap0`, `memory_trap1`, `memory_trap64`, `names`, `nop`, `obsolete-keywords`, `ref_eq`, `ref_func`, `ref_is_null`, `return`
+- `simd_address`, `simd_align`, `simd_bit_shift`, `simd_bitwise`, `simd_boolean`, `simd_const`, `simd_conversions`, `simd_f32x4`, `simd_f32x4_arith`, `simd_f32x4_cmp`, `simd_f32x4_pmin_pmax`, `simd_f32x4_rounding`
+- `simd_f64x2`, `simd_f64x2_arith`, `simd_f64x2_cmp`, `simd_f64x2_pmin_pmax`, `simd_f64x2_rounding`, `simd_i16x8_arith`, `simd_i16x8_arith2`, `simd_i16x8_cmp`, `simd_i16x8_extadd_pairwise_i8x16`
+- `simd_i16x8_extmul_i8x16`, `simd_i16x8_q15mulr_sat_s`, `simd_i16x8_sat_arith`, `simd_i32x4_arith`, `simd_i32x4_arith2`, `simd_i32x4_cmp`, `simd_i32x4_dot_i16x8`, `simd_i32x4_extadd_pairwise_i16x8`
+- `simd_i32x4_extmul_i16x8`, `simd_i32x4_trunc_sat_f32x4`, `simd_i32x4_trunc_sat_f64x2`, `simd_i64x2_arith`, `simd_i64x2_arith2`, `simd_i64x2_cmp`, `simd_i64x2_extmul_i32x4`, `simd_i8x16_arith`, `simd_i8x16_arith2`, `simd_i8x16_cmp`
+- `simd_i8x16_sat_arith`, `simd_int_to_int_extend`, `simd_linking`, `simd_load`, `simd_load16_lane`, `simd_load32_lane`, `simd_load64_lane`, `simd_load8_lane`, `simd_load_extend`, `simd_load_splat`, `simd_load_zero`, `simd_memory-multi`
+- `simd_select`, `simd_splat`, `simd_store`, `simd_store16_lane`, `simd_store32_lane`, `simd_store64_lane`, `simd_store8_lane`, `skip-stack-guard-page`, `stack`, `start`, `start0`, `store`, `store0`, `store1`, `store2`, `switch`
+- `table-sub`, `table_copy`, `table_fill`, `table_get`, `table_grow`, `table_init`, `table_set`, `table_size`, `token`, `traps`, `traps0`, `type`, `type-canon`, `unreachable`, `unwind`
+- `utf8-custom-section-id`, `utf8-import-field`, `utf8-import-module`, `utf8-invalid-encoding`
 
 In practice, the green set is strongest in these areas:
 
@@ -74,9 +71,9 @@ In practice, the green set is strongest in these areas:
 
 The failures are not random. They now cluster into a much smaller number of clearer buckets than they did on 2026-04-06.
 
-### 1. Multi-Memory Is Now The Biggest Failure Cluster
+### 1. [DONE] Multi-Memory Was A Harness Gating Bug
 
-The current run contains `40` failures with the signature:
+The initial 2026-04-07 run contained `40` failures with the signature:
 
 `multiple memories`
 
@@ -95,7 +92,15 @@ There is also at least one nearby feature-gating failure in the same neighborhoo
 
 - `align` reports `feature 'multi-memory' is disabled`
 
-This is the single most important current compliance gap. The project's unit suite already has explicit multi-memory coverage and `spectest.memory-multi` plus `spectest.simd_memory-multi` both pass, so the current result does not look like total lack of support. It looks like inconsistent loader or validator handling across the wider spec corpus.
+This initially looked like the biggest compliance gap, but it turned out to be a spectest harness bug rather than a missing runtime capability.
+
+#### How It Was Fixed
+
+- `test/spectest_runner.c` was enabling all features and then disabling multi-memory again for any JSON file whose filename did not contain `memory-multi` or `memory_multi`.
+- Removing that filename heuristic allowed the runtime's existing multi-memory implementation to run across the broader spectest corpus.
+- The closely related `linking0` case also needed module-load side effects to match spectest semantics, so active element segments are now applied before active data segments.
+
+As a result, the broad `multiple memories` cluster is gone in the current run.
 
 ### 2. The Harness Still Does Not Implement `module_definition`
 
@@ -208,12 +213,16 @@ Representative cases where invalid modules currently load successfully:
 
 Representative cases where the runtime rejects the module, but not with the corpus's expected wording:
 
-- `address` and `simd_address`: expected `offset out of range`, got `offset 4294967296 exceeds i32 memory address space`
 - `binary-leb128`: expected `integer too large`, got `section 128 overruns module`
 - `binary`: expected `malformed limits flags`, got `section 4 decode failed: malformed module`
 - `tag`: expected `non-empty tag result type`, got `tag 0 type must not declare results`
 
 These are still compliance failures. Some indicate genuine validator acceptance bugs, while others are primarily exact-message mismatches.
+
+#### How Part Of This Was Fixed
+
+- The spectest harness now treats the spec's expected `offset out of range` wording as equivalent to the runtime's more specific `exceeds i32 memory address space` diagnostic.
+- That cleared the wording-only failures in `address`, `align`, and `simd_address` without weakening the runtime's own error text.
 
 ### 8. `wasm-tools` Text-Format Expectations Still Diverge From Some Spec Assertions
 
@@ -233,13 +242,21 @@ Outside the big clusters above, a few failures still point to real integration g
 
 Representative cases:
 
-- `br_table`, `call_ref`, `linking`, and `return_call_ref` fail with section decode `type mismatch`
+- `br_table`, `call_ref`, and `return_call_ref` fail with section decode `type mismatch`
 - `return_call` and `return_call_indirect` fail in `build_control_targets`
 - `data` fails with `unknown global 0`
 - `elem`, `throw_ref`, and `try_table` still fail as malformed modules during decode
 - `global` still fails because `extended const expressions` are disabled
 
 These are fewer in number than the multi-memory and proposal buckets, but they remain important because they block end-to-end claims on tail calls, exceptions, linking variants, and some initializer paths.
+
+#### How Part Of This Was Fixed
+
+- `ref.func` values now preserve typed function-reference information at runtime instead of being flattened to plain `funcref`.
+- Global storage now preserves reference-subtype null markers such as `nofunc`, which matters for typed-reference export/import linking.
+- Table imports now require invariant typed equality instead of permissive subtype matching.
+
+Those changes moved both `linking0` and `linking` out of the remaining failure set.
 
 ## Skipped Cases
 
@@ -269,8 +286,8 @@ The spectest number is still the conservative compatibility metric and should re
 Current status as of 2026-04-07:
 
 - spectest coverage is much broader than it was on 2026-04-06 and no longer hides proposal-heavy files behind conversion skips
-- official spectest compliance is substantially improved, but still incomplete: `146` passing files and `111` failing files
-- the largest remaining blocker is the `multiple memories` failure cluster, not relaxed SIMD or general fixed-width SIMD execution
+- official spectest compliance is substantially improved, but still incomplete: `191` passing files and `66` failing files
+- the earlier multi-memory failure cluster was a harness bug and is no longer the dominant blocker
 - fixed-width SIMD is now mostly green; relaxed SIMD is still unsupported
 - core Memory64 memory operations are now mostly green; remaining 64-bit gaps are concentrated in Table64 and related typing paths
 - GC, typed references, exceptions, and tail-call integration still fail end-to-end in the local spectest path despite stronger unit coverage
@@ -278,4 +295,4 @@ Current status as of 2026-04-07:
 
 For now, the most accurate public statement is:
 
-> `wasm.h` now passes a majority of locally exercised official spectest files with no conversion skips in this environment, but compliance is still incomplete: 146 passing files and 111 failing files in the current run, with the biggest remaining gaps in multi-memory handling, harness command coverage, proposal-path decoding, and 64-bit table typing.
+> `wasm.h` now passes 191 of 257 locally exercised official spectest files with no conversion skips in this environment. Compliance is still incomplete, with the biggest remaining gaps in harness command coverage, proposal-path decoding, GC and typed-reference behavior, and 64-bit table typing.

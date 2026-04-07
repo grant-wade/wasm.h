@@ -573,15 +573,6 @@ static int spec_encode_externref_handle(uint64_t bits, uintptr_t* out_value) {
     return 1;
 }
 
-static int spec_json_uses_multi_memory(const char* json_path) {
-    const char* leaf;
-
-    if (!json_path) return 0;
-    leaf = strrchr(json_path, '/');
-    leaf = leaf ? leaf + 1 : json_path;
-    return strstr(leaf, "memory-multi") != NULL || strstr(leaf, "memory_multi") != NULL;
-}
-
 static char* spec_read_file_text(const char* path, size_t* out_size) {
     FILE* file;
     long size;
@@ -1104,7 +1095,8 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "expected an instruction") != NULL))
         return 1;
     if (strcmp(expected_lower, "offset out of range") == 0 &&
-        strstr(actual_lower, "offset must be less than or equal") != NULL)
+        (strstr(actual_lower, "offset must be less than or equal") != NULL ||
+         strstr(actual_lower, "exceeds i32 memory address space") != NULL))
         return 1;
     if (strcmp(expected_lower, "invalid lane index") == 0 &&
         strstr(actual_lower, "lane") != NULL && strstr(actual_lower, "out of range") != NULL)
@@ -2686,8 +2678,6 @@ static int spec_harness_init(spec_harness_t* harness,
     }
 
     wasm_enable_all_features(&harness->runtime);
-    if (!spec_json_uses_multi_memory(json_path))
-        wasm_disable_feature(&harness->runtime, WASM_FEATURE_MULTI_MEMORY);
     wasm_disable_feature(&harness->runtime, WASM_FEATURE_EXTENDED_CONST);
 
     err = wasm_bind_wasi_stubs(&harness->runtime);

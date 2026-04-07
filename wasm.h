@@ -329,6 +329,10 @@ typedef struct wasm_gc_array_t {
 typedef struct wasm_runtime_t wasm_runtime_t;
 #ifdef WASM_IMPL
 static wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
+static int wasm__resolve_func_ref(const wasm_runtime_t* rt,
+                                  uint32_t ref_id,
+                                  wasm_module_t** out_module,
+                                  uint32_t* out_func_idx);
 static int wasm__is_heap_subtype(const wasm_module_t* mod,
                                  wasm_valtype_t subtype,
                                  wasm_valtype_t supertype);
@@ -2608,6 +2612,8 @@ static int wasm__runtime_value_reftype(const wasm_module_t* mod,
                                        const wasm_value_t* value,
                                        wasm_reftype_t* out_reftype) {
     const wasm_gc_header_t* object;
+    wasm_module_t* func_mod;
+    uint32_t func_idx;
 
     if (!value || !out_reftype || !wasm__is_ref_type(value->type)) {
         wasm__clear_reftype(out_reftype);
@@ -2617,9 +2623,22 @@ static int wasm__runtime_value_reftype(const wasm_module_t* mod,
     wasm__clear_reftype(out_reftype);
     out_reftype->type = value->type;
     out_reftype->nullable = wasm__is_null_ref(value);
-    if (out_reftype->nullable || wasm__uses_funcref_storage(value->type) ||
-        wasm__uses_externref_storage(value->type))
+    if (out_reftype->nullable || wasm__uses_externref_storage(value->type))
         return 1;
+
+    if (wasm__uses_funcref_storage(value->type)) {
+        if (mod && mod->rt &&
+            wasm__resolve_func_ref(mod->rt, value->of.funcref, &func_mod, &func_idx) &&
+            func_mod && func_idx < func_mod->num_funcs) {
+            wasm_func_t* func = &func_mod->funcs[func_idx];
+
+            if (func->type_idx < func_mod->num_types) {
+                out_reftype->has_type_index = 1;
+                out_reftype->type_index = func->type_idx;
+            }
+        }
+        return 1;
+    }
 
     if ((value->of.gc_ref & WASM__GC_I31_TAG) != 0) {
         out_reftype->type = WASM_TYPE_I31REF;
@@ -2801,11 +2820,11 @@ static int wasm__tabletype_matches_import(const wasm_module_t* mod,
     actual_table = wasm__table_actual_const(actual_table);
     if (!actual_table) return 0;
     if (actual_table->is_64 != expected_is_64) return 0;
-    if (!wasm__typed_valtype_is_subtype(mod,
-                                        actual_table->reftype,
-                                        &actual_table->reftype_info,
-                                        expected_type,
-                                        expected_ref)) {
+    if (!wasm__typed_valtype_equal(mod,
+                                   actual_table->reftype,
+                                   &actual_table->reftype_info,
+                                   expected_type,
+                                   expected_ref)) {
         return 0;
     }
     return wasm__limits_match_import(actual_table->size,
@@ -3606,9 +3625,11 @@ static wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
 }
 
 static void wasm__global_set_value(wasm_global_t* global, wasm_value_t value) {
-    value.type = global->type;
+    if (!wasm__is_ref_type(global->type) || !wasm__is_ref_type(value.type))
+        value.type = global->type;
     if (global->is_import) {
-        global->import_value->type = global->type;
+        if (!wasm__is_ref_type(global->type) || !wasm__is_ref_type(value.type))
+            global->import_value->type = global->type;
         *global->import_value = value;
     } else {
         global->value = value;
@@ -10973,14 +10994,14 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         }
     }
 
-    err = wasm__apply_active_data_segments(mod);
-    if (err != WASM_OK) {
-        WASM__LOAD_FAIL("apply_active_data_segments");
-    }
-
     err = wasm__apply_active_elem_segments(mod);
     if (err != WASM_OK) {
         WASM__LOAD_FAIL("apply_active_elem_segments");
+    }
+
+    err = wasm__apply_active_data_segments(mod);
+    if (err != WASM_OK) {
+        WASM__LOAD_FAIL("apply_active_data_segments");
     }
 
     err = wasm__run_startup(mod);
