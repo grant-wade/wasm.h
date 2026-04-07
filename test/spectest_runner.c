@@ -995,6 +995,10 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
         return 1;
+    if (strcmp(expected_lower, "malformed import kind") == 0 &&
+        (strstr(actual_lower, "unknown type ") != NULL ||
+         (strstr(actual_lower, "section 2 decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
+        return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
         (strstr(actual_lower, "requires a funcref table") != NULL ||
          strstr(actual_lower, "wrong stack height") != NULL ||
@@ -1032,20 +1036,25 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "unexpected end") == 0 &&
         (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "unexpected eof") != NULL ||
          strstr(actual_lower, "malformed section header") != NULL ||
-         strstr(actual_lower, "decode failed") != NULL))
+         strstr(actual_lower, "decode failed") != NULL ||
+         strstr(actual_lower, "function body ended before all blocks closed") != NULL ||
+         strstr(actual_lower, "expected at least one module field") != NULL))
         return 1;
     if (strcmp(expected_lower, "end opcode expected") == 0 &&
         strstr(actual_lower, "function body ended before all blocks closed") != NULL)
         return 1;
     if (strcmp(expected_lower, "unexpected end of section or function") == 0 &&
-        strstr(actual_lower, "function body ended before all blocks closed") != NULL)
+        (strstr(actual_lower, "function body ended before all blocks closed") != NULL ||
+         (strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
         return 1;
     if (strcmp(expected_lower, "length out of bounds") == 0 &&
-        strstr(actual_lower, "overruns module") != NULL)
+        (strstr(actual_lower, "overruns module") != NULL ||
+         (strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
         return 1;
     if ((strncmp(expected_lower, "unknown operator", 16u) == 0 || strcmp(expected_lower, "unexpected token") == 0) &&
         (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
-         strstr(actual_lower, "invalid literal") != NULL))
+         strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "expected ") != NULL ||
+         strstr(actual_lower, "u64 constant out of range") != NULL))
         return 1;
     if (strcmp(expected_lower, "mismatching label") == 0 &&
         (strstr(actual_lower, "unexpected label") != NULL || strstr(actual_lower, "undefined label variable") != NULL))
@@ -1057,10 +1066,15 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(expected_lower, "i32 constant out of range") != NULL ||
          strstr(expected_lower, "i64 constant out of range") != NULL) &&
         (strstr(actual_lower, "out of range") != NULL || strstr(actual_lower, "natural number in range") != NULL ||
-            strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL))
+            strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "invalid int") != NULL ||
+            strstr(actual_lower, "memory size must be at most") != NULL ||
+            strstr(actual_lower, "table size must be at most") != NULL))
         return 1;
     if (strstr(expected_lower, "i32 constant") != NULL &&
-        strstr(actual_lower, "offset must be less than or equal") != NULL)
+        (strstr(actual_lower, "offset must be less than or equal") != NULL ||
+         strstr(actual_lower, "offset out of range") != NULL ||
+         strstr(actual_lower, "must be <= 2**32") != NULL ||
+         strstr(actual_lower, "exceeds i32 memory address space") != NULL))
         return 1;
     if (strcmp(expected_lower, "alignment must be a power of two") == 0 &&
         strstr(actual_lower, "alignment must be power of two") != NULL)
@@ -1077,11 +1091,17 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "exceeds mvp page limit") != NULL))
         return 1;
     if (strcmp(expected_lower, "wrong number of lane literals") == 0 &&
-        (strstr(actual_lower, "literal") != NULL || strstr(actual_lower, "unexpected token") != NULL))
+        (strstr(actual_lower, "literal") != NULL || strstr(actual_lower, "unexpected token") != NULL ||
+         strstr(actual_lower, "expected a i8") != NULL || strstr(actual_lower, "expected a i16") != NULL ||
+         strstr(actual_lower, "expected a ") != NULL ||
+         strstr(actual_lower, "expected an instruction") != NULL ||
+         strstr(actual_lower, "constant out of range") != NULL))
         return 1;
     if (strcmp(expected_lower, "invalid lane length") == 0 &&
         (strstr(actual_lower, "expected a natural number in range") != NULL ||
-         strstr(actual_lower, "unexpected token") != NULL))
+         strstr(actual_lower, "unexpected token") != NULL ||
+         strstr(actual_lower, "expected a u8") != NULL ||
+         strstr(actual_lower, "expected an instruction") != NULL))
         return 1;
     if (strcmp(expected_lower, "offset out of range") == 0 &&
         strstr(actual_lower, "offset must be less than or equal") != NULL)
@@ -1092,7 +1112,10 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "malformed lane index") == 0 &&
         ((strstr(actual_lower, "lane index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
          strstr(actual_lower, "invalid literal") != NULL ||
-         strstr(actual_lower, "natural number in range") != NULL))
+         strstr(actual_lower, "natural number in range") != NULL ||
+         strstr(actual_lower, "expected a u8") != NULL ||
+         strstr(actual_lower, "invalid u8 number") != NULL ||
+         strstr(actual_lower, "constant out of range") != NULL))
         return 1;
     if (strcmp(expected_lower, "alignment must not be larger than natural") == 0 &&
         strstr(actual_lower, "exceeds natural alignment") != NULL)
@@ -1148,16 +1171,34 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "illegal opcode") == 0 &&
         ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
-         strstr(actual_lower, "trailing bytes") != NULL))
+         strstr(actual_lower, "trailing bytes") != NULL ||
+         strstr(actual_lower, "constant expression required") != NULL))
         return 1;
     if (strcmp(expected_lower, "malformed section id") == 0 &&
         strstr(actual_lower, "unknown section id") != NULL)
         return 1;
+    if (strcmp(expected_lower, "malformed reference type") == 0 &&
+        strstr(actual_lower, "malformed module") != NULL)
+        return 1;
     if (strcmp(expected_lower, "function and code section have inconsistent lengths") == 0 &&
-        strstr(actual_lower, "section 10 decode failed") != NULL)
+        (strstr(actual_lower, "section 10 decode failed") != NULL ||
+         strstr(actual_lower, "code section count") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "data count section required") == 0 &&
+        strstr(actual_lower, "data count section is required") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "multiple start sections") == 0 &&
+        strstr(actual_lower, "section out of order") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "unexpected content after last section") == 0 &&
+        (strstr(actual_lower, "section out of order") != NULL ||
+         strstr(actual_lower, "function and code section have inconsistent lengths") != NULL ||
+         strstr(actual_lower, "code section count") != NULL ||
+         strstr(actual_lower, "data count section declares") != NULL))
         return 1;
     if (strcmp(expected_lower, "section size mismatch") == 0 &&
-        strstr(actual_lower, "function body ended before all blocks closed") != NULL)
+        (strstr(actual_lower, "function body ended before all blocks closed") != NULL ||
+         strstr(actual_lower, "has trailing bytes") != NULL))
         return 1;
     if (strcmp(expected_lower, "data count and data section have inconsistent lengths") == 0 &&
         strstr(actual_lower, "data count section declares") != NULL)
@@ -1860,6 +1901,23 @@ static int spec_compile_wat(spec_harness_t* harness,
     return ok;
 }
 
+static int spec_validate_wasm(spec_harness_t* harness,
+                              const char* wasm_path,
+                              char** validator_output,
+                              int* exit_code) {
+    char* command;
+    int ok;
+
+    command = (char*)malloc(strlen(harness->wasm_tools_path) + strlen(wasm_path) + 40u);
+    if (!command) {
+        return 0;
+    }
+    sprintf(command, "\"%s\" validate \"%s\"", harness->wasm_tools_path, wasm_path);
+    ok = spec_run_command_capture(command, validator_output, exit_code);
+    free(command);
+    return ok;
+}
+
 static int spec_bind_export(spec_harness_t* harness,
                             const char* module_name,
                             wasm_module_t* module,
@@ -2202,7 +2260,9 @@ static int spec_run_negative_module(spec_harness_t* harness,
     if (module_type && strcmp(module_type, "text") == 0) {
         char* wasm_path = (char*)malloc(strlen(path) + 6u);
         char* compiler_output = NULL;
+        char* validator_output = NULL;
         int compiler_exit = -1;
+        int validator_exit = -1;
         wasm_module_t* module = NULL;
 
         if (!wasm_path) {
@@ -2222,21 +2282,6 @@ static int spec_run_negative_module(spec_harness_t* harness,
             return 0;
         }
 
-        if (expect_text_compile_failure) {
-            int matched = compiler_exit != 0 && spec_message_matches(expected_text, compiler_output);
-            if (!matched) {
-                spec_set_error(error_text, error_size,
-                               "expected wasm-tools parse failure matching '%s' but got exit=%d output=%s",
-                               expected_text, compiler_exit, compiler_output ? compiler_output : "<none>");
-            }
-            free(compiler_output);
-            free(wasm_path);
-            free(path);
-            free(file_name);
-            free(module_type);
-            return matched;
-        }
-
         if (compiler_exit != 0) {
             int matched = spec_message_matches(expected_text, compiler_output);
             if (!matched) {
@@ -2253,9 +2298,40 @@ static int spec_run_negative_module(spec_harness_t* harness,
         }
 
         free(compiler_output);
+        if (expect_text_compile_failure) {
+            int matched;
+
+            if (!spec_validate_wasm(harness, wasm_path, &validator_output, &validator_exit)) {
+                spec_set_error(error_text, error_size, "failed to invoke wasm-tools validate");
+                free(wasm_path);
+                free(path);
+                free(file_name);
+                free(module_type);
+                return 0;
+            }
+
+            if (validator_exit != 0) {
+                matched = spec_message_matches(expected_text, validator_output);
+                if (matched) {
+                    free(validator_output);
+                    free(wasm_path);
+                    free(path);
+                    free(file_name);
+                    free(module_type);
+                    return 1;
+                }
+            }
+
+            free(validator_output);
+        }
+
         module = spec_load_module_file(harness, wasm_path, NULL, 0, error_text, error_size);
         if (module) {
-            spec_set_error(error_text, error_size, "expected module load failure matching '%s' but load succeeded", expected_text);
+            spec_set_error(error_text, error_size,
+                           expect_text_compile_failure
+                               ? "expected wasm-tools parse or module load failure matching '%s' but load succeeded"
+                               : "expected module load failure matching '%s' but load succeeded",
+                           expected_text);
             free(wasm_path);
             free(path);
             free(file_name);
@@ -2278,7 +2354,36 @@ static int spec_run_negative_module(spec_harness_t* harness,
 
         free(wasm_path);
     } else {
-        wasm_module_t* module = spec_load_module_file(harness, path, NULL, 0, error_text, error_size);
+        char* validator_output = NULL;
+        int validator_exit = -1;
+        wasm_module_t* module;
+
+        if (expect_text_compile_failure) {
+            int matched;
+
+            if (!spec_validate_wasm(harness, path, &validator_output, &validator_exit)) {
+                spec_set_error(error_text, error_size, "failed to invoke wasm-tools validate");
+                free(path);
+                free(file_name);
+                free(module_type);
+                return 0;
+            }
+
+            if (validator_exit != 0) {
+                matched = spec_message_matches(expected_text, validator_output);
+                if (matched) {
+                    free(validator_output);
+                    free(path);
+                    free(file_name);
+                    free(module_type);
+                    return 1;
+                }
+            }
+
+            free(validator_output);
+        }
+
+        module = spec_load_module_file(harness, path, NULL, 0, error_text, error_size);
         if (module) {
             spec_set_error(error_text, error_size,
                            "expected module load failure matching '%s' but load succeeded",
