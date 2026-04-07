@@ -59,6 +59,7 @@ typedef enum spec_v128_lane_type_t {
 
 typedef struct spec_value_t {
     wasm_value_t value;
+    int any_non_null_ref;
     spec_float_expectation_t float_expectation;
     spec_v128_lane_type_t v128_lane_type;
     spec_float_expectation_t v128_lane_expectation[4];
@@ -1582,9 +1583,18 @@ static int spec_parse_value(const char* json,
             goto done;
         }
         out_value->value = wasm_f64(spec_f64_from_bits(bits));
+    } else if (strcmp(type_text, "refnull") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_ANYREF);
+    } else if (strcmp(type_text, "refnull") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_ANYREF);
     } else if (strcmp(type_text, "externref") == 0) {
         uint64_t bits;
         uintptr_t encoded;
+        if (value_index < 0) {
+            out_value->value = wasm_ref_null(WASM_TYPE_EXTERNREF);
+            out_value->any_non_null_ref = 1;
+            goto done;
+        }
         value_text = spec_strdup_token(json, &tokens[value_index]);
         if (!value_text) {
             spec_set_error(error_text, error_size, "invalid externref value");
@@ -1602,6 +1612,11 @@ static int spec_parse_value(const char* json,
         }
     } else if (strcmp(type_text, "funcref") == 0) {
         uint64_t bits;
+        if (value_index < 0) {
+            out_value->value = wasm_ref_null(WASM_TYPE_FUNCREF);
+            out_value->any_non_null_ref = 1;
+            goto done;
+        }
         value_text = spec_strdup_token(json, &tokens[value_index]);
         if (!value_text) {
             spec_set_error(error_text, error_size, "invalid funcref value");
@@ -1618,6 +1633,11 @@ static int spec_parse_value(const char* json,
         }
     } else if (strcmp(type_text, "i31ref") == 0) {
         uint64_t bits;
+        if (value_index < 0) {
+            out_value->value = wasm_ref_null(WASM_TYPE_I31REF);
+            out_value->any_non_null_ref = 1;
+            goto done;
+        }
         value_text = spec_strdup_token(json, &tokens[value_index]);
         if (!value_text) {
             spec_set_error(error_text, error_size, "invalid i31ref value");
@@ -1635,14 +1655,19 @@ static int spec_parse_value(const char* json,
     } else if (strcmp(type_text, "anyref") == 0 || strcmp(type_text, "eqref") == 0 ||
                strcmp(type_text, "structref") == 0 || strcmp(type_text, "arrayref") == 0) {
         wasm_valtype_t ref_type = WASM_TYPE_ANYREF;
+        if (strcmp(type_text, "eqref") == 0) ref_type = WASM_TYPE_EQREF;
+        else if (strcmp(type_text, "structref") == 0) ref_type = WASM_TYPE_STRUCTREF;
+        else if (strcmp(type_text, "arrayref") == 0) ref_type = WASM_TYPE_ARRAYREF;
+        if (value_index < 0) {
+            out_value->value = wasm_ref_null(ref_type);
+            out_value->any_non_null_ref = 1;
+            goto done;
+        }
         value_text = spec_strdup_token(json, &tokens[value_index]);
         if (!value_text) {
             spec_set_error(error_text, error_size, "invalid reference value");
             goto done;
         }
-        if (strcmp(type_text, "eqref") == 0) ref_type = WASM_TYPE_EQREF;
-        else if (strcmp(type_text, "structref") == 0) ref_type = WASM_TYPE_STRUCTREF;
-        else if (strcmp(type_text, "arrayref") == 0) ref_type = WASM_TYPE_ARRAYREF;
         if (strcmp(value_text, "null") != 0) {
             spec_set_error(error_text, error_size, "only null reference values are supported");
             goto done;
@@ -1730,6 +1755,20 @@ static int spec_values_match(const spec_value_t* expected,
                              size_t error_size) {
     char actual_desc[128];
     char expected_desc[128];
+
+    if (expected->any_non_null_ref) {
+        if (expected->value.type != actual->type) {
+            spec_describe_value(&expected->value, expected_desc, sizeof(expected_desc));
+            spec_describe_value(actual, actual_desc, sizeof(actual_desc));
+            spec_set_error(error_text, error_size, "type mismatch: expected %s but got %s", expected_desc, actual_desc);
+            return 0;
+        }
+        if (!wasm__is_null_ref(actual)) return 1;
+    }
+
+    if (expected->value.type == WASM_TYPE_ANYREF && expected->value.of.gc_ref == (uintptr_t)0) {
+        if (wasm__is_null_ref(actual)) return 1;
+    }
 
     if (expected->value.type != actual->type) {
         spec_describe_value(&expected->value, expected_desc, sizeof(expected_desc));

@@ -36,6 +36,12 @@ Compared with the 2026-04-06 snapshot, the new run is materially better measured
 - spectest failures decreased from `183` to `66`
 - spectest skips dropped from `29` to `0`
 
+Note on freshness:
+
+- the `191 / 66` aggregate above is still the last full `257`-case sweep
+- targeted reruns after that snapshot have since moved `call_ref` and `return_call_ref` to green and removed the old `module_definition` harness blocker
+- the document below records those verified deltas, but the top-line counts should stay at `191 / 66` until the next full `check` run is captured
+
 That change matters. A year ago style coverage is no longer the right comparison point; the newer `main` spec corpus is now being exercised much more fully. Several proposal-heavy files that were previously hidden behind tooling skips now run end-to-end and either pass cleanly or fail with concrete runtime or validator diagnostics.
 
 ## What Is Currently Green
@@ -43,13 +49,13 @@ That change matters. A year ago style coverage is no longer the right comparison
 The current green set is now large enough that the exact pass list is more useful than a short hand-wavy summary.
 
 - `address`, `address0`, `address1`, `address64`, `align`, `align0`, `align64`, `binary-gc`, `binary0`, `binary_leb128_64`, `block`, `br`, `bulk`, `bulk64`
-- `call`, `call_indirect`, `comments`, `const`, `conversions`, `custom`, `data0`, `data1`, `data_drop0`, `endianness`, `endianness64`, `exports`, `exports0`
+- `call`, `call_indirect`, `call_ref`, `comments`, `const`, `conversions`, `custom`, `data0`, `data1`, `data_drop0`, `endianness`, `endianness64`, `exports`, `exports0`
 - `f32`, `f32_bitwise`, `f32_cmp`, `f64`, `f64_bitwise`, `f64_cmp`, `fac`, `float_exprs`, `float_exprs0`, `float_exprs1`, `float_literals`, `float_memory`, `float_memory0`, `float_memory64`, `float_misc`
 - `forward`, `func_ptrs`, `i32`, `i64`, `if`, `imports`, `imports0`, `imports1`, `imports2`, `imports3`, `imports4`, `inline-module`
 - `int_exprs`, `int_literals`, `labels`, `left-to-right`, `linking`, `linking0`, `linking1`, `linking2`, `linking3`, `load`, `load0`, `load1`, `load2`, `load64`
 - `local_get`, `local_set`, `local_tee`, `loop`, `memory-multi`, `memory64-imports`, `memory_copy`, `memory_copy0`, `memory_copy1`, `memory_copy64`, `memory_fill`, `memory_fill0`, `memory_fill64`
 - `memory_grow`, `memory_grow64`, `memory_init`, `memory_init0`, `memory_init64`, `memory_redundancy`, `memory_redundancy64`, `memory_size`, `memory_size0`, `memory_size1`, `memory_size2`, `memory_size3`, `memory_size_import`
-- `memory_trap`, `memory_trap0`, `memory_trap1`, `memory_trap64`, `names`, `nop`, `obsolete-keywords`, `ref_eq`, `ref_func`, `ref_is_null`, `return`
+- `memory_trap`, `memory_trap0`, `memory_trap1`, `memory_trap64`, `names`, `nop`, `obsolete-keywords`, `ref_eq`, `ref_func`, `ref_is_null`, `return`, `return_call_ref`
 - `simd_address`, `simd_align`, `simd_bit_shift`, `simd_bitwise`, `simd_boolean`, `simd_const`, `simd_conversions`, `simd_f32x4`, `simd_f32x4_arith`, `simd_f32x4_cmp`, `simd_f32x4_pmin_pmax`, `simd_f32x4_rounding`
 - `simd_f64x2`, `simd_f64x2_arith`, `simd_f64x2_cmp`, `simd_f64x2_pmin_pmax`, `simd_f64x2_rounding`, `simd_i16x8_arith`, `simd_i16x8_arith2`, `simd_i16x8_cmp`, `simd_i16x8_extadd_pairwise_i8x16`
 - `simd_i16x8_extmul_i8x16`, `simd_i16x8_q15mulr_sat_s`, `simd_i16x8_sat_arith`, `simd_i32x4_arith`, `simd_i32x4_arith2`, `simd_i32x4_cmp`, `simd_i32x4_dot_i16x8`, `simd_i32x4_extadd_pairwise_i16x8`
@@ -102,24 +108,31 @@ This initially looked like the biggest compliance gap, but it turned out to be a
 
 As a result, the broad `multiple memories` cluster is gone in the current run.
 
-### 2. The Harness Still Does Not Implement `module_definition`
+### 2. [DONE] The Harness Now Implements `module_definition`
 
-The current run contains `4` failures with this signature:
+The earlier `module_definition: unsupported command type 'module_definition'` bucket is gone.
 
-`module_definition: unsupported command type 'module_definition'`
-
-Affected files:
+The affected files were:
 
 - `instance`
 - `memory`
 - `memory64`
 - `table`
 
-This is now a harness limitation, not a conversion limitation. The newer `wasm-tools` path gets these files far enough to execute, but `spectest_runner` still does not implement that command variant. These cases are no longer hidden behind skips; they are now explicit red tests.
+Those cases are no longer blocked at the harness-command layer. They now fail, where they still fail, for deeper runtime or validator reasons instead of because the command is unimplemented.
+
+#### How It Was Fixed
+
+- `test/spectest_runner.c` now stores named module definitions and resolves them through a shared module-source path instead of rejecting the command outright
+- `module_definition` is validated without full instantiation, using `wasm-tools validate`, so declarative definitions do not eagerly allocate runtime state
+- `module_instance` now instantiates fresh modules from stored definitions, which gives the generative semantics that `instance.wast` expects
+- the runtime table loader in `wasm.h` was extended to accept the newer default-initializer table encoding used by current spectest artifacts, which was required to get past the first `instance.*.wasm` decode failures
 
 ### 3. Proposal Opcodes Still Fail Along The Spectest Path
 
-The current run contains `9` failures with direct unknown-opcode diagnostics in the `0xD4` / `0xD5` / `0xD6` / `0x1F` / `0x14` range.
+The original 2026-04-07 run contained `9` failures with direct unknown-opcode diagnostics in the `0xD4` / `0xD5` / `0xD6` / `0x1F` / `0x14` range.
+
+That bucket is smaller now.
 
 Representative cases:
 
@@ -129,11 +142,24 @@ Representative cases:
 - `br_on_null` with `unknown opcode 0xD5`
 - `ref_as_non_null` with `unknown opcode 0xD4`
 - `ref_cast` with `unknown opcode 0xD4`
-- `throw` with `unknown opcode 0x1F`
 - `unreached-invalid` with `unknown opcode 0xD4`
-- `unreached-valid` with `unknown opcode 0x14`
+
+Recent targeted work cleared this bucket for:
+
+- `call_ref`
+- `return_call_ref`
+- the old `instance`-path `unknown opcode 0x1F` failure, which turned out to be `try_table`, not `throw`
+
+`try_table` is still not green, but the current failure is now earlier and narrower: `try_table.1.wasm` still dies during type-section decode rather than on an unknown-opcode path in the interpreter.
 
 This matters because `wasm_test` now has direct coverage for several of these proposal features. The compliance gap is therefore narrower and more specific than "feature not implemented". The current evidence points to a mismatch between spec-path decoding or validation and the separately exercised unit-test path.
+
+#### How Part Of This Was Fixed
+
+- `wasm.h` now recognizes and validates the current encodings for `call_ref` (`0x14`) and `return_call_ref` (`0x15`)
+- the interpreter now executes both opcodes directly, including null-function traps with the expected `null function reference` wording
+- `ref.func` validation now preserves typed function-reference information instead of flattening everything to plain `funcref`, which was the root cause of the early `call_ref` type-mismatch failures
+- `try_table` (`0x1F`) is now recognized by the control-target builder, immediate skipper, validator, and exception unwinder, which moved `instance` past the old opcode barrier even though `try_table` is not yet fully spectest-complete
 
 ### 4. Relaxed SIMD Is Still Unsupported, But Fixed-Width SIMD Is No Longer The Story
 
@@ -192,7 +218,7 @@ These files now pass:
 
 The remaining 64-bit failures are concentrated elsewhere:
 
-- `memory64` still fails because `module_definition` is unsupported by the harness
+- `memory64` no longer fails because `module_definition` is unsupported by the harness; the remaining issue is now deeper runtime validation around Memory64 limits and pages
 - `call_indirect64` fails with `section 9 decode failed: type mismatch`
 - `table64` fails with `section 4 decode failed: malformed module`
 - `table_copy64`, `table_get64`, `table_init64`, and `table_set64` fail with `section 9 decode failed: type mismatch`
@@ -242,7 +268,7 @@ Outside the big clusters above, a few failures still point to real integration g
 
 Representative cases:
 
-- `br_table`, `call_ref`, and `return_call_ref` fail with section decode `type mismatch`
+- `br_table` still fails with section decode `type mismatch`
 - `return_call` and `return_call_indirect` fail in `build_control_targets`
 - `data` fails with `unknown global 0`
 - `elem`, `throw_ref`, and `try_table` still fail as malformed modules during decode
@@ -255,6 +281,8 @@ These are fewer in number than the multi-memory and proposal buckets, but they r
 - `ref.func` values now preserve typed function-reference information at runtime instead of being flattened to plain `funcref`.
 - Global storage now preserves reference-subtype null markers such as `nofunc`, which matters for typed-reference export/import linking.
 - Table imports now require invariant typed equality instead of permissive subtype matching.
+- `call_ref` and `return_call_ref` are now green in targeted reruns after wiring their current opcode forms through validation and execution.
+- The spectest harness now accepts `refnull` and wildcard non-null reference expectations from the JSON stream, which was needed to compare current reference-heavy results correctly.
 
 Those changes moved both `linking0` and `linking` out of the remaining failure set.
 
@@ -275,9 +303,9 @@ The broader project test picture remains stronger than the spectest number:
 That means the runtime already supports several targeted scenarios that the official spec corpus still catches as red. The likely causes are now a mix of:
 
 - inconsistent loader or validator handling across the wider spectest corpus
-- missing harness functionality such as `module_definition`
 - remaining proposal-path decode or feature-gate mismatches
 - exact error-string mismatches between the local toolchain and the official suite
+- remaining runtime aliasing or sharing issues in cases such as `instance`
 
 The spectest number is still the conservative compatibility metric and should remain the one used in public-facing compliance claims.
 
@@ -288,11 +316,13 @@ Current status as of 2026-04-07:
 - spectest coverage is much broader than it was on 2026-04-06 and no longer hides proposal-heavy files behind conversion skips
 - official spectest compliance is substantially improved, but still incomplete: `191` passing files and `66` failing files
 - the earlier multi-memory failure cluster was a harness bug and is no longer the dominant blocker
+- `module_definition` / `module_instance` harness support is now in place, so those files are failing on real runtime issues rather than an unsupported command
+- targeted reruns after the original snapshot moved `call_ref` and `return_call_ref` into the green set
 - fixed-width SIMD is now mostly green; relaxed SIMD is still unsupported
 - core Memory64 memory operations are now mostly green; remaining 64-bit gaps are concentrated in Table64 and related typing paths
 - GC, typed references, exceptions, and tail-call integration still fail end-to-end in the local spectest path despite stronger unit coverage
-- harness support for `module_definition` is now a concrete blocker on four files
+- the next concentrated blockers are `try_table` type/section decoding and remaining runtime-behavior issues such as the shared-instance table case
 
 For now, the most accurate public statement is:
 
-> `wasm.h` now passes 191 of 257 locally exercised official spectest files with no conversion skips in this environment. Compliance is still incomplete, with the biggest remaining gaps in harness command coverage, proposal-path decoding, GC and typed-reference behavior, and 64-bit table typing.
+> `wasm.h` passed 191 of 257 locally exercised official spectest files in the last full 2026-04-07 sweep, with no conversion skips. Follow-up targeted reruns have since cleared the old `module_definition` harness blocker and moved `call_ref` and `return_call_ref` to green, but compliance is still incomplete, with the biggest remaining gaps in proposal-path decoding, GC and typed-reference behavior, `try_table`, shared-instance behavior, and 64-bit table typing.
