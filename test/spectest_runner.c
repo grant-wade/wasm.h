@@ -1291,9 +1291,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strstr(expected_lower, "uninitialized element") != NULL &&
         strstr(actual_lower, "uninitialized table element") != NULL)
         return 1;
-        if ((strcmp(expected_lower, "out of bounds table access") == 0 ||
-            strcmp(expected_lower, "out of bounds memory access") == 0 ||
-            strcmp(expected_lower, "out of bounds array access") == 0) &&
+    if ((strcmp(expected_lower, "out of bounds table access") == 0 ||
+         strcmp(expected_lower, "out of bounds memory access") == 0 ||
+         strcmp(expected_lower, "out of bounds array access") == 0) &&
         strstr(actual_lower, "out of bounds") != NULL)
         return 1;
     if (strcmp(expected_lower, "integer divide by zero") == 0 &&

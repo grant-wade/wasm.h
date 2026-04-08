@@ -10339,11 +10339,11 @@ static wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mo
     }
     if (v->local_init_words != 0) {
         size_t bytes;
+        uint64_t total_words;
 
-        if ((size_t)frame_capacity > SIZE_MAX / sizeof(uint64_t) ||
-            (size_t)frame_capacity * sizeof(uint64_t) > SIZE_MAX / (size_t)v->local_init_words)
-            return WASM_ERR_OOM;
-        bytes = (size_t)frame_capacity * (size_t)v->local_init_words * sizeof(uint64_t);
+        total_words = (uint64_t)frame_capacity * (uint64_t)v->local_init_words;
+        if (total_words > (uint64_t)(SIZE_MAX / sizeof(uint64_t))) return WASM_ERR_OOM;
+        bytes = (size_t)total_words * sizeof(uint64_t);
         v->local_init_bits = (uint64_t*)WASM_CALLOC(1, bytes);
         v->local_init_entry_bits = (uint64_t*)WASM_CALLOC(1, bytes);
         if (!v->local_init_bits || !v->local_init_entry_bits) return WASM_ERR_OOM;
