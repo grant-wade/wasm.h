@@ -258,91 +258,68 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
         wasm_export_kind_t memory_kind = WASM_EXPORT_FUNC;
         if (!wasm_find_export(ctx->mod, "memory", &memory_kind, &ctx->memory_export_index) || memory_kind != WASM_EXPORT_MEM) {
             session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached memory export missing");
-            wasm_free_module(ctx->mod);
-            ctx->mod = NULL;
-            return ctx;
+            goto fail_loaded_module;
         }
     }
     if (!wasm_find_export(ctx->mod, "init_state", NULL, &ctx->idx_init_init_state)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "init export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "add", NULL, &ctx->idx_add)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "sub", NULL, &ctx->idx_sub)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "pow", NULL, &ctx->idx_pow)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "exp", NULL, &ctx->idx_exp)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "init_state", NULL, &ctx->idx_init_state)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "ready", NULL, &ctx->idx_ready)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "add_scaled", NULL, &ctx->idx_add_scaled)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "set_bias", NULL, &ctx->idx_set_bias)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "get_bias", NULL, &ctx->idx_get_bias)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "get_total", NULL, &ctx->idx_get_total)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     if (!wasm_find_export(ctx->mod, "reset_total", NULL, &ctx->idx_reset_total)) {
         session_math_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, "cached export missing");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     err = wasm_call_index(ctx->mod, ctx->idx_init_init_state, NULL, 0, NULL, 0);
     if (err != WASM_OK) {
         session_math_capture_runtime_error(ctx, err, "module init export failed");
-        wasm_free_module(ctx->mod);
-        ctx->mod = NULL;
-        return ctx;
+        goto fail_loaded_module;
     }
     session_math_clear_error(ctx);
+    return ctx;
+
+fail_loaded_module:
+    wasm_free_module(ctx->mod);
+    ctx->mod = NULL;
     return ctx;
 }
 

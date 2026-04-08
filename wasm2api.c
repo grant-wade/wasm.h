@@ -1853,9 +1853,7 @@ static int wasm2api_write_source(const char* source_path,
 		fprintf(out,
 				", &memory_kind, &ctx->%s) || memory_kind != WASM_EXPORT_MEM) {\n"
 				"            %s_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, \"cached memory export missing\");\n"
-				"            wasm_free_module(ctx->mod);\n"
-				"            ctx->mod = NULL;\n"
-				"            return ctx;\n"
+				"            goto fail_loaded_module;\n"
 				"        }\n"
 				"    }\n",
 				model->memory_index_field, model->api_prefix);
@@ -1866,9 +1864,7 @@ static int wasm2api_write_source(const char* source_path,
 		fprintf(out,
 				", NULL, &ctx->%s)) {\n"
 				"        %s_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, \"init export missing\");\n"
-				"        wasm_free_module(ctx->mod);\n"
-				"        ctx->mod = NULL;\n"
-				"        return ctx;\n"
+				"        goto fail_loaded_module;\n"
 				"    }\n",
 				model->init_index_field, model->api_prefix);
 	}
@@ -1878,9 +1874,7 @@ static int wasm2api_write_source(const char* source_path,
 		fprintf(out,
 				", NULL, &ctx->%s)) {\n"
 				"        %s_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, \"cached export missing\");\n"
-				"        wasm_free_module(ctx->mod);\n"
-				"        ctx->mod = NULL;\n"
-				"        return ctx;\n"
+				"        goto fail_loaded_module;\n"
 				"    }\n",
 				model->funcs[i].index_field, model->api_prefix);
 	}
@@ -1889,13 +1883,16 @@ static int wasm2api_write_source(const char* source_path,
 				"    err = wasm_call_index(ctx->mod, ctx->%s, NULL, 0, NULL, 0);\n"
 				"    if (err != WASM_OK) {\n"
 				"        %s_capture_runtime_error(ctx, err, \"module init export failed\");\n"
-				"        wasm_free_module(ctx->mod);\n"
-				"        ctx->mod = NULL;\n"
-				"        return ctx;\n"
+				"        goto fail_loaded_module;\n"
 				"    }\n",
 				model->init_index_field, model->api_prefix);
 	}
 	fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
+	fputs("    return ctx;\n", out);
+	fputs("\n", out);
+	fputs("fail_loaded_module:\n", out);
+	fputs("    wasm_free_module(ctx->mod);\n", out);
+	fputs("    ctx->mod = NULL;\n", out);
 	fputs("    return ctx;\n", out);
 	fputs("}\n\n", out);
 
