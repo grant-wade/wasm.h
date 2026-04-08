@@ -890,6 +890,15 @@ const char* wasm_error_string(wasm_error_t err);
 #include <string.h>
 #include <time.h>
 
+#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define WASM__SIMD_USE_NEON 1
+#include <arm_neon.h>
+#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define WASM__SIMD_USE_SSE2 1
+#include <emmintrin.h>
+#include <xmmintrin.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -937,6 +946,149 @@ static void* wasm__calloc_fallback(size_t count, size_t size) {
     return ptr;
 }
 #define WASM_CALLOC(n, sz) wasm__calloc_fallback((n), (sz))
+#endif
+
+#if defined(WASM__SIMD_USE_NEON)
+static uint8x16_t wasm__neon_load_u8x16(const wasm_value_t* value) {
+    return vld1q_u8(value->of.v128);
+}
+
+static int8x16_t wasm__neon_load_i8x16(const wasm_value_t* value) {
+    return vreinterpretq_s8_u8(wasm__neon_load_u8x16(value));
+}
+
+static uint16x8_t wasm__neon_load_u16x8(const wasm_value_t* value) {
+    return vreinterpretq_u16_u8(wasm__neon_load_u8x16(value));
+}
+
+static int16x8_t wasm__neon_load_i16x8(const wasm_value_t* value) {
+    return vreinterpretq_s16_u8(wasm__neon_load_u8x16(value));
+}
+
+static uint32x4_t wasm__neon_load_u32x4(const wasm_value_t* value) {
+    return vreinterpretq_u32_u8(wasm__neon_load_u8x16(value));
+}
+
+static int32x4_t wasm__neon_load_i32x4(const wasm_value_t* value) {
+    return vreinterpretq_s32_u8(wasm__neon_load_u8x16(value));
+}
+
+static uint64x2_t wasm__neon_load_u64x2(const wasm_value_t* value) {
+    return vreinterpretq_u64_u8(wasm__neon_load_u8x16(value));
+}
+
+static int64x2_t wasm__neon_load_i64x2(const wasm_value_t* value) {
+    return vreinterpretq_s64_u8(wasm__neon_load_u8x16(value));
+}
+
+static float32x4_t wasm__neon_load_f32x4(const wasm_value_t* value) {
+    return vreinterpretq_f32_u8(wasm__neon_load_u8x16(value));
+}
+
+static float64x2_t wasm__neon_load_f64x2(const wasm_value_t* value) {
+    return vreinterpretq_f64_u8(wasm__neon_load_u8x16(value));
+}
+
+static wasm_value_t wasm__neon_store_u8x16(uint8x16_t value) {
+    wasm_value_t result = wasm_v128_zero();
+    vst1q_u8(result.of.v128, value);
+    return result;
+}
+
+static wasm_value_t wasm__neon_store_u16x8(uint16x8_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u16(value));
+}
+
+static wasm_value_t wasm__neon_store_u32x4(uint32x4_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u32(value));
+}
+
+static wasm_value_t wasm__neon_store_u64x2(uint64x2_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u64(value));
+}
+
+static wasm_value_t wasm__neon_store_f32x4(float32x4_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_f32(value));
+}
+
+static wasm_value_t wasm__neon_store_f64x2(float64x2_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_f64(value));
+}
+
+static int wasm__neon_any_true_u8x16(uint8x16_t value) {
+    uint64x2_t words = vreinterpretq_u64_u8(value);
+
+    return (vgetq_lane_u64(words, 0) | vgetq_lane_u64(words, 1)) != 0u;
+}
+#endif
+
+#if defined(WASM__SIMD_USE_SSE2)
+static __m128i wasm__sse_load_si128(const wasm_value_t* value) {
+    return _mm_loadu_si128((const __m128i*)(const void*)value->of.v128);
+}
+
+static __m128 wasm__sse_load_ps128(const wasm_value_t* value) {
+    return _mm_castsi128_ps(wasm__sse_load_si128(value));
+}
+
+static __m128d wasm__sse_load_pd128(const wasm_value_t* value) {
+    return _mm_castsi128_pd(wasm__sse_load_si128(value));
+}
+
+static wasm_value_t wasm__sse_store_si128(__m128i value) {
+    wasm_value_t result = wasm_v128_zero();
+    _mm_storeu_si128((__m128i*)(void*)result.of.v128, value);
+    return result;
+}
+
+static wasm_value_t wasm__sse_store_ps128(__m128 value) {
+    return wasm__sse_store_si128(_mm_castps_si128(value));
+}
+
+static wasm_value_t wasm__sse_store_pd128(__m128d value) {
+    return wasm__sse_store_si128(_mm_castpd_si128(value));
+}
+
+static __m128i wasm__sse_select_si128(__m128i mask, __m128i if_true, __m128i if_false) {
+    return _mm_or_si128(_mm_and_si128(mask, if_true), _mm_andnot_si128(mask, if_false));
+}
+
+static __m128i wasm__sse_cmpgt_epu8(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi8((char)0x80);
+    return _mm_cmpgt_epi8(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+static __m128i wasm__sse_cmpgt_epu16(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi16((short)INT16_MIN);
+    return _mm_cmpgt_epi16(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+static __m128i wasm__sse_cmpgt_epu32(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi32(INT32_MIN);
+    return _mm_cmpgt_epi32(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+static __m128i wasm__sse_cmpeq_epi64(__m128i lhs, __m128i rhs) {
+    __m128i eq32 = _mm_cmpeq_epi32(lhs, rhs);
+    __m128i swapped = _mm_shuffle_epi32(eq32, _MM_SHUFFLE(2, 3, 0, 1));
+    return _mm_and_si128(eq32, swapped);
+}
+
+static __m128 wasm__sse_abs_ps(__m128 value) {
+    return _mm_andnot_ps(_mm_set1_ps(-0.0f), value);
+}
+
+static __m128 wasm__sse_neg_ps(__m128 value) {
+    return _mm_xor_ps(value, _mm_set1_ps(-0.0f));
+}
+
+static __m128d wasm__sse_abs_pd(__m128d value) {
+    return _mm_andnot_pd(_mm_set1_pd(-0.0), value);
+}
+
+static __m128d wasm__sse_neg_pd(__m128d value) {
+    return _mm_xor_pd(value, _mm_set1_pd(-0.0));
+}
 #endif
 
 #undef WASM__HAS_CUSTOM_MALLOC
@@ -5144,6 +5296,12 @@ static uint8_t wasm__popcount_u8(uint8_t value) {
 }
 
 static int wasm__simd_any_true(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return wasm__neon_any_true_u8x16(wasm__neon_load_u8x16(value));
+#elif defined(WASM__SIMD_USE_SSE2)
+    __m128i vec = wasm__sse_load_si128(value);
+    return _mm_movemask_epi8(_mm_cmpeq_epi8(vec, _mm_setzero_si128())) != 0xFFFF;
+#endif
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
@@ -5154,6 +5312,9 @@ static int wasm__simd_any_true(const wasm_value_t* value) {
 }
 
 static int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_SSE2)
+    return _mm_movemask_epi8(wasm__sse_load_si128(value));
+#endif
     uint32_t lane;
     int32_t mask = 0;
 
@@ -5176,6 +5337,13 @@ static int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value) {
 }
 
 static int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    uint32x4_t sign = vshrq_n_u32(wasm__neon_load_u32x4(value), 31);
+    return (int32_t)(vgetq_lane_u32(sign, 0) | (vgetq_lane_u32(sign, 1) << 1) |
+                     (vgetq_lane_u32(sign, 2) << 2) | (vgetq_lane_u32(sign, 3) << 3));
+#elif defined(WASM__SIMD_USE_SSE2)
+    return _mm_movemask_ps(_mm_castsi128_ps(wasm__sse_load_si128(value)));
+#endif
     uint32_t lane;
     int32_t mask = 0;
 
@@ -5187,6 +5355,12 @@ static int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
 }
 
 static int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    uint64x2_t sign = vshrq_n_u64(wasm__neon_load_u64x2(value), 63);
+    return (int32_t)(vgetq_lane_u64(sign, 0) | (vgetq_lane_u64(sign, 1) << 1));
+#elif defined(WASM__SIMD_USE_SSE2)
+    return _mm_movemask_pd(_mm_castsi128_pd(wasm__sse_load_si128(value)));
+#endif
     uint32_t lane;
     int32_t mask = 0;
 
@@ -5198,6 +5372,12 @@ static int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
 }
 
 static int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return !wasm__neon_any_true_u8x16(vceqq_u8(wasm__neon_load_u8x16(value), vdupq_n_u8(0u)));
+#elif defined(WASM__SIMD_USE_SSE2)
+    __m128i vec = wasm__sse_load_si128(value);
+    return _mm_movemask_epi8(_mm_cmpeq_epi8(vec, _mm_setzero_si128())) == 0;
+#endif
     uint32_t lane;
     for (lane = 0; lane < 16; lane++) {
         if (wasm__v128_get_i8(value, lane) == 0) return 0;
@@ -5206,6 +5386,12 @@ static int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
 }
 
 static int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u16(vceqq_u16(wasm__neon_load_u16x8(value), vdupq_n_u16(0u))));
+#elif defined(WASM__SIMD_USE_SSE2)
+    __m128i vec = wasm__sse_load_si128(value);
+    return _mm_movemask_epi8(_mm_cmpeq_epi16(vec, _mm_setzero_si128())) == 0;
+#endif
     uint32_t lane;
     for (lane = 0; lane < 8; lane++) {
         if (wasm__v128_get_i16(value, lane) == 0) return 0;
@@ -5214,6 +5400,12 @@ static int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
 }
 
 static int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u32(vceqq_u32(wasm__neon_load_u32x4(value), vdupq_n_u32(0u))));
+#elif defined(WASM__SIMD_USE_SSE2)
+    __m128i vec = wasm__sse_load_si128(value);
+    return _mm_movemask_epi8(_mm_cmpeq_epi32(vec, _mm_setzero_si128())) == 0;
+#endif
     uint32_t lane;
     for (lane = 0; lane < 4; lane++) {
         if (wasm__v128_get_i32(value, lane) == 0) return 0;
@@ -5222,6 +5414,12 @@ static int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
 }
 
 static int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u64(vceqq_u64(wasm__neon_load_u64x2(value), vdupq_n_u64(0u))));
+#elif defined(WASM__SIMD_USE_SSE2)
+    __m128i vec = wasm__sse_load_si128(value);
+    return _mm_movemask_epi8(wasm__sse_cmpeq_epi64(vec, _mm_setzero_si128())) == 0;
+#endif
     uint32_t lane;
     for (lane = 0; lane < 2; lane++) {
         if (wasm__v128_get_i64(value, lane) == 0) return 0;
@@ -5230,6 +5428,11 @@ static int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
 }
 
 static wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    return wasm__neon_store_u8x16(vmvnq_u8(wasm__neon_load_u8x16(value)));
+#elif defined(WASM__SIMD_USE_SSE2)
+    return wasm__sse_store_si128(_mm_xor_si128(wasm__sse_load_si128(value), _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5240,6 +5443,39 @@ static wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value) {
 static wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
                                               const wasm_value_t* lhs,
                                               const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        uint8x16_t a = wasm__neon_load_u8x16(lhs);
+        uint8x16_t b = wasm__neon_load_u8x16(rhs);
+
+        switch (subop) {
+            case 0x4E:
+                return wasm__neon_store_u8x16(vandq_u8(a, b));
+            case 0x4F:
+                return wasm__neon_store_u8x16(vbicq_u8(a, b));
+            case 0x50:
+                return wasm__neon_store_u8x16(vorrq_u8(a, b));
+            default:
+                return wasm__neon_store_u8x16(veorq_u8(a, b));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i a = wasm__sse_load_si128(lhs);
+        __m128i b = wasm__sse_load_si128(rhs);
+
+        switch (subop) {
+            case 0x4E:
+                return wasm__sse_store_si128(_mm_and_si128(a, b));
+            case 0x4F:
+                return wasm__sse_store_si128(_mm_andnot_si128(b, a));
+            case 0x50:
+                return wasm__sse_store_si128(_mm_or_si128(a, b));
+            default:
+                return wasm__sse_store_si128(_mm_xor_si128(a, b));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5266,6 +5502,15 @@ static wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
 static wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
                                          const wasm_value_t* rhs,
                                          const wasm_value_t* mask) {
+#if defined(WASM__SIMD_USE_NEON)
+    return wasm__neon_store_u8x16(vbslq_u8(wasm__neon_load_u8x16(mask),
+                                           wasm__neon_load_u8x16(lhs),
+                                           wasm__neon_load_u8x16(rhs)));
+#elif defined(WASM__SIMD_USE_SSE2)
+    return wasm__sse_store_si128(wasm__sse_select_si128(wasm__sse_load_si128(mask),
+                                                        wasm__sse_load_si128(lhs),
+                                                        wasm__sse_load_si128(rhs)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5281,6 +5526,13 @@ static wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
 static wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
                                        const wasm_value_t* rhs,
                                        const uint8_t lanes[16]) {
+#if defined(WASM__SIMD_USE_NEON)
+    uint8x16x2_t table;
+
+    table.val[0] = wasm__neon_load_u8x16(lhs);
+    table.val[1] = wasm__neon_load_u8x16(rhs);
+    return wasm__neon_store_u8x16(vqtbl2q_u8(table, vld1q_u8(lanes)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint8_t combined[32];
     uint32_t lane;
@@ -5292,6 +5544,9 @@ static wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
 }
 
 static wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    return wasm__neon_store_u8x16(vqtbl1q_u8(wasm__neon_load_u8x16(lhs), wasm__neon_load_u8x16(rhs)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5493,6 +5748,66 @@ static void wasm__skip_simd_immediates(wasm__reader_t* r) {
 static wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int8x16_t a = wasm__neon_load_i8x16(lhs);
+        int8x16_t b = wasm__neon_load_i8x16(rhs);
+        uint8x16_t ua = vreinterpretq_u8_s8(a);
+        uint8x16_t ub = vreinterpretq_u8_s8(b);
+
+        switch (subop) {
+            case 0x23:
+                return wasm__neon_store_u8x16(vceqq_u8(ua, ub));
+            case 0x24:
+                return wasm__neon_store_u8x16(vmvnq_u8(vceqq_u8(ua, ub)));
+            case 0x25:
+                return wasm__neon_store_u8x16(vcltq_s8(a, b));
+            case 0x26:
+                return wasm__neon_store_u8x16(vcltq_u8(ua, ub));
+            case 0x27:
+                return wasm__neon_store_u8x16(vcgtq_s8(a, b));
+            case 0x28:
+                return wasm__neon_store_u8x16(vcgtq_u8(ua, ub));
+            case 0x29:
+                return wasm__neon_store_u8x16(vcleq_s8(a, b));
+            case 0x2A:
+                return wasm__neon_store_u8x16(vcleq_u8(ua, ub));
+            case 0x2B:
+                return wasm__neon_store_u8x16(vcgeq_s8(a, b));
+            default:
+                return wasm__neon_store_u8x16(vcgeq_u8(ua, ub));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i a = wasm__sse_load_si128(lhs);
+        __m128i b = wasm__sse_load_si128(rhs);
+        __m128i eq = _mm_cmpeq_epi8(a, b);
+
+        switch (subop) {
+            case 0x23:
+                return wasm__sse_store_si128(eq);
+            case 0x24:
+                return wasm__sse_store_si128(_mm_andnot_si128(eq, _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
+            case 0x25:
+                return wasm__sse_store_si128(_mm_cmpgt_epi8(b, a));
+            case 0x26:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu8(b, a));
+            case 0x27:
+                return wasm__sse_store_si128(_mm_cmpgt_epi8(a, b));
+            case 0x28:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu8(a, b));
+            case 0x29:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi8(b, a)));
+            case 0x2A:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu8(b, a)));
+            case 0x2B:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi8(a, b)));
+            default:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu8(a, b)));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5545,6 +5860,66 @@ static wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
 static wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int16x8_t a = wasm__neon_load_i16x8(lhs);
+        int16x8_t b = wasm__neon_load_i16x8(rhs);
+        uint16x8_t ua = vreinterpretq_u16_s16(a);
+        uint16x8_t ub = vreinterpretq_u16_s16(b);
+
+        switch (subop) {
+            case 0x2D:
+                return wasm__neon_store_u16x8(vceqq_u16(ua, ub));
+            case 0x2E:
+                return wasm__neon_store_u16x8(vmvnq_u16(vceqq_u16(ua, ub)));
+            case 0x2F:
+                return wasm__neon_store_u16x8(vcltq_s16(a, b));
+            case 0x30:
+                return wasm__neon_store_u16x8(vcltq_u16(ua, ub));
+            case 0x31:
+                return wasm__neon_store_u16x8(vcgtq_s16(a, b));
+            case 0x32:
+                return wasm__neon_store_u16x8(vcgtq_u16(ua, ub));
+            case 0x33:
+                return wasm__neon_store_u16x8(vcleq_s16(a, b));
+            case 0x34:
+                return wasm__neon_store_u16x8(vcleq_u16(ua, ub));
+            case 0x35:
+                return wasm__neon_store_u16x8(vcgeq_s16(a, b));
+            default:
+                return wasm__neon_store_u16x8(vcgeq_u16(ua, ub));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i a = wasm__sse_load_si128(lhs);
+        __m128i b = wasm__sse_load_si128(rhs);
+        __m128i eq = _mm_cmpeq_epi16(a, b);
+
+        switch (subop) {
+            case 0x2D:
+                return wasm__sse_store_si128(eq);
+            case 0x2E:
+                return wasm__sse_store_si128(_mm_andnot_si128(eq, _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
+            case 0x2F:
+                return wasm__sse_store_si128(_mm_cmpgt_epi16(b, a));
+            case 0x30:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu16(b, a));
+            case 0x31:
+                return wasm__sse_store_si128(_mm_cmpgt_epi16(a, b));
+            case 0x32:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu16(a, b));
+            case 0x33:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi16(b, a)));
+            case 0x34:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu16(b, a)));
+            case 0x35:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi16(a, b)));
+            default:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu16(a, b)));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5597,6 +5972,66 @@ static wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
 static wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int32x4_t a = wasm__neon_load_i32x4(lhs);
+        int32x4_t b = wasm__neon_load_i32x4(rhs);
+        uint32x4_t ua = vreinterpretq_u32_s32(a);
+        uint32x4_t ub = vreinterpretq_u32_s32(b);
+
+        switch (subop) {
+            case 0x37:
+                return wasm__neon_store_u32x4(vceqq_u32(ua, ub));
+            case 0x38:
+                return wasm__neon_store_u32x4(vmvnq_u32(vceqq_u32(ua, ub)));
+            case 0x39:
+                return wasm__neon_store_u32x4(vcltq_s32(a, b));
+            case 0x3A:
+                return wasm__neon_store_u32x4(vcltq_u32(ua, ub));
+            case 0x3B:
+                return wasm__neon_store_u32x4(vcgtq_s32(a, b));
+            case 0x3C:
+                return wasm__neon_store_u32x4(vcgtq_u32(ua, ub));
+            case 0x3D:
+                return wasm__neon_store_u32x4(vcleq_s32(a, b));
+            case 0x3E:
+                return wasm__neon_store_u32x4(vcleq_u32(ua, ub));
+            case 0x3F:
+                return wasm__neon_store_u32x4(vcgeq_s32(a, b));
+            default:
+                return wasm__neon_store_u32x4(vcgeq_u32(ua, ub));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i a = wasm__sse_load_si128(lhs);
+        __m128i b = wasm__sse_load_si128(rhs);
+        __m128i eq = _mm_cmpeq_epi32(a, b);
+
+        switch (subop) {
+            case 0x37:
+                return wasm__sse_store_si128(eq);
+            case 0x38:
+                return wasm__sse_store_si128(_mm_andnot_si128(eq, _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
+            case 0x39:
+                return wasm__sse_store_si128(_mm_cmpgt_epi32(b, a));
+            case 0x3A:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu32(b, a));
+            case 0x3B:
+                return wasm__sse_store_si128(_mm_cmpgt_epi32(a, b));
+            case 0x3C:
+                return wasm__sse_store_si128(wasm__sse_cmpgt_epu32(a, b));
+            case 0x3D:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi32(b, a)));
+            case 0x3E:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu32(b, a)));
+            case 0x3F:
+                return wasm__sse_store_si128(_mm_or_si128(eq, _mm_cmpgt_epi32(a, b)));
+            default:
+                return wasm__sse_store_si128(_mm_or_si128(eq, wasm__sse_cmpgt_epu32(a, b)));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5649,6 +6084,27 @@ static wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
 static wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int64x2_t a = wasm__neon_load_i64x2(lhs);
+        int64x2_t b = wasm__neon_load_i64x2(rhs);
+
+        switch (subop) {
+            case 0xD6:
+                return wasm__neon_store_u64x2(vceqq_s64(a, b));
+            case 0xD7:
+                return wasm__neon_store_u64x2(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_s64(a, b)))));
+            case 0xD8:
+                return wasm__neon_store_u64x2(vcltq_s64(a, b));
+            case 0xD9:
+                return wasm__neon_store_u64x2(vcgtq_s64(a, b));
+            case 0xDA:
+                return wasm__neon_store_u64x2(vcleq_s64(a, b));
+            default:
+                return wasm__neon_store_u64x2(vcgeq_s64(a, b));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5687,6 +6143,47 @@ static wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
 static wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        float32x4_t a = wasm__neon_load_f32x4(lhs);
+        float32x4_t b = wasm__neon_load_f32x4(rhs);
+
+        switch (subop) {
+            case 0x41:
+                return wasm__neon_store_u32x4(vceqq_f32(a, b));
+            case 0x42:
+                return wasm__neon_store_u32x4(vmvnq_u32(vceqq_f32(a, b)));
+            case 0x43:
+                return wasm__neon_store_u32x4(vcltq_f32(a, b));
+            case 0x44:
+                return wasm__neon_store_u32x4(vcgtq_f32(a, b));
+            case 0x45:
+                return wasm__neon_store_u32x4(vcleq_f32(a, b));
+            default:
+                return wasm__neon_store_u32x4(vcgeq_f32(a, b));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128 a = wasm__sse_load_ps128(lhs);
+        __m128 b = wasm__sse_load_ps128(rhs);
+
+        switch (subop) {
+            case 0x41:
+                return wasm__sse_store_ps128(_mm_cmpeq_ps(a, b));
+            case 0x42:
+                return wasm__sse_store_ps128(_mm_cmpneq_ps(a, b));
+            case 0x43:
+                return wasm__sse_store_ps128(_mm_cmplt_ps(a, b));
+            case 0x44:
+                return wasm__sse_store_ps128(_mm_cmpgt_ps(a, b));
+            case 0x45:
+                return wasm__sse_store_ps128(_mm_cmple_ps(a, b));
+            default:
+                return wasm__sse_store_ps128(_mm_cmpge_ps(a, b));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5725,6 +6222,47 @@ static wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
 static wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
                                          const wasm_value_t* lhs,
                                          const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        float64x2_t a = wasm__neon_load_f64x2(lhs);
+        float64x2_t b = wasm__neon_load_f64x2(rhs);
+
+        switch (subop) {
+            case 0x47:
+                return wasm__neon_store_u64x2(vceqq_f64(a, b));
+            case 0x48:
+                return wasm__neon_store_u64x2(vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(vceqq_f64(a, b)))));
+            case 0x49:
+                return wasm__neon_store_u64x2(vcltq_f64(a, b));
+            case 0x4A:
+                return wasm__neon_store_u64x2(vcgtq_f64(a, b));
+            case 0x4B:
+                return wasm__neon_store_u64x2(vcleq_f64(a, b));
+            default:
+                return wasm__neon_store_u64x2(vcgeq_f64(a, b));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128d a = wasm__sse_load_pd128(lhs);
+        __m128d b = wasm__sse_load_pd128(rhs);
+
+        switch (subop) {
+            case 0x47:
+                return wasm__sse_store_pd128(_mm_cmpeq_pd(a, b));
+            case 0x48:
+                return wasm__sse_store_pd128(_mm_cmpneq_pd(a, b));
+            case 0x49:
+                return wasm__sse_store_pd128(_mm_cmplt_pd(a, b));
+            case 0x4A:
+                return wasm__sse_store_pd128(_mm_cmpgt_pd(a, b));
+            case 0x4B:
+                return wasm__sse_store_pd128(_mm_cmple_pd(a, b));
+            default:
+                return wasm__sse_store_pd128(_mm_cmpge_pd(a, b));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5761,6 +6299,23 @@ static wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int8x16_t s = wasm__neon_load_i8x16(value);
+        uint8x16_t u = vreinterpretq_u8_s8(s);
+
+        switch (subop) {
+            case 0x60:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vabsq_s8(s)));
+            case 0x61:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vnegq_s8(s)));
+            default:
+                return wasm__neon_store_u8x16(vcntq_u8(u));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0x61) return wasm__sse_store_si128(_mm_sub_epi8(_mm_setzero_si128(), wasm__sse_load_si128(value)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5788,6 +6343,22 @@ static wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
                                            const wasm_value_t* value,
                                            uint32_t amount) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int8x16_t counts;
+
+        amount &= 7u;
+        if (subop == 0x6B) {
+            counts = vdupq_n_s8((int8_t)amount);
+            return wasm__neon_store_u8x16(vshlq_u8(wasm__neon_load_u8x16(value), counts));
+        }
+
+        counts = vdupq_n_s8((int8_t)(-(int32_t)amount));
+        if (subop == 0x6C)
+            return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vshlq_s8(wasm__neon_load_i8x16(value), counts)));
+        return wasm__neon_store_u8x16(vshlq_u8(wasm__neon_load_u8x16(value), counts));
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5815,6 +6386,89 @@ static wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
 static wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        int8x16_t a_s8 = wasm__neon_load_i8x16(lhs);
+        int8x16_t b_s8 = wasm__neon_load_i8x16(rhs);
+        uint8x16_t a_u8 = vreinterpretq_u8_s8(a_s8);
+        uint8x16_t b_u8 = vreinterpretq_u8_s8(b_s8);
+
+        switch (subop) {
+            case 0x65:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vcombine_s8(vqmovn_s16(wasm__neon_load_i16x8(lhs)),
+                                                                               vqmovn_s16(wasm__neon_load_i16x8(rhs)))));
+            case 0x66:
+                return wasm__neon_store_u8x16(vcombine_u8(vqmovun_s16(wasm__neon_load_i16x8(lhs)),
+                                                          vqmovun_s16(wasm__neon_load_i16x8(rhs))));
+            case 0x6E:
+                return wasm__neon_store_u8x16(vaddq_u8(a_u8, b_u8));
+            case 0x6F:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vqaddq_s8(a_s8, b_s8)));
+            case 0x70:
+                return wasm__neon_store_u8x16(vqaddq_u8(a_u8, b_u8));
+            case 0x71:
+                return wasm__neon_store_u8x16(vsubq_u8(a_u8, b_u8));
+            case 0x72:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vqsubq_s8(a_s8, b_s8)));
+            case 0x73:
+                return wasm__neon_store_u8x16(vqsubq_u8(a_u8, b_u8));
+            case 0x76:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vminq_s8(a_s8, b_s8)));
+            case 0x77:
+                return wasm__neon_store_u8x16(vminq_u8(a_u8, b_u8));
+            case 0x78:
+                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vmaxq_s8(a_s8, b_s8)));
+            case 0x79:
+                return wasm__neon_store_u8x16(vmaxq_u8(a_u8, b_u8));
+            case 0x7B:
+                return wasm__neon_store_u8x16(vrhaddq_u8(a_u8, b_u8));
+            default:
+                break;
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i a = wasm__sse_load_si128(lhs);
+        __m128i b = wasm__sse_load_si128(rhs);
+        __m128i eq;
+        __m128i gt;
+
+        switch (subop) {
+            case 0x65:
+                return wasm__sse_store_si128(_mm_packs_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+            case 0x66:
+                return wasm__sse_store_si128(_mm_packus_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+            case 0x6E:
+                return wasm__sse_store_si128(_mm_add_epi8(a, b));
+            case 0x6F:
+                return wasm__sse_store_si128(_mm_adds_epi8(a, b));
+            case 0x70:
+                return wasm__sse_store_si128(_mm_adds_epu8(a, b));
+            case 0x71:
+                return wasm__sse_store_si128(_mm_sub_epi8(a, b));
+            case 0x72:
+                return wasm__sse_store_si128(_mm_subs_epi8(a, b));
+            case 0x73:
+                return wasm__sse_store_si128(_mm_subs_epu8(a, b));
+            case 0x77:
+                return wasm__sse_store_si128(_mm_min_epu8(a, b));
+            case 0x79:
+                return wasm__sse_store_si128(_mm_max_epu8(a, b));
+            case 0x7B:
+                return wasm__sse_store_si128(_mm_avg_epu8(a, b));
+            case 0x76:
+                gt = _mm_cmpgt_epi8(a, b);
+                return wasm__sse_store_si128(wasm__sse_select_si128(gt, b, a));
+            case 0x78:
+                gt = _mm_cmpgt_epi8(a, b);
+                return wasm__sse_store_si128(wasm__sse_select_si128(gt, a, b));
+            default:
+                eq = _mm_cmpeq_epi8(a, b);
+                gt = wasm__sse_cmpgt_epu8(a, b);
+                return wasm__sse_store_si128(wasm__sse_select_si128(_mm_or_si128(eq, gt), a, b));
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5881,6 +6535,30 @@ static wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0x87:
+        case 0x88:
+        case 0x89:
+        case 0x8A: {
+            int8x16_t s8 = wasm__neon_load_i8x16(value);
+            uint8x16_t u8 = vreinterpretq_u8_s8(s8);
+
+            if (subop == 0x87) return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmovl_s8(vget_low_s8(s8))));
+            if (subop == 0x88) return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmovl_s8(vget_high_s8(s8))));
+            if (subop == 0x89) return wasm__neon_store_u16x8(vmovl_u8(vget_low_u8(u8)));
+            return wasm__neon_store_u16x8(vmovl_u8(vget_high_u8(u8)));
+        }
+        case 0x80:
+            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vabsq_s16(wasm__neon_load_i16x8(value))));
+        case 0x81:
+            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vnegq_s16(wasm__neon_load_i16x8(value))));
+        default:
+            break;
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0x81) return wasm__sse_store_si128(_mm_sub_epi16(_mm_setzero_si128(), wasm__sse_load_si128(value)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5922,6 +6600,27 @@ static wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
                                            const wasm_value_t* value,
                                            uint32_t amount) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        amount &= 15u;
+        if (subop == 0x8B)
+            return wasm__neon_store_u16x8(vshlq_u16(wasm__neon_load_u16x8(value), vdupq_n_s16((int16_t)amount)));
+        if (subop == 0x8C)
+            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vshlq_s16(wasm__neon_load_i16x8(value), vdupq_n_s16((int16_t)(-(int32_t)amount)))));
+        return wasm__neon_store_u16x8(vshlq_u16(wasm__neon_load_u16x8(value), vdupq_n_s16((int16_t)(-(int32_t)amount))));
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i vec = wasm__sse_load_si128(value);
+        __m128i count = _mm_cvtsi32_si128((int)amount);
+
+        amount &= 15u;
+        count = _mm_cvtsi32_si128((int)amount);
+        if (subop == 0x8B) return wasm__sse_store_si128(_mm_sll_epi16(vec, count));
+        if (subop == 0x8C) return wasm__sse_store_si128(_mm_sra_epi16(vec, count));
+        return wasm__sse_store_si128(_mm_srl_epi16(vec, count));
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -5949,6 +6648,122 @@ static wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
 static wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0x82:
+            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vqrdmulhq_s16(wasm__neon_load_i16x8(lhs),
+                                                                              wasm__neon_load_i16x8(rhs))));
+        case 0x85:
+        case 0x86: {
+            uint32x4_t a = wasm__neon_load_u32x4(lhs);
+            uint32x4_t b = wasm__neon_load_u32x4(rhs);
+            if (subop == 0x85)
+                return wasm__neon_store_u16x8(vcombine_u16(vreinterpret_u16_s16(vqmovn_s32(vreinterpretq_s32_u32(a))),
+                                                           vreinterpret_u16_s16(vqmovn_s32(vreinterpretq_s32_u32(b)))));
+            return wasm__neon_store_u16x8(vcombine_u16(vqmovun_s32(vreinterpretq_s32_u32(a)),
+                                                       vqmovun_s32(vreinterpretq_s32_u32(b))));
+        }
+        case 0x9C:
+        case 0x9D:
+        case 0x9E:
+        case 0x9F: {
+            int8x16_t a_s8 = wasm__neon_load_i8x16(lhs);
+            int8x16_t b_s8 = wasm__neon_load_i8x16(rhs);
+            uint8x16_t a_u8 = vreinterpretq_u8_s8(a_s8);
+            uint8x16_t b_u8 = vreinterpretq_u8_s8(b_s8);
+            if (subop == 0x9C) return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmull_s8(vget_low_s8(a_s8), vget_low_s8(b_s8))));
+            if (subop == 0x9D) return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmull_s8(vget_high_s8(a_s8), vget_high_s8(b_s8))));
+            if (subop == 0x9E) return wasm__neon_store_u16x8(vmull_u8(vget_low_u8(a_u8), vget_low_u8(b_u8)));
+            return wasm__neon_store_u16x8(vmull_u8(vget_high_u8(a_u8), vget_high_u8(b_u8)));
+        }
+        default:
+            break;
+    }
+    {
+        int16x8_t a_s16 = wasm__neon_load_i16x8(lhs);
+        int16x8_t b_s16 = wasm__neon_load_i16x8(rhs);
+        uint16x8_t a_u16 = vreinterpretq_u16_s16(a_s16);
+        uint16x8_t b_u16 = vreinterpretq_u16_s16(b_s16);
+        uint16x8_t eq;
+        uint16x8_t gt;
+
+        switch (subop) {
+            case 0x8E:
+                return wasm__neon_store_u16x8(vaddq_u16(a_u16, b_u16));
+            case 0x8F:
+                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vqaddq_s16(a_s16, b_s16)));
+            case 0x90:
+                return wasm__neon_store_u16x8(vqaddq_u16(a_u16, b_u16));
+            case 0x91:
+                return wasm__neon_store_u16x8(vsubq_u16(a_u16, b_u16));
+            case 0x92:
+                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vqsubq_s16(a_s16, b_s16)));
+            case 0x93:
+                return wasm__neon_store_u16x8(vqsubq_u16(a_u16, b_u16));
+            case 0x95:
+                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmulq_s16(a_s16, b_s16)));
+            case 0x96:
+                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vminq_s16(a_s16, b_s16)));
+            case 0x97:
+                return wasm__neon_store_u16x8(vminq_u16(a_u16, b_u16));
+            case 0x98:
+                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmaxq_s16(a_s16, b_s16)));
+            case 0x99:
+                return wasm__neon_store_u16x8(vmaxq_u16(a_u16, b_u16));
+            case 0x9B:
+                return wasm__neon_store_u16x8(vrhaddq_u16(a_u16, b_u16));
+            default:
+                eq = vceqq_u16(a_u16, b_u16);
+                gt = vcgtq_u16(a_u16, b_u16);
+                return wasm__neon_store_u16x8(vbslq_u16(vorrq_u16(eq, gt), a_u16, b_u16));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    switch (subop) {
+        case 0x8E:
+            return wasm__sse_store_si128(_mm_add_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x8F:
+            return wasm__sse_store_si128(_mm_adds_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x90:
+            return wasm__sse_store_si128(_mm_adds_epu16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x91:
+            return wasm__sse_store_si128(_mm_sub_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x92:
+            return wasm__sse_store_si128(_mm_subs_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x93:
+            return wasm__sse_store_si128(_mm_subs_epu16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x95:
+            return wasm__sse_store_si128(_mm_mullo_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0x96: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = _mm_cmpgt_epi16(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, b, a));
+        }
+        case 0x97: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = wasm__sse_cmpgt_epu16(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, b, a));
+        }
+        case 0x98: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = _mm_cmpgt_epi16(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, a, b));
+        }
+        case 0x99: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = wasm__sse_cmpgt_epu16(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, a, b));
+        }
+        case 0x9B:
+            return wasm__sse_store_si128(_mm_avg_epu16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        default:
+            break;
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6047,6 +6862,38 @@ static wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0xA7:
+        case 0xA8:
+        case 0xA9:
+        case 0xAA: {
+            int16x8_t s16 = wasm__neon_load_i16x8(value);
+            uint16x8_t u16 = vreinterpretq_u16_s16(s16);
+
+            if (subop == 0xA7) return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(s16))));
+            if (subop == 0xA8) return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmovl_s16(vget_high_s16(s16))));
+            if (subop == 0xA9) return wasm__neon_store_u32x4(vmovl_u16(vget_low_u16(u16)));
+            return wasm__neon_store_u32x4(vmovl_u16(vget_high_u16(u16)));
+        }
+        case 0xA0: {
+            int32x4_t s32 = wasm__neon_load_i32x4(value);
+            uint32x4_t neg = vreinterpretq_u32_s32(vnegq_s32(s32));
+            return wasm__neon_store_u32x4(vbslq_u32(vcltq_s32(s32, vdupq_n_s32(0)), neg, vreinterpretq_u32_s32(s32)));
+        }
+        case 0xA1:
+            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vnegq_s32(wasm__neon_load_i32x4(value))));
+        default:
+            break;
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0xA0 || subop == 0xA1) {
+        __m128i vec = wasm__sse_load_si128(value);
+        __m128i neg = _mm_sub_epi32(_mm_setzero_si128(), vec);
+        if (subop == 0xA1) return wasm__sse_store_si128(neg);
+        return wasm__sse_store_si128(wasm__sse_select_si128(_mm_cmpgt_epi32(_mm_setzero_si128(), vec), neg, vec));
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6088,6 +6935,27 @@ static wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
                                            const wasm_value_t* value,
                                            uint32_t amount) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        amount &= 31u;
+        if (subop == 0xAB)
+            return wasm__neon_store_u32x4(vshlq_u32(wasm__neon_load_u32x4(value), vdupq_n_s32((int32_t)amount)));
+        if (subop == 0xAC)
+            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vshlq_s32(wasm__neon_load_i32x4(value), vdupq_n_s32(-(int32_t)amount))));
+        return wasm__neon_store_u32x4(vshlq_u32(wasm__neon_load_u32x4(value), vdupq_n_s32(-(int32_t)amount)));
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128i vec = wasm__sse_load_si128(value);
+        __m128i count;
+
+        amount &= 31u;
+        count = _mm_cvtsi32_si128((int)amount);
+        if (subop == 0xAB) return wasm__sse_store_si128(_mm_sll_epi32(vec, count));
+        if (subop == 0xAC) return wasm__sse_store_si128(_mm_sra_epi32(vec, count));
+        return wasm__sse_store_si128(_mm_srl_epi32(vec, count));
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6115,6 +6983,83 @@ static wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
 static wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0xBA: {
+            int32x4_t lo = vmull_s16(vget_low_s16(wasm__neon_load_i16x8(lhs)), vget_low_s16(wasm__neon_load_i16x8(rhs)));
+            int32x4_t hi = vmull_s16(vget_high_s16(wasm__neon_load_i16x8(lhs)), vget_high_s16(wasm__neon_load_i16x8(rhs)));
+            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vpaddq_s32(lo, hi)));
+        }
+        case 0xBC:
+            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmull_s16(vget_low_s16(wasm__neon_load_i16x8(lhs)), vget_low_s16(wasm__neon_load_i16x8(rhs)))));
+        case 0xBD:
+            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmull_s16(vget_high_s16(wasm__neon_load_i16x8(lhs)), vget_high_s16(wasm__neon_load_i16x8(rhs)))));
+        case 0xBE:
+            return wasm__neon_store_u32x4(vmull_u16(vget_low_u16(wasm__neon_load_u16x8(lhs)), vget_low_u16(wasm__neon_load_u16x8(rhs))));
+        case 0xBF:
+            return wasm__neon_store_u32x4(vmull_u16(vget_high_u16(wasm__neon_load_u16x8(lhs)), vget_high_u16(wasm__neon_load_u16x8(rhs))));
+        default:
+            break;
+    }
+    {
+        int32x4_t a_s32 = wasm__neon_load_i32x4(lhs);
+        int32x4_t b_s32 = wasm__neon_load_i32x4(rhs);
+        uint32x4_t a_u32 = vreinterpretq_u32_s32(a_s32);
+        uint32x4_t b_u32 = vreinterpretq_u32_s32(b_s32);
+
+        switch (subop) {
+            case 0xAE:
+                return wasm__neon_store_u32x4(vaddq_u32(a_u32, b_u32));
+            case 0xB1:
+                return wasm__neon_store_u32x4(vsubq_u32(a_u32, b_u32));
+            case 0xB5:
+                return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmulq_s32(a_s32, b_s32)));
+            case 0xB6:
+                return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vminq_s32(a_s32, b_s32)));
+            case 0xB7:
+                return wasm__neon_store_u32x4(vminq_u32(a_u32, b_u32));
+            case 0xB8:
+                return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmaxq_s32(a_s32, b_s32)));
+            default:
+                return wasm__neon_store_u32x4(vmaxq_u32(a_u32, b_u32));
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    switch (subop) {
+        case 0xBA:
+            return wasm__sse_store_si128(_mm_madd_epi16(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0xAE:
+            return wasm__sse_store_si128(_mm_add_epi32(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0xB1:
+            return wasm__sse_store_si128(_mm_sub_epi32(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+        case 0xB6: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = _mm_cmpgt_epi32(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, b, a));
+        }
+        case 0xB7: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = wasm__sse_cmpgt_epu32(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, b, a));
+        }
+        case 0xB8: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = _mm_cmpgt_epi32(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, a, b));
+        }
+        case 0xB9: {
+            __m128i a = wasm__sse_load_si128(lhs);
+            __m128i b = wasm__sse_load_si128(rhs);
+            __m128i gt = wasm__sse_cmpgt_epu32(a, b);
+            return wasm__sse_store_si128(wasm__sse_select_si128(gt, a, b));
+        }
+        default:
+            break;
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6184,6 +7129,32 @@ static wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0xC7:
+        case 0xC8:
+        case 0xC9:
+        case 0xCA: {
+            int32x4_t s32 = wasm__neon_load_i32x4(value);
+            uint32x4_t u32 = vreinterpretq_u32_s32(s32);
+            if (subop == 0xC7) return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vmovl_s32(vget_low_s32(s32))));
+            if (subop == 0xC8) return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vmovl_s32(vget_high_s32(s32))));
+            if (subop == 0xC9) return wasm__neon_store_u64x2(vmovl_u32(vget_low_u32(u32)));
+            return wasm__neon_store_u64x2(vmovl_u32(vget_high_u32(u32)));
+        }
+        case 0xC0: {
+            int64x2_t s64 = wasm__neon_load_i64x2(value);
+            uint64x2_t neg = vreinterpretq_u64_s64(vnegq_s64(s64));
+            return wasm__neon_store_u64x2(vbslq_u64(vcltq_s64(s64, vdupq_n_s64(0)), neg, vreinterpretq_u64_s64(s64)));
+        }
+        case 0xC1:
+            return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vnegq_s64(wasm__neon_load_i64x2(value))));
+        default:
+            break;
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0xC1) return wasm__sse_store_si128(_mm_sub_epi64(_mm_setzero_si128(), wasm__sse_load_si128(value)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6228,6 +7199,26 @@ static wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
                                            const wasm_value_t* value,
                                            uint32_t amount) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        amount &= 63u;
+        if (subop == 0xCB)
+            return wasm__neon_store_u64x2(vshlq_u64(wasm__neon_load_u64x2(value), vdupq_n_s64((int64_t)amount)));
+        if (subop == 0xCC)
+            return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vshlq_s64(wasm__neon_load_i64x2(value), vdupq_n_s64(-(int64_t)amount))));
+        return wasm__neon_store_u64x2(vshlq_u64(wasm__neon_load_u64x2(value), vdupq_n_s64(-(int64_t)amount)));
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop != 0xCC) {
+        __m128i vec = wasm__sse_load_si128(value);
+        __m128i count;
+
+        amount &= 63u;
+        count = _mm_cvtsi32_si128((int)amount);
+        if (subop == 0xCB) return wasm__sse_store_si128(_mm_sll_epi64(vec, count));
+        return wasm__sse_store_si128(_mm_srl_epi64(vec, count));
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6255,6 +7246,27 @@ static wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
 static wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    switch (subop) {
+        case 0xDC:
+            return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vmull_s32(vget_low_s32(wasm__neon_load_i32x4(lhs)), vget_low_s32(wasm__neon_load_i32x4(rhs)))));
+        case 0xDD:
+            return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vmull_s32(vget_high_s32(wasm__neon_load_i32x4(lhs)), vget_high_s32(wasm__neon_load_i32x4(rhs)))));
+        case 0xDE:
+            return wasm__neon_store_u64x2(vmull_u32(vget_low_u32(wasm__neon_load_u32x4(lhs)), vget_low_u32(wasm__neon_load_u32x4(rhs))));
+        case 0xDF:
+            return wasm__neon_store_u64x2(vmull_u32(vget_high_u32(wasm__neon_load_u32x4(lhs)), vget_high_u32(wasm__neon_load_u32x4(rhs))));
+        case 0xCE:
+            return wasm__neon_store_u64x2(vaddq_u64(wasm__neon_load_u64x2(lhs), wasm__neon_load_u64x2(rhs)));
+        case 0xD1:
+            return wasm__neon_store_u64x2(vsubq_u64(wasm__neon_load_u64x2(lhs), wasm__neon_load_u64x2(rhs)));
+        default:
+            break;
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0xCE) return wasm__sse_store_si128(_mm_add_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+    if (subop == 0xD1) return wasm__sse_store_si128(_mm_sub_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6302,6 +7314,15 @@ static wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    if (subop == 0xE0) return wasm__neon_store_f32x4(vabsq_f32(wasm__neon_load_f32x4(value)));
+    if (subop == 0xE1) return wasm__neon_store_f32x4(vnegq_f32(wasm__neon_load_f32x4(value)));
+    if (subop == 0xE3) return wasm__neon_store_f32x4(vsqrtq_f32(wasm__neon_load_f32x4(value)));
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0xE0) return wasm__sse_store_ps128(wasm__sse_abs_ps(wasm__sse_load_ps128(value)));
+    if (subop == 0xE1) return wasm__sse_store_ps128(wasm__sse_neg_ps(wasm__sse_load_ps128(value)));
+    if (subop == 0xE3) return wasm__sse_store_ps128(_mm_sqrt_ps(wasm__sse_load_ps128(value)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6342,6 +7363,43 @@ static wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        float32x4_t a = wasm__neon_load_f32x4(lhs);
+        float32x4_t b = wasm__neon_load_f32x4(rhs);
+
+        switch (subop) {
+            case 0xE4:
+                return wasm__neon_store_f32x4(vaddq_f32(a, b));
+            case 0xE5:
+                return wasm__neon_store_f32x4(vsubq_f32(a, b));
+            case 0xE6:
+                return wasm__neon_store_f32x4(vmulq_f32(a, b));
+            case 0xE7:
+                return wasm__neon_store_f32x4(vdivq_f32(a, b));
+            default:
+                break;
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128 a = wasm__sse_load_ps128(lhs);
+        __m128 b = wasm__sse_load_ps128(rhs);
+
+        switch (subop) {
+            case 0xE4:
+                return wasm__sse_store_ps128(_mm_add_ps(a, b));
+            case 0xE5:
+                return wasm__sse_store_ps128(_mm_sub_ps(a, b));
+            case 0xE6:
+                return wasm__sse_store_ps128(_mm_mul_ps(a, b));
+            case 0xE7:
+                return wasm__sse_store_ps128(_mm_div_ps(a, b));
+            default:
+                break;
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6384,6 +7442,15 @@ static wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
 }
 
 static wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* value) {
+#if defined(WASM__SIMD_USE_NEON)
+    if (subop == 0xEC) return wasm__neon_store_f64x2(vabsq_f64(wasm__neon_load_f64x2(value)));
+    if (subop == 0xED) return wasm__neon_store_f64x2(vnegq_f64(wasm__neon_load_f64x2(value)));
+    if (subop == 0xEF) return wasm__neon_store_f64x2(vsqrtq_f64(wasm__neon_load_f64x2(value)));
+#elif defined(WASM__SIMD_USE_SSE2)
+    if (subop == 0xEC) return wasm__sse_store_pd128(wasm__sse_abs_pd(wasm__sse_load_pd128(value)));
+    if (subop == 0xED) return wasm__sse_store_pd128(wasm__sse_neg_pd(wasm__sse_load_pd128(value)));
+    if (subop == 0xEF) return wasm__sse_store_pd128(_mm_sqrt_pd(wasm__sse_load_pd128(value)));
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
@@ -6424,6 +7491,43 @@ static wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* v
 static wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
                                             const wasm_value_t* lhs,
                                             const wasm_value_t* rhs) {
+#if defined(WASM__SIMD_USE_NEON)
+    {
+        float64x2_t a = wasm__neon_load_f64x2(lhs);
+        float64x2_t b = wasm__neon_load_f64x2(rhs);
+
+        switch (subop) {
+            case 0xF0:
+                return wasm__neon_store_f64x2(vaddq_f64(a, b));
+            case 0xF1:
+                return wasm__neon_store_f64x2(vsubq_f64(a, b));
+            case 0xF2:
+                return wasm__neon_store_f64x2(vmulq_f64(a, b));
+            case 0xF3:
+                return wasm__neon_store_f64x2(vdivq_f64(a, b));
+            default:
+                break;
+        }
+    }
+#elif defined(WASM__SIMD_USE_SSE2)
+    {
+        __m128d a = wasm__sse_load_pd128(lhs);
+        __m128d b = wasm__sse_load_pd128(rhs);
+
+        switch (subop) {
+            case 0xF0:
+                return wasm__sse_store_pd128(_mm_add_pd(a, b));
+            case 0xF1:
+                return wasm__sse_store_pd128(_mm_sub_pd(a, b));
+            case 0xF2:
+                return wasm__sse_store_pd128(_mm_mul_pd(a, b));
+            case 0xF3:
+                return wasm__sse_store_pd128(_mm_div_pd(a, b));
+            default:
+                break;
+        }
+    }
+#endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
