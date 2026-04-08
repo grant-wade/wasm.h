@@ -202,6 +202,7 @@ Generate wrapper files:
 ```sh
 ./build/wasm2api path/to/module.wasm my_module
 ./build/wasm2api --embed --init-func init_state path/to/module.wasm my_module
+./build/wasm2api --singleton --embed path/to/module.wasm my_module
 ./build/wasm2api --all-exports path/to/module.wasm my_module
 ./build/wasm2api --exclude-prefix internal_ --exclude-export debug_dump path/to/module.wasm my_module
 ```
@@ -212,12 +213,15 @@ What it does today:
 - caches export indices and provides lifecycle helpers
 - owns a runtime by default so the common case is just `*_init(...)` or `*_init_embedded(NULL)` and then direct wrapper calls
 - exposes an `*_init_options_t` struct for advanced callers that want to supply a runtime, runtime config, or import bindings
+- can emit a singleton-oriented API with `--singleton`, which hides one generated context instance in the `.c` file and removes the `ctx` parameter from wrapper calls
 - emits an imports struct when the module imports host functions or globals
 - filters common toolchain-noise exports by default, including Emscripten stack helpers and LLVM-prefixed internals
 - supports generated wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`
 - skips unsupported signatures with diagnostics instead of generating incorrect code
 
 `--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
+
+`--singleton` generates a single-instance API for cases where only one module instance should exist in-process. In that mode, the generated export wrappers, `*_free`, `*_module`, `*_runtime`, and `*_last_error*` helpers no longer take a context pointer. `*_init(...)` and `*_init_embedded(...)` return `wasm_error_t` instead of a context pointer and manage one hidden static context inside the generated source.
 
 `--init-func <export>` marks a `void(void)` Wasm export that should be invoked automatically after the wrapper loads the module. This is useful for libraries that need an explicit Wasm-side startup step before other exports are called.
 

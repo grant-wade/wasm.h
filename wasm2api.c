@@ -46,6 +46,7 @@ typedef struct wasm2api_model_t {
 	uint32_t num_global_imports;
 	uint32_t required_features;
 	int has_init_func;
+	int singleton_mode;
 	char* init_export_name;
 	char* init_index_field;
 } wasm2api_model_t;
@@ -81,10 +82,10 @@ typedef struct wasm2api_prescan_t {
 
 static void wasm2api_usage(FILE* stream, const char* argv0) {
 	fprintf(stream,
-			"usage: %s [--embed] [--init-func <export>] [--all-exports]\n"
+			"usage: %s [--embed] [--singleton] [--init-func <export>] [--all-exports]\n"
 			"       [--include-export <name>] [--include-prefix <prefix>]\n"
 			"       [--exclude-export <name>] [--exclude-prefix <prefix>] <input.wasm> [output_prefix]\n"
-			"       %s [--embed] [--init-func <export>] [--all-exports]\n"
+			"       %s [--embed] [--singleton] [--init-func <export>] [--all-exports]\n"
 			"       [--include-export <name>] [--include-prefix <prefix>]\n"
 			"       [--exclude-export <name>] [--exclude-prefix <prefix>] <input.wasm> -o <output_prefix>\n",
 			argv0, argv0);
@@ -322,6 +323,13 @@ static int wasm2api_func_name_is_reserved(const wasm2api_model_t* model, const c
 		"last_error_message",
 		"embedded_wasm",
 		"init_embedded",
+		"__free_ctx",
+		"__init_ctx",
+		"__require_ctx",
+		"__singleton_ctx",
+		"__singleton_last_error",
+		"__singleton_last_error_msg",
+		"__store_error",
 		"set_error",
 		"clear_error",
 		"capture_runtime_error",
@@ -1153,6 +1161,7 @@ static void wasm2api_write_byte_array(FILE* out, const uint8_t* bytes, size_t le
 static void wasm2api_emit_function_signature(FILE* out, const wasm2api_model_t* model,
 									 const wasm2api_func_t* func, int with_semicolon) {
 	uint32_t i;
+	int need_comma = 0;
 
 	if (func->num_results == 1u) {
 		fprintf(out, "%s ", wasm2api_c_type(func->results[0]));
@@ -1160,15 +1169,24 @@ static void wasm2api_emit_function_signature(FILE* out, const wasm2api_model_t* 
 		fputs("void ", out);
 	}
 
-	fprintf(out, "%s_%s(%s_ctx_t* ctx", model->api_prefix, func->c_name, model->api_prefix);
+	fprintf(out, "%s_%s(", model->api_prefix, func->c_name);
+	if (!model->singleton_mode) {
+		fprintf(out, "%s_ctx_t* ctx", model->api_prefix);
+		need_comma = 1;
+	}
 	for (i = 0; i < func->num_params; i++) {
-		fprintf(out, ", %s arg%u", wasm2api_c_type(func->params[i]), (unsigned)i);
+		fprintf(out, "%s%s arg%u", need_comma ? ", " : "", wasm2api_c_type(func->params[i]),
+				(unsigned)i);
+		need_comma = 1;
 	}
 	if (func->num_results > 1u) {
 		for (i = 0; i < func->num_results; i++) {
-			fprintf(out, ", %s* out%u", wasm2api_c_type(func->results[i]), (unsigned)i);
+			fprintf(out, "%s%s* out%u", need_comma ? ", " : "",
+					wasm2api_c_type(func->results[i]), (unsigned)i);
+			need_comma = 1;
 		}
 	}
+	if (!need_comma) fputs("void", out);
 	fputs(")", out);
 	if (with_semicolon) fputs(";\n", out);
 }
@@ -1315,10 +1333,20 @@ static char* wasm2api_build_fmt_string(const wasm_valtype_t* params, uint32_t nu
 
 static void wasm2api_emit_init_signature(FILE* out, const wasm2api_model_t* model,
 									 int embed_wasm, int with_semicolon) {
-	fprintf(out, "%s_ctx_t* %s_%s(", model->api_prefix, model->api_prefix,
-			embed_wasm ? "init_embedded" : "init");
-	if (!embed_wasm) fputs("const uint8_t* wasm_bytes, size_t len", out);
-	fprintf(out, "%sconst %s_init_options_t* options", embed_wasm ? "" : ", ",
+	int need_comma = 0;
+
+	if (model->singleton_mode) {
+		fprintf(out, "wasm_error_t %s_%s(", model->api_prefix,
+				embed_wasm ? "init_embedded" : "init");
+	} else {
+		fprintf(out, "%s_ctx_t* %s_%s(", model->api_prefix, model->api_prefix,
+				embed_wasm ? "init_embedded" : "init");
+	}
+	if (!embed_wasm) {
+		fputs("const uint8_t* wasm_bytes, size_t len", out);
+		need_comma = 1;
+	}
+	fprintf(out, "%sconst %s_init_options_t* options", need_comma ? ", " : "",
 			model->api_prefix);
 	fputs(")", out);
 	if (with_semicolon) fputs(";\n", out);
@@ -1401,7 +1429,10 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 	fputs("#pragma once\n\n", out);
 	fputs("#include <stdint.h>\n", out);
 	fputs("#include \"wasm.h\"\n\n", out);
-	fprintf(out, "typedef struct %s_ctx_t %s_ctx_t;\n", model->api_prefix, model->api_prefix);
+	if (!model->singleton_mode) {
+		fprintf(out, "typedef struct %s_ctx_t %s_ctx_t;\n", model->api_prefix,
+				model->api_prefix);
+	}
 	if (has_imports) {
 		fprintf(out, "typedef struct %s_imports_t {\n", model->api_prefix);
 		for (i = 0; i < model->num_imports; i++) {
@@ -1427,18 +1458,31 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 	fprintf(out, "void %s_init_options_default(%s_init_options_t* options);\n",
 			model->api_prefix, model->api_prefix);
 	wasm2api_emit_init_signature(out, model, 0, 1);
-	fprintf(out, "void %s_free(%s_ctx_t* ctx);\n", model->api_prefix, model->api_prefix);
-	fprintf(out, "wasm_module_t* %s_module(%s_ctx_t* ctx);\n", model->api_prefix,
-			model->api_prefix);
-	fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx);\n", model->api_prefix,
-			model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "void %s_free(void);\n", model->api_prefix);
+		fprintf(out, "wasm_module_t* %s_module(void);\n", model->api_prefix);
+		fprintf(out, "wasm_runtime_t* %s_runtime(void);\n", model->api_prefix);
+	} else {
+		fprintf(out, "void %s_free(%s_ctx_t* ctx);\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "wasm_module_t* %s_module(%s_ctx_t* ctx);\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx);\n", model->api_prefix,
+				model->api_prefix);
+	}
 	fprintf(out, "uint32_t %s_required_features(void);\n", model->api_prefix);
-	fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx);\n", model->api_prefix,
-			model->api_prefix);
-	fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx);\n", model->api_prefix,
-			model->api_prefix);
-	fprintf(out, "const char* %s_last_error_message(const %s_ctx_t* ctx);\n", model->api_prefix,
-			model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "wasm_error_t %s_last_error(void);\n", model->api_prefix);
+		fprintf(out, "const char* %s_last_error_string(void);\n", model->api_prefix);
+		fprintf(out, "const char* %s_last_error_message(void);\n", model->api_prefix);
+	} else {
+		fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx);\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx);\n",
+				model->api_prefix, model->api_prefix);
+		fprintf(out, "const char* %s_last_error_message(const %s_ctx_t* ctx);\n",
+				model->api_prefix, model->api_prefix);
+	}
 	if (embed_wasm) {
 		fprintf(out, "const uint8_t* %s_embedded_wasm(size_t* out_len);\n", model->api_prefix);
 		wasm2api_emit_init_signature(out, model, 1, 1);
@@ -1486,6 +1530,10 @@ static int wasm2api_write_source(const char* source_path,
 		fprintf(out, "static const size_t %s_embedded_wasm_len = %zu;\n\n", model->api_prefix,
 				wasm_len);
 	}
+	if (model->singleton_mode) {
+		fprintf(out, "typedef struct %s_ctx_t %s_ctx_t;\n\n", model->api_prefix,
+				model->api_prefix);
+	}
 
 	fprintf(out, "struct %s_ctx_t {\n", model->api_prefix);
 	fputs("    wasm_runtime_t* rt;\n", out);
@@ -1502,13 +1550,34 @@ static int wasm2api_write_source(const char* source_path,
 		fprintf(out, "    uint32_t %s;\n", model->funcs[i].index_field);
 	}
 	fputs("};\n\n", out);
+	if (model->singleton_mode) {
+		fprintf(out, "static %s_ctx_t* %s__singleton_ctx = NULL;\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "static wasm_error_t %s__singleton_last_error = WASM_OK;\n",
+				model->api_prefix);
+		fprintf(out, "static char %s__singleton_last_error_msg[256];\n\n", model->api_prefix);
+	}
 
 	fprintf(out, "static const uint32_t %s_required_features_mask = %uu;\n\n",
 			model->api_prefix, (unsigned)model->required_features);
+	if (model->singleton_mode) {
+		fprintf(out,
+				"static void %s__store_error(wasm_error_t err, const char* message) {\n",
+				model->api_prefix);
+		fprintf(out, "    %s__singleton_last_error = err;\n", model->api_prefix);
+		fprintf(out,
+				"    snprintf(%s__singleton_last_error_msg, sizeof(%s__singleton_last_error_msg), \"%%s\",\n",
+				model->api_prefix, model->api_prefix);
+		fputs("             message ? message : \"\");\n", out);
+		fputs("}\n\n", out);
+	}
 
 	fprintf(out,
 			"static void %s_set_error(%s_ctx_t* ctx, wasm_error_t err, const char* message) {\n",
 			model->api_prefix, model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "    %s__store_error(err, message);\n", model->api_prefix);
+	}
 	fputs("    if (!ctx) return;\n", out);
 	fputs("    ctx->last_error = err;\n", out);
 	fputs("    snprintf(ctx->last_error_msg, sizeof(ctx->last_error_msg), \"%s\",\n", out);
@@ -1521,6 +1590,9 @@ static int wasm2api_write_source(const char* source_path,
 
 	fprintf(out, "static void %s_clear_error(%s_ctx_t* ctx) {\n", model->api_prefix,
 			model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "    %s__store_error(WASM_OK, \"\");\n", model->api_prefix);
+	}
 	fputs("    if (!ctx) return;\n", out);
 	fputs("    ctx->last_error = WASM_OK;\n", out);
 	fputs("    ctx->last_error_msg[0] = '\\0';\n", out);
@@ -1537,6 +1609,16 @@ static int wasm2api_write_source(const char* source_path,
 	fputs("    if (!message) message = wasm_error_string(err);\n", out);
 	fprintf(out, "    %s_set_error(ctx, err, message);\n", model->api_prefix);
 	fputs("}\n\n", out);
+	if (model->singleton_mode) {
+		fprintf(out, "static %s_ctx_t* %s__require_ctx(void) {\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "    if (%s__singleton_ctx && %s__singleton_ctx->mod) return %s__singleton_ctx;\n",
+				model->api_prefix, model->api_prefix, model->api_prefix);
+		fprintf(out, "    %s__store_error(WASM_ERR_MALFORMED, \"module not initialized\");\n",
+				model->api_prefix);
+		fputs("    return NULL;\n", out);
+		fputs("}\n\n", out);
+	}
 
 	fprintf(out, "static void %s_configure_runtime(wasm_runtime_t* rt) {\n", model->api_prefix);
 	fputs("    if (!rt) return;\n", out);
@@ -1554,7 +1636,13 @@ static int wasm2api_write_source(const char* source_path,
 			wasm2api_emit_import_dispatcher(out, model, &model->imports[i]);
 	}
 
-	wasm2api_emit_init_signature(out, model, 0, 0);
+	if (model->singleton_mode) {
+		fprintf(out,
+				"static %s_ctx_t* %s__init_ctx(const uint8_t* wasm_bytes, size_t len, const %s_init_options_t* options)",
+				model->api_prefix, model->api_prefix, model->api_prefix);
+	} else {
+		wasm2api_emit_init_signature(out, model, 0, 0);
+	}
 	fputs(" {\n", out);
 	fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
 	fputs("    wasm_runtime_t* rt = NULL;\n", out);
@@ -1723,43 +1811,123 @@ static int wasm2api_write_source(const char* source_path,
 	fputs("    return ctx;\n", out);
 	fputs("}\n\n", out);
 
-	fprintf(out, "void %s_free(%s_ctx_t* ctx) {\n", model->api_prefix, model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "static void %s__free_ctx(%s_ctx_t* ctx) {\n", model->api_prefix,
+				model->api_prefix);
+	} else {
+		fprintf(out, "void %s_free(%s_ctx_t* ctx) {\n", model->api_prefix,
+				model->api_prefix);
+	}
 	fputs("    if (!ctx) return;\n", out);
 	fputs("    if (ctx->mod) wasm_free_module(ctx->mod);\n", out);
 	fputs("    if (ctx->owns_runtime && ctx->runtime_initialized) wasm_destroy(&ctx->owned_rt);\n",
 		out);
 	fputs("    free(ctx);\n", out);
 	fputs("}\n\n", out);
+	if (model->singleton_mode) {
+		wasm2api_emit_init_signature(out, model, 0, 0);
+		fputs(" {\n", out);
+		fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
+		fputs("    wasm_error_t err;\n\n", out);
+		fputs("    if (!wasm_bytes) {\n", out);
+		fprintf(out, "        %s__store_error(WASM_ERR_MALFORMED, \"missing wasm bytes\");\n",
+				model->api_prefix);
+		fputs("        return WASM_ERR_MALFORMED;\n", out);
+		fputs("    }\n", out);
+		fprintf(out, "    if (%s__singleton_ctx) {\n", model->api_prefix);
+		fprintf(out,
+				"        %s_set_error(%s__singleton_ctx, WASM_ERR_MALFORMED, \"singleton already initialized\");\n",
+				model->api_prefix, model->api_prefix);
+		fputs("        return WASM_ERR_MALFORMED;\n", out);
+		fputs("    }\n", out);
+		fprintf(out, "    ctx = %s__init_ctx(wasm_bytes, len, options);\n", model->api_prefix);
+		fputs("    if (!ctx) {\n", out);
+		fprintf(out, "        %s__store_error(WASM_ERR_OOM, \"failed to allocate context\");\n",
+				model->api_prefix);
+		fputs("        return WASM_ERR_OOM;\n", out);
+		fputs("    }\n", out);
+		fputs("    if (ctx->last_error != WASM_OK || !ctx->mod) {\n", out);
+		fputs("        err = ctx->last_error != WASM_OK ? ctx->last_error : WASM_ERR_MALFORMED;\n",
+			out);
+		fprintf(out, "        %s__free_ctx(ctx);\n", model->api_prefix);
+		fputs("        return err;\n", out);
+		fputs("    }\n", out);
+		fprintf(out, "    %s__singleton_ctx = ctx;\n", model->api_prefix);
+		fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
+		fputs("    return WASM_OK;\n", out);
+		fputs("}\n\n", out);
 
-	fprintf(out, "wasm_module_t* %s_module(%s_ctx_t* ctx) {\n", model->api_prefix,
-			model->api_prefix);
-	fputs("    return ctx ? ctx->mod : NULL;\n", out);
+		fprintf(out, "void %s_free(void) {\n", model->api_prefix);
+		fprintf(out, "    %s_ctx_t* ctx = %s__singleton_ctx;\n\n", model->api_prefix,
+				model->api_prefix);
+		fprintf(out, "    %s__singleton_ctx = NULL;\n", model->api_prefix);
+		fputs("    if (!ctx) return;\n", out);
+		fprintf(out, "    %s__free_ctx(ctx);\n", model->api_prefix);
+		fputs("}\n\n", out);
+	}
+
+	if (model->singleton_mode) {
+		fprintf(out, "wasm_module_t* %s_module(void) {\n", model->api_prefix);
+		fprintf(out, "    return %s__singleton_ctx ? %s__singleton_ctx->mod : NULL;\n",
+				model->api_prefix, model->api_prefix);
+	} else {
+		fprintf(out, "wasm_module_t* %s_module(%s_ctx_t* ctx) {\n", model->api_prefix,
+				model->api_prefix);
+		fputs("    return ctx ? ctx->mod : NULL;\n", out);
+	}
 	fputs("}\n\n", out);
 
-	fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx) {\n", model->api_prefix,
-			model->api_prefix);
-	fputs("    return ctx ? ctx->rt : NULL;\n", out);
+	if (model->singleton_mode) {
+		fprintf(out, "wasm_runtime_t* %s_runtime(void) {\n", model->api_prefix);
+		fprintf(out, "    return %s__singleton_ctx ? %s__singleton_ctx->rt : NULL;\n",
+				model->api_prefix, model->api_prefix);
+	} else {
+		fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx) {\n", model->api_prefix,
+				model->api_prefix);
+		fputs("    return ctx ? ctx->rt : NULL;\n", out);
+	}
 	fputs("}\n\n", out);
 
 	fprintf(out, "uint32_t %s_required_features(void) {\n", model->api_prefix);
 	fprintf(out, "    return %s_required_features_mask;\n", model->api_prefix);
 	fputs("}\n\n", out);
 
-	fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx) {\n", model->api_prefix,
-			model->api_prefix);
-	fputs("    if (!ctx) return WASM_ERR_MALFORMED;\n", out);
-	fputs("    return ctx->last_error;\n", out);
+	if (model->singleton_mode) {
+		fprintf(out, "wasm_error_t %s_last_error(void) {\n", model->api_prefix);
+		fprintf(out, "    if (%s__singleton_ctx) return %s__singleton_ctx->last_error;\n",
+				model->api_prefix, model->api_prefix);
+		fprintf(out, "    return %s__singleton_last_error;\n", model->api_prefix);
+	} else {
+		fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx) {\n",
+				model->api_prefix, model->api_prefix);
+		fputs("    if (!ctx) return WASM_ERR_MALFORMED;\n", out);
+		fputs("    return ctx->last_error;\n", out);
+	}
 	fputs("}\n\n", out);
 
-	fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx) {\n", model->api_prefix,
-			model->api_prefix);
-	fprintf(out, "    return wasm_error_string(%s_last_error(ctx));\n", model->api_prefix);
+	if (model->singleton_mode) {
+		fprintf(out, "const char* %s_last_error_string(void) {\n", model->api_prefix);
+		fprintf(out, "    return wasm_error_string(%s_last_error());\n", model->api_prefix);
+	} else {
+		fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx) {\n",
+				model->api_prefix, model->api_prefix);
+		fprintf(out, "    return wasm_error_string(%s_last_error(ctx));\n", model->api_prefix);
+	}
 	fputs("}\n\n", out);
 
-	fprintf(out, "const char* %s_last_error_message(const %s_ctx_t* ctx) {\n", model->api_prefix,
-			model->api_prefix);
-	fputs("    if (!ctx) return \"invalid context\";\n", out);
-	fputs("    return ctx->last_error_msg;\n", out);
+	if (model->singleton_mode) {
+		fprintf(out, "const char* %s_last_error_message(void) {\n", model->api_prefix);
+		fprintf(out, "    if (%s__singleton_ctx) return %s__singleton_ctx->last_error_msg;\n",
+				model->api_prefix, model->api_prefix);
+		fprintf(out,
+				"    return %s__singleton_last_error_msg[0] ? %s__singleton_last_error_msg : \"\";\n",
+				model->api_prefix, model->api_prefix);
+	} else {
+		fprintf(out, "const char* %s_last_error_message(const %s_ctx_t* ctx) {\n",
+				model->api_prefix, model->api_prefix);
+		fputs("    if (!ctx) return \"invalid context\";\n", out);
+		fputs("    return ctx->last_error_msg;\n", out);
+	}
 	fputs("}\n\n", out);
 
 	if (embed_wasm) {
@@ -1785,6 +1953,10 @@ static int wasm2api_write_source(const char* source_path,
 
 		wasm2api_emit_function_signature(out, model, func, 0);
 		fputs(" {\n", out);
+		if (model->singleton_mode) {
+			fprintf(out, "    %s_ctx_t* ctx = %s__require_ctx();\n", model->api_prefix,
+					model->api_prefix);
+		}
 		if (func->num_results == 1u) {
 			fprintf(out, "    %s ret = %s;\n", wasm2api_c_type(func->results[0]),
 					wasm2api_default_return(func->results[0]));
@@ -1799,9 +1971,17 @@ static int wasm2api_write_source(const char* source_path,
 		fputs("\n", out);
 
 		if (func->num_results == 1u) {
-			fputs("    if (!ctx || !ctx->mod) return ret;\n", out);
+			if (model->singleton_mode) {
+				fputs("    if (!ctx) return ret;\n", out);
+			} else {
+				fputs("    if (!ctx || !ctx->mod) return ret;\n", out);
+			}
 		} else {
-			fputs("    if (!ctx || !ctx->mod) return;\n", out);
+			if (model->singleton_mode) {
+				fputs("    if (!ctx) return;\n", out);
+			} else {
+				fputs("    if (!ctx || !ctx->mod) return;\n", out);
+			}
 		}
 		if (func->num_results > 1u) {
 			for (result_index = 0; result_index < func->num_results; result_index++) {
@@ -1871,6 +2051,7 @@ int main(int argc, char** argv) {
 	wasm2api_export_filter_set_t export_filters;
 	wasm_error_t err;
 	int embed_wasm = 0;
+	int singleton_mode = 0;
 	int i;
 	int ok = 0;
 
@@ -1885,6 +2066,10 @@ int main(int argc, char** argv) {
 		}
 		if (strcmp(argv[i], "--embed") == 0) {
 			embed_wasm = 1;
+			continue;
+		}
+		if (strcmp(argv[i], "--singleton") == 0) {
+			singleton_mode = 1;
 			continue;
 		}
 		if (strcmp(argv[i], "--all-exports") == 0) {
@@ -1990,6 +2175,7 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "wasm2api: failed to inspect module\n");
 		goto cleanup_runtime;
 	}
+	model.singleton_mode = singleton_mode;
 	if (!wasm2api_set_init_func(mod, &model, init_func_name)) goto cleanup_runtime;
 
 	if (!wasm2api_write_header(header_path, &model, embed_wasm)) goto cleanup_runtime;
@@ -1998,7 +2184,7 @@ int main(int argc, char** argv) {
 		goto cleanup_runtime;
 
 	fprintf(stdout,
-			"generated %s and %s (%u wrapper%s, %u import binding%s, %u filtered export%s, %u skipped export%s%s)\n",
+			"generated %s and %s (%u wrapper%s, %u import binding%s, %u filtered export%s, %u skipped export%s%s%s)\n",
 			header_path, source_path,
 			(unsigned)model.num_funcs, model.num_funcs == 1u ? "" : "s",
 			(unsigned)(model.num_func_imports + model.num_global_imports),
@@ -2007,7 +2193,8 @@ int main(int argc, char** argv) {
 			model.filtered_funcs == 1u ? "" : "s",
 			(unsigned)model.skipped_funcs,
 			model.skipped_funcs == 1u ? "" : "s",
-			embed_wasm ? ", embedded wasm" : "");
+			embed_wasm ? ", embedded wasm" : "",
+			singleton_mode ? ", singleton mode" : "");
 	ok = 1;
 
 cleanup_runtime:
