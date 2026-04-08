@@ -214,6 +214,7 @@ What it does today:
 - owns a runtime by default so the common case is just `*_init(...)` or `*_init_embedded(NULL)` and then direct wrapper calls
 - exposes an `*_init_options_t` struct for advanced callers that want to supply a runtime, runtime config, or import bindings
 - can emit a singleton-oriented API with `--singleton`, which hides one generated context instance in the `.c` file and removes the `ctx` parameter from wrapper calls
+- if the module exports a memory, also emits `*_get_memory_ptr`, `*_get_memory_size`, `*_read_memory_string`, `*_read_memory`, and `*_write_memory` helpers against that exported memory, preferring an export literally named `memory` when several memories are exported
 - emits an imports struct when the module imports host functions or globals
 - filters common toolchain-noise exports by default, including Emscripten stack helpers and LLVM-prefixed internals
 - supports generated wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`
@@ -221,7 +222,7 @@ What it does today:
 
 `--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
 
-`--singleton` generates a single-instance API for cases where only one module instance should exist in-process. In that mode, the generated export wrappers, `*_free`, `*_module`, `*_runtime`, and `*_last_error*` helpers no longer take a context pointer. `*_init(...)` and `*_init_embedded(...)` return `wasm_error_t` instead of a context pointer and manage one hidden static context inside the generated source.
+`--singleton` generates a single-instance API for cases where only one module instance should exist in-process. In that mode, the generated export wrappers, `*_free`, `*_get_module`, `*_get_runtime`, and `*_get_last_error*` helpers no longer take a context pointer. `*_init(...)` and `*_init_embedded(...)` return `wasm_error_t` instead of a context pointer and manage one hidden static context inside the generated source.
 
 `--init-func <export>` marks a `void(void)` Wasm export that should be invoked automatically after the wrapper loads the module. This is useful for libraries that need an explicit Wasm-side startup step before other exports are called.
 
@@ -242,7 +243,7 @@ Checked-in example flow:
 
 - `examples/session_math_wasm.c` is a small stateful Wasm library source meant to be compiled with `emcc`
 - `cmake --build build --target session_math_wasm` builds the `.wasm` module from that checked-in C source
-- `cmake --build build --target session_math_generate` runs `wasm2api --embed --init-func init_state` against the built module
+- `cmake --build build --target session_math_generate` runs `wasm2api --singleton --embed --init-func init_state` against the built module and refreshes `examples/session_math.h` plus `examples/session_math.c`
 - `cmake --build build --target session_math_demo` builds and runs a native demo against the generated wrapper API
 
 ## Repository layout
