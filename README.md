@@ -137,7 +137,11 @@ cmake --build build --target check
 
 `check` runs the full test pass: unit tests (`wasm_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
 
-Spectest targets require a system `wasm-tools` with both `json-from-wast` and `parse` subcommands. Emcc fixture targets require `emcc`.
+- `wasm`
+- `wasm2api`
+- `wasm_test`
+- `wl_test`
+- `session_math_demo` (when `emcc` is available)
 
 Additional targets:
 
@@ -190,10 +194,61 @@ WASI stubs are bound by default; `--no-wasi` disables them.
 ./build/wasm2api --embed module.wasm my_module  # embeds the .wasm bytes in the source
 ```
 
-- Generates `<prefix>.h` and `<prefix>.c` with cached export indices and lifecycle helpers.
-- Emits an `<prefix>_imports_t` struct when the module has host-function or global imports.
-- Supports `i32`, `i64`, `f32`, `f64`, and `externref` signatures; skips unsupported types with diagnostics.
-- `--embed` bakes the module bytes into the generated `.c` so no runtime file I/O is needed.
+Generate wrapper files:
+
+```sh
+./build/wasm2api path/to/module.wasm my_module
+./build/wasm2api --embed --init-func init_state path/to/module.wasm my_module
+./build/wasm2api --all-exports path/to/module.wasm my_module
+./build/wasm2api --exclude-prefix internal_ --exclude-export debug_dump path/to/module.wasm my_module
+```
+
+What it does today:
+
+- emits `<prefix>.h` and `<prefix>.c`
+- caches export indices and provides lifecycle helpers
+- owns a runtime by default so the common case is just `*_init(...)` or `*_init_embedded(NULL)` and then direct wrapper calls
+- exposes an `*_init_options_t` struct for advanced callers that want to supply a runtime, runtime config, or import bindings
+- emits an imports struct when the module imports host functions or globals
+- filters common toolchain-noise exports by default, including Emscripten stack helpers and LLVM-prefixed internals
+- supports generated wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`
+- skips unsupported signatures with diagnostics instead of generating incorrect code
+
+`--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
+
+`--init-func <export>` marks a `void(void)` Wasm export that should be invoked automatically after the wrapper loads the module. This is useful for libraries that need an explicit Wasm-side startup step before other exports are called.
+
+By default, `wasm2api` excludes exports that look like toolchain internals rather than library API surface, such as names beginning with `emscripten_`, `_emscripten_`, `__emscripten_`, `llvm.`, `llvm_`, `__llvm_`, plus `__wasm_call_ctors`.
+
+`--all-exports` disables those built-in exclusions.
+
+You can layer your own rules on top with:
+
+- `--include-export <name>`
+- `--include-prefix <prefix>`
+- `--exclude-export <name>`
+- `--exclude-prefix <prefix>`
+
+User rules override the built-in defaults, so you can re-include a filtered prefix selectively without turning everything back on.
+
+Checked-in example flow:
+
+- `examples/session_math_wasm.c` is a small stateful Wasm library source meant to be compiled with `emcc`
+- `cmake --build build --target session_math_wasm` builds the `.wasm` module from that checked-in C source
+- `cmake --build build --target session_math_generate` runs `wasm2api --embed --init-func init_state` against the built module
+- `cmake --build build --target session_math_demo` builds and runs a native demo against the generated wrapper API
+
+## Repository layout
+
+- `wasm.h` — single-header runtime, validator, interpreter, and public C API
+- `wasm.c` — CLI runner and inspection tool built on top of `wasm.h`
+- `wasm2api.c` — typed wrapper generator for Wasm exports and imports
+- `wasm_test.c` — native regression coverage for the runtime
+- `wl.h` — local support library used by tests and development utilities
+- `wl_test.c` — tests for `wl.h`
+- `examples/` — native examples and demo code
+- `test/` — spectest harness, `emcc` fixtures, and Wasm fixture runner
+- `docs/` — design notes, plans, and historical compliance snapshots
 
 ## Proposal support
 

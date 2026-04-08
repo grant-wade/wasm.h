@@ -39,11 +39,39 @@ typedef struct wasm2api_model_t {
 	wasm2api_func_t* funcs;
 	uint32_t num_funcs;
 	uint32_t skipped_funcs;
+	uint32_t filtered_funcs;
 	wasm2api_import_t* imports;
 	uint32_t num_imports;
 	uint32_t num_func_imports;
 	uint32_t num_global_imports;
+	uint32_t required_features;
+	int has_init_func;
+	char* init_export_name;
+	char* init_index_field;
 } wasm2api_model_t;
+
+typedef enum wasm2api_export_filter_action_t {
+	WASM2API_FILTER_INCLUDE,
+	WASM2API_FILTER_EXCLUDE
+} wasm2api_export_filter_action_t;
+
+typedef enum wasm2api_export_filter_match_t {
+	WASM2API_FILTER_MATCH_EXACT,
+	WASM2API_FILTER_MATCH_PREFIX
+} wasm2api_export_filter_match_t;
+
+typedef struct wasm2api_export_filter_rule_t {
+	char* pattern;
+	wasm2api_export_filter_action_t action;
+	wasm2api_export_filter_match_t match;
+} wasm2api_export_filter_rule_t;
+
+typedef struct wasm2api_export_filter_set_t {
+	wasm2api_export_filter_rule_t* rules;
+	uint32_t num_rules;
+	uint32_t cap_rules;
+	int include_default_rules;
+} wasm2api_export_filter_set_t;
 
 typedef struct wasm2api_prescan_t {
 	wasm_value_t** globals;
@@ -53,9 +81,28 @@ typedef struct wasm2api_prescan_t {
 
 static void wasm2api_usage(FILE* stream, const char* argv0) {
 	fprintf(stream,
-			"usage: %s [--embed] <input.wasm> [output_prefix]\n"
-			"       %s [--embed] <input.wasm> -o <output_prefix>\n",
+			"usage: %s [--embed] [--init-func <export>] [--all-exports]\n"
+			"       [--include-export <name>] [--include-prefix <prefix>]\n"
+			"       [--exclude-export <name>] [--exclude-prefix <prefix>] <input.wasm> [output_prefix]\n"
+			"       %s [--embed] [--init-func <export>] [--all-exports]\n"
+			"       [--include-export <name>] [--include-prefix <prefix>]\n"
+			"       [--exclude-export <name>] [--exclude-prefix <prefix>] <input.wasm> -o <output_prefix>\n",
 			argv0, argv0);
+}
+
+static void wasm2api_export_filter_set_init(wasm2api_export_filter_set_t* filter_set) {
+	if (!filter_set) return;
+	memset(filter_set, 0, sizeof(*filter_set));
+	filter_set->include_default_rules = 1;
+}
+
+static void wasm2api_export_filter_set_free(wasm2api_export_filter_set_t* filter_set) {
+	uint32_t i;
+
+	if (!filter_set) return;
+	for (i = 0; i < filter_set->num_rules; i++) free(filter_set->rules[i].pattern);
+	free(filter_set->rules);
+	memset(filter_set, 0, sizeof(*filter_set));
 }
 
 static char* wasm2api_strdup(const char* src) {
@@ -148,6 +195,109 @@ static char* wasm2api_make_identifier(const char* text) {
 	}
 
 	return out;
+}
+
+static int wasm2api_export_filter_insert_rule(wasm2api_export_filter_set_t* filter_set,
+								      uint32_t insert_at,
+								      wasm2api_export_filter_action_t action,
+								      wasm2api_export_filter_match_t match,
+								      const char* pattern) {
+	wasm2api_export_filter_rule_t* next_rules;
+	char* pattern_copy;
+	uint32_t new_cap;
+
+	if (!filter_set || !pattern || !pattern[0]) return 0;
+	if (insert_at > filter_set->num_rules) insert_at = filter_set->num_rules;
+
+	if (filter_set->num_rules >= filter_set->cap_rules) {
+		new_cap = filter_set->cap_rules ? filter_set->cap_rules * 2u : 8u;
+		next_rules = (wasm2api_export_filter_rule_t*)realloc(filter_set->rules,
+											new_cap * sizeof(*next_rules));
+		if (!next_rules) return 0;
+		filter_set->rules = next_rules;
+		filter_set->cap_rules = new_cap;
+	}
+
+	pattern_copy = wasm2api_strdup(pattern);
+	if (!pattern_copy) return 0;
+
+	if (insert_at < filter_set->num_rules) {
+		memmove(filter_set->rules + insert_at + 1u,
+				filter_set->rules + insert_at,
+				(size_t)(filter_set->num_rules - insert_at) * sizeof(*filter_set->rules));
+	}
+
+	filter_set->rules[insert_at].pattern = pattern_copy;
+	filter_set->rules[insert_at].action = action;
+	filter_set->rules[insert_at].match = match;
+	filter_set->num_rules++;
+	return 1;
+}
+
+static int wasm2api_export_filter_add_rule(wasm2api_export_filter_set_t* filter_set,
+								   wasm2api_export_filter_action_t action,
+								   wasm2api_export_filter_match_t match,
+								   const char* pattern) {
+	return wasm2api_export_filter_insert_rule(filter_set, filter_set ? filter_set->num_rules : 0u,
+			action, match, pattern);
+}
+
+static int wasm2api_export_filter_add_default_rules(wasm2api_export_filter_set_t* filter_set) {
+	static const char* exclude_prefixes[] = {
+		"emscripten_",
+		"_emscripten_",
+		"__emscripten_",
+		"llvm.",
+		"llvm_",
+		"__llvm_"
+	};
+	static const char* exclude_names[] = {
+		"__wasm_call_ctors"
+	};
+	uint32_t insert_at = 0u;
+	size_t i;
+
+	if (!filter_set || !filter_set->include_default_rules) return 1;
+
+	for (i = 0; i < sizeof(exclude_prefixes) / sizeof(exclude_prefixes[0]); i++) {
+		if (!wasm2api_export_filter_insert_rule(filter_set, insert_at++, WASM2API_FILTER_EXCLUDE,
+								 WASM2API_FILTER_MATCH_PREFIX,
+								 exclude_prefixes[i]))
+			return 0;
+	}
+	for (i = 0; i < sizeof(exclude_names) / sizeof(exclude_names[0]); i++) {
+		if (!wasm2api_export_filter_insert_rule(filter_set, insert_at++, WASM2API_FILTER_EXCLUDE,
+								 WASM2API_FILTER_MATCH_EXACT,
+								 exclude_names[i]))
+			return 0;
+	}
+	return 1;
+}
+
+static int wasm2api_export_filter_rule_matches(const wasm2api_export_filter_rule_t* rule,
+								   const char* export_name) {
+	size_t pattern_len;
+
+	if (!rule || !export_name || !rule->pattern) return 0;
+	if (rule->match == WASM2API_FILTER_MATCH_EXACT) return strcmp(export_name, rule->pattern) == 0;
+
+	pattern_len = strlen(rule->pattern);
+	return strncmp(export_name, rule->pattern, pattern_len) == 0;
+}
+
+static int wasm2api_export_filter_allows(const wasm2api_export_filter_set_t* filter_set,
+							 const char* export_name) {
+	uint32_t i;
+	int allowed = 1;
+
+	if (!filter_set || !export_name) return 1;
+
+	for (i = 0; i < filter_set->num_rules; i++) {
+		if (!wasm2api_export_filter_rule_matches(&filter_set->rules[i], export_name)) continue;
+		allowed = filter_set->rules[i].action == WASM2API_FILTER_INCLUDE;
+	}
+
+	return allowed;
 }
 
 static int wasm2api_func_name_in_use(const wasm2api_model_t* model, const char* name) {
@@ -608,6 +758,8 @@ static int wasm2api_prescan_bind_imports(wasm_runtime_t* rt,
 
 				if (section_reader.malformed) goto fail;
 			}
+		} else {
+			section_reader.ptr = section_reader.end;
 		}
 
 		if (section_reader.malformed || section_reader.ptr != section_reader.end) goto fail;
@@ -628,6 +780,8 @@ static void wasm2api_free_model(wasm2api_model_t* model) {
 	if (!model) return;
 
 	free(model->api_prefix);
+	free(model->init_export_name);
+	free(model->init_index_field);
 	for (i = 0; i < model->num_funcs; i++) {
 		free(model->funcs[i].export_name);
 		free(model->funcs[i].c_name);
@@ -648,7 +802,9 @@ static void wasm2api_free_model(wasm2api_model_t* model) {
 	memset(model, 0, sizeof(*model));
 }
 
-static int wasm2api_collect_funcs(wasm_module_t* mod, wasm2api_model_t* model) {
+static int wasm2api_collect_funcs(wasm_module_t* mod,
+					  const wasm2api_export_filter_set_t* filter_set,
+					  wasm2api_model_t* model) {
 	uint32_t export_count;
 	uint32_t export_index;
 
@@ -669,6 +825,10 @@ static int wasm2api_collect_funcs(wasm_module_t* mod, wasm2api_model_t* model) {
 		if (wasm_export_kind(mod, export_index) != WASM_EXPORT_FUNC) continue;
 
 		export_name = wasm_export_name(mod, export_index);
+		if (!wasm2api_export_filter_allows(filter_set, export_name)) {
+			model->filtered_funcs++;
+			continue;
+		}
 		func_idx = wasm_export_index(mod, export_index);
 
 		for (param_index = 0; param_index < wasm_func_param_count(mod, func_idx); param_index++) {
@@ -833,13 +993,56 @@ static int wasm2api_collect_imports(wasm_module_t* mod, wasm2api_model_t* model)
 	return 1;
 }
 
-static int wasm2api_collect_model(wasm_module_t* mod, const char* api_prefix,
-									  wasm2api_model_t* out_model) {
+static int wasm2api_collect_model(wasm_module_t* mod,
+							  const char* api_prefix,
+							  const wasm2api_export_filter_set_t* filter_set,
+							  wasm2api_model_t* out_model) {
 	memset(out_model, 0, sizeof(*out_model));
 	out_model->api_prefix = wasm2api_make_identifier(wasm2api_basename(api_prefix));
 	if (!out_model->api_prefix) return 0;
-	if (!wasm2api_collect_funcs(mod, out_model)) return 0;
+	out_model->required_features = mod->required_features;
+	if (!wasm2api_collect_funcs(mod, filter_set, out_model)) return 0;
 	if (!wasm2api_collect_imports(mod, out_model)) return 0;
+	return 1;
+}
+
+static int wasm2api_set_init_func(wasm_module_t* mod,
+						  wasm2api_model_t* model,
+						  const char* export_name) {
+	wasm_export_kind_t export_kind;
+	uint32_t func_index;
+	uint32_t i;
+
+	if (!export_name || !export_name[0]) return 1;
+
+	if (!wasm_find_export(mod, export_name, &export_kind, &func_index)) {
+		fprintf(stderr, "wasm2api: init export '%s' not found\n", export_name);
+		return 0;
+	}
+	if (export_kind != WASM_EXPORT_FUNC) {
+		fprintf(stderr, "wasm2api: init export '%s' is not a function\n", export_name);
+		return 0;
+	}
+	if (wasm_func_param_count(mod, func_index) != 0u || wasm_func_result_count(mod, func_index) != 0u) {
+		fprintf(stderr, "wasm2api: init export '%s' must have signature void(void)\n",
+				export_name);
+		return 0;
+	}
+	for (i = 0; i < model->num_funcs; i++) {
+		if (strcmp(model->funcs[i].export_name, export_name) == 0) break;
+	}
+
+	model->init_export_name = wasm2api_strdup(export_name);
+	if (!model->init_export_name) return 0;
+	model->init_index_field = wasm2api_make_identifier(export_name);
+	if (!model->init_index_field) return 0;
+	{
+		char* next = wasm2api_concat3("idx_init_", model->init_index_field, "");
+		if (!next) return 0;
+		free(model->init_index_field);
+		model->init_index_field = next;
+	}
+	model->has_init_func = 1;
 	return 1;
 }
 
@@ -1062,13 +1265,11 @@ static char* wasm2api_build_fmt_string(const wasm_valtype_t* params, uint32_t nu
 
 static void wasm2api_emit_init_signature(FILE* out, const wasm2api_model_t* model,
 									 int embed_wasm, int with_semicolon) {
-	int has_imports = wasm2api_model_has_import_bindings(model);
-
 	fprintf(out, "%s_ctx_t* %s_%s(", model->api_prefix, model->api_prefix,
 			embed_wasm ? "init_embedded" : "init");
-	fprintf(out, "wasm_runtime_t* rt");
-	if (!embed_wasm) fputs(", const uint8_t* wasm_bytes, size_t len", out);
-	if (has_imports) fprintf(out, ", const %s_imports_t* imports", model->api_prefix);
+	if (!embed_wasm) fputs("const uint8_t* wasm_bytes, size_t len", out);
+	fprintf(out, "%sconst %s_init_options_t* options", embed_wasm ? "" : ", ",
+			model->api_prefix);
 	fputs(")", out);
 	if (with_semicolon) fputs(";\n", out);
 }
@@ -1165,11 +1366,23 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 		fputs("    void* userdata;\n", out);
 		fprintf(out, "} %s_imports_t;\n", model->api_prefix);
 	}
+	fprintf(out, "typedef struct %s_init_options_t {\n", model->api_prefix);
+	fputs("    wasm_runtime_t* runtime;\n", out);
+	fputs("    const wasm_config_t* runtime_config;\n", out);
+	if (has_imports) {
+		fprintf(out, "    const %s_imports_t* imports;\n", model->api_prefix);
+	}
+	fprintf(out, "} %s_init_options_t;\n", model->api_prefix);
 	fputs("\n", out);
+	fprintf(out, "void %s_init_options_default(%s_init_options_t* options);\n",
+			model->api_prefix, model->api_prefix);
 	wasm2api_emit_init_signature(out, model, 0, 1);
 	fprintf(out, "void %s_free(%s_ctx_t* ctx);\n", model->api_prefix, model->api_prefix);
 	fprintf(out, "wasm_module_t* %s_module(%s_ctx_t* ctx);\n", model->api_prefix,
 			model->api_prefix);
+	fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx);\n", model->api_prefix,
+			model->api_prefix);
+	fprintf(out, "uint32_t %s_required_features(void);\n", model->api_prefix);
 	fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx);\n", model->api_prefix,
 			model->api_prefix);
 	fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx);\n", model->api_prefix,
@@ -1226,16 +1439,31 @@ static int wasm2api_write_source(const char* source_path,
 
 	fprintf(out, "struct %s_ctx_t {\n", model->api_prefix);
 	fputs("    wasm_runtime_t* rt;\n", out);
+	fputs("    wasm_runtime_t owned_rt;\n", out);
 	fputs("    wasm_module_t* mod;\n", out);
+	fputs("    wasm_error_t last_error;\n", out);
+	fputs("    char last_error_msg[256];\n", out);
+	fputs("    int owns_runtime;\n", out);
+	fputs("    int runtime_initialized;\n", out);
+	if (model->has_init_func) {
+		fprintf(out, "    uint32_t %s;\n", model->init_index_field);
+	}
 	for (i = 0; i < model->num_funcs; i++) {
 		fprintf(out, "    uint32_t %s;\n", model->funcs[i].index_field);
 	}
 	fputs("};\n\n", out);
 
+	fprintf(out, "static const uint32_t %s_required_features_mask = %uu;\n\n",
+			model->api_prefix, (unsigned)model->required_features);
+
 	fprintf(out,
 			"static void %s_set_error(%s_ctx_t* ctx, wasm_error_t err, const char* message) {\n",
 			model->api_prefix, model->api_prefix);
-	fputs("    if (!ctx || !ctx->rt) return;\n", out);
+	fputs("    if (!ctx) return;\n", out);
+	fputs("    ctx->last_error = err;\n", out);
+	fputs("    snprintf(ctx->last_error_msg, sizeof(ctx->last_error_msg), \"%s\",\n", out);
+	fputs("             message ? message : \"\");\n", out);
+	fputs("    if (!ctx->rt) return;\n", out);
 	fputs("    ctx->rt->last_error = err;\n", out);
 	fputs("    snprintf(ctx->rt->error_msg, sizeof(ctx->rt->error_msg), \"%s\",\n", out);
 	fputs("             message ? message : \"\");\n", out);
@@ -1243,9 +1471,32 @@ static int wasm2api_write_source(const char* source_path,
 
 	fprintf(out, "static void %s_clear_error(%s_ctx_t* ctx) {\n", model->api_prefix,
 			model->api_prefix);
-	fputs("    if (!ctx || !ctx->rt) return;\n", out);
+	fputs("    if (!ctx) return;\n", out);
+	fputs("    ctx->last_error = WASM_OK;\n", out);
+	fputs("    ctx->last_error_msg[0] = '\\0';\n", out);
+	fputs("    if (!ctx->rt) return;\n", out);
 	fputs("    ctx->rt->last_error = WASM_OK;\n", out);
 	fputs("    ctx->rt->error_msg[0] = '\\0';\n", out);
+	fputs("}\n\n", out);
+
+	fprintf(out,
+			"static void %s_capture_runtime_error(%s_ctx_t* ctx, wasm_error_t err, const char* fallback) {\n",
+			model->api_prefix, model->api_prefix);
+	fputs("    const char* message = fallback;\n\n", out);
+	fputs("    if (ctx && ctx->rt && ctx->rt->error_msg[0]) message = ctx->rt->error_msg;\n", out);
+	fputs("    if (!message) message = wasm_error_string(err);\n", out);
+	fprintf(out, "    %s_set_error(ctx, err, message);\n", model->api_prefix);
+	fputs("}\n\n", out);
+
+	fprintf(out, "static void %s_configure_runtime(wasm_runtime_t* rt) {\n", model->api_prefix);
+	fputs("    if (!rt) return;\n", out);
+	fprintf(out, "    rt->enabled_features = %s_required_features_mask;\n", model->api_prefix);
+	fputs("}\n\n", out);
+
+	fprintf(out, "void %s_init_options_default(%s_init_options_t* options) {\n",
+			model->api_prefix, model->api_prefix);
+	fputs("    if (!options) return;\n", out);
+	fputs("    memset(options, 0, sizeof(*options));\n", out);
 	fputs("}\n\n", out);
 
 	for (i = 0; i < model->num_imports; i++) {
@@ -1256,18 +1507,43 @@ static int wasm2api_write_source(const char* source_path,
 	wasm2api_emit_init_signature(out, model, 0, 0);
 	fputs(" {\n", out);
 	fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
-	if (has_imports) fputs("    wasm_error_t err;\n", out);
+	fputs("    wasm_runtime_t* rt = NULL;\n", out);
+	fputs("    const wasm_config_t* runtime_config = NULL;\n", out);
+	fputs("    wasm_error_t err;\n", out);
+	if (has_imports) {
+		fprintf(out, "    const %s_imports_t* imports = NULL;\n", model->api_prefix);
+	}
 	fputs("\n", out);
-	fputs("    if (!rt || !wasm_bytes) return NULL;\n", out);
+	fputs("    if (!wasm_bytes) return NULL;\n", out);
 	fputs("    ctx = (void*)calloc(1u, sizeof(*ctx));\n", out);
 	fputs("    if (!ctx) return NULL;\n", out);
-	fputs("    ctx->rt = rt;\n", out);
+	fputs("    if (options) {\n", out);
+	fputs("        rt = options->runtime;\n", out);
+	fputs("        runtime_config = options->runtime_config;\n", out);
+	if (has_imports) {
+		fputs("        imports = options->imports;\n", out);
+	}
+	fputs("    }\n", out);
+	fputs("    if (rt) {\n", out);
+	fputs("        ctx->rt = rt;\n", out);
+	fputs("    } else {\n", out);
+	fputs("        ctx->rt = &ctx->owned_rt;\n", out);
+	fputs("        err = wasm_init(ctx->rt, runtime_config);\n", out);
+	fputs("        if (err != WASM_OK) {\n", out);
+	fprintf(out, "            %s_capture_runtime_error(ctx, err, \"runtime init failed\");\n",
+			model->api_prefix);
+	fputs("            return ctx;\n", out);
+	fputs("        }\n", out);
+	fputs("        ctx->owns_runtime = 1;\n", out);
+	fputs("        ctx->runtime_initialized = 1;\n", out);
+	fputs("    }\n", out);
+	fputs("    rt = ctx->rt;\n", out);
+	fprintf(out, "    %s_configure_runtime(ctx->rt);\n", model->api_prefix);
 	if (has_imports) {
 		fputs("    if (!imports) {\n", out);
 		fprintf(out, "        %s_set_error(ctx, WASM_ERR_UNKNOWN_IMPORT, \"missing import bindings\");\n",
 				model->api_prefix);
-		fputs("        free(ctx);\n", out);
-		fputs("        return NULL;\n", out);
+		fputs("        return ctx;\n", out);
 		fputs("    }\n", out);
 		for (i = 0; i < model->num_imports; i++) {
 			const wasm2api_import_t* import_entry = &model->imports[i];
@@ -1288,8 +1564,7 @@ static int wasm2api_write_source(const char* source_path,
 			fprintf(out, "        %s_set_error(ctx, WASM_ERR_UNKNOWN_IMPORT, ", model->api_prefix);
 			wasm2api_write_c_string(out, full_message);
 			fputs(");\n", out);
-			fputs("        free(ctx);\n", out);
-			fputs("        return NULL;\n", out);
+			fputs("        return ctx;\n", out);
 			fputs("    }\n", out);
 			free(full_message);
 		}
@@ -1311,7 +1586,12 @@ static int wasm2api_write_source(const char* source_path,
 				wasm2api_write_c_string(out, fmt);
 				fprintf(out, ", %s_%s, (void*)imports);\n", model->api_prefix,
 						import_entry->dispatch_name);
-				fputs("    if (err != WASM_OK) { free(ctx); return NULL; }\n", out);
+				fputs("    if (err != WASM_OK) {\n", out);
+				fprintf(out,
+						"        %s_capture_runtime_error(ctx, err, \"failed to bind host import\");\n",
+						model->api_prefix);
+				fputs("        return ctx;\n", out);
+				fputs("    }\n", out);
 				free(fmt);
 			} else if (import_entry->kind == WASM_IMPORT_GLOBAL) {
 				fputs("    {\n", out);
@@ -1337,17 +1617,35 @@ static int wasm2api_write_source(const char* source_path,
 						import_entry->global_is_mutable ? 1 : 0);
 				fprintf(out, "        global_imp.value = imports->%s;\n", import_entry->field_name);
 				fputs("        err = wasm_register_global_import(rt, &global_imp);\n", out);
-				fputs("        if (err != WASM_OK) { free(ctx); return NULL; }\n", out);
+				fputs("        if (err != WASM_OK) {\n", out);
+				fprintf(out,
+						"            %s_capture_runtime_error(ctx, err, \"failed to bind global import\");\n",
+						model->api_prefix);
+				fputs("            return ctx;\n", out);
+				fputs("        }\n", out);
 				fputs("    }\n", out);
 			}
 		}
 	}
-	fputs("    ctx->mod = wasm_load(rt, wasm_bytes, len);\n", out);
+	fputs("    ctx->mod = wasm_load(ctx->rt, wasm_bytes, len);\n", out);
 	fputs("    if (!ctx->mod) {\n", out);
-	fputs("        free(ctx);\n", out);
-	fputs("        return NULL;\n", out);
+	fprintf(out, "        %s_capture_runtime_error(ctx, ctx->rt->last_error, \"failed to load module\");\n",
+			model->api_prefix);
+	fputs("        return ctx;\n", out);
 	fputs("    }\n", out);
 	fputs("    wasm_module_set_userdata(ctx->mod, ctx);\n", out);
+	if (model->has_init_func) {
+		fputs("    if (!wasm_find_export(ctx->mod, ", out);
+		wasm2api_write_c_string(out, model->init_export_name);
+		fprintf(out,
+				", NULL, &ctx->%s)) {\n"
+				"        %s_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, \"init export missing\");\n"
+				"        wasm_free_module(ctx->mod);\n"
+				"        ctx->mod = NULL;\n"
+				"        return ctx;\n"
+				"    }\n",
+				model->init_index_field, model->api_prefix);
+	}
 	for (i = 0; i < model->num_funcs; i++) {
 		fputs("    if (!wasm_find_export(ctx->mod, ", out);
 		wasm2api_write_c_string(out, model->funcs[i].export_name);
@@ -1355,10 +1653,21 @@ static int wasm2api_write_source(const char* source_path,
 				", NULL, &ctx->%s)) {\n"
 				"        %s_set_error(ctx, WASM_ERR_UNDEFINED_EXPORT, \"cached export missing\");\n"
 				"        wasm_free_module(ctx->mod);\n"
-				"        free(ctx);\n"
-				"        return NULL;\n"
+				"        ctx->mod = NULL;\n"
+				"        return ctx;\n"
 				"    }\n",
 				model->funcs[i].index_field, model->api_prefix);
+	}
+	if (model->has_init_func) {
+		fprintf(out,
+				"    err = wasm_call_index(ctx->mod, ctx->%s, NULL, 0, NULL, 0);\n"
+				"    if (err != WASM_OK) {\n"
+				"        %s_capture_runtime_error(ctx, err, \"module init export failed\");\n"
+				"        wasm_free_module(ctx->mod);\n"
+				"        ctx->mod = NULL;\n"
+				"        return ctx;\n"
+				"    }\n",
+				model->init_index_field, model->api_prefix);
 	}
 	fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
 	fputs("    return ctx;\n", out);
@@ -1367,6 +1676,8 @@ static int wasm2api_write_source(const char* source_path,
 	fprintf(out, "void %s_free(%s_ctx_t* ctx) {\n", model->api_prefix, model->api_prefix);
 	fputs("    if (!ctx) return;\n", out);
 	fputs("    if (ctx->mod) wasm_free_module(ctx->mod);\n", out);
+	fputs("    if (ctx->owns_runtime && ctx->runtime_initialized) wasm_destroy(&ctx->owned_rt);\n",
+		out);
 	fputs("    free(ctx);\n", out);
 	fputs("}\n\n", out);
 
@@ -1375,10 +1686,19 @@ static int wasm2api_write_source(const char* source_path,
 	fputs("    return ctx ? ctx->mod : NULL;\n", out);
 	fputs("}\n\n", out);
 
+	fprintf(out, "wasm_runtime_t* %s_runtime(%s_ctx_t* ctx) {\n", model->api_prefix,
+			model->api_prefix);
+	fputs("    return ctx ? ctx->rt : NULL;\n", out);
+	fputs("}\n\n", out);
+
+	fprintf(out, "uint32_t %s_required_features(void) {\n", model->api_prefix);
+	fprintf(out, "    return %s_required_features_mask;\n", model->api_prefix);
+	fputs("}\n\n", out);
+
 	fprintf(out, "wasm_error_t %s_last_error(const %s_ctx_t* ctx) {\n", model->api_prefix,
 			model->api_prefix);
-	fputs("    if (!ctx || !ctx->rt) return WASM_ERR_MALFORMED;\n", out);
-	fputs("    return ctx->rt->last_error;\n", out);
+	fputs("    if (!ctx) return WASM_ERR_MALFORMED;\n", out);
+	fputs("    return ctx->last_error;\n", out);
 	fputs("}\n\n", out);
 
 	fprintf(out, "const char* %s_last_error_string(const %s_ctx_t* ctx) {\n", model->api_prefix,
@@ -1388,8 +1708,8 @@ static int wasm2api_write_source(const char* source_path,
 
 	fprintf(out, "const char* %s_last_error_message(const %s_ctx_t* ctx) {\n", model->api_prefix,
 			model->api_prefix);
-	fputs("    if (!ctx || !ctx->rt) return \"invalid context\";\n", out);
-	fputs("    return ctx->rt->error_msg;\n", out);
+	fputs("    if (!ctx) return \"invalid context\";\n", out);
+	fputs("    return ctx->last_error_msg;\n", out);
 	fputs("}\n\n", out);
 
 	if (embed_wasm) {
@@ -1401,9 +1721,9 @@ static int wasm2api_write_source(const char* source_path,
 		wasm2api_emit_init_signature(out, model, 1, 0);
 		fputs(" {\n", out);
 		fputs("    return ", out);
-		fprintf(out, "%s_init(rt, %s_embedded_wasm_data, %s_embedded_wasm_len",
+		fprintf(out, "%s_init(%s_embedded_wasm_data, %s_embedded_wasm_len",
 				model->api_prefix, model->api_prefix, model->api_prefix);
-		if (has_imports) fputs(", imports", out);
+		fputs(", options", out);
 		fputs(");\n", out);
 		fputs("}\n\n", out);
 	}
@@ -1455,12 +1775,16 @@ static int wasm2api_write_source(const char* source_path,
 				(unsigned)func->num_results);
 
 		if (func->num_results == 1u) {
-			fputs("    if (err != WASM_OK) return ret;\n", out);
+			fprintf(out,
+					"    if (err != WASM_OK) { %s_capture_runtime_error(ctx, err, NULL); return ret; }\n",
+					model->api_prefix);
 			wasm2api_emit_result_write(out, func->results[0], 0u, "ret");
 			fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
 			fputs("    return ret;\n", out);
 		} else {
-			fputs("    if (err != WASM_OK) return;\n", out);
+			fprintf(out,
+					"    if (err != WASM_OK) { %s_capture_runtime_error(ctx, err, NULL); return; }\n",
+					model->api_prefix);
 			for (result_index = 0; result_index < func->num_results; result_index++) {
 				char target[32];
 
@@ -1482,6 +1806,7 @@ static int wasm2api_write_source(const char* source_path,
 
 int main(int argc, char** argv) {
 	const char* input_path = NULL;
+	const char* init_func_name = NULL;
 	char* output_prefix = NULL;
 	char* derived_prefix = NULL;
 	char* header_path = NULL;
@@ -1493,6 +1818,7 @@ int main(int argc, char** argv) {
 	wasm_module_t* mod = NULL;
 	wasm2api_model_t model;
 	wasm2api_prescan_t prescan;
+	wasm2api_export_filter_set_t export_filters;
 	wasm_error_t err;
 	int embed_wasm = 0;
 	int i;
@@ -1500,6 +1826,7 @@ int main(int argc, char** argv) {
 
 	memset(&model, 0, sizeof(model));
 	memset(&prescan, 0, sizeof(prescan));
+	wasm2api_export_filter_set_init(&export_filters);
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -1508,6 +1835,40 @@ int main(int argc, char** argv) {
 		}
 		if (strcmp(argv[i], "--embed") == 0) {
 			embed_wasm = 1;
+			continue;
+		}
+		if (strcmp(argv[i], "--all-exports") == 0) {
+			export_filters.include_default_rules = 0;
+			continue;
+		}
+		if (strcmp(argv[i], "--include-export") == 0 ||
+			strcmp(argv[i], "--include-prefix") == 0 ||
+			strcmp(argv[i], "--exclude-export") == 0 ||
+			strcmp(argv[i], "--exclude-prefix") == 0) {
+			wasm2api_export_filter_action_t action;
+			wasm2api_export_filter_match_t match;
+
+			if (i + 1 >= argc) {
+				wasm2api_usage(stderr, argv[0]);
+				return 1;
+			}
+
+			action = (strncmp(argv[i], "--include", 9) == 0) ? WASM2API_FILTER_INCLUDE
+														 : WASM2API_FILTER_EXCLUDE;
+			match = strstr(argv[i], "prefix") ? WASM2API_FILTER_MATCH_PREFIX
+												 : WASM2API_FILTER_MATCH_EXACT;
+			if (!wasm2api_export_filter_add_rule(&export_filters, action, match, argv[++i])) {
+				fprintf(stderr, "wasm2api: failed to allocate export filter\n");
+				goto cleanup;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--init-func") == 0) {
+			if (i + 1 >= argc) {
+				wasm2api_usage(stderr, argv[0]);
+				return 1;
+			}
+			init_func_name = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "-o") == 0) {
@@ -1553,6 +1914,10 @@ int main(int argc, char** argv) {
 	header_include = wasm2api_basename(header_path);
 
 	if (!wasm2api_read_file(input_path, &wasm_bytes, &wasm_len)) goto cleanup;
+	if (!wasm2api_export_filter_add_default_rules(&export_filters)) {
+		fprintf(stderr, "wasm2api: failed to allocate default export filters\n");
+		goto cleanup;
+	}
 
 	err = wasm_init(&rt, NULL);
 	if (err != WASM_OK) {
@@ -1571,10 +1936,11 @@ int main(int argc, char** argv) {
 		goto cleanup_runtime;
 	}
 
-	if (!wasm2api_collect_model(mod, output_prefix, &model)) {
+	if (!wasm2api_collect_model(mod, output_prefix, &export_filters, &model)) {
 		fprintf(stderr, "wasm2api: failed to inspect module\n");
 		goto cleanup_runtime;
 	}
+	if (!wasm2api_set_init_func(mod, &model, init_func_name)) goto cleanup_runtime;
 
 	if (!wasm2api_write_header(header_path, &model, embed_wasm)) goto cleanup_runtime;
 	if (!wasm2api_write_source(source_path, header_include, &model, embed_wasm, wasm_bytes,
@@ -1582,11 +1948,13 @@ int main(int argc, char** argv) {
 		goto cleanup_runtime;
 
 	fprintf(stdout,
-			"generated %s and %s (%u wrapper%s, %u import binding%s, %u skipped export%s%s)\n",
+			"generated %s and %s (%u wrapper%s, %u import binding%s, %u filtered export%s, %u skipped export%s%s)\n",
 			header_path, source_path,
 			(unsigned)model.num_funcs, model.num_funcs == 1u ? "" : "s",
 			(unsigned)(model.num_func_imports + model.num_global_imports),
 			(model.num_func_imports + model.num_global_imports) == 1u ? "" : "s",
+			(unsigned)model.filtered_funcs,
+			model.filtered_funcs == 1u ? "" : "s",
 			(unsigned)model.skipped_funcs,
 			model.skipped_funcs == 1u ? "" : "s",
 			embed_wasm ? ", embedded wasm" : "");
@@ -1598,6 +1966,7 @@ cleanup_runtime:
 	wasm2api_prescan_free(&prescan);
 
 cleanup:
+	wasm2api_export_filter_set_free(&export_filters);
 	wasm2api_free_model(&model);
 	free(wasm_bytes);
 	free(header_path);

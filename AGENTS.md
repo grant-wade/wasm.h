@@ -27,7 +27,7 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 - Configure: `cmake -S . -B build`
 - Main validation pass: `cmake --build build --target check`
-- Focused native targets: `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `basic_add_demo`
+- Focused native targets: `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`
 - Emscripten fixtures: `wasm-emcc-build`, `wasm-emcc-run`, `wasm-emcc-run-strict`
 - Spectest targets exist only when system `wasm-tools` provides both `json-from-wast` and `parse`.
 

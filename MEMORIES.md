@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 5
+Memory Version: 6
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -52,6 +52,9 @@ This file is the canonical checked-in snapshot of repo memory.
 ## wasm2api.md
 
 - `wasm2api.c` generates `<prefix>.h` and `<prefix>.c` wrappers from a `.wasm` module by inspecting exports and imports through `wasm.h`.
+- Generated wrappers own a runtime by default and expose an `*_init_options_t` path for callers that want to supply their own runtime, config, or imports.
+- `--init-func <export>` validates a `void(void)` export and invokes it automatically after load.
+- Export collection now applies built-in filters for common Emscripten / LLVM noise by default; `--all-exports` disables those defaults, and user include/exclude exact or prefix rules can override or extend them.
 - Generated export wrappers currently support `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported parameter or result types are skipped with diagnostics.
 - Generated code caches export indices, exposes lifecycle and `last_error*` helpers, and maps multi-value returns to output pointers.
 - If the module imports host functions or globals, the generated header includes a `<prefix>_imports_t` struct and the init path binds those imports.

@@ -1,0 +1,38 @@
+#include <stdint.h>
+
+static int32_t g_bias;
+static int32_t g_total;
+static int32_t g_initialized;
+
+void init_state(void) {
+	g_bias = 7;
+	g_total = 100;
+	g_initialized = 1;
+}
+
+int32_t ready(void) {
+	return g_initialized;
+}
+
+int32_t add_scaled(int32_t lhs, int32_t rhs) {
+	int32_t value = lhs * 2 + rhs + g_bias;
+
+	g_total += value;
+	return g_total;
+}
+
+void set_bias(int32_t bias) {
+	g_bias = bias;
+}
+
+int32_t get_bias(void) {
+	return g_bias;
+}
+
+int32_t get_total(void) {
+	return g_total;
+}
+
+void reset_total(void) {
+	g_total = 0;
+}
