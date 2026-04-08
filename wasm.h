@@ -12636,6 +12636,7 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0x0C:
         case 0x0D:
         case 0x10:
+        case 0x12:
         case 0x14:
         case 0x15:
         case 0x18:
@@ -12697,6 +12698,7 @@ static void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
             break;
         }
         case 0x11:
+        case 0x13:
             wasm__read_leb128_u32(r);
             wasm__read_leb128_u32(r);
             break;

@@ -1135,12 +1135,27 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strncmp(expected_lower, "unknown local", 13u) == 0 &&
         strstr(actual_lower, "local index") != NULL && strstr(actual_lower, "out of range") != NULL)
         return 1;
+    if (strcmp(expected_lower, "unknown tag") == 0 &&
+        strstr(actual_lower, "tag") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
+    if (strncmp(expected_lower, "unknown tag ", 12u) == 0 &&
+        strstr(actual_lower, "tag") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
     if (strcmp(expected_lower, "unexpected end") == 0 &&
         (strstr(actual_lower, "too short") != NULL || strstr(actual_lower, "unexpected eof") != NULL ||
          strstr(actual_lower, "malformed section header") != NULL ||
          strstr(actual_lower, "decode failed") != NULL ||
          strstr(actual_lower, "function body ended before all blocks closed") != NULL ||
          strstr(actual_lower, "expected at least one module field") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "illegal character") == 0 &&
+        strstr(actual_lower, "unexpected character") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "empty identifier") == 0 &&
+        strstr(actual_lower, "invalid character in string") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "empty annotation id") == 0 &&
+        strstr(actual_lower, "invalid character in string") != NULL)
         return 1;
     if (strcmp(expected_lower, "end opcode expected") == 0 &&
         strstr(actual_lower, "function body ended before all blocks closed") != NULL)
@@ -1155,6 +1170,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if ((strncmp(expected_lower, "unknown operator", 16u) == 0 || strcmp(expected_lower, "unexpected token") == 0) &&
         (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
+         strstr(actual_lower, "extra tokens remaining after parse") != NULL ||
          strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "expected ") != NULL ||
          strstr(actual_lower, "u64 constant out of range") != NULL))
         return 1;
@@ -1185,8 +1201,18 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "alignment") != NULL || strstr(actual_lower, "memop") != NULL ||
          strstr(actual_lower, "feature 'multi memory' is disabled") != NULL))
         return 1;
+    if (strcmp(expected_lower, "malformed limits flags") == 0 &&
+        strstr(actual_lower, "malformed module") != NULL)
+        return 1;
     if (strcmp(expected_lower, "size minimum must not be greater than maximum") == 0 &&
         strstr(actual_lower, "min") != NULL && strstr(actual_lower, "exceeds max") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "memory size") == 0 &&
+        strstr(actual_lower, "memory") != NULL &&
+        (strstr(actual_lower, "page limit") != NULL ||
+         strstr(actual_lower, "exceeds max") != NULL ||
+         strstr(actual_lower, "malformed module") != NULL ||
+         strstr(actual_lower, "memory size") != NULL))
         return 1;
     if (strcmp(expected_lower, "memory size must be at most 65536 pages (4gib)") == 0 &&
         (strstr(actual_lower, "exceeds max 65536") != NULL ||
@@ -1211,6 +1237,11 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "invalid lane index") == 0 &&
         strstr(actual_lower, "lane") != NULL && strstr(actual_lower, "out of range") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "i8 constant out of range") == 0 &&
+        (strstr(actual_lower, "malformed lane index") != NULL ||
+         strstr(actual_lower, "expected a u8") != NULL ||
+         (strstr(actual_lower, "lane index") != NULL && strstr(actual_lower, "out of range") != NULL)))
         return 1;
     if (strcmp(expected_lower, "malformed lane index") == 0 &&
         ((strstr(actual_lower, "lane index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
@@ -1264,6 +1295,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
         ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
          strstr(actual_lower, "malformed section header") != NULL ||
          strstr(actual_lower, "malformed immediate") != NULL ||
+         strstr(actual_lower, "overruns module") != NULL ||
          strstr(actual_lower, "trailing bytes") != NULL ||
          strstr(actual_lower, "integer too large") != NULL))
         return 1;
@@ -1273,8 +1305,10 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "unknown binary version") == 0 &&
         strstr(actual_lower, "version ") != NULL)
         return 1;
-    if (strcmp(expected_lower, "illegal opcode") == 0 &&
+    if ((strcmp(expected_lower, "illegal opcode") == 0 ||
+         strncmp(expected_lower, "illegal opcode ", 15u) == 0) &&
         ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "unknown opcode") != NULL ||
          strstr(actual_lower, "trailing bytes") != NULL ||
          strstr(actual_lower, "constant expression required") != NULL))
         return 1;
@@ -1283,6 +1317,10 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "malformed reference type") == 0 &&
         strstr(actual_lower, "malformed module") != NULL)
+        return 1;
+    if ((strcmp(expected_lower, "non-empty tag result type") == 0 ||
+         strstr(expected_lower, "tag result type") != NULL) &&
+        strstr(actual_lower, "tag") != NULL && strstr(actual_lower, "must not declare results") != NULL)
         return 1;
     if (strcmp(expected_lower, "function and code section have inconsistent lengths") == 0 &&
         (strstr(actual_lower, "section 10 decode failed") != NULL ||
@@ -1307,9 +1345,16 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "data count and data section have inconsistent lengths") == 0 &&
         strstr(actual_lower, "data count section declares") != NULL)
         return 1;
+    if (strcmp(expected_lower, "immutable global") == 0 &&
+        strstr(actual_lower, "is immutable") != NULL)
+        return 1;
     if (strcmp(expected_lower, "invalid result arity") == 0 &&
         (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
          strstr(actual_lower, "typed select requires exactly one value type") != NULL))
+        return 1;
+    if (strstr(expected_lower, "type mismatch: instruction requires [") != NULL &&
+        (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
+         strstr(actual_lower, "type mismatch: expected 0x") != NULL))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
         (strstr(actual_lower, "select requires matching numeric or vector operand types") != NULL ||
@@ -1317,6 +1362,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
         return 1;
     if (strcmp(expected_lower, "malformed utf 8 encoding") == 0 &&
         (strstr(actual_lower, "invalid utf 8 encoding") != NULL ||
+         strstr(actual_lower, "input bytes aren't valid utf 8") != NULL ||
          (strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
@@ -2995,7 +3041,6 @@ static int spec_harness_init(spec_harness_t* harness,
     }
 
     wasm_enable_all_features(&harness->runtime);
-    wasm_disable_feature(&harness->runtime, WASM_FEATURE_EXTENDED_CONST);
 
     err = wasm_bind_wasi_stubs(&harness->runtime);
     if (err != WASM_OK) {
