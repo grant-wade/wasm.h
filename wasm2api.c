@@ -309,23 +309,73 @@ static int wasm2api_func_name_in_use(const wasm2api_model_t* model, const char* 
 	return 0;
 }
 
+static int wasm2api_func_name_is_reserved(const wasm2api_model_t* model, const char* name) {
+	static const char* reserved_names[] = {
+		"init_options_default",
+		"init",
+		"free",
+		"module",
+		"runtime",
+		"required_features",
+		"last_error",
+		"last_error_string",
+		"last_error_message",
+		"embedded_wasm",
+		"init_embedded",
+		"set_error",
+		"clear_error",
+		"capture_runtime_error",
+		"configure_runtime"
+	};
+	uint32_t i;
+
+	if (!name || !name[0]) return 1;
+
+	for (i = 0; i < (uint32_t)(sizeof(reserved_names) / sizeof(reserved_names[0])); i++) {
+		if (strcmp(reserved_names[i], name) == 0) return 1;
+	}
+
+	for (i = 0; i < model->num_imports; i++) {
+		if (!model->imports[i].dispatch_name) continue;
+		if (strcmp(model->imports[i].dispatch_name, name) == 0) return 1;
+	}
+
+	return 0;
+}
+
+static int wasm2api_func_name_conflicts(const wasm2api_model_t* model, const char* name) {
+	if (wasm2api_func_name_in_use(model, name)) return 1;
+	return wasm2api_func_name_is_reserved(model, name);
+}
+
 static char* wasm2api_make_unique_func_name(const wasm2api_model_t* model, const char* base) {
 	uint32_t suffix = 2u;
-	char* candidate = wasm2api_strdup(base);
+	char* unique_base = NULL;
+	char* candidate;
 
-	if (!candidate) return NULL;
-	while (wasm2api_func_name_in_use(model, candidate)) {
+	if (!base || !base[0]) return NULL;
+
+	if (!wasm2api_func_name_conflicts(model, base)) return wasm2api_strdup(base);
+
+	unique_base = wasm2api_concat3("export_", base, "");
+	if (!unique_base) return NULL;
+	if (!wasm2api_func_name_conflicts(model, unique_base)) return unique_base;
+
+	candidate = NULL;
+	while (1) {
 		char suffix_buf[32];
 		char* next;
 
 		free(candidate);
 		snprintf(suffix_buf, sizeof(suffix_buf), "_%u", (unsigned)suffix++);
-		next = wasm2api_concat3(base, suffix_buf, "");
+		next = wasm2api_concat3(unique_base, suffix_buf, "");
 		if (!next) return NULL;
+		if (!wasm2api_func_name_conflicts(model, next)) {
+			free(unique_base);
+			return next;
+		}
 		candidate = next;
 	}
-
-	return candidate;
 }
 
 static int wasm2api_import_field_in_use(const wasm2api_model_t* model, const char* name) {
@@ -1001,8 +1051,8 @@ static int wasm2api_collect_model(wasm_module_t* mod,
 	out_model->api_prefix = wasm2api_make_identifier(wasm2api_basename(api_prefix));
 	if (!out_model->api_prefix) return 0;
 	out_model->required_features = mod->required_features;
-	if (!wasm2api_collect_funcs(mod, filter_set, out_model)) return 0;
 	if (!wasm2api_collect_imports(mod, out_model)) return 0;
+	if (!wasm2api_collect_funcs(mod, filter_set, out_model)) return 0;
 	return 1;
 }
 
