@@ -109,9 +109,12 @@ wasm_config_t cfg = {
 	.max_labels        = 4096,
 	.initial_gc_heap_size = 1 << 20,
 	.frame_arena_size  = 1 << 16,
+	.lazy_validation   = 1,
 };
 wasm_init(&rt, &cfg);
 ```
+
+Set `lazy_validation` to defer per-function body validation until first execution. The default is `0`, which preserves eager whole-module validation.
 
 ### Custom allocators
 

@@ -7028,6 +7028,9 @@ WL_TEST(test_runtime_config_defaults) {
                  "expected default frame arena size %zu, got %zu",
                  (size_t)WASM_FRAME_ARENA_SIZE,
                  cfg.frame_arena_size);
+    WL_CHECK_MSG(t, cfg.lazy_validation == 0,
+                 "expected default lazy_validation 0, got %d",
+                 cfg.lazy_validation);
 
     wasm_init(&rt);
     WL_CHECK_MSG(t, rt.max_stack == cfg.max_stack_values,
@@ -7054,6 +7057,9 @@ WL_TEST(test_runtime_config_defaults) {
                  "expected frame arena size %zu, got %zu",
                  cfg.frame_arena_size,
                  rt.frame_arena_size);
+    WL_CHECK_MSG(t, rt.lazy_validation == 0,
+                 "expected runtime lazy_validation 0, got %d",
+                 rt.lazy_validation);
     wasm_destroy(&rt);
 }
 
@@ -7067,6 +7073,7 @@ WL_TEST(test_runtime_config_custom_allocations) {
     cfg.max_labels = 8;
     cfg.initial_gc_heap_size = 256;
     cfg.frame_arena_size = 64;
+    cfg.lazy_validation = 1;
 
     wasm_init_config(&rt, &cfg);
     WL_CHECK_MSG(t, rt.max_stack == 32, "expected max_stack 32, got %u", (unsigned)rt.max_stack);
@@ -7078,6 +7085,9 @@ WL_TEST(test_runtime_config_custom_allocations) {
     WL_CHECK_MSG(t, rt.frame_arena_size == 64,
                  "expected frame_arena_size 64, got %zu",
                  rt.frame_arena_size);
+    WL_CHECK_MSG(t, rt.lazy_validation == 1,
+                 "expected lazy_validation 1, got %d",
+                 rt.lazy_validation);
     WL_CHECK_MSG(t, rt.stack != NULL, "%s", "expected configured value stack allocation");
     WL_CHECK_MSG(t, rt.call_frames != NULL, "%s", "expected configured call frame allocation");
     WL_CHECK_MSG(t, rt.backtrace_func_indices != NULL, "%s", "expected configured backtrace function buffer");
@@ -7626,6 +7636,151 @@ WL_TEST(test_validation_rejects_stack_type_errors) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected stack type error to fail validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_lazy_validation_defers_body_errors_until_first_call) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+    wasm_value_t result = { 0 };
+    wasm_error_t err;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x7F);
+
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 2);
+        emit_export_func(&sec, "good", 0);
+        emit_export_func(&sec, "bad", 1);
+        emit_section(&mod, 7, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t good = { 0 };
+        wasm_builder_t bad = { 0 };
+
+        emit_leb128_u32(&sec, 2);
+
+        emit_leb128_u32(&good, 0);
+        emit(&good, 0x41);
+        emit_leb128_i32(&good, 7);
+        emit(&good, 0x0B);
+        emit_leb128_u32(&sec, good.len);
+        emit_bytes(&sec, good.buf, good.len);
+
+        emit_leb128_u32(&bad, 0);
+        emit(&bad, 0x41);
+        emit_leb128_i32(&bad, 1);
+        emit(&bad, 0x6A);
+        emit(&bad, 0x0B);
+        emit_leb128_u32(&sec, bad.len);
+        emit_bytes(&sec, bad.buf, bad.len);
+
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_config_default(&cfg);
+    cfg.lazy_validation = 1;
+    wasm_init_config(&rt, &cfg);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    err = wasm_call(m, "good", NULL, 0, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_OK, "expected good export to run, got %d (%s)", (int)err, rt.error_msg);
+    WL_CHECK_MSG(t, result.of.i32 == 7, "expected good export result 7, got %d", result.of.i32);
+
+    err = wasm_call(m, "bad", NULL, 0, NULL, 0);
+    WL_CHECK_MSG(t, err != WASM_OK, "%s", "expected bad export to fail deferred validation");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_lazy_validation_still_runs_startup_bodies_at_load) {
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+
+    emit_header(&mod);
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x60);
+        emit_leb128_u32(&sec, 0);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 1, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 8, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        wasm_builder_t body = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&body, 0);
+        emit(&body, 0x41);
+        emit_leb128_i32(&body, 1);
+        emit(&body, 0x6A);
+        emit(&body, 0x0B);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    wasm_config_default(&cfg);
+    cfg.lazy_validation = 1;
+    wasm_init_config(&rt, &cfg);
+
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected invalid start body to fail during load under lazy validation");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
 }
@@ -13813,6 +13968,8 @@ int main(void) {
         { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
         { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
         { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },
+        { "runtime config: lazy validation defers body checks until first call", test_lazy_validation_defers_body_errors_until_first_call },
+        { "runtime config: lazy validation still validates startup bodies at load", test_lazy_validation_still_runs_startup_bodies_at_load },
         { "runtime config: call depth limit drives captured backtraces", test_runtime_config_limits_call_depth_and_backtrace },
         { "runtime: frame arena alloc/reset/destroy are well-formed", test_frame_arena_allocator },
         { "runtime: top-level execution grows the frame arena for validated modules", test_runtime_grows_frame_arena_for_execution },

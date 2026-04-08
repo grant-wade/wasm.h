@@ -708,6 +708,7 @@ typedef struct wasm_config_t {
     uint32_t max_labels;
     size_t initial_gc_heap_size;
     size_t frame_arena_size;
+    int lazy_validation;
 } wasm_config_t;
 
 struct wasm_runtime_t {
@@ -736,6 +737,7 @@ struct wasm_runtime_t {
     uint64_t fuel;
     int fuel_enabled;
     uint32_t enabled_features;
+    int lazy_validation;
     wasm_error_t last_error;
     char error_msg[256];
     wasm__exception_state_t pending_exception;
@@ -8401,6 +8403,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->max_labels = WASM_MAX_LABELS;
     config->initial_gc_heap_size = (size_t)WASM_GC_HEAP_SIZE;
     config->frame_arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
+    config->lazy_validation = 0;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -8472,6 +8475,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
     rt->max_call_frames = cfg.max_call_depth;
     rt->max_labels = cfg.max_labels;
+    rt->lazy_validation = cfg.lazy_validation != 0;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
@@ -13635,6 +13639,9 @@ done:
 
 static wasm_error_t wasm__validate_code(wasm_module_t* mod) {
     uint32_t i;
+
+    if (mod->rt && mod->rt->lazy_validation) return WASM_OK;
+
     for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
         wasm_error_t err = wasm__validate_function(mod, i);
         if (err != WASM_OK) return err;
@@ -13644,6 +13651,43 @@ static wasm_error_t wasm__validate_code(wasm_module_t* mod) {
                                           "data count section is required when memory.init or data.drop is used");
     }
     return WASM_OK;
+}
+
+static wasm_error_t wasm__build_control_targets(wasm_func_t* func);
+
+static wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t func_idx) {
+    wasm_func_t* func;
+    wasm_error_t err;
+
+    if (!mod || func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
+
+    func = &mod->funcs[func_idx];
+    if (func->is_import) return WASM_OK;
+
+    if (func->max_label_depth == 0) {
+        err = wasm__validate_function(mod, func_idx);
+        if (err != WASM_OK) return err;
+    }
+
+    if (mod->uses_data_count_section && !mod->has_data_count_section) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "data count section is required when memory.init or data.drop is used");
+    }
+
+    if (func->control_targets) return WASM_OK;
+
+    err = wasm__build_control_targets(func);
+    if (err == WASM_OK) return WASM_OK;
+
+    if (mod->rt && mod->rt->last_error == WASM_OK) {
+        if (err == WASM_ERR_OOM)
+            WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate control targets");
+        else
+            (void)wasm__set_validation_error(mod->rt, func_idx, 0,
+                                             "failed to build control targets");
+    }
+
+    return err;
 }
 
 static wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod);
@@ -13815,9 +13859,11 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         WASM__LOAD_FAIL("validate_code");
     }
 
-    err = wasm__build_module_control_targets(mod);
-    if (err != WASM_OK) {
-        WASM__LOAD_FAIL("build_control_targets");
+    if (!rt->lazy_validation) {
+        err = wasm__build_module_control_targets(mod);
+        if (err != WASM_OK) {
+            WASM__LOAD_FAIL("build_control_targets");
+        }
     }
 
     err = wasm__check_unresolved_function_imports(mod);
@@ -13982,7 +14028,14 @@ static int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out)
     for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
         wasm_func_t* func = &mod->funcs[i];
         size_t frame_bytes;
-        uint32_t max_labels = func->max_label_depth ? func->max_label_depth : 1u;
+        uint32_t max_labels = func->max_label_depth;
+
+        if (max_labels == 0) {
+            if (mod->rt && mod->rt->lazy_validation)
+                max_labels = mod->rt->max_labels;
+            else
+                max_labels = 1u;
+        }
 
         if (!wasm__frame_storage_size(func->num_locals, max_labels, &frame_bytes)) return 0;
         if (frame_bytes > max_frame_bytes) max_frame_bytes = frame_bytes;
@@ -14517,6 +14570,14 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_ERR_MALFORMED;
+    err = wasm__prepare_function(mod, func_idx);
+    if (err != WASM_OK) return err;
+
+    if (rt->call_frame_sp == 0) {
+        err = wasm__ensure_module_frame_arena(mod);
+        if (err != WASM_OK) return err;
+    }
+
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
     max_labels = func->max_label_depth ? func->max_label_depth : 1;
@@ -14970,6 +15031,7 @@ static wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
     uint32_t i;
 
     if (!func->code || func->code_len == 0) return WASM_OK;
+    if (func->control_targets) return WASM_OK;
 
     targets = (wasm__control_target_t*)WASM_MALLOC(func->code_len * sizeof(wasm__control_target_t));
     if (!targets) return WASM_ERR_OOM;
@@ -15076,7 +15138,7 @@ static wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod) {
     uint32_t i;
 
     for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
-        wasm_error_t err = wasm__build_control_targets(&mod->funcs[i]);
+        wasm_error_t err = wasm__prepare_function(mod, i);
         if (err != WASM_OK) return err;
     }
 
