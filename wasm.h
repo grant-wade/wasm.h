@@ -553,6 +553,7 @@ typedef struct wasm_elem_segment_t {
     uint32_t num_elems;
     uint32_t table_index;
     uint64_t offset;
+    int uses_expr;
     int is_passive;
     int is_declarative;
     int is_dropped;
@@ -561,7 +562,7 @@ typedef struct wasm_elem_segment_t {
 /* ── Linear memory ────────────────────────────────────────────────── */
 #define WASM_PAGE_SIZE 65536u
 #define WASM_MEMORY32_MAX_PAGES 65536u
-#define WASM_MEMORY64_MAX_PAGES (UINT64_MAX / (uint64_t)WASM_PAGE_SIZE)
+#define WASM_MEMORY64_MAX_PAGES (UINT64_C(1) << 48)
 
 typedef struct wasm_memory_t {
     uint8_t* data;
@@ -2785,10 +2786,29 @@ static int wasm__runtime_value_matches_type(const wasm_module_t* mod,
     }
     if (effective_expected.type == WASM_TYPE_VOID) effective_expected.type = expected_type;
 
-    if (actual_ref.nullable && effective_expected.nullable) return 1;
-
     if (!wasm__is_valtype_subtype(mod, actual_ref.type, expected_type)) return 0;
     return wasm__reftype_is_subtype(mod, &actual_ref, &effective_expected);
+}
+
+static int wasm__elem_segment_values_match_type(const wasm_module_t* mod,
+                                                const wasm_elem_segment_t* segment,
+                                                wasm_valtype_t expected_type,
+                                                const wasm_reftype_t* expected_ref) {
+    uint32_t i;
+
+    if (!segment) return 0;
+    if (segment->uses_expr) {
+        return wasm__typed_valtype_is_subtype(mod,
+                                              segment->elem_type,
+                                              &segment->elem_ref_type,
+                                              expected_type,
+                                              expected_ref);
+    }
+    for (i = 0; i < segment->num_elems; i++) {
+        if (!wasm__runtime_value_matches_type(mod, &segment->elems[i], expected_type, expected_ref))
+            return 0;
+    }
+    return 1;
 }
 
 static int wasm__get_effective_reftype(const wasm_module_t* mod,
@@ -4226,6 +4246,34 @@ static wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t
 
 static uint64_t wasm__memory_page_limit(const wasm_memory_t* memory) {
     return (memory && memory->is_64) ? WASM_MEMORY64_MAX_PAGES : (uint64_t)WASM_MEMORY32_MAX_PAGES;
+}
+
+static wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
+                                               uint32_t func_idx,
+                                               uint32_t offset,
+                                               const char* fmt,
+                                               ...);
+
+static wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
+                                                 uint32_t memory_index,
+                                                 const wasm_memory_t* memory) {
+    if (!mod || !mod->rt || !memory) return WASM_ERR_MALFORMED;
+
+    if (memory->pages > memory->max_pages) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "memory %u min %llu exceeds max %llu",
+                                          (unsigned)memory_index,
+                                          (unsigned long long)memory->pages,
+                                          (unsigned long long)memory->max_pages);
+    }
+    if (memory->max_pages > wasm__memory_page_limit(memory)) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "memory %u max %llu exceeds %s page limit",
+                                          (unsigned)memory_index,
+                                          (unsigned long long)memory->max_pages,
+                                          memory->is_64 ? "Memory64" : "MVP");
+    }
+    return WASM_OK;
 }
 
 static uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
@@ -5919,11 +5967,10 @@ static wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
         if (segment->table_index >= mod->num_tables) return WASM_ERR_MALFORMED;
         table = wasm__table_at(mod, segment->table_index);
         if (!table) return WASM_ERR_MALFORMED;
-        if (!wasm__typed_valtype_is_subtype(mod,
-                                            segment->elem_type,
-                                            &segment->elem_ref_type,
-                                            table->reftype,
-                                            &table->reftype_info))
+        if (!wasm__elem_segment_values_match_type(mod,
+                              segment,
+                              table->reftype,
+                              &table->reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
         if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, table->size))
             return WASM_ERR_OUT_OF_BOUNDS;
@@ -6000,7 +6047,7 @@ static wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
                 uint32_t global_index = wasm__read_leb128_u32(r);
                 const wasm_global_t* global;
 
-                if (global_index >= max_global_index) {
+                if (global_index >= max_global_index || global_index >= mod->num_globals || !mod->globals) {
                     WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown global %u", (unsigned)global_index);
                     err = WASM_ERR_MALFORMED;
                     break;
@@ -7127,7 +7174,7 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     if (has_init_expr) {
         wasm_value_t init_value;
 
-        err = wasm__eval_init_expr(mod, r, UINT32_MAX, &init_value);
+        err = wasm__eval_init_expr(mod, r, mod->num_globals, &init_value);
         if (err != WASM_OK) return err;
         if (!wasm__runtime_value_matches_type(mod, &init_value, table->reftype, &table->reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
@@ -7240,17 +7287,18 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         wasm_memory_t* memory;
         wasm_memory_import_t* mimp;
         wasm_memory_t* bound_memory;
+        wasm_error_t err;
 
         if (wasm__append_memories(mod, 1, &memory_index) != WASM_OK) return WASM_ERR_OOM;
         if (mod->num_memories > 1) {
-            wasm_error_t err = wasm__require_multi_memory(mod);
+            err = wasm__require_multi_memory(mod);
             if (err != WASM_OK) return err;
         }
         memory = &mod->memories[memory_index];
-        {
-            wasm_error_t err = wasm__read_memory_type(mod, r, memory);
-            if (err != WASM_OK) return err;
-        }
+        err = wasm__read_memory_type(mod, r, memory);
+        if (err != WASM_OK) return err;
+        err = wasm__validate_memory_limits(mod, memory_index, memory);
+        if (err != WASM_OK) return err;
         mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
         if (!mimp) {
             if (wasm__has_import_named(mod->rt, info->module, info->name)) {
@@ -7353,6 +7401,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (!import_type) {
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)type_index);
             return WASM_ERR_MALFORMED;
+        }
+        if (import_type->num_results != 0) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "non-empty tag result type");
+            return WASM_ERR_TYPE_MISMATCH;
         }
         timp = wasm__find_tag_import(mod->rt, info->module, info->name);
         if (!timp) {
@@ -7618,6 +7670,7 @@ static wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reade
         segment->elem_type = WASM_TYPE_FUNCREF;
         segment->elem_ref_type.type = WASM_TYPE_FUNCREF;
         segment->elem_ref_type.nullable = 1;
+        segment->uses_expr = uses_expr;
         if (flags & 0x01) {
             if (flags & 0x02)
                 segment->is_declarative = 1;
@@ -8194,21 +8247,9 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
 
     for (i = 0; i < mod->num_memories; i++) {
         wasm_memory_t* memory = &mod->memories[i];
+        wasm_error_t err = wasm__validate_memory_limits(mod, i, memory);
 
-        if (memory->pages > memory->max_pages) {
-            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "memory %u min %llu exceeds max %llu",
-                                              (unsigned)i,
-                                              (unsigned long long)memory->pages,
-                                              (unsigned long long)memory->max_pages);
-        }
-        if (memory->max_pages > wasm__memory_page_limit(memory)) {
-            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "memory %u max %llu exceeds %s page limit",
-                                              (unsigned)i,
-                                              (unsigned long long)memory->max_pages,
-                                              memory->is_64 ? "Memory64" : "MVP");
-        }
+        if (err != WASM_OK) return err;
     }
 
     for (i = 0; i < mod->num_exports; i++) {
@@ -8294,11 +8335,10 @@ static wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
             }
             table = wasm__table_at(mod, segment->table_index);
             if (!table) return WASM_ERR_MALFORMED;
-            if (!wasm__typed_valtype_is_subtype(mod,
-                                                segment->elem_type,
-                                                &segment->elem_ref_type,
-                                                table->reftype,
-                                                &table->reftype_info)) {
+            if (!wasm__elem_segment_values_match_type(mod,
+                                                      segment,
+                                                      table->reftype,
+                                                      &table->reftype_info)) {
                 return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                                   "element segment %u type mismatch with table %u",
                                                   (unsigned)i,
@@ -10076,11 +10116,10 @@ static wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
                 return wasm__validator_error(v, at, "unknown elem segment %u", (unsigned)elem_idx);
             segment = &v->mod->elem_segments[elem_idx];
             table = &v->mod->tables[table_idx];
-            if (!wasm__validator_type_matches(v,
-                                              segment->elem_type,
-                                              &segment->elem_ref_type,
-                                              table->reftype,
-                                              &table->reftype_info))
+            if (!wasm__elem_segment_values_match_type(v->mod,
+                                                      segment,
+                                                      table->reftype,
+                                                      &table->reftype_info))
                 return wasm__validator_error(v, at, "table.init type mismatch");
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
             if (err != WASM_OK) return err;
