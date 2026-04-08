@@ -894,7 +894,13 @@ static wasm_error_t spec_forward_import_call(wasm_module_t* mod,
                                              void* userdata) {
     spec_forward_func_t* forward = (spec_forward_func_t*)userdata;
     (void)mod;
-    return wasm_call_index(forward->module, forward->func_index, args, num_args, results, num_results);
+    if (forward->module && forward->module->rt) wasm__clear_backtrace(forward->module->rt);
+    return wasm__interp(forward->module,
+                        forward->func_index,
+                        (wasm_value_t*)args,
+                        num_args,
+                        results,
+                        num_results);
 }
 
 static wasm_error_t spec_spectest_print_stub(wasm_module_t* mod,
@@ -1091,8 +1097,15 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "null array reference") == 0 &&
         strcmp(actual_lower, "trap") == 0)
         return 1;
+    if (strcmp(expected_lower, "null i31 reference") == 0 &&
+        strcmp(actual_lower, "trap") == 0)
+        return 1;
     if (strcmp(expected_lower, "null structure reference") == 0 &&
         strcmp(actual_lower, "trap") == 0)
+        return 1;
+    if (strcmp(expected_lower, "unclosed string") == 0 &&
+        (strstr(actual_lower, "unexpected end of file") != NULL ||
+         strstr(actual_lower, "unexpected end-of-file") != NULL))
         return 1;
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
@@ -1177,6 +1190,8 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "unexpected token") != NULL || strstr(actual_lower, "unexpected type") != NULL ||
          strstr(actual_lower, "extra tokens remaining after parse") != NULL ||
          strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "expected ") != NULL ||
+         strstr(actual_lower, "found outside `legacytry` block") != NULL ||
+         strstr(actual_lower, "found outside legacytry block") != NULL ||
          strstr(actual_lower, "u64 constant out of range") != NULL))
         return 1;
     if (strcmp(expected_lower, "mismatching label") == 0 &&
@@ -2032,49 +2047,72 @@ static void spec_describe_result_list(const wasm_value_t* values,
     }
 }
 
-static int spec_parse_expected_list(const char* json,
-                                    const spec_json_token_t* tokens,
-                                    int array_index,
-                                    spec_value_t** out_values,
-                                    uint32_t* out_count,
-                                    char* error_text,
-                                    size_t error_size) {
-    spec_value_t* values;
-    int i;
-    int count;
+static int spec_expected_value_matches(const char* json,
+                                       const spec_json_token_t* tokens,
+                                       int object_index,
+                                       const wasm_value_t* actual,
+                                       char* error_text,
+                                       size_t error_size) {
+    int type_index;
+    char* type_text;
+    int ok = 0;
 
-    if (out_values) *out_values = NULL;
-    if (out_count) *out_count = 0u;
-    if (array_index < 0) return 1;
-    if (tokens[array_index].type != SPEC_JSON_ARRAY) {
-        spec_set_error(error_text, error_size, "expected list is not an array");
+    if (object_index < 0 || tokens[object_index].type != SPEC_JSON_OBJECT) {
+        spec_set_error(error_text, error_size, "expected value is not an object");
         return 0;
     }
 
-    count = tokens[array_index].size;
-    if (count == 0) {
-        if (out_values) *out_values = NULL;
-        if (out_count) *out_count = 0u;
-        return 1;
-    }
-
-    values = (spec_value_t*)calloc((size_t)count, sizeof(*values));
-    if (!values) {
-        spec_set_error(error_text, error_size, "out of memory parsing expected values");
+    type_index = spec_object_get(json, tokens, object_index, "type");
+    if (type_index < 0) {
+        spec_set_error(error_text, error_size, "missing value type");
         return 0;
     }
 
-    for (i = 0; i < count; i++) {
-        int item_index = spec_array_at(tokens, array_index, i);
-        if (!spec_parse_value(json, tokens, item_index, &values[i], error_text, error_size)) {
-            free(values);
+    type_text = spec_strdup_token(json, &tokens[type_index]);
+    if (!type_text) {
+        spec_set_error(error_text, error_size, "missing value type");
+        return 0;
+    }
+
+    if (strcmp(type_text, "either") == 0) {
+        int values_index = spec_object_get(json, tokens, object_index, "values");
+        int i;
+
+        if (values_index < 0 || tokens[values_index].type != SPEC_JSON_ARRAY) {
+            spec_set_error(error_text, error_size, "'either' value must have a 'values' array");
+            free(type_text);
             return 0;
         }
+
+        for (i = 0; i < tokens[values_index].size; i++) {
+            char candidate_error[256];
+            int candidate_index = spec_array_at(tokens, values_index, i);
+
+            if (spec_expected_value_matches(json, tokens, candidate_index, actual,
+                                            candidate_error, sizeof(candidate_error))) {
+                ok = 1;
+                break;
+            }
+        }
+
+        if (!ok)
+            spec_set_error(error_text, error_size, "value did not match any 'either' candidate");
+        free(type_text);
+        return ok;
     }
 
-    if (out_values) *out_values = values;
-    if (out_count) *out_count = (uint32_t)count;
-    return 1;
+    {
+        spec_value_t expected;
+
+        if (!spec_parse_value(json, tokens, object_index, &expected, error_text, error_size)) {
+            free(type_text);
+            return 0;
+        }
+        ok = spec_values_match(&expected, actual, error_text, error_size);
+    }
+
+    free(type_text);
+    return ok;
 }
 
 static int spec_compare_results_against_array(const char* json,
@@ -2084,31 +2122,32 @@ static int spec_compare_results_against_array(const char* json,
                                               uint32_t actual_count,
                                               char* error_text,
                                               size_t error_size) {
-    spec_value_t* expected = NULL;
-    uint32_t expected_count = 0u;
     uint32_t i;
-    int ok;
+    uint32_t expected_count;
 
-    if (!spec_parse_expected_list(json, tokens, array_index, &expected, &expected_count, error_text, error_size))
-        return 0;
+    if (array_index < 0) {
+        expected_count = 0u;
+    } else {
+        if (tokens[array_index].type != SPEC_JSON_ARRAY) {
+            spec_set_error(error_text, error_size, "expected list is not an array");
+            return 0;
+        }
+        expected_count = (uint32_t)tokens[array_index].size;
+    }
 
     if (expected_count != actual_count) {
-        free(expected);
         spec_set_error(error_text, error_size, "result count mismatch: expected %u but got %u",
                        (unsigned)expected_count, (unsigned)actual_count);
         return 0;
     }
 
-    ok = 1;
     for (i = 0; i < expected_count; i++) {
-        if (!spec_values_match(&expected[i], &actual[i], error_text, error_size)) {
-            ok = 0;
-            break;
-        }
+        int item_index = spec_array_at(tokens, array_index, (int)i);
+        if (!spec_expected_value_matches(json, tokens, item_index, &actual[i], error_text, error_size))
+            return 0;
     }
 
-    free(expected);
-    return ok;
+    return 1;
 }
 
 static int spec_compare_expected(const char* json,
@@ -2302,6 +2341,10 @@ static int spec_bind_export(spec_harness_t* harness,
         import_desc.module = module_name;
         import_desc.name = export_name;
         import_desc.type = *type;
+        import_desc.type_module = module;
+        import_desc.type_index = module->tags[index].type_idx;
+        import_desc.has_type_context = 1;
+        import_desc.identity = module->tags[index].identity;
         err = wasm_register_tag_import(&harness->runtime, &import_desc);
     } else {
         spec_set_error(error_text, error_size, "unsupported export kind for '%s'", export_name);

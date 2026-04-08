@@ -598,10 +598,15 @@ typedef struct wasm_tag_import_t {
     const char* module;
     const char* name;
     wasm_functype_t type;
+    wasm_module_t* type_module;
+    uint32_t type_index;
+    int has_type_context;
+    uint64_t identity;
 } wasm_tag_import_t;
 
 typedef struct wasm_tag_t {
     uint32_t type_idx;
+    uint64_t identity;
 } wasm_tag_t;
 
 typedef struct wasm_custom_section_t {
@@ -612,10 +617,19 @@ typedef struct wasm_custom_section_t {
 
 typedef struct wasm__exception_state_t {
     uint32_t tag_index;
+    uint64_t tag_identity;
     wasm_value_t* values;
     uint32_t num_values;
     int is_pending;
 } wasm__exception_state_t;
+
+typedef struct wasm__exception_object_t {
+    uint32_t tag_index;
+    uint64_t tag_identity;
+    wasm_value_t* values;
+    uint32_t num_values;
+    struct wasm__exception_object_t* next;
+} wasm__exception_object_t;
 
 /* ── Module ───────────────────────────────────────────────────────── */
 struct wasm_module_t {
@@ -715,6 +729,7 @@ struct wasm_runtime_t {
     wasm_tag_import_t* tag_imports;
     uint32_t num_tag_imports;
     uint32_t cap_tag_imports;
+    uint64_t next_tag_identity;
     wasm_value_t* stack;
     uint32_t max_stack;
     uint32_t sp;
@@ -724,6 +739,7 @@ struct wasm_runtime_t {
     wasm_error_t last_error;
     char error_msg[256];
     wasm__exception_state_t pending_exception;
+    wasm__exception_object_t* exception_objects;
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
@@ -4189,6 +4205,7 @@ static void wasm__free_exception_state(wasm__exception_state_t* ex) {
 
 static wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
                                               uint32_t tag_index,
+                                              uint64_t tag_identity,
                                               const wasm_value_t* values,
                                               uint32_t count) {
     wasm_value_t* copy = NULL;
@@ -4201,10 +4218,58 @@ static wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
     }
 
     ex->tag_index = tag_index;
+    ex->tag_identity = tag_identity;
     ex->values = copy;
     ex->num_values = count;
     ex->is_pending = 1;
     return WASM_OK;
+}
+
+static uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt) {
+    uint64_t identity;
+
+    if (!rt) return 0;
+    identity = rt->next_tag_identity;
+    if (identity == 0) identity = 1;
+    rt->next_tag_identity = identity + 1;
+    if (rt->next_tag_identity == 0) rt->next_tag_identity = 1;
+    return identity;
+}
+
+static wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
+                                            const wasm__exception_state_t* ex,
+                                            wasm_value_t* out_value) {
+    wasm__exception_object_t* object;
+    wasm_value_t value;
+
+    if (!rt || !ex || !out_value) return WASM_ERR_MALFORMED;
+
+    object = (wasm__exception_object_t*)WASM_CALLOC(1u, sizeof(*object));
+    if (!object) return WASM_ERR_OOM;
+    object->tag_index = ex->tag_index;
+    object->tag_identity = ex->tag_identity;
+    object->num_values = ex->num_values;
+    if (ex->num_values > 0) {
+        object->values = (wasm_value_t*)WASM_MALLOC(ex->num_values * sizeof(wasm_value_t));
+        if (!object->values) {
+            WASM_FREE(object);
+            return WASM_ERR_OOM;
+        }
+        memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
+    }
+
+    object->next = rt->exception_objects;
+    rt->exception_objects = object;
+
+    value = wasm_ref_null(WASM_TYPE_EXNREF);
+    value.of.externref = (uintptr_t)object;
+    *out_value = value;
+    return WASM_OK;
+}
+
+static wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value) {
+    if (!value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
+    return (wasm__exception_object_t*)value->of.externref;
 }
 
 static wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
@@ -4624,77 +4689,41 @@ static int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
     return 0;
 }
 
-static int wasm__cross_reftype_is_subtype(const wasm_module_t* lhs_mod,
-                                          const wasm_reftype_t* lhs,
-                                          const wasm_module_t* rhs_mod,
-                                          const wasm_reftype_t* rhs,
-                                          uint8_t* memo) {
-    if (!wasm__has_reftype_info(lhs) || !wasm__has_reftype_info(rhs)) return 0;
-    if (lhs->nullable && !rhs->nullable) return 0;
+static int wasm__functype_equal_across_modules(const wasm_module_t* lhs_mod,
+                                               uint32_t lhs_type_idx,
+                                               const wasm_module_t* rhs_mod,
+                                               uint32_t rhs_type_idx) {
+    size_t memo_size;
+    uint8_t* memo;
+    int result;
 
-    if (lhs->has_type_index && rhs->has_type_index)
-        return wasm__cross_type_is_subtype_with_memo(lhs_mod,
-                                                     lhs->type_index,
-                                                     rhs_mod,
-                                                     rhs->type_index,
-                                                     memo);
-
-    if (lhs->has_type_index)
-        return wasm__is_heap_subtype(lhs_mod, lhs->type, rhs->type);
-
-    if (rhs->has_type_index) {
-        switch (lhs->type) {
-            case WASM_TYPE_NOFUNC:
-                return rhs->type == WASM_TYPE_FUNCREF && rhs->nullable;
-            case WASM_TYPE_NONE:
-                return (rhs->type == WASM_TYPE_STRUCTREF ||
-                        rhs->type == WASM_TYPE_ARRAYREF) &&
-                       rhs->nullable;
-            default:
-                return 0;
-        }
-    }
-
-    return wasm__is_heap_subtype(lhs_mod, lhs->type, rhs->type);
-}
-
-static int wasm__cross_typed_valtype_is_subtype(const wasm_module_t* lhs_mod,
-                                                wasm_valtype_t lhs_type,
-                                                const wasm_reftype_t* lhs_ref,
-                                                const wasm_module_t* rhs_mod,
-                                                wasm_valtype_t rhs_type,
-                                                const wasm_reftype_t* rhs_ref,
-                                                uint8_t* memo) {
-    wasm_reftype_t lhs_effective;
-    wasm_reftype_t rhs_effective;
-
-    if (!wasm__is_ref_type(lhs_type) && !wasm__is_ref_type(rhs_type))
-        return wasm__is_valtype_subtype(lhs_mod, lhs_type, rhs_type);
-    if (!wasm__is_ref_type(lhs_type) || !wasm__is_ref_type(rhs_type)) return 0;
-    if (!wasm__get_effective_reftype(lhs_mod, lhs_type, lhs_ref, &lhs_effective) ||
-        !wasm__get_effective_reftype(rhs_mod, rhs_type, rhs_ref, &rhs_effective))
+    if (!lhs_mod || !rhs_mod || lhs_type_idx >= lhs_mod->num_types || rhs_type_idx >= rhs_mod->num_types)
         return 0;
-    return wasm__cross_reftype_is_subtype(lhs_mod,
-                                          &lhs_effective,
-                                          rhs_mod,
-                                          &rhs_effective,
-                                          memo);
+    if (lhs_mod == rhs_mod) return wasm__type_equal(lhs_mod, lhs_type_idx, rhs_type_idx);
+    if (rhs_mod->num_types != 0u &&
+        (size_t)lhs_mod->num_types > ((size_t)-1) / (size_t)rhs_mod->num_types)
+        return 0;
+
+    memo_size = (size_t)lhs_mod->num_types * (size_t)rhs_mod->num_types;
+    memo = memo_size ? (uint8_t*)WASM_MALLOC(memo_size) : NULL;
+    if (memo_size && !memo) return 0;
+    if (memo_size) memset(memo, 0, memo_size);
+    result = wasm__cross_type_equal_visit(lhs_mod, lhs_type_idx, rhs_mod, rhs_type_idx, memo);
+    WASM_FREE(memo);
+    return result;
 }
 
 static int wasm__functype_is_subtype_across_modules(const wasm_module_t* lhs_mod,
                                                     uint32_t lhs_type_idx,
                                                     const wasm_module_t* rhs_mod,
                                                     uint32_t rhs_type_idx) {
-    const wasm_functype_t* lhs = wasm__module_const_functype(lhs_mod, lhs_type_idx);
-    const wasm_functype_t* rhs = wasm__module_const_functype(rhs_mod, rhs_type_idx);
-    uint32_t i;
     uint8_t* memo;
     size_t memo_size;
     int result;
 
-    if (!lhs || !rhs) return 0;
+    if (!lhs_mod || !rhs_mod || lhs_type_idx >= lhs_mod->num_types || rhs_type_idx >= rhs_mod->num_types)
+        return 0;
     if (lhs_mod == rhs_mod) return wasm__is_subtype(lhs_mod, lhs_type_idx, rhs_type_idx);
-    if (lhs->num_params != rhs->num_params || lhs->num_results != rhs->num_results) return 0;
 
     if (rhs_mod->num_types != 0u &&
         (size_t)lhs_mod->num_types > ((size_t)-1) / (size_t)rhs_mod->num_types)
@@ -4705,37 +4734,7 @@ static int wasm__functype_is_subtype_across_modules(const wasm_module_t* lhs_mod
     if (memo_size && !memo) return 0;
     if (memo_size) memset(memo, 0, memo_size);
 
-    result = 1;
-    for (i = 0; i < lhs->num_params; i++) {
-        const wasm_reftype_t* lhs_ref = lhs->param_reftypes ? &lhs->param_reftypes[i] : NULL;
-        const wasm_reftype_t* rhs_ref = rhs->param_reftypes ? &rhs->param_reftypes[i] : NULL;
-
-        if (!wasm__cross_typed_valtype_is_subtype(rhs_mod,
-                                                  rhs->params[i],
-                                                  rhs_ref,
-                                                  lhs_mod,
-                                                  lhs->params[i],
-                                                  lhs_ref,
-                                                  memo)) {
-            result = 0;
-            break;
-        }
-    }
-
-    for (i = 0; result && i < lhs->num_results; i++) {
-        const wasm_reftype_t* lhs_ref = lhs->result_reftypes ? &lhs->result_reftypes[i] : NULL;
-        const wasm_reftype_t* rhs_ref = rhs->result_reftypes ? &rhs->result_reftypes[i] : NULL;
-
-        if (!wasm__cross_typed_valtype_is_subtype(lhs_mod,
-                                                  lhs->results[i],
-                                                  lhs_ref,
-                                                  rhs_mod,
-                                                  rhs->results[i],
-                                                  rhs_ref,
-                                                  memo)) {
-            result = 0;
-        }
-    }
+    result = wasm__cross_type_is_subtype_with_memo(lhs_mod, lhs_type_idx, rhs_mod, rhs_type_idx, memo);
 
     WASM_FREE(memo);
     return result;
@@ -5299,6 +5298,65 @@ static wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value
     for (lane = 0; lane < 16; lane++) {
         uint8_t index = rhs->of.v128[lane];
         result.of.v128[lane] = (index < 16u) ? lhs->of.v128[index] : 0;
+    }
+
+    return result;
+}
+
+static wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs,
+                                            const wasm_value_t* acc) {
+    wasm_value_t result = wasm_v128_zero();
+    uint32_t lane;
+
+    if (subop == 0x105 || subop == 0x106) {
+        for (lane = 0; lane < 4; lane++) {
+            float product = wasm__v128_get_f32(lhs, lane) * wasm__v128_get_f32(rhs, lane);
+            float sum = (subop == 0x106) ? (-product + wasm__v128_get_f32(acc, lane))
+                                         : (product + wasm__v128_get_f32(acc, lane));
+            wasm__v128_set_f32(&result, lane, sum);
+        }
+        return result;
+    }
+
+    for (lane = 0; lane < 2; lane++) {
+        double product = wasm__v128_get_f64(lhs, lane) * wasm__v128_get_f64(rhs, lane);
+        double sum = (subop == 0x108) ? (-product + wasm__v128_get_f64(acc, lane))
+                                      : (product + wasm__v128_get_f64(acc, lane));
+        wasm__v128_set_f64(&result, lane, sum);
+    }
+    return result;
+}
+
+static wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
+                                                         const wasm_value_t* rhs) {
+    wasm_value_t result = wasm_v128_zero();
+    uint32_t lane;
+
+    for (lane = 0; lane < 8; lane++) {
+        uint32_t base = lane * 2u;
+        int32_t dot = (int32_t)wasm__v128_get_i8(lhs, base) * (int32_t)wasm__v128_get_i8(rhs, base) +
+                      (int32_t)wasm__v128_get_i8(lhs, base + 1u) * (int32_t)wasm__v128_get_i8(rhs, base + 1u);
+        wasm__v128_set_i16(&result, lane, wasm__sat_i16(dot));
+    }
+
+    return result;
+}
+
+static wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
+                                                             const wasm_value_t* rhs,
+                                                             const wasm_value_t* acc) {
+    wasm_value_t result = wasm_v128_zero();
+    uint32_t lane;
+
+    for (lane = 0; lane < 4; lane++) {
+        uint32_t base = lane * 4u;
+        int32_t dot = (int32_t)wasm__v128_get_i8(lhs, base) * (int32_t)wasm__v128_get_i8(rhs, base) +
+                      (int32_t)wasm__v128_get_i8(lhs, base + 1u) * (int32_t)wasm__v128_get_i8(rhs, base + 1u) +
+                      (int32_t)wasm__v128_get_i8(lhs, base + 2u) * (int32_t)wasm__v128_get_i8(rhs, base + 2u) +
+                      (int32_t)wasm__v128_get_i8(lhs, base + 3u) * (int32_t)wasm__v128_get_i8(rhs, base + 3u);
+        wasm__v128_set_i32(&result, lane, dot + wasm__v128_get_i32(acc, lane));
     }
 
     return result;
@@ -7295,6 +7353,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     if (!rt) return WASM_ERR_MALFORMED;
 
     memset(rt, 0, sizeof(*rt));
+    rt->next_tag_identity = 1;
 
     if (config)
         cfg = *config;
@@ -7352,6 +7411,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
 void wasm_destroy(wasm_runtime_t* rt) {
     uint32_t i;
     wasm__externref_box_t* box;
+    wasm__exception_object_t* exception_object;
 
     for (i = 0; i < rt->num_imports; i++) {
         WASM_FREE((void*)rt->imports[i].module);
@@ -7387,6 +7447,14 @@ void wasm_destroy(wasm_runtime_t* rt) {
         WASM_FREE(box);
         box = next;
     }
+    exception_object = rt->exception_objects;
+    while (exception_object) {
+        wasm__exception_object_t* next = exception_object->next;
+        WASM_FREE(exception_object->values);
+        WASM_FREE(exception_object);
+        exception_object = next;
+    }
+    rt->exception_objects = NULL;
     rt->externref_boxes = NULL;
     WASM_FREE(rt->validator_stack);
     WASM_FREE(rt->validator_stack_reftypes);
@@ -7590,6 +7658,10 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
         WASM_FREE((void*)copy.name);
         return err;
     }
+    copy.type_module = imp->type_module;
+    copy.type_index = imp->type_index;
+    copy.has_type_context = imp->has_type_context;
+    copy.identity = imp->identity ? imp->identity : wasm__alloc_tag_identity(rt);
 
     rt->tag_imports[rt->num_tag_imports++] = copy;
     return WASM_OK;
@@ -7804,7 +7876,15 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             if (strcmp(mod->rt->imports[binding_index].module, info->module) == 0 &&
                 strcmp(mod->rt->imports[binding_index].name, info->name) == 0) {
                 if (!wasm__functype_is_unspecified(&mod->rt->imports[binding_index].type) &&
-                    !wasm__functype_is_subtype(mod, &mod->rt->imports[binding_index].type, import_type)) {
+                    !((mod->rt->imports[binding_index].has_type_context &&
+                       mod->rt->imports[binding_index].type_module &&
+                       wasm__functype_is_subtype_across_modules(
+                           mod->rt->imports[binding_index].type_module,
+                           mod->rt->imports[binding_index].type_index,
+                           mod,
+                           ti)) ||
+                      (!mod->rt->imports[binding_index].has_type_context &&
+                       wasm__functype_is_subtype(mod, &mod->rt->imports[binding_index].type, import_type)))) {
                     WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                                   "function import type mismatch: %.64s.%.64s", info->module, info->name);
                     return WASM_ERR_TYPE_MISMATCH;
@@ -7843,8 +7923,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                               info->module, info->name);
                 return WASM_ERR_TYPE_MISMATCH;
             }
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_UNKNOWN_IMPORT;
+            table->is_import = 1;
+            table->import_table = NULL;
+            info->index = table_index;
+            info->type = table->reftype;
+            info->ref_type = table->reftype_info;
+            return WASM_OK;
         }
         bound_table = wasm__table_actual(timp->table);
         if (!bound_table) return WASM_ERR_MALFORMED;
@@ -8004,7 +8088,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
             return WASM_ERR_UNKNOWN_IMPORT;
         }
-        if (!wasm__functype_equal(&timp->type, import_type)) {
+        if (!((timp->has_type_context && timp->type_module &&
+               wasm__functype_equal_across_modules(timp->type_module,
+                                                   timp->type_index,
+                                                   mod,
+                                                   type_index)) ||
+              (!timp->has_type_context && wasm__functype_equal(&timp->type, import_type)))) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                           "tag import type mismatch: %.64s.%.64s",
                           info->module, info->name);
@@ -8012,6 +8101,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
         mod->tags[tag_index].type_idx = type_index;
+        mod->tags[tag_index].identity = timp->identity;
         info->index = tag_index;
         info->type_index = mod->tags[tag_index].type_idx;
     } else {
@@ -8207,6 +8297,7 @@ static wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t*
     for (i = 0; i < count; i++) {
         if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
         mod->tags[base + i].type_idx = wasm__read_leb128_u32(r);
+        mod->tags[base + i].identity = wasm__alloc_tag_identity(mod->rt);
     }
 
     return WASM_OK;
@@ -8496,6 +8587,19 @@ static wasm_error_t wasm__check_unresolved_function_imports(wasm_module_t* mod) 
         if (info->kind != WASM_IMPORT_FUNC) continue;
         if (info->index >= mod->num_funcs) return WASM_ERR_MALFORMED;
         if (mod->funcs[info->index].host_func) continue;
+
+        WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s",
+                      info->module ? info->module : "",
+                      info->name ? info->name : "");
+        return WASM_ERR_UNKNOWN_IMPORT;
+    }
+
+    for (i = 0; i < mod->num_imports; i++) {
+        wasm_import_info_t* info = &mod->imports[i];
+
+        if (info->kind != WASM_IMPORT_TABLE) continue;
+        if (info->index >= mod->num_tables) return WASM_ERR_MALFORMED;
+        if (mod->tables[info->index].import_table) continue;
 
         WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s",
                       info->module ? info->module : "",
@@ -8983,6 +9087,8 @@ struct wasm__val_frame_t {
     int in_catch;
     int seen_catch_all;
     int seen_delegate;
+    uint64_t* local_init;
+    uint64_t* local_init_entry;
 };
 
 typedef struct wasm__validator_t {
@@ -8998,27 +9104,102 @@ typedef struct wasm__validator_t {
     uint32_t frame_capacity;
     uint32_t fp;
     uint32_t max_fp;
+    uint64_t* local_init_bits;
+    uint64_t* local_init_entry_bits;
+    uint32_t local_init_words;
 } wasm__validator_t;
+
+static uint32_t wasm__validator_local_init_word_count(uint32_t num_locals) {
+    return num_locals ? ((num_locals + 63u) >> 6) : 0u;
+}
+
+static int wasm__validator_local_is_undefaulted(const wasm_func_t* func, uint32_t index) {
+    const wasm_reftype_t* ref_type;
+
+    if (!func || index >= func->num_locals || !func->local_reftypes) return 0;
+    if (!wasm__is_ref_type(func->locals[index])) return 0;
+    ref_type = &func->local_reftypes[index];
+    return wasm__has_reftype_info(ref_type) && !ref_type->nullable;
+}
+
+static void wasm__validator_local_init_set(uint64_t* bits, uint32_t index) {
+    bits[index >> 6] |= UINT64_C(1) << (index & 63u);
+}
+
+static int wasm__validator_local_init_get(const uint64_t* bits, uint32_t index) {
+    return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;
+}
+
+static void wasm__validator_copy_local_init(uint64_t* dst,
+                                            const uint64_t* src,
+                                            uint32_t word_count) {
+    if (word_count == 0) return;
+    memcpy(dst, src, (size_t)word_count * sizeof(*dst));
+}
+
+static void wasm__validator_seed_local_init(wasm__validator_t* v,
+                                            const wasm_func_t* func,
+                                            const wasm_functype_t* ft) {
+    uint32_t index;
+
+    if (!v || !func || !ft || v->local_init_words == 0 || !v->frames[0].local_init) return;
+
+    memset(v->frames[0].local_init, 0, (size_t)v->local_init_words * sizeof(*v->frames[0].local_init));
+    for (index = 0; index < func->num_locals; index++) {
+        if (index < ft->num_params || !wasm__validator_local_is_undefaulted(func, index))
+            wasm__validator_local_init_set(v->frames[0].local_init, index);
+    }
+    wasm__validator_copy_local_init(v->frames[0].local_init_entry,
+                                    v->frames[0].local_init,
+                                    v->local_init_words);
+}
+
+static void wasm__validator_enter_child_frame(wasm__validator_t* v, uint32_t frame_index) {
+    const wasm__val_frame_t* parent;
+    wasm__val_frame_t* child;
+
+    if (!v || v->local_init_words == 0 || frame_index >= v->frame_capacity || frame_index == 0) return;
+    parent = &v->frames[frame_index - 1];
+    child = &v->frames[frame_index];
+    wasm__validator_copy_local_init(child->local_init, parent->local_init, v->local_init_words);
+    wasm__validator_copy_local_init(child->local_init_entry, parent->local_init, v->local_init_words);
+}
+
+static void wasm__validator_restore_entry_local_init(wasm__validator_t* v, wasm__val_frame_t* frame) {
+    if (!v || !frame || v->local_init_words == 0) return;
+    wasm__validator_copy_local_init(frame->local_init, frame->local_init_entry, v->local_init_words);
+}
 
 static void wasm__validator_destroy(wasm__validator_t* v) {
     if (!v) return;
+    WASM_FREE(v->local_init_bits);
+    WASM_FREE(v->local_init_entry_bits);
     v->stack = NULL;
     v->stack_reftypes = NULL;
     v->frames = NULL;
     v->stack_capacity = 0;
     v->frame_capacity = 0;
+    v->local_init_bits = NULL;
+    v->local_init_entry_bits = NULL;
+    v->local_init_words = 0;
 }
 
 static wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mod, uint32_t func_idx) {
     wasm_runtime_t* rt;
+    wasm_func_t* func;
+    wasm_functype_t* ft;
     uint32_t stack_capacity;
     uint32_t frame_capacity;
+    uint32_t i;
 
     if (!v || !mod || !mod->rt) return WASM_ERR_MALFORMED;
 
     memset(v, 0, sizeof(*v));
     v->mod = mod;
     v->func_idx = func_idx;
+    func = &mod->funcs[func_idx];
+    ft = wasm__module_functype(mod, func->type_idx);
+    if (!ft) return WASM_ERR_MALFORMED;
     rt = mod->rt;
     stack_capacity = rt->max_stack ? rt->max_stack : 1u;
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
@@ -9044,6 +9225,30 @@ static wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mo
     v->frames = rt->validator_frames;
     v->stack_capacity = stack_capacity;
     v->frame_capacity = frame_capacity;
+    if (func->num_locals > ft->num_params) {
+        for (i = ft->num_params; i < func->num_locals; i++) {
+            if (wasm__validator_local_is_undefaulted(func, i)) {
+                v->local_init_words = wasm__validator_local_init_word_count(func->num_locals);
+                break;
+            }
+        }
+    }
+    if (v->local_init_words != 0) {
+        size_t bytes;
+
+        if ((size_t)frame_capacity > SIZE_MAX / sizeof(uint64_t) ||
+            (size_t)frame_capacity * sizeof(uint64_t) > SIZE_MAX / (size_t)v->local_init_words)
+            return WASM_ERR_OOM;
+        bytes = (size_t)frame_capacity * (size_t)v->local_init_words * sizeof(uint64_t);
+        v->local_init_bits = (uint64_t*)WASM_CALLOC(1, bytes);
+        v->local_init_entry_bits = (uint64_t*)WASM_CALLOC(1, bytes);
+        if (!v->local_init_bits || !v->local_init_entry_bits) return WASM_ERR_OOM;
+        for (i = 0; i < frame_capacity; i++) {
+            v->frames[i].local_init = v->local_init_bits + (size_t)i * v->local_init_words;
+            v->frames[i].local_init_entry = v->local_init_entry_bits + (size_t)i * v->local_init_words;
+        }
+        wasm__validator_seed_local_init(v, func, ft);
+    }
     return WASM_OK;
 }
 
@@ -9327,6 +9532,31 @@ static int wasm__validator_same_types(const wasm_valtype_t* a,
     return 1;
 }
 
+static int wasm__validator_types_match(const wasm__validator_t* v,
+                                       const wasm_valtype_t* actual_types,
+                                       const wasm_reftype_t* actual_refs,
+                                       uint32_t actual_count,
+                                       const wasm_valtype_t* expected_types,
+                                       const wasm_reftype_t* expected_refs,
+                                       uint32_t expected_count) {
+    uint32_t i;
+
+    if (actual_count != expected_count) return 0;
+    for (i = 0; i < actual_count; i++) {
+        const wasm_reftype_t* actual_ref = actual_refs ? &actual_refs[i] : NULL;
+        const wasm_reftype_t* expected_ref = expected_refs ? &expected_refs[i] : NULL;
+
+        if (!wasm__validator_type_matches(v,
+                                          actual_types[i],
+                                          actual_ref,
+                                          expected_types[i],
+                                          expected_ref)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int wasm__validator_meet_type(const wasm_module_t* mod,
                                      wasm_valtype_t lhs_type,
                                      const wasm_reftype_t* lhs_ref,
@@ -9478,6 +9708,7 @@ static wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
     if (err != WASM_OK) return err;
 
     v->sp = frame->height;
+    wasm__validator_restore_entry_local_init(v, frame);
     frame->unreachable = 0;
     frame->in_catch = 1;
     return WASM_OK;
@@ -10228,6 +10459,7 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
             return wasm__validator_binary(v, at, WASM_TYPE_V128, WASM_TYPE_V128, WASM_TYPE_V128);
         }
         case 0x0E:
+        case 0x100:
             return wasm__validator_binary(v, at, WASM_TYPE_V128, WASM_TYPE_V128, WASM_TYPE_V128);
         case 0x0F:
         case 0x10:
@@ -10237,6 +10469,22 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
             return wasm__validator_push(v, at, WASM_TYPE_V128);
         case 0x12:
             err = wasm__validator_pop_expect(v, at, WASM_TYPE_I64);
+            if (err != WASM_OK) return err;
+            return wasm__validator_push(v, at, WASM_TYPE_V128);
+        case 0x105:
+        case 0x106:
+        case 0x107:
+        case 0x108:
+        case 0x109:
+        case 0x10A:
+        case 0x10B:
+        case 0x10C:
+        case 0x113:
+            err = wasm__validator_pop_expect(v, at, WASM_TYPE_V128);
+            if (err != WASM_OK) return err;
+            err = wasm__validator_pop_expect(v, at, WASM_TYPE_V128);
+            if (err != WASM_OK) return err;
+            err = wasm__validator_pop_expect(v, at, WASM_TYPE_V128);
             if (err != WASM_OK) return err;
             return wasm__validator_push(v, at, WASM_TYPE_V128);
         case 0x13:
@@ -10484,6 +10732,10 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
         case 0xFD:
         case 0xFE:
         case 0xFF:
+        case 0x101:
+        case 0x102:
+        case 0x103:
+        case 0x104:
             return wasm__validator_unary(v, at, WASM_TYPE_V128, WASM_TYPE_V128);
         case 0x65:
         case 0x66:
@@ -10558,6 +10810,12 @@ static wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const ui
         case 0xF5:
         case 0xF6:
         case 0xF7:
+        case 0x10D:
+        case 0x10E:
+        case 0x10F:
+        case 0x110:
+        case 0x111:
+        case 0x112:
             return wasm__validator_binary(v, at, WASM_TYPE_V128, WASM_TYPE_V128, WASM_TYPE_V128);
         case 0x6B:
         case 0x6C:
@@ -10970,6 +11228,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
                 v.frames[v.fp].seen_delegate = 0;
+                wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
                 break;
@@ -11011,6 +11270,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
                 v.frames[v.fp].seen_delegate = 0;
+                wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
                 break;
@@ -11032,6 +11292,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                       frame->param_reftypes,
                                                       frame->num_params);
                 if (err != WASM_OK) return err;
+                wasm__validator_restore_entry_local_init(&v, frame);
                 frame->unreachable = 0;
                 frame->seen_else = 1;
                 break;
@@ -11073,6 +11334,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
                 v.frames[v.fp].seen_delegate = 0;
+                wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
                 break;
@@ -11141,6 +11403,13 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm__validator_mark_unreachable(&v);
                 break;
             }
+            case 0x0A:
+                err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
+                if (err != WASM_OK) return err;
+                err = wasm__validator_pop_expect(&v, at, WASM_TYPE_EXNREF);
+                if (err != WASM_OK) return err;
+                wasm__validator_mark_unreachable(&v);
+                break;
             case 0x0B: {
                 wasm__val_frame_t frame;
                 if (v.fp == 0)
@@ -11477,6 +11746,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
                 v.frames[v.fp].seen_delegate = 0;
+                wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
 
@@ -11513,12 +11783,13 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                 return wasm__validator_error(&v, at,
                                                              "tag %u does not reference a function type",
                                                              (unsigned)clause.tag_index);
-                            if (!wasm__validator_same_types(tag_type->params,
-                                                            tag_type->param_reftypes,
-                                                            tag_type->num_params,
-                                                            branch_types,
-                                                            branch_reftypes,
-                                                            branch_count)) {
+                            if (!wasm__validator_types_match(&v,
+                                                             tag_type->params,
+                                                             tag_type->param_reftypes,
+                                                             tag_type->num_params,
+                                                             branch_types,
+                                                             branch_reftypes,
+                                                             branch_count)) {
                                 return wasm__validator_error(&v, at,
                                                              "try_table catch target type mismatch");
                             }
@@ -11529,10 +11800,62 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                 return wasm__validator_error(&v, at,
                                                              "try_table catch_all target type mismatch");
                             break;
-                        case 0x01:
-                        case 0x03:
-                            return wasm__validator_error(&v, at,
-                                                         "catch_ref clauses are not supported yet");
+                        case 0x01: {
+                            wasm_functype_t* tag_type;
+                            wasm_valtype_t exn_type = WASM_TYPE_NOEXN;
+                            wasm_reftype_t exn_ref;
+
+                            wasm__clear_reftype(&exn_ref);
+                            exn_ref.type = WASM_TYPE_NOEXN;
+                            exn_ref.nullable = 0;
+
+                            if (clause.tag_index >= mod->num_tags)
+                                return wasm__validator_error(&v, at, "tag %u out of range",
+                                                             (unsigned)clause.tag_index);
+                            tag_type = wasm__module_functype(mod, mod->tags[clause.tag_index].type_idx);
+                            if (!tag_type)
+                                return wasm__validator_error(&v, at,
+                                                             "tag %u does not reference a function type",
+                                                             (unsigned)clause.tag_index);
+                            if (branch_count != tag_type->num_params + 1u ||
+                                !wasm__validator_types_match(&v,
+                                                             tag_type->params,
+                                                             tag_type->param_reftypes,
+                                                             tag_type->num_params,
+                                                             branch_types,
+                                                             branch_reftypes,
+                                                             tag_type->num_params)) {
+                                return wasm__validator_error(&v, at,
+                                                             "try_table catch_ref target type mismatch");
+                            }
+                            if (!wasm__validator_type_matches(&v,
+                                                              exn_type,
+                                                              &exn_ref,
+                                                              branch_types[tag_type->num_params],
+                                                              branch_reftypes ? &branch_reftypes[tag_type->num_params] : NULL)) {
+                                return wasm__validator_error(&v, at,
+                                                             "try_table catch_ref target type mismatch");
+                            }
+                            break;
+                        }
+                        case 0x03: {
+                            wasm_valtype_t exn_type = WASM_TYPE_NOEXN;
+                            wasm_reftype_t exn_ref;
+
+                            wasm__clear_reftype(&exn_ref);
+                            exn_ref.type = WASM_TYPE_NOEXN;
+                            exn_ref.nullable = 0;
+
+                            if (branch_count != 1 ||
+                                !wasm__validator_type_matches(&v,
+                                                             exn_type,
+                                                             &exn_ref,
+                                                             branch_types[0],
+                                                             branch_reftypes ? &branch_reftypes[0] : NULL))
+                                return wasm__validator_error(&v, at,
+                                                             "try_table catch_all_ref target type mismatch");
+                            break;
+                        }
                         default:
                             return wasm__validator_error(&v, at, "invalid try_table clause kind 0x%X",
                                                          (unsigned)clause.kind);
@@ -11618,6 +11941,12 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 uint32_t index = wasm__read_leb128_u32(&v.r);
                 if (index >= func->num_locals)
                     return wasm__validator_error(&v, at, "local index %u out of range", (unsigned)index);
+                if (v.local_init_words != 0 &&
+                    !wasm__validator_frame(&v)->unreachable &&
+                    wasm__validator_local_is_undefaulted(func, index) &&
+                    !wasm__validator_local_init_get(wasm__validator_frame(&v)->local_init, index)) {
+                    return wasm__validator_error(&v, at, "%s", "uninitialized local");
+                }
                 err = wasm__validator_push_typed(&v, at,
                                                  func->locals[index],
                                                  func->local_reftypes ? &func->local_reftypes[index] : NULL);
@@ -11632,6 +11961,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                        func->locals[index],
                                                        func->local_reftypes ? &func->local_reftypes[index] : NULL);
                 if (err != WASM_OK) return err;
+                if (v.local_init_words != 0)
+                    wasm__validator_local_init_set(wasm__validator_frame(&v)->local_init, index);
                 break;
             }
             case 0x22: {
@@ -11642,6 +11973,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                        func->locals[index],
                                                        func->local_reftypes ? &func->local_reftypes[index] : NULL);
                 if (err != WASM_OK) return err;
+                if (v.local_init_words != 0)
+                    wasm__validator_local_init_set(wasm__validator_frame(&v)->local_init, index);
                 err = wasm__validator_push_typed(&v, at,
                                                  func->locals[index],
                                                  func->local_reftypes ? &func->local_reftypes[index] : NULL);
@@ -12476,6 +12809,7 @@ typedef struct wasm__label_t {
     uint32_t param_arity;
     uint32_t arity;
     uint32_t caught_tag;
+    uint64_t caught_tag_identity;
     uint32_t caught_count;
     wasm_value_t* caught_values;
     uint32_t delegate_depth;
@@ -12773,6 +13107,7 @@ static void wasm__gc_mark_object(wasm_gc_header_t* object) {
 
 static void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
+    wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;
     uint32_t i;
 
@@ -12785,6 +13120,9 @@ static void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     }
     for (box = rt->externref_boxes; box; box = box->next) {
         wasm__gc_mark_value(&box->value);
+    }
+    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
+        wasm__gc_mark_values(exception_object->values, exception_object->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -12875,6 +13213,7 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
+    wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;
     uint32_t i;
 
@@ -12887,6 +13226,9 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     }
     for (box = rt->externref_boxes; box; box = box->next) {
         wasm__gc_forward_value(rt, &box->value);
+    }
+    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
+        wasm__gc_forward_values(rt, exception_object->values, exception_object->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -12999,6 +13341,8 @@ typedef struct wasm__try_clause_t {
 static void wasm__clear_label(wasm__label_t* label) {
     WASM_FREE(label->caught_values);
     label->caught_values = NULL;
+    label->caught_tag = UINT32_MAX;
+    label->caught_tag_identity = 0;
     label->caught_count = 0;
     label->active_catch = 0;
     label->delegate_depth = UINT32_MAX;
@@ -13680,6 +14024,7 @@ static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
     }
 
     label->caught_tag = ex->tag_index;
+    label->caught_tag_identity = ex->tag_identity;
     label->caught_values = copy;
     label->caught_count = ex->num_values;
     label->active_catch = 1;
@@ -13742,7 +14087,8 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                 if (wasm__read_try_clause(clause_ptr, label->continuation, &clause) != WASM_OK)
                     return WASM_ERR_MALFORMED;
 
-                if (clause.opcode == 0x07 && clause.immediate == rt->pending_exception.tag_index) {
+                if (clause.opcode == 0x07 && clause.immediate < mod->num_tags &&
+                    mod->tags[clause.immediate].identity == rt->pending_exception.tag_identity) {
                     wasm_error_t err;
                     uint32_t i;
 
@@ -13823,7 +14169,8 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
 
                 switch (clause.kind) {
                     case 0x00:
-                        matches = (clause.tag_index == rt->pending_exception.tag_index);
+                        matches = (clause.tag_index < mod->num_tags &&
+                                   mod->tags[clause.tag_index].identity == rt->pending_exception.tag_identity);
                         if (matches) {
                             if (clause.tag_index >= mod->num_tags) return WASM_ERR_MALFORMED;
                             tag_type = wasm__module_functype(mod, mod->tags[clause.tag_index].type_idx);
@@ -13834,8 +14181,17 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                         matches = 1;
                         break;
                     case 0x01:
+                        matches = (clause.tag_index < mod->num_tags &&
+                                   mod->tags[clause.tag_index].identity == rt->pending_exception.tag_identity);
+                        if (matches) {
+                            if (clause.tag_index >= mod->num_tags) return WASM_ERR_MALFORMED;
+                            tag_type = wasm__module_functype(mod, mod->tags[clause.tag_index].type_idx);
+                            if (!tag_type) return WASM_ERR_MALFORMED;
+                        }
+                        break;
                     case 0x03:
-                        return WASM_ERR_MALFORMED;
+                        matches = 1;
+                        break;
                     default:
                         return WASM_ERR_MALFORMED;
                 }
@@ -13850,7 +14206,24 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                 }
 
                 rt->sp = label->sp_base;
-                if (tag_type) {
+                if (clause.kind == 0x01) {
+                    wasm_value_t exnref_value;
+
+                    if (!tag_type) return WASM_ERR_MALFORMED;
+                    if (rt->sp + tag_type->num_params + 1u > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
+                    for (i = 0; i < tag_type->num_params; i++)
+                        rt->stack[rt->sp++] = rt->pending_exception.values[i];
+                    err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
+                    if (err != WASM_OK) return err;
+                    rt->stack[rt->sp++] = exnref_value;
+                } else if (clause.kind == 0x03) {
+                    wasm_value_t exnref_value;
+
+                    err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
+                    if (err != WASM_OK) return err;
+                    if (rt->sp >= rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
+                    rt->stack[rt->sp++] = exnref_value;
+                } else if (tag_type) {
                     if (rt->sp + tag_type->num_params > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
                     for (i = 0; i < tag_type->num_params; i++)
                         rt->stack[rt->sp++] = rt->pending_exception.values[i];
@@ -14197,7 +14570,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = WASM__POP(rt);
-                err = wasm__set_exception_state(&rt->pending_exception, tag_index, payload, tag_type->num_params);
+                err = wasm__set_exception_state(&rt->pending_exception,
+                                                tag_index,
+                                                mod->tags[tag_index].identity,
+                                                payload,
+                                                tag_type->num_params);
                 if (payload != payload_buf) WASM_FREE(payload);
                 if (err != WASM_OK) goto cleanup;
                 err = wasm__handle_exception_frames(mod, base_frame_sp);
@@ -14212,6 +14589,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (!wasm__find_rethrow_label(cf->labels, cf->lsp, depth_index, &target_index)) WASM__TRAP(WASM_ERR_MALFORMED);
                 err = wasm__set_exception_state(&rt->pending_exception,
                                                 cf->labels[target_index].caught_tag,
+                                                cf->labels[target_index].caught_tag_identity,
                                                 cf->labels[target_index].caught_values,
                                                 cf->labels[target_index].caught_count);
                 if (err != WASM_OK) goto cleanup;
@@ -14220,6 +14598,22 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     rt->sp = cf->labels[cf->lsp - 1].sp_base;
                     cf->lsp--;
                 }
+                err = wasm__handle_exception_frames(mod, base_frame_sp);
+                if (err == WASM_OK) return WASM__ERR_RESUME_FRAME;
+                if (err == WASM__ERR_EXCEPTION) return err;
+                goto cleanup;
+            }
+            case 0x0A: { /* throw_ref */
+                wasm_value_t exnref_value = WASM__POP(rt);
+                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(&exnref_value);
+
+                if (!exn) WASM__TRAP(WASM_ERR_TRAP);
+                err = wasm__set_exception_state(&rt->pending_exception,
+                                                exn->tag_index,
+                                                exn->tag_identity,
+                                                exn->values,
+                                                exn->num_values);
+                if (err != WASM_OK) goto cleanup;
                 err = wasm__handle_exception_frames(mod, base_frame_sp);
                 if (err == WASM_OK) return WASM__ERR_RESUME_FRAME;
                 if (err == WASM__ERR_EXCEPTION) return err;
@@ -14304,6 +14698,17 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__handle_exception_frames(mod, base_frame_sp);
+                            if (err == WASM_OK) {
+                                if (call_results != call_results_buf) WASM_FREE(call_results);
+                                return WASM__ERR_RESUME_FRAME;
+                            }
+                            if (err == WASM__ERR_EXCEPTION) {
+                                if (call_results != call_results_buf) WASM_FREE(call_results);
+                                return err;
+                            }
+                        }
                         if (call_results != call_results_buf) WASM_FREE(call_results);
                         goto cleanup;
                     }
@@ -15737,6 +16142,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         WASM__PUSH(rt, wasm__simd_swizzle(&lhs, &rhs));
                         break;
                     }
+                    case 0x100: {
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_swizzle(&lhs, &rhs));
+                        break;
+                    }
                     case 0x0F:
                     case 0x10:
                     case 0x11:
@@ -15934,6 +16345,26 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         WASM__PUSH(rt, wasm__simd_bitselect(&lhs, &rhs, &mask));
                         break;
                     }
+                    case 0x105:
+                    case 0x106:
+                    case 0x107:
+                    case 0x108: {
+                        wasm_value_t acc = WASM__POP(rt);
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_relaxed_madd(subop, &lhs, &rhs, &acc));
+                        break;
+                    }
+                    case 0x109:
+                    case 0x10A:
+                    case 0x10B:
+                    case 0x10C: {
+                        wasm_value_t mask = WASM__POP(rt);
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_bitselect(&lhs, &rhs, &mask));
+                        break;
+                    }
                     case 0x53: {
                         wasm_value_t value = WASM__POP(rt);
                         WASM__PUSH(rt, wasm_i32(wasm__simd_any_true(&value) ? 1 : 0));
@@ -16041,7 +16472,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     case 0xFC:
                     case 0xFD:
                     case 0xFE:
-                    case 0xFF: {
+                    case 0xFF:
+                    case 0x101:
+                    case 0x102:
+                    case 0x103:
+                    case 0x104: {
                         wasm_value_t value = WASM__POP(rt);
                         wasm_value_t vector;
 
@@ -16069,6 +16504,18 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             case 0xFC:
                             case 0xFD:
                                 vector = wasm__simd_trunc_sat_f64x2_zero(subop, &value);
+                                break;
+                            case 0x101:
+                                vector = wasm__simd_trunc_sat_f32x4(0xF8, &value);
+                                break;
+                            case 0x102:
+                                vector = wasm__simd_trunc_sat_f32x4(0xF9, &value);
+                                break;
+                            case 0x103:
+                                vector = wasm__simd_trunc_sat_f64x2_zero(0xFC, &value);
+                                break;
+                            case 0x104:
+                                vector = wasm__simd_trunc_sat_f64x2_zero(0xFD, &value);
                                 break;
                             default:
                                 vector = wasm__simd_convert_low_i32x4_to_f64x2(subop, &value);
@@ -16309,10 +16756,50 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     case 0xF4:
                     case 0xF5:
                     case 0xF6:
-                    case 0xF7: {
+                    case 0xF7:
+                    case 0x10D:
+                    case 0x10E:
+                    case 0x10F:
+                    case 0x110: {
                         wasm_value_t rhs = WASM__POP(rt);
                         wasm_value_t lhs = WASM__POP(rt);
-                        WASM__PUSH(rt, wasm__simd_f64x2_binary(subop, &lhs, &rhs));
+                        if (subop >= 0x10D) {
+                            switch (subop) {
+                                case 0x10D:
+                                    WASM__PUSH(rt, wasm__simd_f32x4_binary(0xE8, &lhs, &rhs));
+                                    break;
+                                case 0x10E:
+                                    WASM__PUSH(rt, wasm__simd_f32x4_binary(0xE9, &lhs, &rhs));
+                                    break;
+                                case 0x10F:
+                                    WASM__PUSH(rt, wasm__simd_f64x2_binary(0xF4, &lhs, &rhs));
+                                    break;
+                                default:
+                                    WASM__PUSH(rt, wasm__simd_f64x2_binary(0xF5, &lhs, &rhs));
+                                    break;
+                            }
+                        } else {
+                            WASM__PUSH(rt, wasm__simd_f64x2_binary(subop, &lhs, &rhs));
+                        }
+                        break;
+                    }
+                    case 0x111: {
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_i16x8_binary(0x82, &lhs, &rhs));
+                        break;
+                    }
+                    case 0x112: {
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_relaxed_dot_i8x16_i7x16_s(&lhs, &rhs));
+                        break;
+                    }
+                    case 0x113: {
+                        wasm_value_t acc = WASM__POP(rt);
+                        wasm_value_t rhs = WASM__POP(rt);
+                        wasm_value_t lhs = WASM__POP(rt);
+                        WASM__PUSH(rt, wasm__simd_relaxed_dot_i8x16_i7x16_add_s(&lhs, &rhs, &acc));
                         break;
                     }
                     default:
