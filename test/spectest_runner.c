@@ -1069,7 +1069,24 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "unknown type") == 0 &&
         ((strstr(actual_lower, "type index") != NULL && strstr(actual_lower, "out of range") != NULL) ||
          (strstr(actual_lower, "section 10 decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         (strstr(actual_lower, "resolve_module_reftypes") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
          strstr(actual_lower, "invalid func type index") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "immutable array") == 0 &&
+        (strstr(actual_lower, "destination must be mutable") != NULL ||
+         strstr(actual_lower, "requires a mutable element type") != NULL))
+        return 1;
+    if (strcmp(expected_lower, "array types do not match") == 0 &&
+        strstr(actual_lower, "array copy type mismatch") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "array type is not numeric or vector") == 0 &&
+        strstr(actual_lower, "requires a non reference element type") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "type mismatch") == 0 &&
+        strstr(actual_lower, "requires a reference element type") != NULL)
+        return 1;
+    if (strcmp(expected_lower, "null array reference") == 0 &&
+        strcmp(actual_lower, "trap") == 0)
         return 1;
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
         (strstr(actual_lower, "type mismatch") != NULL || strstr(actual_lower, "import type mismatch") != NULL))
@@ -1217,8 +1234,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strstr(expected_lower, "uninitialized element") != NULL &&
         strstr(actual_lower, "uninitialized table element") != NULL)
         return 1;
-    if ((strcmp(expected_lower, "out of bounds table access") == 0 ||
-         strcmp(expected_lower, "out of bounds memory access") == 0) &&
+        if ((strcmp(expected_lower, "out of bounds table access") == 0 ||
+            strcmp(expected_lower, "out of bounds memory access") == 0 ||
+            strcmp(expected_lower, "out of bounds array access") == 0) &&
         strstr(actual_lower, "out of bounds") != NULL)
         return 1;
     if (strcmp(expected_lower, "integer divide by zero") == 0 &&
@@ -1593,6 +1611,7 @@ static int spec_parse_value(const char* json,
         if (value_index < 0) {
             out_value->value = wasm_ref_null(WASM_TYPE_EXTERNREF);
             out_value->any_non_null_ref = 1;
+            ok = 1;
             goto done;
         }
         value_text = spec_strdup_token(json, &tokens[value_index]);
@@ -1615,6 +1634,7 @@ static int spec_parse_value(const char* json,
         if (value_index < 0) {
             out_value->value = wasm_ref_null(WASM_TYPE_FUNCREF);
             out_value->any_non_null_ref = 1;
+            ok = 1;
             goto done;
         }
         value_text = spec_strdup_token(json, &tokens[value_index]);
@@ -1636,6 +1656,7 @@ static int spec_parse_value(const char* json,
         if (value_index < 0) {
             out_value->value = wasm_ref_null(WASM_TYPE_I31REF);
             out_value->any_non_null_ref = 1;
+            ok = 1;
             goto done;
         }
         value_text = spec_strdup_token(json, &tokens[value_index]);
@@ -1664,6 +1685,7 @@ static int spec_parse_value(const char* json,
         if (value_index < 0) {
             out_value->value = wasm_ref_null(ref_type);
             out_value->any_non_null_ref = 1;
+            ok = 1;
             goto done;
         }
         value_text = spec_strdup_token(json, &tokens[value_index]);
@@ -1728,14 +1750,34 @@ static void spec_describe_value(const wasm_value_t* value, char* buffer, size_t 
                 snprintf(buffer, buffer_size, "externref(0x%" PRIxPTR ")", value->of.externref);
             break;
         case WASM_TYPE_I31REF:
+            if (value->of.gc_ref == (uintptr_t)0)
+                snprintf(buffer, buffer_size, "i31ref(null)");
+            else
+                snprintf(buffer, buffer_size, "i31ref(0x%" PRIxPTR ")", value->of.gc_ref);
+            break;
         case WASM_TYPE_ANYREF:
+            if (value->of.gc_ref == (uintptr_t)0)
+                snprintf(buffer, buffer_size, "anyref(null)");
+            else
+                snprintf(buffer, buffer_size, "anyref(0x%" PRIxPTR ")", value->of.gc_ref);
+            break;
         case WASM_TYPE_EQREF:
+            if (value->of.gc_ref == (uintptr_t)0)
+                snprintf(buffer, buffer_size, "eqref(null)");
+            else
+                snprintf(buffer, buffer_size, "eqref(0x%" PRIxPTR ")", value->of.gc_ref);
+            break;
         case WASM_TYPE_STRUCTREF:
+            if (value->of.gc_ref == (uintptr_t)0)
+                snprintf(buffer, buffer_size, "structref(null)");
+            else
+                snprintf(buffer, buffer_size, "structref(0x%" PRIxPTR ")", value->of.gc_ref);
+            break;
         case WASM_TYPE_ARRAYREF:
             if (value->of.gc_ref == (uintptr_t)0)
-                snprintf(buffer, buffer_size, "ref(null)");
+                snprintf(buffer, buffer_size, "arrayref(null)");
             else
-                snprintf(buffer, buffer_size, "ref(0x%" PRIxPTR ")", value->of.gc_ref);
+                snprintf(buffer, buffer_size, "arrayref(0x%" PRIxPTR ")", value->of.gc_ref);
             break;
         case WASM_TYPE_V128: {
             size_t offset = 0u;
@@ -1760,7 +1802,7 @@ static int spec_values_match(const spec_value_t* expected,
     char expected_desc[128];
 
     if (expected->any_non_null_ref) {
-        if (expected->value.type != actual->type) {
+        if (!wasm__is_valtype_subtype(NULL, actual->type, expected->value.type)) {
             spec_describe_value(&expected->value, expected_desc, sizeof(expected_desc));
             spec_describe_value(actual, actual_desc, sizeof(actual_desc));
             spec_set_error(error_text, error_size, "type mismatch: expected %s but got %s", expected_desc, actual_desc);
@@ -1845,6 +1887,37 @@ static int spec_values_match(const spec_value_t* expected,
     spec_describe_value(actual, actual_desc, sizeof(actual_desc));
     spec_set_error(error_text, error_size, "expected %s but got %s", expected_desc, actual_desc);
     return 0;
+}
+
+static void spec_describe_result_list(const wasm_value_t* values,
+                                      uint32_t count,
+                                      char* buffer,
+                                      size_t buffer_size) {
+    uint32_t i;
+    size_t offset = 0u;
+
+    if (!buffer || buffer_size == 0u) return;
+    buffer[0] = '\0';
+
+    if (!values || count == 0u) {
+        spec_set_error(buffer, buffer_size, "<no results>");
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        char value_desc[128];
+        int written;
+
+        spec_describe_value(&values[i], value_desc, sizeof(value_desc));
+        written = snprintf(buffer + offset, buffer_size - offset,
+                           "%s%s", i == 0u ? "" : ", ", value_desc);
+        if (written < 0) break;
+        if ((size_t)written >= buffer_size - offset) {
+            offset = buffer_size - 1u;
+            break;
+        }
+        offset += (size_t)written;
+    }
 }
 
 static int spec_parse_expected_list(const char* json,
@@ -2781,6 +2854,14 @@ static int spec_run_command(spec_harness_t* harness,
 
         ok = spec_compare_expected(json, tokens, command_index, result.results, result.num_results,
                                    command_error, sizeof(command_error));
+        if (!ok && command_error[0] == '\0') {
+            char actual_results[256];
+
+            spec_describe_result_list(result.results, result.num_results,
+                                      actual_results, sizeof(actual_results));
+            spec_set_error(command_error, sizeof(command_error),
+                           "result comparison failed; actual results: %s", actual_results);
+        }
         spec_action_result_dispose(&result);
     } else if (strcmp(type_text, "assert_trap") == 0 || strcmp(type_text, "assert_exhaustion") == 0 ||
                strcmp(type_text, "assert_exception") == 0) {

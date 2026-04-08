@@ -2284,6 +2284,22 @@ static wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
     return wasm_ref_null(null_type);
 }
 
+static wasm_value_t wasm__retag_value_for_declared_type(wasm_valtype_t declared_type,
+                                                        const wasm_reftype_t* declared_reftype,
+                                                        wasm_value_t value) {
+    wasm_valtype_t result_type = declared_type == WASM_TYPE_VOID ? WASM_TYPE_ANYREF : declared_type;
+
+    if (!wasm__is_ref_type(result_type) || !wasm__is_ref_type(value.type)) {
+        value.type = result_type;
+        return value;
+    }
+
+    if (wasm__is_null_ref(&value)) return wasm__typed_ref_null(result_type, declared_reftype);
+
+    value.type = result_type;
+    return value;
+}
+
 static wasm_value_t wasm__default_value(wasm_valtype_t type) {
     switch (type) {
         case WASM_TYPE_I32:
@@ -2525,7 +2541,12 @@ static wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
 
 static wasm_error_t wasm__resolve_reftype(wasm_module_t* mod, wasm_reftype_t* reftype) {
     if (!reftype || !reftype->has_type_index) return WASM_OK;
-    if (!mod || reftype->type_index >= mod->num_types) return WASM_ERR_MALFORMED;
+    if (!mod || reftype->type_index >= mod->num_types) {
+        if (mod && mod->rt) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)reftype->type_index);
+        }
+        return WASM_ERR_MALFORMED;
+    }
 
     switch (mod->types[reftype->type_index].kind) {
         case WASM_COMP_FUNC:
@@ -3644,15 +3665,15 @@ static wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 }
 
 static wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
-    return global->is_import ? *global->import_value : global->value;
+    wasm_value_t value;
+
+    value = global->is_import ? *global->import_value : global->value;
+    return wasm__retag_value_for_declared_type(global->type, &global->ref_type, value);
 }
 
 static void wasm__global_set_value(wasm_global_t* global, wasm_value_t value) {
-    if (!wasm__is_ref_type(global->type) || !wasm__is_ref_type(value.type))
-        value.type = global->type;
+    value = wasm__retag_value_for_declared_type(global->type, &global->ref_type, value);
     if (global->is_import) {
-        if (!wasm__is_ref_type(global->type) || !wasm__is_ref_type(value.type))
-            global->import_value->type = global->type;
         *global->import_value = value;
     } else {
         global->value = value;
@@ -8936,7 +8957,9 @@ static wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint
                     if (err != WASM_OK) return err;
                     if (!atype->field.is_mutable)
                         return wasm__validator_error(v, at, "array.copy destination must be mutable");
-                    if (!wasm__is_fieldtype_subtype(v->mod, &src_type->field, &atype->field))
+                    if (!wasm__is_storagetype_subtype(v->mod,
+                                                      &src_type->field.storage,
+                                                      &atype->field.storage))
                         return wasm__validator_error(v, at, "array.copy type mismatch");
                     err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
                     if (err != WASM_OK) return err;
@@ -12063,8 +12086,10 @@ static wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     for (i = 0; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
     for (i = 0; i < ft->num_params && i < num_args; i++) {
-        cf->locals[i] = args[i];
-        cf->locals[i].type = ft->params[i];
+        cf->locals[i] = wasm__retag_value_for_declared_type(
+            ft->params[i],
+            ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
+            args[i]);
     }
 
     return WASM_OK;
@@ -12091,8 +12116,12 @@ static wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_fr
         if (!result_values) return WASM_ERR_OOM;
     }
 
-    for (i = 0; i < result_count; i++)
-        result_values[i] = rt->stack[rt->sp - result_count + i];
+    for (i = 0; i < result_count; i++) {
+        result_values[i] = wasm__retag_value_for_declared_type(
+            cf->ft->results[i],
+            cf->ft->result_reftypes ? &cf->ft->result_reftypes[i] : NULL,
+            rt->stack[rt->sp - result_count + i]);
+    }
 
     rt->sp = cf->sp_base;
     wasm__arena_reset(rt, cf->arena_saved);
@@ -12236,8 +12265,6 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
         case 0x0D:
         case 0x0E:
         case 0x10:
-        case 0x12:
-        case 0x13:
             wasm__read_leb128_u32(r);
             break;
         case 0x02:
@@ -12247,6 +12274,8 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
         case 0x09:
         case 0x0A:
         case 0x11:
+        case 0x12:
+        case 0x13:
             wasm__read_leb128_u32(r);
             wasm__read_leb128_u32(r);
             break;
@@ -13787,7 +13816,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             if (!wasm__gc_array_data_element_size(atype, &elem_size)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                             count = (uint32_t)size_value.of.i32;
                             segment = &mod->data_segments[data_idx];
-                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (!segment->is_passive) WASM__TRAP(WASM_ERR_TRAP);
                             if (count != 0 && elem_size > UINT64_MAX / count) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                             byte_count = (uint64_t)elem_size * (uint64_t)count;
                             src_offset = (uint64_t)(uint32_t)offset_value.of.i32;
@@ -13824,7 +13853,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             count = (uint32_t)size_value.of.i32;
                             src_offset = (uint32_t)offset_value.of.i32;
                             segment = &mod->elem_segments[elem_idx];
-                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (!segment->is_passive) WASM__TRAP(WASM_ERR_TRAP);
                             if (!wasm__range_in_bounds_u64(src_offset, count, segment->num_elems))
                                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
 
@@ -14017,7 +14046,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             if (!header || header->kind != WASM_GC_OBJ_ARRAY) WASM__TRAP(WASM_ERR_TRAP);
                             object = (wasm_gc_array_t*)header;
                             segment = &mod->data_segments[data_idx];
-                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (!segment->is_passive) WASM__TRAP(WASM_ERR_TRAP);
                             if (!wasm__gc_array_data_element_size(atype, &elem_size)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
 
                             count = (uint32_t)count_value.of.i32;
@@ -14063,7 +14092,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             if (!header || header->kind != WASM_GC_OBJ_ARRAY) WASM__TRAP(WASM_ERR_TRAP);
                             object = (wasm_gc_array_t*)header;
                             segment = &mod->elem_segments[elem_idx];
-                            if (!segment->is_passive || segment->is_dropped) WASM__TRAP(WASM_ERR_TRAP);
+                            if (!segment->is_passive) WASM__TRAP(WASM_ERR_TRAP);
                             count = (uint32_t)count_value.of.i32;
                             src_index = (uint32_t)src_offset_value.of.i32;
                             dst_index = (uint32_t)dst_offset_value.of.i32;
@@ -15297,17 +15326,26 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             /* Variables */
             case 0x20: {
                 uint32_t x = wasm__read_leb128_u32(&cf->r);
-                WASM__PUSH(rt, cf->locals[x]);
+                WASM__PUSH(rt, wasm__retag_value_for_declared_type(
+                    cf->func->locals[x],
+                    cf->func->local_reftypes ? &cf->func->local_reftypes[x] : NULL,
+                    cf->locals[x]));
                 break;
             }
             case 0x21: {
                 uint32_t x = wasm__read_leb128_u32(&cf->r);
-                cf->locals[x] = WASM__POP(rt);
+                cf->locals[x] = wasm__retag_value_for_declared_type(
+                    cf->func->locals[x],
+                    cf->func->local_reftypes ? &cf->func->local_reftypes[x] : NULL,
+                    WASM__POP(rt));
                 break;
             }
             case 0x22: {
                 uint32_t x = wasm__read_leb128_u32(&cf->r);
-                cf->locals[x] = WASM__PEEK(rt);
+                cf->locals[x] = wasm__retag_value_for_declared_type(
+                    cf->func->locals[x],
+                    cf->func->local_reftypes ? &cf->func->local_reftypes[x] : NULL,
+                    WASM__PEEK(rt));
                 break;
             }
             case 0x23: {
