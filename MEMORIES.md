@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 4
+Memory Version: 5
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -20,6 +20,11 @@ This file is the canonical checked-in snapshot of repo memory.
 - `br_on_cast` source-operand validation wants the actual operand to be a subtype of the declared source type, while `ref.test`/`ref.cast` still need the target type to be a subtype of the operand’s static type. Reusing one helper for both directions causes either `expected 0x15, got 0x15` false negatives or valid cast rejections.
 - Canonical GC type equality must include the declared supertype chain, not just the immediate struct/array/function body, or sibling types with matching fields collapse and make `br_on_cast` succeed when it should not.
 - Typed-reference comparisons in validators and cross-module type matching must use the effective `wasm_reftype_t`, not the raw outer `wasm_valtype_t`. The outer tag can differ (`anyref` vs `funcref`) for the same semantic typed ref, and imports / `call_indirect` / `ref.test` need subtype-based compatibility across modules rather than exact type equality.
+
+## exception-typing.md
+
+- `try_table` branch-target validation must use subtype-compatible typed-reference matching, not exact signature equality, or `catch` / `catch_ref` rejects valid payload flows like `(ref $t)` into `(ref null $t)`.
+- `catch_ref` and `catch_all_ref` produce a definitely non-null exception reference. In `wasm.h`, validate that slot with an explicit non-null `noexn` reftype; passing a bare `exnref` type falls back to the validator's default nullable reference handling and incorrectly rejects `(ref exn)` targets.
 
 ## br-table-validator.md
 
