@@ -213,6 +213,7 @@ What it does today:
 - caches export indices and provides lifecycle helpers
 - owns a runtime by default so the common case is just `*_init(...)` or `*_init_embedded(NULL)` and then direct wrapper calls
 - exposes an `*_init_options_t` struct for advanced callers that want to supply a runtime, runtime config, or import bindings
+- for non-singleton library output, also emits a `*_api_t` handle plus `*_api_vtable_t`, so callers can keep an instance pointer and method table together via `*_api_init(...)` or `*_api_from_ctx(...)`
 - can emit a singleton-oriented API with `--singleton`, which hides one generated context instance in the `.c` file and removes the `ctx` parameter from wrapper calls
 - if the module exports a memory, also emits `*_get_memory_ptr`, `*_get_memory_size`, `*_read_memory_string`, `*_read_memory`, and `*_write_memory` helpers against that exported memory, preferring an export literally named `memory` when several memories are exported
 - emits an imports struct when the module imports host functions or globals
@@ -223,6 +224,13 @@ What it does today:
 `--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
 
 `--singleton` generates a single-instance API for cases where only one module instance should exist in-process. In that mode, the generated export wrappers, `*_free`, `*_get_module`, `*_get_runtime`, and `*_get_last_error*` helpers no longer take a context pointer. `*_init(...)` and `*_init_embedded(...)` return `wasm_error_t` instead of a context pointer and manage one hidden static context inside the generated source.
+
+When you stay in the default non-singleton mode, the generated header now also includes a small object layer:
+
+- `*_api_init(...)` and `*_api_init_embedded(...)` return a `*_api_t` value with a `ctx`, `owns_ctx`, and `vtable`
+- `*_api_from_ctx(...)` wraps an existing context without taking ownership
+- `*_api_free(...)` frees owned contexts and simply detaches borrowed ones
+- the vtable mirrors the generated export wrappers and helper methods, so callers that prefer an object-style surface can dispatch through `api.vtable->method(&api, ...)` while the flat `*_func(ctx, ...)` API remains available
 
 `--init-func <export>` marks a `void(void)` Wasm export that should be invoked automatically after the wrapper loads the module. This is useful for libraries that need an explicit Wasm-side startup step before other exports are called.
 

@@ -92,12 +92,14 @@ double sub(double lhs, double rhs) {
 	return lhs - rhs;
 }
 
-__attribute__((export_name("pow"))) double session_math_pow_export(double base,
+#define export(name) __attribute__((export_name(name)))
+
+export("pow") double session_math_pow_export(double base,
 													   double exponent) {
 	return session_math_pow_approx(base, exponent);
 }
 
-__attribute__((export_name("exp"))) double session_math_exp_export(double value) {
+export("exp") double session_math_exp_export(double value) {
 	return session_math_exp_approx(value);
 }
 
