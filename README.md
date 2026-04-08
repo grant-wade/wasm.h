@@ -1,49 +1,15 @@
 # wasm.h
 
-`wasm.h` is a single-header WebAssembly runtime for C99.
+A single-header WebAssembly runtime for C99. No external runtime dependency.
 
-It loads Wasm binaries from memory, validates them, instantiates modules, binds host imports, executes exports, and exposes a compact embedding API with no external runtime dependency. The repository also includes a CLI runner, a wrapper generator, a local spectest harness, and an `emcc`-based fixture suite.
-
-## Current status
-
-The checked-in local test harness is currently green.
-
-On a machine with `wasm-tools` and `emcc` available, the repository's `check` target passes all locally configured tests:
-
-- `wl_test`
-- `wasm_test`
-- the full spectest harness configured by `test/CMakeLists.txt`
-- the `emcc` fixture suite
-
-In the latest local run on this repository state, that was `272/272` passing tests.
-
-## What this runtime provides
-
-At a high level, `wasm.h` includes:
-
-- load-time validation and feature gating
-- execution of exported Wasm functions from C
-- host function and imported-global binding
-- linear memories, including multiple memories and `memory64`
-- tables, indirect calls, `call_ref`, and typed reference flows
-- bulk memory and element/data segment operations
-- exceptions, tail calls, and extended constant expressions
-- fixed-width SIMD plus relaxed SIMD execution, with ARM NEON and x86_64 SSE2 fast paths where the platform instructions preserve Wasm semantics exactly
-- GC-aware runtime support for structs, arrays, `i31ref`, casts, and heap subtyping
-- trap reporting, fuel metering, and backtrace helpers
-- optional built-in WASI stubs for common `wasi_snapshot_preview1` imports
-
+Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
 ## Quick start
-
-Use `wasm.h` like a normal single-header library:
 
 ```c
 #define WASM_IMPL
 #include "wasm.h"
 ```
-
-Minimal embedding example:
 
 ```c
 #include <stdio.h>
@@ -60,13 +26,13 @@ int main(void) {
 
 	mod = wasm_load(&rt, wasm_bytes, wasm_len);
 	if (!mod) {
-		fprintf(stderr, "load failed: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
+		fprintf(stderr, "load: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
 		wasm_destroy(&rt);
 		return 1;
 	}
 
 	if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK) {
-		fprintf(stderr, "call failed: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
+		fprintf(stderr, "call: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
 		wasm_free_module(mod);
 		wasm_destroy(&rt);
 		return 1;
@@ -80,166 +46,195 @@ int main(void) {
 }
 ```
 
-The format string for `wasm_call_fmt()` uses `args(results)` syntax, so `"i(i)"` means one `i32` argument and one `i32` result.
+`wasm_call_fmt` uses `args(results)` syntax: `"i(i)"` means one `i32` argument and one `i32` result.
 
-Useful public APIs beyond the basic load-and-call path include:
+Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void result.
 
-- `wasm_enable_feature()`, `wasm_disable_feature()`, `wasm_enable_all_features()`
-- `wasm_call()`, `wasm_call_index()`, `wasm_call_fmt()`
-- `wasm_bind_host_func()` and the lower-level import registration APIs
-- `wasm_memory_read()`, `wasm_memory_write()`, and the indexed memory helpers
-- `wasm_global_get()` and `wasm_global_set()`
-- `wasm_set_fuel()` and `wasm_get_fuel()`
-- `wasm_dump_backtrace()` and call-stack inspection helpers
-- `wasm_bind_wasi_stubs()`
+## Embedding API
+
+### Lifecycle
+
+| Function | Purpose |
+| --- | --- |
+| `wasm_init(rt, config)` | Initialize a runtime. Pass `NULL` for defaults. |
+| `wasm_destroy(rt)` | Free all runtime resources. |
+| `wasm_load(rt, bytes, len)` | Load, validate, and instantiate a module. |
+| `wasm_free_module(mod)` | Free a loaded module. |
+
+### Calling Wasm
+
+| Function | Purpose |
+| --- | --- |
+| `wasm_call(mod, name, args, nargs, results, nresults)` | Call an export by name with value arrays. |
+| `wasm_call_index(mod, idx, args, nargs, results, nresults)` | Call a function by index. |
+| `wasm_call_fmt(mod, name, fmt, ...)` | Call an export using a format string and varargs. |
+| `wasm_find_export(mod, name, kind, index)` | Look up an export by name. |
+
+### Host imports
+
+| Function | Purpose |
+| --- | --- |
+| `wasm_bind_host_func(rt, module, name, fmt, cb, userdata)` | Bind a host function import using a format string. |
+| `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs. |
+
+### Memory and globals
+
+| Function | Purpose |
+| --- | --- |
+| `wasm_memory_read(mod, mem_idx, offset, dst, len)` | Read bytes from linear memory. |
+| `wasm_memory_write(mod, mem_idx, offset, src, len)` | Write bytes to linear memory. |
+| `wasm_global_get(mod, name, out)` | Read an exported global. |
+| `wasm_global_set(mod, name, val)` | Write an exported mutable global. |
+
+### Features and diagnostics
+
+| Function | Purpose |
+| --- | --- |
+| `wasm_enable_feature(rt, flag)` | Enable a proposal feature flag. |
+| `wasm_disable_feature(rt, flag)` | Disable a proposal feature flag. |
+| `wasm_enable_all_features(rt)` | Enable all implemented proposals. |
+| `wasm_set_fuel(mod, n)` | Set an instruction fuel limit. |
+| `wasm_get_fuel(mod)` | Read remaining fuel. |
+| `wasm_dump_backtrace(mod)` | Print a call-stack backtrace. |
+| `wasm_error_string(err)` | Human-readable name for an error code. |
+
+### Configuration
+
+Pass a `wasm_config_t` to `wasm_init` to override defaults:
+
+```c
+wasm_config_t cfg = {
+	.max_stack_values  = 65536,
+	.max_call_depth    = 1024,
+	.max_labels        = 4096,
+	.initial_gc_heap_size = 1 << 20,
+	.frame_arena_size  = 1 << 16,
+};
+wasm_init(&rt, &cfg);
+```
+
+### Custom allocators
+
+Define before including `wasm.h`:
+
+```c
+#define WASM_MALLOC(sz)      my_malloc(sz)
+#define WASM_REALLOC(p, sz)  my_realloc(p, sz)
+#define WASM_FREE(p)         my_free(p)
+#define WASM_CALLOC(n, sz)   my_calloc(n, sz)
+```
+
+### WASI stubs
+
+`wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_close`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
 
 ## Build and test
 
-Configure and build with CMake:
-
 ```sh
 cmake -S . -B build
-cmake --build build
-```
-
-Run the full repository test pass:
-
-```sh
 cmake --build build --target check
 ```
 
-Main native targets:
+`check` runs the full test pass: unit tests (`wasm_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
 
-- `wasm`
-- `wasm2api`
-- `wasm_test`
-- `wl_test`
-- `basic_add_demo`
+Spectest targets require a system `wasm-tools` with both `json-from-wast` and `parse` subcommands. Emcc fixture targets require `emcc`.
 
-Spectest targets are enabled only when a system `wasm-tools` executable is available with both `json-from-wast` and `parse` subcommands.
-
-Useful spectest targets:
-
-- `cmake --build build --target wasm-spectest-build`
-- `cmake --build build --target wasm-spectest-run`
-- `cmake --build build --target wasm-spectest-run-strict`
-
-The spectest harness builds per-file JSON command streams under `build/test/spec/` and runs them through `test/spectest_runner.c`.
-
-The repository also includes an `emcc`-driven fixture suite that compiles real C inputs into Wasm and executes them through `wasm.h`.
-
-Useful `emcc` targets:
-
-- `cmake --build build --target wasm-emcc-build`
-- `cmake --build build --target wasm-emcc-run`
-- `cmake --build build --target wasm-emcc-run-strict`
-- `cmake --build build --target wasm-emcc-list`
-
-## CLI runner
-
-`wasm.c` builds a small command-line tool for inspection and execution.
-
-Build it with:
+Additional targets:
 
 ```sh
-cmake --build build --target wasm
+cmake --build build --target wasm               # CLI runner
+cmake --build build --target wasm2api            # Wrapper generator
+cmake --build build --target wasm-spectest-run   # Spectest only
+cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 ```
 
-Usage:
+## CLI
 
-```sh
-./build/wasm [--no-wasi] [--fuel N] <module.wasm> <command> [args...]
+`wasm.c` builds a command-line tool for inspection and execution:
+
+```
+wasm [--help] [--no-wasi] [--fuel N] <module.wasm> <command> [args...]
 ```
 
-Supported commands:
-
-- `info`
-- `exports`
-- `funcs`
-- `types`
-- `globals`
-- `memories`
-- `custom-sections`
-- `call <export_name> [args...]`
-- `call-index <func_index> [args...]`
-- `global-get <export_name>`
-- `global-set <export_name> <value>`
-- `memory-read <memory_index> <offset> <length>`
-- `memory-string <memory_index> <offset> [max_len]`
-
-Examples:
+| Command | Description |
+| --- | --- |
+| `info` | Module summary. |
+| `exports` | List exports. |
+| `funcs` | List functions with signatures. |
+| `types` | List type section entries. |
+| `globals` | List globals. |
+| `memories` | List memories. |
+| `custom-sections` | List custom section names and sizes. |
+| `call <name> [args...]` | Call an export by name. |
+| `call-index <idx> [args...]` | Call a function by index. |
+| `global-get <name>` | Read an exported global. |
+| `global-set <name> <value>` | Write an exported mutable global. |
+| `memory-read <idx> <offset> <len>` | Hex-dump memory. |
+| `memory-string <idx> <offset> [max]` | Print a null-terminated string from memory. |
 
 ```sh
 ./build/wasm hello.wasm info
-./build/wasm hello.wasm exports
 ./build/wasm math.wasm call add 2 40
 ./build/wasm memory.wasm memory-read 0 0 64
+./build/wasm --no-wasi bare.wasm call _start
 ```
 
-By default the CLI binds the built-in WASI stub layer. Use `--no-wasi` to disable that.
+WASI stubs are bound by default; `--no-wasi` disables them.
 
-## `wasm2api`
+## wasm2api
 
-`wasm2api.c` generates small typed C wrappers around Wasm exports and imports.
-
-Build it with:
+`wasm2api.c` generates typed C wrappers around a module's exports and imports:
 
 ```sh
-cmake --build build --target wasm2api
+./build/wasm2api module.wasm my_module          # generates my_module.h + my_module.c
+./build/wasm2api --embed module.wasm my_module  # embeds the .wasm bytes in the source
 ```
 
-Generate wrapper files:
-
-```sh
-./build/wasm2api path/to/module.wasm my_module
-./build/wasm2api --embed path/to/module.wasm my_module
-```
-
-What it does today:
-
-- emits `<prefix>.h` and `<prefix>.c`
-- caches export indices and provides lifecycle helpers
-- emits an imports struct when the module imports host functions or globals
-- supports generated wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`
-- skips unsupported signatures with diagnostics instead of generating incorrect code
-
-`--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
-
-## Repository layout
-
-- `wasm.h` — single-header runtime, validator, interpreter, and public C API
-- `wasm.c` — CLI runner and inspection tool built on top of `wasm.h`
-- `wasm2api.c` — typed wrapper generator for Wasm exports and imports
-- `wasm_test.c` — native regression coverage for the runtime
-- `wl.h` — local support library used by tests and development utilities
-- `wl_test.c` — tests for `wl.h`
-- `examples/` — native examples and demo code
-- `test/` — spectest harness, `emcc` fixtures, and Wasm fixture runner
-- `docs/` — design notes, plans, and historical compliance snapshots
+- Generates `<prefix>.h` and `<prefix>.c` with cached export indices and lifecycle helpers.
+- Emits an `<prefix>_imports_t` struct when the module has host-function or global imports.
+- Supports `i32`, `i64`, `f32`, `f64`, and `externref` signatures; skips unsupported types with diagnostics.
+- `--embed` bakes the module bytes into the generated `.c` so no runtime file I/O is needed.
 
 ## Proposal support
 
-This table is about the runtime in this repository, not the JS API or text-format tooling.
+| Proposal | Status |
+| --- | --- |
+| MVP | Implemented |
+| Import/Export of Mutable Globals | Implemented |
+| Non-trapping float-to-int conversions | Implemented |
+| Sign-extension operators | Implemented |
+| Multi-value | Implemented |
+| Reference Types | Implemented |
+| Typed Function References | Implemented |
+| Bulk Memory Operations | Implemented |
+| Multiple Memories | Implemented |
+| Fixed-width SIMD | Implemented |
+| Relaxed SIMD | Implemented |
+| Tail Calls | Implemented |
+| Extended Constant Expressions | Implemented |
+| Garbage Collection | Implemented |
+| Exception Handling | Implemented |
+| Memory64 | Implemented |
+| Branch Hinting | Not implemented |
 
-| Proposal | Status | Notes |
-| --- | --- | --- |
-| MVP | Implemented | Core validation, instantiation, execution, memory, tables, imports, and exports. |
-| Import/Export of Mutable Globals | Implemented | Includes imported globals by reference and mutable global support. |
-| Non-trapping float-to-int conversions | Implemented | Covered by validation and execution. |
-| Sign-extension operators | Implemented | Supported in validation and execution. |
-| Multi-value | Implemented | Includes multi-result validation and runtime support. |
-| Reference Types | Implemented | Includes `funcref`, `externref`, tables, and typed reference validation/execution. |
-| Bulk Memory Operations | Implemented | Includes passive segments, `memory.init`, `data.drop`, `table.init`, `table.copy`, and related ops. |
-| Fixed-width SIMD | Implemented | Includes `v128`, full fixed-width SIMD execution, and platform intrinsics where safe. |
-| Relaxed SIMD | Implemented | Covered by the current local spectest harness. |
-| Tail Calls | Implemented | Includes `return_call`, `return_call_indirect`, and `return_call_ref`. |
-| Extended Constant Expressions | Implemented | Evaluated and validated at load time. |
-| Typed Function References | Implemented | Includes `call_ref` and typed function-reference flows exercised by the local testsuite. |
-| Garbage Collection | Implemented | Includes recursive types, structs, arrays, `i31ref`, casts, and host GC helpers. |
-| Multiple Memories | Implemented | Includes indexed memory ops and public helpers. |
-| Exception Handling | Implemented | Includes tags, `try`, `catch`, `catch_all`, `rethrow`, `throw_ref`, and `delegate`. |
-| Memory64 | Implemented | Includes 64-bit memories, validation, execution, and test coverage. |
-| JavaScript BigInt to WebAssembly i64 integration | Out of scope | JS embedding proposal, not relevant to this native C runtime. |
-| JS String Builtins | Out of scope | JS host proposal, not part of this runtime surface. |
-| Custom Annotation Syntax in the Text Format | Out of scope | `wasm.h` is a binary runtime, not a WAT parser. |
-| Branch Hinting | Not implemented | No branch-hint parsing or execution support is present. |
+SIMD execution includes ARM NEON and x86_64 SSE2 fast paths where the platform instructions preserve Wasm semantics exactly.
+
+GC support covers recursive types, structs, arrays, `i31ref`, casts, and heap subtyping.
+
+Exception handling covers both the legacy (`try`/`catch`/`delegate`) and current (`try_table`/`throw_ref`) instruction sets.
+
+JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals (Custom Annotation Syntax) are out of scope for a binary C runtime.
+
+## Repository layout
+
+| Path | Description |
+| --- | --- |
+| `wasm.h` | Single-header runtime, validator, interpreter, and public API. |
+| `wasm.c` | CLI runner. |
+| `wasm2api.c` | Typed wrapper generator. |
+| `wasm_test.c` | Runtime regression tests. |
+| `wl.h` | Local support library (used by tests and utilities). |
+| `wl_test.c` | Tests for `wl.h`. |
+| `examples/` | Demo code. |
+| `test/` | Spectest harness, emcc fixtures, and fixture runner. |
+| `docs/` | Design notes and compliance snapshots. |
