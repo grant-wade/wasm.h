@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 2
+Memory Version: 3
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -19,6 +19,10 @@ This file is the canonical checked-in snapshot of repo memory.
 - Conditional branch validators (`br_if`, `br_on_null`, `br_on_non_null`, `br_on_cast`, `br_on_cast_fail`) need real pop/re-push fallthrough normalization of label arguments. Peeking without retyping preserves overly-specific refs and lets spec-invalid stack-shape cases load.
 - `br_on_cast` source-operand validation wants the actual operand to be a subtype of the declared source type, while `ref.test`/`ref.cast` still need the target type to be a subtype of the operand’s static type. Reusing one helper for both directions causes either `expected 0x15, got 0x15` false negatives or valid cast rejections.
 - Canonical GC type equality must include the declared supertype chain, not just the immediate struct/array/function body, or sibling types with matching fields collapse and make `br_on_cast` succeed when it should not.
+
+## br-table-validator.md
+
+- `br_table` target labels must be merged by a common subtype/result-type match, not exact signature equality. For reference labels, choose the more specific target type when one matches the other; exact-equality checks reject valid `meet-funcref` / `meet-nullref` spectests.
 
 ## spectest-harness.md
 

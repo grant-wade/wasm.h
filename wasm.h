@@ -8739,6 +8739,90 @@ static int wasm__validator_same_types(const wasm_valtype_t* a,
     return 1;
 }
 
+static int wasm__validator_meet_type(const wasm_module_t* mod,
+                                     wasm_valtype_t lhs_type,
+                                     const wasm_reftype_t* lhs_ref,
+                                     wasm_valtype_t rhs_type,
+                                     const wasm_reftype_t* rhs_ref,
+                                     wasm_valtype_t* out_type,
+                                     wasm_reftype_t* out_ref) {
+    wasm_reftype_t lhs_effective;
+    wasm_reftype_t rhs_effective;
+    wasm_reftype_t common_ref;
+
+    if (wasm__typed_valtype_is_subtype(mod, lhs_type, lhs_ref, rhs_type, rhs_ref)) {
+        *out_type = lhs_type;
+        if (lhs_ref && wasm__has_reftype_info(lhs_ref))
+            *out_ref = *lhs_ref;
+        else
+            wasm__clear_reftype(out_ref);
+        return 1;
+    }
+
+    if (wasm__typed_valtype_is_subtype(mod, rhs_type, rhs_ref, lhs_type, lhs_ref)) {
+        *out_type = rhs_type;
+        if (rhs_ref && wasm__has_reftype_info(rhs_ref))
+            *out_ref = *rhs_ref;
+        else
+            wasm__clear_reftype(out_ref);
+        return 1;
+    }
+
+    if (lhs_type != rhs_type || !wasm__is_ref_type(lhs_type) || !wasm__is_ref_type(rhs_type)) {
+        return 0;
+    }
+
+    if (!wasm__get_effective_reftype(mod, lhs_type, lhs_ref, &lhs_effective) ||
+        !wasm__get_effective_reftype(mod, rhs_type, rhs_ref, &rhs_effective)) {
+        return 0;
+    }
+
+    wasm__clear_reftype(&common_ref);
+    common_ref.nullable = lhs_effective.nullable && rhs_effective.nullable;
+
+    if (wasm__uses_funcref_storage(lhs_effective.type) && wasm__uses_funcref_storage(rhs_effective.type)) {
+        common_ref.type = WASM_TYPE_NOFUNC;
+    } else if (wasm__uses_externref_storage(lhs_effective.type) &&
+               wasm__uses_externref_storage(rhs_effective.type)) {
+        common_ref.type = WASM_TYPE_NOEXTERN;
+    } else if (wasm__uses_gc_ref_storage(lhs_effective.type) && wasm__uses_gc_ref_storage(rhs_effective.type)) {
+        common_ref.type = WASM_TYPE_NONE;
+    } else {
+        return 0;
+    }
+
+    *out_type = common_ref.type;
+    *out_ref = common_ref;
+    return wasm__typed_valtype_is_subtype(mod, *out_type, out_ref, lhs_type, lhs_ref) &&
+           wasm__typed_valtype_is_subtype(mod, *out_type, out_ref, rhs_type, rhs_ref);
+}
+
+static int wasm__validator_meet_types(const wasm_module_t* mod,
+                                      const wasm_valtype_t* lhs_types,
+                                      const wasm_reftype_t* lhs_reftypes,
+                                      uint32_t lhs_count,
+                                      const wasm_valtype_t* rhs_types,
+                                      const wasm_reftype_t* rhs_reftypes,
+                                      uint32_t rhs_count,
+                                      wasm_valtype_t* out_types,
+                                      wasm_reftype_t* out_reftypes) {
+    uint32_t i;
+
+    if (lhs_count != rhs_count) return 0;
+    for (i = 0; i < lhs_count; i++) {
+        const wasm_reftype_t* lhs_ref = lhs_reftypes ? &lhs_reftypes[i] : NULL;
+        const wasm_reftype_t* rhs_ref = rhs_reftypes ? &rhs_reftypes[i] : NULL;
+
+        if (!wasm__validator_meet_type(mod,
+                                       lhs_types[i], lhs_ref,
+                                       rhs_types[i], rhs_ref,
+                                       &out_types[i], &out_reftypes[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
                                              const wasm_valtype_t** out_types,
                                              const wasm_reftype_t** out_reftypes,
@@ -10523,47 +10607,74 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x0E: {
                 uint32_t count = wasm__read_leb128_u32(&v.r);
-                uint32_t first_depth = UINT32_MAX;
                 const wasm_valtype_t* branch_types = NULL;
                 const wasm_reftype_t* branch_reftypes = NULL;
                 uint32_t branch_count = 0;
                 const wasm__val_frame_t* frame = wasm__validator_frame(&v);
+                uint32_t depth;
                 uint32_t i;
 
                 err = wasm__validator_pop_expect(&v, at, WASM_TYPE_I32);
                 if (err != WASM_OK) return err;
-                for (i = 0; i <= count; i++) {
-                    uint32_t depth = wasm__read_leb128_u32(&v.r);
-                    const wasm_valtype_t* candidate_types;
-                    const wasm_reftype_t* candidate_reftypes;
-                    uint32_t candidate_count;
+                depth = wasm__read_leb128_u32(&v.r);
+                if (depth >= v.fp)
+                    return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
+                wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
+                                                 &branch_types,
+                                                 &branch_reftypes,
+                                                 &branch_count);
 
-                    if (depth >= v.fp)
-                        return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
-                    wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
-                                                     &candidate_types,
-                                                     &candidate_reftypes,
-                                                     &candidate_count);
-                    if (i == 0) {
-                        first_depth = depth;
-                        branch_types = candidate_types;
-                        branch_reftypes = candidate_reftypes;
-                        branch_count = candidate_count;
-                    } else if (!wasm__validator_same_types(branch_types, branch_reftypes, branch_count,
-                                                           candidate_types, candidate_reftypes,
-                                                           candidate_count)) {
-                        if (!(frame->unreachable && v.sp == frame->height && branch_count == candidate_count)) {
-                            return wasm__validator_error(&v, at,
-                                                         "br_table targets do not share the same signature");
+                {
+                    uint32_t merged_count = branch_count ? branch_count : 1u;
+                    wasm_valtype_t merged_types[merged_count];
+                    wasm_reftype_t merged_reftypes[merged_count];
+
+                    for (i = 0; i < branch_count; i++) {
+                        merged_types[i] = branch_types[i];
+                        if (branch_reftypes && wasm__has_reftype_info(&branch_reftypes[i]))
+                            merged_reftypes[i] = branch_reftypes[i];
+                        else
+                            wasm__clear_reftype(&merged_reftypes[i]);
+                    }
+
+                    for (i = 1; i <= count; i++) {
+                        depth = wasm__read_leb128_u32(&v.r);
+                        {
+                            const wasm_valtype_t* candidate_types;
+                            const wasm_reftype_t* candidate_reftypes;
+                            uint32_t candidate_count;
+
+                            if (depth >= v.fp)
+                                return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
+                            wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
+                                                             &candidate_types,
+                                                             &candidate_reftypes,
+                                                             &candidate_count);
+                            if (!wasm__validator_meet_types(v.mod,
+                                                            merged_types,
+                                                            merged_reftypes,
+                                                            branch_count,
+                                                            candidate_types,
+                                                            candidate_reftypes,
+                                                            candidate_count,
+                                                            merged_types,
+                                                            merged_reftypes)) {
+                                if (!(frame->unreachable && v.sp == frame->height && branch_count == candidate_count)) {
+                                    return wasm__validator_error(&v, at,
+                                                                 "br_table targets do not share the same signature");
+                                }
+                            }
                         }
                     }
+
+                    branch_types = merged_types;
+                    branch_reftypes = merged_reftypes;
+                    err = wasm__validator_check_types_typed(&v, at,
+                                                            branch_types,
+                                                            branch_reftypes,
+                                                            branch_count);
+                    if (err != WASM_OK) return err;
                 }
-                (void)first_depth;
-                err = wasm__validator_check_types_typed(&v, at,
-                                                        branch_types,
-                                                        branch_reftypes,
-                                                        branch_count);
-                if (err != WASM_OK) return err;
                 wasm__validator_mark_unreachable(&v);
                 break;
             }
