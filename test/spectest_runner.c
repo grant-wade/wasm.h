@@ -1076,6 +1076,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "destination must be mutable") != NULL ||
          strstr(actual_lower, "requires a mutable element type") != NULL))
         return 1;
+    if (strcmp(expected_lower, "immutable field") == 0 &&
+        strstr(actual_lower, "requires a mutable field") != NULL)
+        return 1;
     if (strcmp(expected_lower, "array types do not match") == 0 &&
         strstr(actual_lower, "array copy type mismatch") != NULL)
         return 1;
@@ -1086,6 +1089,9 @@ static int spec_message_matches(const char* expected, const char* actual) {
         strstr(actual_lower, "requires a reference element type") != NULL)
         return 1;
     if (strcmp(expected_lower, "null array reference") == 0 &&
+        strcmp(actual_lower, "trap") == 0)
+        return 1;
+    if (strcmp(expected_lower, "null structure reference") == 0 &&
         strcmp(actual_lower, "trap") == 0)
         return 1;
     if (strcmp(expected_lower, "incompatible import type") == 0 &&
@@ -1694,6 +1700,20 @@ static int spec_parse_value(const char* json,
             goto done;
         }
         if (strcmp(value_text, "null") != 0) {
+            if (ref_type == WASM_TYPE_ANYREF) {
+                uint64_t bits;
+                uintptr_t encoded;
+
+                if (!spec_parse_u64_token(json, &tokens[value_index], &bits) ||
+                    !spec_encode_externref_handle(bits, &encoded)) {
+                    spec_set_error(error_text, error_size, "invalid anyref value");
+                    goto done;
+                }
+                out_value->value = wasm_externref(encoded);
+                out_value->value.type = WASM_TYPE_ANYREF;
+                ok = 1;
+                goto done;
+            }
             spec_set_error(error_text, error_size, "only null reference values are supported");
             goto done;
         }
