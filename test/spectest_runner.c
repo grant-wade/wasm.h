@@ -1655,8 +1655,14 @@ static int spec_parse_value(const char* json,
         out_value->value = wasm_f64(spec_f64_from_bits(bits));
     } else if (strcmp(type_text, "refnull") == 0) {
         out_value->value = wasm_ref_null(WASM_TYPE_ANYREF);
-    } else if (strcmp(type_text, "refnull") == 0) {
-        out_value->value = wasm_ref_null(WASM_TYPE_ANYREF);
+    } else if (strcmp(type_text, "nullref") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_NONE);
+    } else if (strcmp(type_text, "nullfuncref") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_NOFUNC);
+    } else if (strcmp(type_text, "nullexternref") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_NOEXTERN);
+    } else if (strcmp(type_text, "nullexnref") == 0) {
+        out_value->value = wasm_ref_null(WASM_TYPE_NOEXN);
     } else if (strcmp(type_text, "externref") == 0) {
         uint64_t bits;
         uintptr_t encoded;
@@ -1703,6 +1709,23 @@ static int spec_parse_value(const char* json,
             }
             out_value->value = wasm_funcref((uint32_t)bits);
         }
+    } else if (strcmp(type_text, "exnref") == 0) {
+        if (value_index < 0) {
+            out_value->value = wasm_ref_null(WASM_TYPE_EXNREF);
+            out_value->any_non_null_ref = 1;
+            ok = 1;
+            goto done;
+        }
+        value_text = spec_strdup_token(json, &tokens[value_index]);
+        if (!value_text) {
+            spec_set_error(error_text, error_size, "invalid exnref value");
+            goto done;
+        }
+        if (strcmp(value_text, "null") != 0) {
+            spec_set_error(error_text, error_size, "only null exnref values are supported");
+            goto done;
+        }
+        out_value->value = wasm_ref_null(WASM_TYPE_EXNREF);
     } else if (strcmp(type_text, "i31ref") == 0) {
         uint64_t bits;
         if (value_index < 0) {
@@ -1815,6 +1838,15 @@ static void spec_describe_value(const wasm_value_t* value, char* buffer, size_t 
             else
                 snprintf(buffer, buffer_size, "externref(0x%" PRIxPTR ")", value->of.externref);
             break;
+        case WASM_TYPE_EXNREF:
+            if (value->of.externref == (uintptr_t)0)
+                snprintf(buffer, buffer_size, "exnref(null)");
+            else
+                snprintf(buffer, buffer_size, "exnref(0x%" PRIxPTR ")", value->of.externref);
+            break;
+        case WASM_TYPE_NOEXN:
+            snprintf(buffer, buffer_size, "nullexnref");
+            break;
         case WASM_TYPE_I31REF:
             if (value->of.gc_ref == (uintptr_t)0)
                 snprintf(buffer, buffer_size, "i31ref(null)");
@@ -1881,6 +1913,11 @@ static int spec_values_match(const spec_value_t* expected,
         if (wasm__is_null_ref(actual)) return 1;
     }
 
+    if (wasm__is_null_ref(&expected->value) && wasm__is_null_ref(actual) &&
+        wasm__is_valtype_subtype(NULL, actual->type, expected->value.type)) {
+        return 1;
+    }
+
     if (expected->value.type != actual->type) {
         spec_describe_value(&expected->value, expected_desc, sizeof(expected_desc));
         spec_describe_value(actual, actual_desc, sizeof(actual_desc));
@@ -1911,6 +1948,10 @@ static int spec_values_match(const spec_value_t* expected,
             if (expected->value.of.funcref == actual->of.funcref) return 1;
             break;
         case WASM_TYPE_EXTERNREF:
+            if (expected->value.of.externref == actual->of.externref) return 1;
+            break;
+        case WASM_TYPE_EXNREF:
+        case WASM_TYPE_NOEXN:
             if (expected->value.of.externref == actual->of.externref) return 1;
             break;
         case WASM_TYPE_I31REF:
@@ -2210,6 +2251,9 @@ static int spec_bind_export(spec_harness_t* harness,
         import_desc.module = module_name;
         import_desc.name = export_name;
         import_desc.type = *type;
+        import_desc.type_module = module;
+        import_desc.type_index = module->funcs[index].type_idx;
+        import_desc.has_type_context = 1;
         import_desc.func = spec_forward_import_call;
         import_desc.userdata = forward;
         err = wasm__register_import_internal(&harness->runtime, &import_desc, 0);
