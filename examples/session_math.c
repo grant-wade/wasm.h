@@ -211,9 +211,10 @@ static session_math_ctx_t* session_math__require_ctx(void) {
     return NULL;
 }
 
-static void session_math_configure_runtime(wasm_runtime_t* rt) {
-    if (!rt) return;
+static wasm_error_t session_math_configure_runtime(wasm_runtime_t* rt) {
+    if (!rt) return WASM_ERR_MALFORMED;
     rt->enabled_features = session_math_required_features_mask;
+    return WASM_OK;
 }
 
 void session_math_init_options_default(session_math_init_options_t* options) {
@@ -247,7 +248,11 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
         ctx->runtime_initialized = 1;
     }
     rt = ctx->rt;
-    session_math_configure_runtime(ctx->rt);
+    err = session_math_configure_runtime(ctx->rt);
+    if (err != WASM_OK) {
+        session_math_capture_runtime_error(ctx, err, "runtime configuration failed");
+        return ctx;
+    }
     ctx->mod = wasm_load(ctx->rt, wasm_bytes, len);
     if (!ctx->mod) {
         session_math_capture_runtime_error(ctx, ctx->rt->last_error, "failed to load module");

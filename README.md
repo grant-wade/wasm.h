@@ -147,6 +147,7 @@ cmake --build build --target check
 
 - `wasm`
 - `wasm2api`
+- `sqlite_wasm_demo`
 - `wasm_test`
 - `wl_test`
 - `session_math_demo` (when `emcc` is available)
@@ -210,6 +211,7 @@ Generate wrapper files:
 ./build/wasm2api path/to/module.wasm my_module
 ./build/wasm2api --embed --init-func init_state path/to/module.wasm my_module
 ./build/wasm2api --singleton --embed path/to/module.wasm my_module
+./build/wasm2api --singleton --no-prefix examples/sqlite3.wasm sqlite_wasm
 ./build/wasm2api --all-exports path/to/module.wasm my_module
 ./build/wasm2api --exclude-prefix internal_ --exclude-export debug_dump path/to/module.wasm my_module
 ```
@@ -231,6 +233,8 @@ What it does today:
 `--embed` includes the module bytes directly in the generated `.c` file so the wrapper can initialize without loading the Wasm from disk at runtime.
 
 `--singleton` generates a single-instance API for cases where only one module instance should exist in-process. In that mode, the generated export wrappers, `*_free`, `*_get_module`, `*_get_runtime`, and `*_get_last_error*` helpers no longer take a context pointer. `*_init(...)` and `*_init_embedded(...)` return `wasm_error_t` instead of a context pointer and manage one hidden static context inside the generated source.
+
+`--no-prefix` removes the generated wrapper prefix from Wasm export wrappers only, so a module export like `sqlite3_open` stays `sqlite3_open(...)` instead of becoming `<prefix>_sqlite3_open(...)`. Generated types, lifecycle helpers, and runtime helpers remain prefixed. If a bare export name would collide with generated helpers or common C runtime symbols, `wasm2api` still disambiguates it, for example `malloc` becomes `export_malloc`.
 
 When you stay in the default non-singleton mode, the generated header now also includes a small object layer:
 
@@ -256,6 +260,9 @@ User rules override the built-in defaults, so you can re-include a filtered pref
 
 Checked-in example flow:
 
+- `examples/sqlite3.wasm` is a checked-in sqlite module that imports Emscripten-compatible host shims and imported memory
+- `cmake --build build --target sqlite_wasm_generate` runs `wasm2api --singleton --no-prefix` against that module and refreshes `examples/sqlite_wasm.h` plus `examples/sqlite_wasm.c`
+- `cmake --build build --target sqlite_wasm_demo` builds and runs a native demo that loads the `.wasm` from disk, opens an in-memory database, and prints query results
 - `examples/session_math_wasm.c` is a small stateful Wasm library source meant to be compiled with `emcc`
 - `cmake --build build --target session_math_wasm` builds the `.wasm` module from that checked-in C source
 - `cmake --build build --target session_math_generate` runs `wasm2api --singleton --embed --init-func init_state` against the built module and refreshes `examples/session_math.h` plus `examples/session_math.c`
