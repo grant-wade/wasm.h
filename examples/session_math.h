@@ -7,44 +7,16 @@
 #include "wasm.h"
 
 typedef struct session_math_api_t session_math_api_t;
-typedef struct session_math_api_vtable_t session_math_api_vtable_t;
 
 typedef struct session_math_init_options_t {
     wasm_runtime_t* runtime;
     const wasm_config_t* runtime_config;
 } session_math_init_options_t;
-typedef struct session_math_api_vtable_t {
-    void (*free)(void);
-    wasm_module_t* (*get_module)(void);
-    wasm_runtime_t* (*get_runtime)(void);
-    uint8_t* (*get_memory_ptr)(void);
-    uint64_t (*get_memory_size)(void);
-    const char* (*read_memory_string)(uint64_t wasm_ptr, char* buffer, size_t max_len);
-    bool (*read_memory)(uint64_t wasm_ptr, void* dest, size_t len);
-    bool (*write_memory)(uint64_t wasm_ptr, const void* src, size_t len);
-    uint32_t (*get_required_features)(void);
-    wasm_error_t (*get_last_error)(void);
-    const char* (*get_last_error_string)(void);
-    const char* (*get_last_error_message)(void);
-    double (*add)(double arg0, double arg1);
-    double (*sub)(double arg0, double arg1);
-    double (*pow)(double arg0, double arg1);
-    double (*exp)(double arg0);
-    void (*init_state)(void);
-    int32_t (*ready)(void);
-    int32_t (*add_scaled)(int32_t arg0, int32_t arg1);
-    void (*set_bias)(int32_t arg0);
-    int32_t (*get_bias)(void);
-    int32_t (*get_total)(void);
-    void (*reset_total)(void);
-} session_math_api_vtable_t;
 struct session_math_api_t {
-    const session_math_api_vtable_t* f;
 };
 
 void session_math_init_options_default(session_math_init_options_t* options);
 wasm_error_t session_math_init(const uint8_t* wasm_bytes, size_t len, const session_math_init_options_t* options);
-const session_math_api_vtable_t* session_math_api_vtable(void);
 session_math_api_t session_math_api_init(const uint8_t* wasm_bytes, size_t len, const session_math_init_options_t* options);
 void session_math_api_free(session_math_api_t* api);
 void session_math_free(void);

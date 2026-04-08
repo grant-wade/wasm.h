@@ -75,50 +75,46 @@ static int run_object_api(void) {
 	session_math_api_t api = session_math_api_init_embedded(NULL);
 	int exit_code = 1;
 
-	if (!api.f) {
-		fprintf(stderr, "object init failed: missing function table\n");
-		return 1;
-	}
-	if (api.f->get_last_error() != WASM_OK) {
+	if (session_math_get_last_error() != WASM_OK) {
 		fprintf(stderr, "object init failed: %s (%s)\n",
-				api.f->get_last_error_string(),
-				api.f->get_last_error_message());
+				session_math_get_last_error_string(),
+				session_math_get_last_error_message());
 		goto cleanup;
 	}
 
-	if (!expect_i32("object ready after init", api.f->ready(), 1)) goto cleanup;
-	if (!expect_f64("object add", api.f->add(2.5, 0.75), 3.25, 1e-9)) goto cleanup;
-	if (!expect_f64("object sub", api.f->sub(9.0, 2.5), 6.5, 1e-9)) goto cleanup;
-	if (!expect_f64("object pow", api.f->pow(2.0, 8.0), 256.0, 1e-9)) goto cleanup;
-	if (!expect_f64("object exp", api.f->exp(0.0), 1.0, 1e-9)) goto cleanup;
-	if (!expect_i32("object initial bias", api.f->get_bias(), 7)) goto cleanup;
-	if (!expect_i32("object initial total", api.f->get_total(), 100)) goto cleanup;
-	if (!expect_i32("object first add_scaled", api.f->add_scaled(3, 4), 117)) goto cleanup;
+	if (!expect_i32("object ready after init", session_math_ready(), 1)) goto cleanup;
+	if (!expect_f64("object add", session_math_add(2.5, 0.75), 3.25, 1e-9)) goto cleanup;
+	if (!expect_f64("object sub", session_math_sub(9.0, 2.5), 6.5, 1e-9)) goto cleanup;
+	if (!expect_f64("object pow", session_math_pow(2.0, 8.0), 256.0, 1e-9)) goto cleanup;
+	if (!expect_f64("object exp", session_math_exp(0.0), 1.0, 1e-9)) goto cleanup;
+	if (!expect_i32("object initial bias", session_math_get_bias(), 7)) goto cleanup;
+	if (!expect_i32("object initial total", session_math_get_total(), 100)) goto cleanup;
+	if (!expect_i32("object first add_scaled", session_math_add_scaled(3, 4), 117)) goto cleanup;
 
-	api.f->set_bias(2);
-	if (api.f->get_last_error() != WASM_OK) {
+	session_math_set_bias(2);
+	if (session_math_get_last_error() != WASM_OK) {
 		fprintf(stderr, "object set_bias failed: %s (%s)\n",
-				api.f->get_last_error_string(),
-				api.f->get_last_error_message());
+				session_math_get_last_error_string(),
+				session_math_get_last_error_message());
 		goto cleanup;
 	}
-	if (!expect_i32("object updated bias", api.f->get_bias(), 2)) goto cleanup;
-	if (!expect_i32("object second add_scaled", api.f->add_scaled(1, 5), 126)) goto cleanup;
-	if (!expect_i32("object current total", api.f->get_total(), 126)) goto cleanup;
+	if (!expect_i32("object updated bias", session_math_get_bias(), 2)) goto cleanup;
+	if (!expect_i32("object second add_scaled", session_math_add_scaled(1, 5), 126)) goto cleanup;
+	if (!expect_i32("object current total", session_math_get_total(), 126)) goto cleanup;
 
-	api.f->reset_total();
-	if (api.f->get_last_error() != WASM_OK) {
+	session_math_reset_total();
+	if (session_math_get_last_error() != WASM_OK) {
 		fprintf(stderr, "object reset_total failed: %s (%s)\n",
-				api.f->get_last_error_string(),
-				api.f->get_last_error_message());
+				session_math_get_last_error_string(),
+				session_math_get_last_error_message());
 		goto cleanup;
 	}
-	if (!expect_i32("object reset total", api.f->get_total(), 0)) goto cleanup;
+	if (!expect_i32("object reset total", session_math_get_total(), 0)) goto cleanup;
 
 	exit_code = 0;
 
 cleanup:
-	if (api.f) api.f->free();
+	session_math_api_free(&api);
 	return exit_code;
 }
 

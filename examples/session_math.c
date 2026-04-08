@@ -625,54 +625,18 @@ void session_math_reset_total(void) {
     return;
 }
 
-static const session_math_api_vtable_t session_math__api_vtable = {
-    session_math_free,
-    session_math_get_module,
-    session_math_get_runtime,
-    session_math_get_memory_ptr,
-    session_math_get_memory_size,
-    session_math_read_memory_string,
-    session_math_read_memory,
-    session_math_write_memory,
-    session_math_get_required_features,
-    session_math_get_last_error,
-    session_math_get_last_error_string,
-    session_math_get_last_error_message,
-    session_math_add,
-    session_math_sub,
-    session_math_pow,
-    session_math_exp,
-    session_math_init_state,
-    session_math_ready,
-    session_math_add_scaled,
-    session_math_set_bias,
-    session_math_get_bias,
-    session_math_get_total,
-    session_math_reset_total
-};
-
-const session_math_api_vtable_t* session_math_api_vtable(void) {
-    return &session_math__api_vtable;
-}
-
-static session_math_api_t session_math__make_api(void) {
+session_math_api_t session_math_api_init(const uint8_t* wasm_bytes, size_t len, const session_math_init_options_t* options) {
     session_math_api_t api;
 
     memset(&api, 0, sizeof(api));
-    api.f = &session_math__api_vtable;
-    return api;
-}
-
-session_math_api_t session_math_api_init(const uint8_t* wasm_bytes, size_t len, const session_math_init_options_t* options) {
-    session_math_api_t api = session_math__make_api();
-
     (void)session_math_init(wasm_bytes, len, options);
     return api;
 }
 
 session_math_api_t session_math_api_init_embedded(const session_math_init_options_t* options) {
-    session_math_api_t api = session_math__make_api();
+    session_math_api_t api;
 
+    memset(&api, 0, sizeof(api));
     (void)session_math_init_embedded(options);
     return api;
 }
@@ -680,6 +644,5 @@ session_math_api_t session_math_api_init_embedded(const session_math_init_option
 void session_math_api_free(session_math_api_t* api) {
     if (!api) return;
     session_math_free();
-    api->f = NULL;
 }
 

@@ -222,7 +222,7 @@ What it does today:
 - caches export indices and provides lifecycle helpers
 - owns a runtime by default so the common case is just `*_init(...)` or `*_init_embedded(NULL)` and then direct wrapper calls
 - exposes an `*_init_options_t` struct for advanced callers that want to supply a runtime, runtime config, or import bindings
-- for non-singleton library output, also emits a `*_api_t` handle plus `*_api_vtable_t`, so callers can keep an instance pointer and method table together via `*_api_init(...)` or `*_api_from_ctx(...)`
+- for non-singleton library output, also emits a `*_api_t` handle so callers can keep an instance pointer together via `*_api_init(...)` or `*_api_from_ctx(...)`
 - can emit a singleton-oriented API with `--singleton`, which hides one generated context instance in the `.c` file and removes the `ctx` parameter from wrapper calls
 - if the module exports a memory, also emits `*_get_memory_ptr`, `*_get_memory_size`, `*_read_memory_string`, `*_read_memory`, and `*_write_memory` helpers against that exported memory, preferring an export literally named `memory` when several memories are exported
 - emits an imports struct when the module imports host functions or globals

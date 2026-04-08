@@ -321,7 +321,6 @@ static int wasm2api_func_name_is_reserved(const wasm2api_model_t* model, const c
 		"init_options_default",
 		"init",
 		"free",
-		"api_vtable",
 		"api_from_ctx",
 		"api_init",
 		"api_init_embedded",
@@ -345,7 +344,6 @@ static int wasm2api_func_name_is_reserved(const wasm2api_model_t* model, const c
 		"__singleton_ctx",
 		"__singleton_last_error",
 		"__singleton_last_error_msg",
-		"__api_vtable",
 		"__make_api",
 		"__store_error",
 		"set_error",
@@ -1381,46 +1379,6 @@ static void wasm2api_emit_function_signature(FILE* out, const wasm2api_model_t* 
 	if (with_semicolon) fputs(";\n", out);
 }
 
-static void wasm2api_emit_api_method_signature(FILE* out, const wasm2api_model_t* model,
-								const char* name,
-								const wasm2api_func_t* func,
-								int as_function_pointer,
-								int with_semicolon) {
-	uint32_t i;
-	int need_arg = 0;
-
-	if (func->num_results == 1u) {
-		fprintf(out, "%s ", wasm2api_c_type(func->results[0]));
-	} else {
-		fputs("void ", out);
-	}
-
-	if (as_function_pointer) {
-		fprintf(out, "(*%s)(", name);
-	} else {
-		fprintf(out, "%s(", name);
-	}
-	if (!model->singleton_mode) {
-		fprintf(out, "%s_api_t* api", model->api_prefix);
-		need_arg = 1;
-	}
-	for (i = 0; i < func->num_params; i++) {
-		fprintf(out, "%s%s arg%u", need_arg ? ", " : "", wasm2api_c_type(func->params[i]),
-				(unsigned)i);
-		need_arg = 1;
-	}
-	if (func->num_results > 1u) {
-		for (i = 0; i < func->num_results; i++) {
-			fprintf(out, "%s%s* out%u", need_arg ? ", " : "",
-					wasm2api_c_type(func->results[i]), (unsigned)i);
-			need_arg = 1;
-		}
-	}
-	if (!need_arg) fputs("void", out);
-	fputs(")", out);
-	if (with_semicolon) fputs(";\n", out);
-}
-
 static void wasm2api_emit_import_callback_field(FILE* out, const wasm2api_import_t* import_entry) {
 	uint32_t i;
 	int need_comma = 0;
@@ -1665,10 +1623,8 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 		fprintf(out, "typedef struct %s_ctx_t %s_ctx_t;\n", model->api_prefix,
 				model->api_prefix);
 	}
-	fprintf(out, "typedef struct %s_api_t %s_api_t;\n", model->api_prefix,
+	fprintf(out, "typedef struct %s_api_t %s_api_t;\n\n", model->api_prefix,
 			model->api_prefix);
-	fprintf(out, "typedef struct %s_api_vtable_t %s_api_vtable_t;\n\n",
-			model->api_prefix, model->api_prefix);
 	if (has_imports) {
 		fprintf(out, "typedef struct %s_imports_t {\n", model->api_prefix);
 		for (i = 0; i < model->num_imports; i++) {
@@ -1690,62 +1646,9 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 		fprintf(out, "    const %s_imports_t* imports;\n", model->api_prefix);
 	}
 	fprintf(out, "} %s_init_options_t;\n", model->api_prefix);
-	fprintf(out, "typedef struct %s_api_vtable_t {\n", model->api_prefix);
-	if (model->singleton_mode) {
-		fputs("    void (*free)(void);\n", out);
-		fputs("    wasm_module_t* (*get_module)(void);\n", out);
-		fputs("    wasm_runtime_t* (*get_runtime)(void);\n", out);
-		if (model->has_memory_export) {
-			fputs("    uint8_t* (*get_memory_ptr)(void);\n", out);
-			fputs("    uint64_t (*get_memory_size)(void);\n", out);
-			fputs("    const char* (*read_memory_string)(uint64_t wasm_ptr, char* buffer, size_t max_len);\n", out);
-			fputs("    bool (*read_memory)(uint64_t wasm_ptr, void* dest, size_t len);\n", out);
-			fputs("    bool (*write_memory)(uint64_t wasm_ptr, const void* src, size_t len);\n", out);
-		}
-		fputs("    uint32_t (*get_required_features)(void);\n", out);
-		fputs("    wasm_error_t (*get_last_error)(void);\n", out);
-		fputs("    const char* (*get_last_error_string)(void);\n", out);
-		fputs("    const char* (*get_last_error_message)(void);\n", out);
-	} else {
-		fprintf(out, "    void (*free)(%s_api_t* api);\n", model->api_prefix);
-		fprintf(out, "    wasm_module_t* (*get_module)(%s_api_t* api);\n", model->api_prefix);
-		fprintf(out, "    wasm_runtime_t* (*get_runtime)(%s_api_t* api);\n", model->api_prefix);
-		if (model->has_memory_export) {
-			fprintf(out, "    uint8_t* (*get_memory_ptr)(%s_api_t* api);\n",
-					model->api_prefix);
-			fprintf(out, "    uint64_t (*get_memory_size)(%s_api_t* api);\n",
-					model->api_prefix);
-			fprintf(out,
-					"    const char* (*read_memory_string)(%s_api_t* api, uint64_t wasm_ptr, char* buffer, size_t max_len);\n",
-					model->api_prefix);
-			fprintf(out,
-					"    bool (*read_memory)(%s_api_t* api, uint64_t wasm_ptr, void* dest, size_t len);\n",
-					model->api_prefix);
-			fprintf(out,
-					"    bool (*write_memory)(%s_api_t* api, uint64_t wasm_ptr, const void* src, size_t len);\n",
-					model->api_prefix);
-		}
-		fprintf(out, "    uint32_t (*get_required_features)(%s_api_t* api);\n",
-				model->api_prefix);
-		fprintf(out, "    wasm_error_t (*get_last_error)(%s_api_t* api);\n",
-				model->api_prefix);
-		fprintf(out, "    const char* (*get_last_error_string)(%s_api_t* api);\n",
-				model->api_prefix);
-		fprintf(out, "    const char* (*get_last_error_message)(%s_api_t* api);\n",
-				model->api_prefix);
-	}
-	for (i = 0; i < model->num_funcs; i++) {
-		fputs("    ", out);
-		wasm2api_emit_api_method_signature(out, model, model->funcs[i].c_name,
-							  &model->funcs[i], 1, 1);
-	}
-	fprintf(out, "} %s_api_vtable_t;\n", model->api_prefix);
 	fprintf(out, "struct %s_api_t {\n", model->api_prefix);
 	if (!model->singleton_mode) {
 		fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
-	}
-	fprintf(out, "    const %s_api_vtable_t* f;\n", model->api_prefix);
-	if (!model->singleton_mode) {
 		fputs("    int owns_ctx;\n", out);
 	}
 	fputs("};\n", out);
@@ -1753,8 +1656,6 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
 	fprintf(out, "void %s_init_options_default(%s_init_options_t* options);\n",
 			model->api_prefix, model->api_prefix);
 	wasm2api_emit_init_signature(out, model, 0, 1);
-	fprintf(out, "const %s_api_vtable_t* %s_api_vtable(void);\n", model->api_prefix,
-			model->api_prefix);
 	if (!model->singleton_mode) {
 		fprintf(out, "%s_api_t %s_api_from_ctx(%s_ctx_t* ctx);\n", model->api_prefix,
 				model->api_prefix, model->api_prefix);
@@ -2512,143 +2413,11 @@ static int wasm2api_write_source(const char* source_path,
 	}
 
 	if (!model->singleton_mode) {
-		fprintf(out, "static wasm_module_t* %s__api_get_module(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    return %s_get_module(api ? api->ctx : NULL);\n", model->api_prefix);
-		fputs("}\n\n", out);
-
-		fprintf(out, "static wasm_runtime_t* %s__api_get_runtime(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    return %s_get_runtime(api ? api->ctx : NULL);\n", model->api_prefix);
-		fputs("}\n\n", out);
-
-		if (model->has_memory_export) {
-			fprintf(out, "static uint8_t* %s__api_get_memory_ptr(%s_api_t* api) {\n",
-					model->api_prefix, model->api_prefix);
-			fprintf(out, "    return %s_get_memory_ptr(api ? api->ctx : NULL);\n",
-					model->api_prefix);
-			fputs("}\n\n", out);
-
-			fprintf(out, "static uint64_t %s__api_get_memory_size(%s_api_t* api) {\n",
-					model->api_prefix, model->api_prefix);
-			fprintf(out, "    return %s_get_memory_size(api ? api->ctx : NULL);\n",
-					model->api_prefix);
-			fputs("}\n\n", out);
-
-			fprintf(out,
-					"static const char* %s__api_read_memory_string(%s_api_t* api, uint64_t wasm_ptr, char* buffer, size_t max_len) {\n",
-					model->api_prefix, model->api_prefix);
-			fprintf(out,
-					"    return %s_read_memory_string(api ? api->ctx : NULL, wasm_ptr, buffer, max_len);\n",
-					model->api_prefix);
-			fputs("}\n\n", out);
-
-			fprintf(out,
-					"static bool %s__api_read_memory(%s_api_t* api, uint64_t wasm_ptr, void* dest, size_t len) {\n",
-					model->api_prefix, model->api_prefix);
-			fprintf(out,
-					"    return %s_read_memory(api ? api->ctx : NULL, wasm_ptr, dest, len);\n",
-					model->api_prefix);
-			fputs("}\n\n", out);
-
-			fprintf(out,
-					"static bool %s__api_write_memory(%s_api_t* api, uint64_t wasm_ptr, const void* src, size_t len) {\n",
-					model->api_prefix, model->api_prefix);
-			fprintf(out,
-					"    return %s_write_memory(api ? api->ctx : NULL, wasm_ptr, src, len);\n",
-					model->api_prefix);
-			fputs("}\n\n", out);
-		}
-
-		fprintf(out, "static uint32_t %s__api_get_required_features(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fputs("    (void)api;\n", out);
-		fprintf(out, "    return %s_get_required_features();\n", model->api_prefix);
-		fputs("}\n\n", out);
-
-		fprintf(out, "static wasm_error_t %s__api_get_last_error(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    return %s_get_last_error(api ? api->ctx : NULL);\n", model->api_prefix);
-		fputs("}\n\n", out);
-
-		fprintf(out, "static const char* %s__api_get_last_error_string(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    return %s_get_last_error_string(api ? api->ctx : NULL);\n",
-				model->api_prefix);
-		fputs("}\n\n", out);
-
-		fprintf(out, "static const char* %s__api_get_last_error_message(%s_api_t* api) {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    return %s_get_last_error_message(api ? api->ctx : NULL);\n",
-				model->api_prefix);
-		fputs("}\n\n", out);
-
-		for (i = 0; i < model->num_funcs; i++) {
-			char thunk_name[256];
-			uint32_t param_index;
-			uint32_t result_index;
-			const wasm2api_func_t* func = &model->funcs[i];
-
-			snprintf(thunk_name, sizeof(thunk_name), "%s__api_%s", model->api_prefix,
-					 func->c_name);
-			fputs("static ", out);
-			wasm2api_emit_api_method_signature(out, model, thunk_name, func, 0, 0);
-			fputs(" {\n", out);
-			fputs("    ", out);
-			if (func->num_results == 1u) fputs("return ", out);
-			wasm2api_emit_export_symbol(out, model, func->c_name);
-			fputs("(api ? api->ctx : NULL", out);
-			for (param_index = 0; param_index < func->num_params; param_index++) {
-				fprintf(out, ", arg%u", (unsigned)param_index);
-			}
-			if (func->num_results > 1u) {
-				for (result_index = 0; result_index < func->num_results; result_index++) {
-					fprintf(out, ", out%u", (unsigned)result_index);
-				}
-			}
-			fputs(");\n", out);
-			if (func->num_results != 1u) fputs("    return;\n", out);
-			fputs("}\n\n", out);
-		}
-
-		fprintf(out, "void %s_api_free(%s_api_t* api);\n\n", model->api_prefix,
-				model->api_prefix);
-
-		fprintf(out, "static const %s_api_vtable_t %s__api_vtable = {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    %s_api_free,\n", model->api_prefix);
-		fprintf(out, "    %s__api_get_module,\n", model->api_prefix);
-		fprintf(out, "    %s__api_get_runtime,\n", model->api_prefix);
-		if (model->has_memory_export) {
-			fprintf(out, "    %s__api_get_memory_ptr,\n", model->api_prefix);
-			fprintf(out, "    %s__api_get_memory_size,\n", model->api_prefix);
-			fprintf(out, "    %s__api_read_memory_string,\n", model->api_prefix);
-			fprintf(out, "    %s__api_read_memory,\n", model->api_prefix);
-			fprintf(out, "    %s__api_write_memory,\n", model->api_prefix);
-		}
-		fprintf(out, "    %s__api_get_required_features,\n", model->api_prefix);
-		fprintf(out, "    %s__api_get_last_error,\n", model->api_prefix);
-		fprintf(out, "    %s__api_get_last_error_string,\n", model->api_prefix);
-		fprintf(out, "    %s__api_get_last_error_message", model->api_prefix);
-		if (model->num_funcs > 0u) fputs(",\n", out);
-		else fputc('\n', out);
-		for (i = 0; i < model->num_funcs; i++) {
-			fprintf(out, "    %s__api_%s%s\n", model->api_prefix, model->funcs[i].c_name,
-					(i + 1u < model->num_funcs) ? "," : "");
-		}
-		fputs("};\n\n", out);
-
-		fprintf(out, "const %s_api_vtable_t* %s_api_vtable(void) {\n", model->api_prefix,
-				model->api_prefix);
-		fprintf(out, "    return &%s__api_vtable;\n", model->api_prefix);
-		fputs("}\n\n", out);
-
 		fprintf(out, "static %s_api_t %s__make_api(%s_ctx_t* ctx, int owns_ctx) {\n",
 				model->api_prefix, model->api_prefix, model->api_prefix);
 		fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
 		fputs("    memset(&api, 0, sizeof(api));\n", out);
 		fputs("    api.ctx = ctx;\n", out);
-		fprintf(out, "    api.f = &%s__api_vtable;\n", model->api_prefix);
 		fputs("    api.owns_ctx = (ctx && owns_ctx) ? 1 : 0;\n", out);
 		fputs("    return api;\n", out);
 		fputs("}\n\n", out);
@@ -2680,53 +2449,14 @@ static int wasm2api_write_source(const char* source_path,
 		fputs("    if (api->owns_ctx && api->ctx) ", out);
 		fprintf(out, "%s_free(api->ctx);\n", model->api_prefix);
 		fputs("    api->ctx = NULL;\n", out);
-		fputs("    api->f = NULL;\n", out);
 		fputs("    api->owns_ctx = 0;\n", out);
 		fputs("}\n\n", out);
 	} else {
-		fprintf(out, "static const %s_api_vtable_t %s__api_vtable = {\n",
-				model->api_prefix, model->api_prefix);
-		fprintf(out, "    %s_free,\n", model->api_prefix);
-		fprintf(out, "    %s_get_module,\n", model->api_prefix);
-		fprintf(out, "    %s_get_runtime,\n", model->api_prefix);
-		if (model->has_memory_export) {
-			fprintf(out, "    %s_get_memory_ptr,\n", model->api_prefix);
-			fprintf(out, "    %s_get_memory_size,\n", model->api_prefix);
-			fprintf(out, "    %s_read_memory_string,\n", model->api_prefix);
-			fprintf(out, "    %s_read_memory,\n", model->api_prefix);
-			fprintf(out, "    %s_write_memory,\n", model->api_prefix);
-		}
-		fprintf(out, "    %s_get_required_features,\n", model->api_prefix);
-		fprintf(out, "    %s_get_last_error,\n", model->api_prefix);
-		fprintf(out, "    %s_get_last_error_string,\n", model->api_prefix);
-		fprintf(out, "    %s_get_last_error_message", model->api_prefix);
-		if (model->num_funcs > 0u) fputs(",\n", out);
-		else fputc('\n', out);
-		for (i = 0; i < model->num_funcs; i++) {
-			fputs("    ", out);
-			wasm2api_emit_export_symbol(out, model, model->funcs[i].c_name);
-			fputs((i + 1u < model->num_funcs) ? ",\n" : "\n", out);
-		}
-		fputs("};\n\n", out);
-
-		fprintf(out, "const %s_api_vtable_t* %s_api_vtable(void) {\n", model->api_prefix,
-				model->api_prefix);
-		fprintf(out, "    return &%s__api_vtable;\n", model->api_prefix);
-		fputs("}\n\n", out);
-
-		fprintf(out, "static %s_api_t %s__make_api(void) {\n", model->api_prefix,
-				model->api_prefix);
-		fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
-		fputs("    memset(&api, 0, sizeof(api));\n", out);
-		fprintf(out, "    api.f = &%s__api_vtable;\n", model->api_prefix);
-		fputs("    return api;\n", out);
-		fputs("}\n\n", out);
-
 		fprintf(out,
 				"%s_api_t %s_api_init(const uint8_t* wasm_bytes, size_t len, const %s_init_options_t* options) {\n",
 				model->api_prefix, model->api_prefix, model->api_prefix);
-		fprintf(out, "    %s_api_t api = %s__make_api();\n\n", model->api_prefix,
-				model->api_prefix);
+		fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
+		fputs("    memset(&api, 0, sizeof(api));\n", out);
 		fprintf(out, "    (void)%s_init(wasm_bytes, len, options);\n", model->api_prefix);
 		fputs("    return api;\n", out);
 		fputs("}\n\n", out);
@@ -2735,8 +2465,8 @@ static int wasm2api_write_source(const char* source_path,
 			fprintf(out,
 					"%s_api_t %s_api_init_embedded(const %s_init_options_t* options) {\n",
 					model->api_prefix, model->api_prefix, model->api_prefix);
-			fprintf(out, "    %s_api_t api = %s__make_api();\n\n", model->api_prefix,
-					model->api_prefix);
+			fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
+			fputs("    memset(&api, 0, sizeof(api));\n", out);
 			fprintf(out, "    (void)%s_init_embedded(options);\n", model->api_prefix);
 			fputs("    return api;\n", out);
 			fputs("}\n\n", out);
@@ -2746,7 +2476,6 @@ static int wasm2api_write_source(const char* source_path,
 				model->api_prefix);
 		fputs("    if (!api) return;\n", out);
 		fprintf(out, "    %s_free();\n", model->api_prefix);
-		fputs("    api->f = NULL;\n", out);
 		fputs("}\n\n", out);
 	}
 
