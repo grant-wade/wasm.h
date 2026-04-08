@@ -12,13 +12,14 @@
 
 typedef struct wasm_cli_options_t {
     int bind_wasi;
+    int bind_emscripten;
     int fuel_set;
     uint64_t fuel;
 } wasm_cli_options_t;
 
 static void wasm_cli_print_usage(FILE* stream, const char* argv0) {
     fprintf(stream,
-            "usage: %s [--no-wasi] [--fuel N] <module.wasm> <command> [args...]\n"
+            "usage: %s [--no-wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]\n"
             "\n"
             "commands:\n"
             "  info\n"
@@ -1066,6 +1067,7 @@ int main(int argc, char** argv) {
     int exit_code = 1;
 
     options.bind_wasi = 1;
+    options.bind_emscripten = 0;
     options.fuel_set = 0;
     options.fuel = 0;
 
@@ -1076,6 +1078,11 @@ int main(int argc, char** argv) {
         }
         if (strcmp(argv[argi], "--no-wasi") == 0) {
             options.bind_wasi = 0;
+            argi++;
+            continue;
+        }
+        if (strcmp(argv[argi], "--emscripten") == 0) {
+            options.bind_emscripten = 1;
             argi++;
             continue;
         }
@@ -1118,6 +1125,15 @@ int main(int argc, char** argv) {
 
         if (err != WASM_OK) {
             fprintf(stderr, "failed to bind WASI stubs: %s\n", wasm_cli_error_text(&runtime));
+            goto cleanup;
+        }
+    }
+
+    if (options.bind_emscripten) {
+        wasm_error_t err = wasm_bind_emscripten_stubs(&runtime);
+
+        if (err != WASM_OK) {
+            fprintf(stderr, "failed to bind Emscripten stubs: %s\n", wasm_cli_error_text(&runtime));
             goto cleanup;
         }
     }

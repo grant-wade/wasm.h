@@ -75,6 +75,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 | Function | Purpose |
 | --- | --- |
 | `wasm_bind_host_func(rt, module, name, fmt, cb, userdata)` | Bind a host function import using a format string. |
+| `wasm_bind_emscripten_stubs(rt)` | Register built-in `env` shims for common Emscripten imports. |
 | `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs. |
 
 ### Memory and globals
@@ -129,7 +130,11 @@ Define before including `wasm.h`:
 
 ### WASI stubs
 
-`wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_close`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
+`wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_read`, `fd_close`, `fd_sync`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
+
+### Emscripten stubs
+
+`wasm_bind_emscripten_stubs(rt)` registers the `env` imports commonly needed by Emscripten-targeted modules, including `emscripten_date_now`, `emscripten_get_now`, `emscripten_get_heap_max`, `emscripten_resize_heap`, `_tzset_js`, `_localtime_js`, `_mmap_js`, `_munmap_js`, and the `__syscall_*` shims used by the official sqlite3 Wasm build. When enabled, the runtime also lazily provides an imported `env.memory` that matches the module's declared memory limits.
 
 ## Build and test
 
@@ -160,7 +165,7 @@ cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 `wasm.c` builds a command-line tool for inspection and execution:
 
 ```
-wasm [--help] [--no-wasi] [--fuel N] <module.wasm> <command> [args...]
+wasm [--help] [--no-wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]
 ```
 
 | Command | Description |
@@ -184,9 +189,11 @@ wasm [--help] [--no-wasi] [--fuel N] <module.wasm> <command> [args...]
 ./build/wasm math.wasm call add 2 40
 ./build/wasm memory.wasm memory-read 0 0 64
 ./build/wasm --no-wasi bare.wasm call _start
+./build/wasm --emscripten examples/sqlite3.wasm info
 ```
 
 WASI stubs are bound by default; `--no-wasi` disables them.
+Emscripten-compatible `env` shims are opt-in via `--emscripten` or `wasm_bind_emscripten_stubs(rt)` in the embedding API.
 
 ## wasm2api
 

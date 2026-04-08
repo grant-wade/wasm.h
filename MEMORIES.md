@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 6
+Memory Version: 7
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -44,8 +44,9 @@ This file is the canonical checked-in snapshot of repo memory.
 - `wasm.h` is the single-header runtime; `wasm_load()` performs load-time validation and feature gating via `wasm_runtime_t.enabled_features`, with helper APIs `wasm_enable_feature()`, `wasm_disable_feature()`, and `wasm_enable_all_features()`.
 - The implemented proposal surface includes reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64; unsupported proposals fail cleanly during load or validation.
 - Imported globals are supported by reference, participate in init expressions, and mutable non-imported globals are rejected in `global.get` init-expression paths.
-- Public host APIs worth remembering are `wasm_call_fmt`, `wasm_bind_host_func`, memory/global helpers, backtrace inspection, runtime configuration (`wasm_config_t` and `wasm_init(rt, NULL)`), GC field/array helpers, and `wasm_bind_wasi_stubs()`.
-- Built-in WASI stubs currently cover `fd_write`, args/env sizing and access, `fd_fdstat_get`, `random_get`, `clock_time_get`, `environ_get`, and `proc_exit`; host override hooks are macro-based near the top of `WASM_IMPL`.
+- Public host APIs worth remembering are `wasm_call_fmt`, `wasm_bind_host_func`, memory/global helpers, backtrace inspection, runtime configuration (`wasm_config_t` and `wasm_init(rt, NULL)`), GC field/array helpers, `wasm_bind_wasi_stubs()`, and `wasm_bind_emscripten_stubs()`.
+- Built-in WASI stubs now cover `fd_write`, `fd_read`, `fd_close`, `fd_sync`, `fd_seek`, `fd_fdstat_get`, args/env sizing and access, `random_get`, `clock_time_get`, `environ_get`, and `proc_exit`; the Emscripten helper binds sqlite-style `env` shims and lazily materializes `env.memory` against the module's declared limits.
+- The default validator label budget is `WASM_MAX_LABELS = 4096`, which is high enough for large real-world modules like the official sqlite3 Wasm build without custom runtime config.
 - Float min/max intentionally avoid `fmin[f]` and `fmax[f]` and use signed-zero-aware comparisons to preserve Wasm semantics.
 - Regression coverage lives primarily in `wasm_test.c`, with additional spectest and emcc coverage under `test/`.
 
