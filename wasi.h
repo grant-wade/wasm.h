@@ -4,10 +4,6 @@
  * USAGE:
  *   #define WASI_IMPL
  *   #include "wasi.h"
- *
- * This first scaffold layer wires wasi.h into the build, owns an embedded
- * wasm_runtime_t, distinguishes core modules from component binaries, and
- * retains raw component bytes for future parser work.
  */
 
 #ifndef WASI_H
