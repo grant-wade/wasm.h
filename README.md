@@ -173,7 +173,7 @@ cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
+`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, the optional `wasmtime` comparison harness for standard scalar/direct `wasi.h` canonical ABI cases (`bool`, integer widths, `f32`, `f64`, `char`), and the `emcc` fixture suite.
 
 - `wasm`
 - `wasm2api`
@@ -189,6 +189,7 @@ Additional targets:
 cmake --build build --target wasm               # CLI runner
 cmake --build build --target wasm2api            # Wrapper generator
 cmake --build build --target wasi-component-run  # Component smoke harness (when wasm-tools component is available)
+cmake --build build --target wasi-wasmtime-run   # Wasmtime reference comparisons (when wasmtime + wasm-tools component support are available)
 cmake --build build --target wasm-spectest-run   # Spectest only
 cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 ```

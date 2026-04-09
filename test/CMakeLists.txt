@@ -1,6 +1,7 @@
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
 wl_add_native_executable(component_runner component_runner.c)
+wl_add_native_executable(wasi_wasmtime_runner wasi_wasmtime_runner.c)
 
 find_program(WL_WASM_TOOLS_EXECUTABLE
     NAMES wasm-tools
@@ -172,6 +173,27 @@ find_program(WL_WASMTIME_EXECUTABLE
     NAMES wasmtime
     DOC "Path to the system wasmtime executable used for future component reference comparisons."
 )
+
+if(WL_WASMTIME_EXECUTABLE AND WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE)
+    set(WL_WASI_WASMTIME_CASES bool s8 u8 s16 u16 s32 u32 s64 u64 f32 f64 char)
+    foreach(WL_WASI_WASMTIME_CASE IN LISTS WL_WASI_WASMTIME_CASES)
+        add_test(
+            NAME "wasi.wasmtime.${WL_WASI_WASMTIME_CASE}"
+            COMMAND $<TARGET_FILE:wasi_wasmtime_runner>
+                    "${WL_WASMTIME_EXECUTABLE}"
+                    "${WL_WASM_TOOLS_EXECUTABLE}"
+                    "${WL_WASI_WASMTIME_CASE}"
+        )
+        set_tests_properties("wasi.wasmtime.${WL_WASI_WASMTIME_CASE}" PROPERTIES LABELS "wasi-wasmtime")
+    endforeach()
+
+    add_custom_target(wasi-wasmtime-run
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} -L wasi-wasmtime ${WL_CTEST_CONFIG_ARGS}
+        USES_TERMINAL
+    )
+else()
+    message(STATUS "wasmtime or required wasm-tools component subcommands not found; skipping WASI reference comparison tests.")
+endif()
 
 if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE)
     set(WL_COMPONENT_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/component")

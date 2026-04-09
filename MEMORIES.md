@@ -1,8 +1,8 @@
 # Repository Memories
 
-Memory Version: 10
+Memory Version: 11
 
-Current curated contents of `/memories/repo/` as of 2026-04-07.
+Current curated contents of `/memories/repo/` as of 2026-04-09.
 
 This file is the canonical checked-in snapshot of repo memory.
 
@@ -74,3 +74,10 @@ This file is the canonical checked-in snapshot of repo memory.
 - In the CMake build, `WL_ENABLE_PLATFORM` is a top-level option that defaults ON and is propagated through `wl_project_options`; standalone `wl.h` consumers need to define the macro themselves before including the header.
 - `wl.h` contains both POSIX and Windows platform backends under the same flag.
 - `wl.h` uses `WL_INLINE` and avoids MSVC-hostile patterns in the portable core.
+
+## wasi-reference-harness.md
+
+- `test/wasi_wasmtime_runner.c` builds standard scalar/direct reference components at test time with `wasm-tools component embed --world compare` plus `wasm-tools component new`, then compares `wasi_canon_call()` against `wasmtime run --invoke` on the same generated component.
+- The harness intentionally targets the low-level canonical ABI path instead of `wasi_instantiate()`, because `wasm-tools component new` emits multi-core-module/start-shim components that exceed the current narrow instance path.
+- Standard embedded components require post-return signatures to match the lowered core result type (`i32` for bool/u8/u16/u32/s8/s16/s32, `i64` for s64/u64); hardcoding `i32` makes `wasm-tools component new` reject 64-bit cases.
+- CTest label `wasi-wasmtime` is enabled only when both `wasmtime` and `wasm-tools` provide `component embed` and `component new`.
