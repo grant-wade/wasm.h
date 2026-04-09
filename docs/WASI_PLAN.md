@@ -106,7 +106,6 @@ wasi_destroy(&engine);
 - Correctly identifies component vs. core module binaries
 - Test harness runs, reports "not yet implemented" for component loading
 
-### Estimated effort: 1–2 weeks
 
 ---
 
@@ -145,8 +144,6 @@ A component binary uses the same `\0asm` magic with layer byte 0x0d (vs. 0x01 fo
 - Parse 0.3-format components from Wasmtime 37+ test suite (async canon opcodes present)
 - Compare parsed structure against `wasm-tools component wit` and `wasm-tools dump` output
 
-### Estimated effort: 3–4 weeks
-
 ---
 
 ## Milestone 2: Canonical ABI — Scalar Types & Strings
@@ -181,8 +178,6 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Verify post-return functions fire after results are consumed
 - UTF-16 string round-trip with a component compiled using `string-encoding=utf16`
 
-### Estimated effort: 3–4 weeks
-
 ---
 
 ## Milestone 3: Canonical ABI — Compound Types
@@ -207,8 +202,6 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Single-result spill: function returning multi-field record uses `retptr`
 - Flags with >32 bits span multiple i32s
 - Fuzz: generate random WIT types via `wasm-tools`, compile Rust components, round-trip values and compare against Wasmtime output
-
-### Estimated effort: 4–5 weeks
 
 ---
 
@@ -248,8 +241,6 @@ wasi_resource_type_t fd_type = wasi_define_resource(
 - `num_lends` guard: dropping an own handle while a borrow is outstanding traps the caller
 - Handle table growth and slot reuse after drops
 
-### Estimated effort: 3–4 weeks
-
 ---
 
 ## Milestone 5: Component Instantiation & Linking
@@ -280,8 +271,6 @@ A component's instantiation section is procedural: it executes a sequence of ins
 - Missing import: clean error naming `wasi:filesystem/types@0.3.0` as unresolved
 - Nested components (component containing sub-components)
 - Canon lift/lower wiring verified by calling a simple exported function end-to-end
-
-### Estimated effort: 4–5 weeks
 
 ---
 
@@ -341,8 +330,6 @@ wasi_set_event_source(&engine, my_poll_callback, userdata);
 - Callback mode: component returns callback pointer, runtime invokes it on event
 - Yield: long-running task yields, other tasks execute, original resumes
 
-### Estimated effort: 5–6 weeks
-
 ---
 
 ## Milestone 7: wasi:cli — Hello World
@@ -394,8 +381,6 @@ wasi_bind_cli(&engine, &cli);
 
 ### 🎉 **This is the "Hello World from a component" milestone.**
 
-### Estimated effort: 3–4 weeks
-
 ---
 
 ## Milestone 8: wasi:filesystem
@@ -437,8 +422,6 @@ wasi_bind_filesystem(&engine, &fs);
 - Symlink traversal respects sandbox
 - Read-only enforcement
 - Async streaming read of a large file (backpressure exercised)
-
-### Estimated effort: 4–5 weeks
 
 ---
 
@@ -486,8 +469,6 @@ wasi_bind_network(&engine, &net);
 - Network sandbox: disallowed hosts rejected with proper error code
 - Concurrent HTTP requests via async (multiple in-flight requests in single instance)
 
-### Estimated effort: 5–6 weeks
-
 ---
 
 ## Milestone 10: Polish, Hardening, 0.2 Compat
@@ -512,8 +493,6 @@ wasi_bind_network(&engine, &net);
 - Valgrind/ASan clean on full test suite
 - Real-world Rust P2 components (current toolchain output) all run through polyfill
 - Wasmtime output comparison: same component + same input = same result
-
-### Estimated effort: 3–4 weeks
 
 ---
 
@@ -569,8 +548,6 @@ void my_db_rows_free(my_db_row_t *rows, size_t nrows);
 - Round-trip complex types through generated wrappers
 - Verify generated code compiles warning-free under `-Wall -Wextra -Wpedantic`
 
-### Estimated effort: 4–5 weeks
-
 ---
 
 ## Milestone 12: 0.3.x Release Train Tracking
@@ -594,31 +571,26 @@ Per the WASI roadmap, these are planned as backwards-compatible point releases o
 - New canon built-ins are implemented as they appear
 - Threading will be a significant sub-project when it lands — likely 4–6 weeks on its own depending on the `shared-everything-threads` spec shape
 
-### Estimated effort: Ongoing, ~2 weeks per point release
 
 ---
 
 ## Summary Timeline
 
-| Milestone | Description | Weeks | Cumulative |
-|-----------|-------------|-------|------------|
-| M0  | Scaffolding & infrastructure | 1–2 | 1–2 |
-| M1  | Component binary parser | 3–4 | 4–6 |
-| M2  | Canonical ABI — scalars & strings | 3–4 | 7–10 |
-| M3  | Canonical ABI — compound types | 4–5 | 11–15 |
-| M4  | Resource types & handle tables | 3–4 | 14–19 |
-| M5  | Component instantiation & linking | 4–5 | 18–24 |
+| Milestone | Description |
+|-----------|-------------|
+| M0  | Scaffolding & infrastructure | 
+| M1  | Component binary parser | 
+| M2  | Canonical ABI — scalars & strings |
+| M3  | Canonical ABI — compound types |
+| M4  | Resource types & handle tables |
+| M5  | Component instantiation & linking |
 | M6  | Async runtime foundation | 5–6 | 23–30 |
-| **M7**  | **wasi:cli — Hello World** 🎉 | **3–4** | **26–34** |
-| M8  | wasi:filesystem | 4–5 | 30–39 |
-| M9  | wasi:sockets & wasi:http | 5–6 | 35–45 |
-| M10 | Polish, hardening, 0.2 compat | 3–4 | 38–49 |
-| M11 | wasm2api — component mode | 4–5 | 42–54 |
-| M12 | 0.3.x release train tracking | Ongoing | — |
-
-**Realistic total: ~10–12 months to a polished M10, ~12–14 months including wasm2api component mode.**
-
-The critical path to Hello World (M7) is approximately 6–8 months. The async runtime (M6) adds ~5–6 weeks compared to the original plan's sync-first approach, but eliminates the "retrofit async later" tax entirely. Every WASI world built after M6 is natively async with no migration needed.
+| **M7**  | **wasi:cli — Hello World** 🎉 |
+| M8  | wasi:filesystem |
+| M9  | wasi:sockets & wasi:http |
+| M10 | Polish, hardening, 0.2 compat |
+| M11 | wasm2api — component mode |
+| M12 | 0.3.x release train tracking |
 
 ---
 
