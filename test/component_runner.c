@@ -21,6 +21,15 @@ static void component_runner_usage(const char* argv0) {
     fprintf(stderr, "    core-instance-export-name <instance_index> <export_index> <expected>\n");
     fprintf(stderr, "    core-instance-module <index> <expected_module_index>\n");
     fprintf(stderr, "    core-instance-arg-name <instance_index> <arg_index> <expected>\n");
+    fprintf(stderr, "    component-instance-count <expected>\n");
+    fprintf(stderr, "    component-instance-kind <index> <instantiate|from-exports>\n");
+    fprintf(stderr, "    component-instance-export-name <instance_index> <export_index> <expected>\n");
+    fprintf(stderr, "    component-instance-component <index> <expected_component_index>\n");
+    fprintf(stderr, "    component-instance-arg-name <instance_index> <arg_index> <expected>\n");
+    fprintf(stderr, "    start-present <0|1>\n");
+    fprintf(stderr, "    start-func <expected_func_index>\n");
+    fprintf(stderr, "    start-args <expected_count>\n");
+    fprintf(stderr, "    start-results <expected_count>\n");
     fprintf(stderr, "    canon-count <expected>\n");
     fprintf(stderr, "    canon-kind <index> <lift|lower>\n");
     fprintf(stderr, "    canon-option-count <index> <expected>\n");
@@ -299,6 +308,193 @@ int main(int argc, char** argv) {
                                                        (uint32_t)instance_index,
                                                        (uint32_t)arg_index);
         exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "component-instance-count") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected component instance count: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_instance_count(component) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "component-instance-kind") == 0) {
+        unsigned long index;
+        char* end = NULL;
+        const char* actual;
+        if (argc != 5) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        actual = wasi_component_instance_kind_string(wasi_component_instance_kind(component, (uint32_t)index));
+        exit_code = strcmp(actual, argv[4]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "component-instance-export-name") == 0) {
+        unsigned long instance_index;
+        unsigned long export_index;
+        char* end = NULL;
+        const char* actual;
+        if (argc != 6) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        instance_index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        export_index = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance export index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        actual = wasi_component_instance_export_name(component,
+                                                     (uint32_t)instance_index,
+                                                     (uint32_t)export_index);
+        exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "component-instance-component") == 0) {
+        unsigned long index;
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 5) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected component index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_instance_component_index(component, (uint32_t)index) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "component-instance-arg-name") == 0) {
+        unsigned long instance_index;
+        unsigned long arg_index;
+        char* end = NULL;
+        const char* actual;
+        if (argc != 6) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        instance_index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        arg_index = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid component instance arg index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        actual = wasi_component_instance_arg_name(component,
+                                                  (uint32_t)instance_index,
+                                                  (uint32_t)arg_index);
+        exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "start-present") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0' || expected > 1u) {
+            fprintf(stderr, "invalid expected start presence: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_has_start(component) == (int)expected ? 0 : 1;
+    } else if (strcmp(mode, "start-func") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected start function: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_start_func_index(component) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "start-args") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected start arg count: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_start_arg_count(component) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "start-results") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected start result count: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_start_result_count(component) == (uint32_t)expected ? 0 : 1;
     } else if (strcmp(mode, "canon-count") == 0) {
         unsigned long expected;
         char* end = NULL;

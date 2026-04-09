@@ -178,6 +178,7 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
     set(WL_COMPONENT_SMOKE_WIT "${CMAKE_CURRENT_SOURCE_DIR}/component_smoke.wit")
     set(WL_COMPONENT_SMOKE_DUMMY "${WL_COMPONENT_OUT_DIR}/smoke.dummy.wasm")
     set(WL_COMPONENT_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/smoke.component.wasm")
+    set(WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_SMOKE_WASM}")
     set(WL_COMPONENT_FIXTURE "wasi-component-built")
 
     add_custom_command(
@@ -204,7 +205,39 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
         VERBATIM
     )
 
-    add_custom_target(wasi-component-build DEPENDS component_runner "${WL_COMPONENT_SMOKE_WASM}")
+    if(WL_WASM_TOOLS_PARSE_AVAILABLE)
+        set(WL_COMPONENT_INSTANCE_SMOKE_WAT "${CMAKE_CURRENT_SOURCE_DIR}/component_instance_smoke.wat")
+        set(WL_COMPONENT_INSTANCE_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/instance-smoke.component.wasm")
+        set(WL_COMPONENT_START_SMOKE_WAT "${CMAKE_CURRENT_SOURCE_DIR}/component_start_smoke.wat")
+        set(WL_COMPONENT_START_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/start-smoke.component.wasm")
+
+        add_custom_command(
+            OUTPUT "${WL_COMPONENT_INSTANCE_SMOKE_WASM}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${WL_COMPONENT_OUT_DIR}"
+            COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" parse
+                    "${WL_COMPONENT_INSTANCE_SMOKE_WAT}"
+                    -o "${WL_COMPONENT_INSTANCE_SMOKE_WASM}"
+            DEPENDS
+                "${WL_COMPONENT_INSTANCE_SMOKE_WAT}"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${WL_COMPONENT_START_SMOKE_WASM}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${WL_COMPONENT_OUT_DIR}"
+            COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" parse
+                    "${WL_COMPONENT_START_SMOKE_WAT}"
+                    -o "${WL_COMPONENT_START_SMOKE_WASM}"
+            DEPENDS
+                "${WL_COMPONENT_START_SMOKE_WAT}"
+            VERBATIM
+        )
+
+        list(APPEND WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_INSTANCE_SMOKE_WASM}")
+        list(APPEND WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_START_SMOKE_WASM}")
+    endif()
+
+    add_custom_target(wasi-component-build DEPENDS component_runner ${WL_COMPONENT_BUILD_OUTPUTS})
 
     if(BUILD_TESTING)
         add_test(
@@ -350,6 +383,89 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
             LABELS "wasi-component"
             FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
         )
+
+        add_test(
+            NAME wasi.component.start-present
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_START_SMOKE_WASM}" start-present 1
+        )
+        set_tests_properties(wasi.component.start-present PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.start-func
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_START_SMOKE_WASM}" start-func 0
+        )
+        set_tests_properties(wasi.component.start-func PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.start-args
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_START_SMOKE_WASM}" start-args 0
+        )
+        set_tests_properties(wasi.component.start-args PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.start-results
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_START_SMOKE_WASM}" start-results 0
+        )
+        set_tests_properties(wasi.component.start-results PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        if(WL_WASM_TOOLS_PARSE_AVAILABLE)
+            add_test(
+                NAME wasi.component.component-instances
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" component-instance-count 2
+            )
+            set_tests_properties(wasi.component.component-instances PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.component-instance-kinds
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" component-instance-kind 0 from-exports
+            )
+            set_tests_properties(wasi.component.component-instance-kinds PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.component-instance-exports
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" component-instance-export-name 0 0 host-log
+            )
+            set_tests_properties(wasi.component.component-instance-exports PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.component-instance-components
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" component-instance-component 1 0
+            )
+            set_tests_properties(wasi.component.component-instance-components PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.component-instance-args
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" component-instance-arg-name 1 0 host-log
+            )
+            set_tests_properties(wasi.component.component-instance-args PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+        endif()
 
         add_test(
             NAME wasi.component.canons
