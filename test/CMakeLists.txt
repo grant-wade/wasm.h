@@ -208,6 +208,8 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
     if(WL_WASM_TOOLS_PARSE_AVAILABLE)
         set(WL_COMPONENT_INSTANCE_SMOKE_WAT "${CMAKE_CURRENT_SOURCE_DIR}/component_instance_smoke.wat")
         set(WL_COMPONENT_INSTANCE_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/instance-smoke.component.wasm")
+        set(WL_COMPONENT_ALIAS_SMOKE_WAT "${CMAKE_CURRENT_SOURCE_DIR}/component_alias_smoke.wat")
+        set(WL_COMPONENT_ALIAS_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/alias-smoke.component.wasm")
         set(WL_COMPONENT_START_SMOKE_WAT "${CMAKE_CURRENT_SOURCE_DIR}/component_start_smoke.wat")
         set(WL_COMPONENT_START_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/start-smoke.component.wasm")
 
@@ -233,8 +235,20 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
             VERBATIM
         )
 
+        add_custom_command(
+            OUTPUT "${WL_COMPONENT_ALIAS_SMOKE_WASM}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${WL_COMPONENT_OUT_DIR}"
+            COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" parse
+                    "${WL_COMPONENT_ALIAS_SMOKE_WAT}"
+                    -o "${WL_COMPONENT_ALIAS_SMOKE_WASM}"
+            DEPENDS
+                "${WL_COMPONENT_ALIAS_SMOKE_WAT}"
+            VERBATIM
+        )
+
         list(APPEND WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_INSTANCE_SMOKE_WASM}")
         list(APPEND WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_START_SMOKE_WASM}")
+        list(APPEND WL_COMPONENT_BUILD_OUTPUTS "${WL_COMPONENT_ALIAS_SMOKE_WASM}")
     endif()
 
     add_custom_target(wasi-component-build DEPENDS component_runner ${WL_COMPONENT_BUILD_OUTPUTS})
@@ -489,6 +503,42 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
                 COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" nested-component-import-name 0 0 host-log
             )
             set_tests_properties(wasi.component.nested-component-imports PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.alias-variant-count
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_ALIAS_SMOKE_WASM}" alias-count 1
+            )
+            set_tests_properties(wasi.component.alias-variant-count PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.alias-variant-kind
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_ALIAS_SMOKE_WASM}" alias-kind 0 instance-export
+            )
+            set_tests_properties(wasi.component.alias-variant-kind PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.alias-variant-name
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_ALIAS_SMOKE_WASM}" alias-name 0 host-log
+            )
+            set_tests_properties(wasi.component.alias-variant-name PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.nested-alias-kind
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_ALIAS_SMOKE_WASM}" nested-component-alias-kind 0 0 outer
+            )
+            set_tests_properties(wasi.component.nested-alias-kind PROPERTIES
                 LABELS "wasi-component"
                 FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
             )

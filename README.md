@@ -91,6 +91,7 @@ Current `wasi.h` capabilities are intentionally limited to binary introspection 
 - structured core-instance records through `wasi_component_core_instance_*`
 - structured component-instance records through `wasi_component_instance_*`
 - structured nested component records through `wasi_component_nested_component_*`
+- structured alias records now include instance-export and outer forms through `wasi_component_alias_*`
 - component start-section state through `wasi_component_has_start` and `wasi_component_start_func_index`
 - parsed component function types through `wasi_component_type_*` and `wasi_component_func_type_*`
 - structured alias and canonical-function records through `wasi_component_alias_*` and `wasi_component_canon_*`

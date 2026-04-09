@@ -71,6 +71,16 @@ static const uint8_t wasi_test_component_with_start[] = {
     0x09, 0x03, 0x00, 0x00, 0x00,
 };
 
+static const uint8_t wasi_test_component_with_alias_variants[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00,
+    0x07, 0x05, 0x01, 0x40, 0x00, 0x01, 0x00,
+    0x0a, 0x0d, 0x01, 0x00, 0x08, 'h', 'o', 's', 't', '-', 'l', 'o', 'g', 0x01, 0x00,
+    0x05, 0x0f, 0x01, 0x01, 0x01, 0x00, 0x08, 'h', 'o', 's', 't', '-', 'l', 'o', 'g', 0x01, 0x00,
+    0x06, 0x0d, 0x01, 0x01, 0x00, 0x00, 0x08, 'h', 'o', 's', 't', '-', 'l', 'o', 'g',
+    0x04, 0x0f, 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00,
+    0x06, 0x05, 0x01, 0x03, 0x02, 0x01, 0x00,
+};
+
 static const uint8_t wasi_test_component_with_core_instances[] = {
     0x00, 0x61, 0x73, 0x6D,
     0x0D, 0x00, 0x01, 0x00,
@@ -339,6 +349,48 @@ WL_TEST(test_wasi_extracts_nested_components) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_parses_alias_variants) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    const wasi_component_t* nested;
+    char dump[896];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_alias_variants,
+                          sizeof(wasi_test_component_with_alias_variants));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    WL_CHECK(t, wasi_component_alias_count(component) == 1u);
+    WL_CHECK(t, wasi_component_alias_kind(component, 0) == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT);
+    WL_CHECK(t, !wasi_component_alias_sort_is_core(component, 0));
+    WL_CHECK(t, wasi_component_alias_sort_code(component, 0) == 0x01u);
+    WL_CHECK(t, wasi_component_alias_extern_kind(component, 0) == WASI_COMPONENT_EXTERN_KIND_FUNC);
+    WL_CHECK(t, wasi_component_alias_instance_index(component, 0) == 0u);
+    WL_CHECK(t, strcmp(wasi_component_alias_name(component, 0), "host-log") == 0);
+
+    WL_CHECK(t, wasi_component_nested_component_count(component) == 1u);
+    nested = wasi_component_nested_component_at(component, 0);
+    WL_REQUIRE(t, nested != NULL);
+    WL_CHECK(t, wasi_component_alias_count(nested) == 1u);
+    WL_CHECK(t, wasi_component_alias_kind(nested, 0) == WASI_COMPONENT_ALIAS_KIND_OUTER);
+    WL_CHECK(t, !wasi_component_alias_sort_is_core(nested, 0));
+    WL_CHECK(t, wasi_component_alias_sort_code(nested, 0) == 0x03u);
+    WL_CHECK(t, wasi_component_alias_extern_kind(nested, 0) == WASI_COMPONENT_EXTERN_KIND_TYPE);
+    WL_CHECK(t, wasi_component_alias_outer_count(nested, 0) == 1u);
+    WL_CHECK(t, wasi_component_alias_outer_index(nested, 0) == 0u);
+    WL_CHECK(t, wasi_component_alias_name(nested, 0) == NULL);
+
+    wasi_dump_component(component, dump, sizeof(dump));
+    WL_CHECK(t, strstr(dump, "alias[0]: kind=instance-export target=func instance=0 name=host-log") != NULL);
+
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_parses_component_start) {
     wasi_engine_t engine;
     wasi_component_t* component;
@@ -394,6 +446,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_parses_component_core_instances),
         WL_TEST_CASE(test_wasi_parses_component_instances),
         WL_TEST_CASE(test_wasi_extracts_nested_components),
+        WL_TEST_CASE(test_wasi_parses_alias_variants),
         WL_TEST_CASE(test_wasi_parses_component_start),
         WL_TEST_CASE(test_wasi_rejects_bad_magic),
     };

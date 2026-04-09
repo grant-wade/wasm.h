@@ -15,6 +15,7 @@ static void component_runner_usage(const char* argv0) {
     fprintf(stderr, "    type-param-count <type_index> <expected>\n");
     fprintf(stderr, "    type-result-count <type_index> <expected>\n");
     fprintf(stderr, "    alias-count <expected>\n");
+    fprintf(stderr, "    alias-kind <index> <core-instance-export|instance-export|outer>\n");
     fprintf(stderr, "    alias-name <index> <expected>\n");
     fprintf(stderr, "    core-instance-count <expected>\n");
     fprintf(stderr, "    core-instance-kind <index> <instantiate|from-exports>\n");
@@ -29,6 +30,7 @@ static void component_runner_usage(const char* argv0) {
     fprintf(stderr, "    nested-component-count <expected>\n");
     fprintf(stderr, "    nested-component-section-count <index> <expected>\n");
     fprintf(stderr, "    nested-component-import-name <component_index> <import_index> <expected>\n");
+    fprintf(stderr, "    nested-component-alias-kind <component_index> <alias_index> <core-instance-export|instance-export|outer>\n");
     fprintf(stderr, "    nested-component-instance-kind <component_index> <instance_index> <instantiate|from-exports>\n");
     fprintf(stderr, "    start-present <0|1>\n");
     fprintf(stderr, "    start-func <expected_func_index>\n");
@@ -174,6 +176,25 @@ int main(int argc, char** argv) {
             goto cleanup;
         }
         exit_code = wasi_component_alias_count(component) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "alias-kind") == 0) {
+        unsigned long index;
+        char* end = NULL;
+        const char* actual;
+        if (argc != 5) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid alias index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        actual = wasi_component_alias_kind_string(wasi_component_alias_kind(component, (uint32_t)index));
+        exit_code = strcmp(actual, argv[4]) == 0 ? 0 : 1;
     } else if (strcmp(mode, "alias-name") == 0) {
         unsigned long index;
         char* end = NULL;
@@ -503,6 +524,35 @@ int main(int argc, char** argv) {
         }
         nested = wasi_component_nested_component_at(component, (uint32_t)component_index);
         actual = nested ? wasi_component_import_name(nested, (uint32_t)import_index) : NULL;
+        exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "nested-component-alias-kind") == 0) {
+        unsigned long component_index;
+        unsigned long alias_index;
+        char* end = NULL;
+        const wasi_component_t* nested;
+        const char* actual;
+        if (argc != 6) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        component_index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested component index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        alias_index = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested alias index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        nested = wasi_component_nested_component_at(component, (uint32_t)component_index);
+        actual = nested ? wasi_component_alias_kind_string(wasi_component_alias_kind(nested, (uint32_t)alias_index)) : NULL;
         exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
     } else if (strcmp(mode, "nested-component-instance-kind") == 0) {
         unsigned long component_index;

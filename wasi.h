@@ -66,6 +66,8 @@ typedef enum wasi_component_type_kind_t {
 typedef enum wasi_component_alias_kind_t {
     WASI_COMPONENT_ALIAS_KIND_UNKNOWN = 0,
     WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT,
+    WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT,
+    WASI_COMPONENT_ALIAS_KIND_OUTER,
 } wasi_component_alias_kind_t;
 
 typedef enum wasi_component_core_instance_kind_t {
@@ -127,9 +129,14 @@ typedef struct wasi_component_export_t {
 
 typedef struct wasi_component_alias_t {
     wasi_component_alias_kind_t kind;
+    int sort_is_core;
+    uint8_t sort_code;
+    wasi_component_extern_kind_t extern_kind;
     wasm_export_kind_t core_export_kind;
     uint32_t instance_index;
     uint8_t name_kind;
+    uint32_t outer_count;
+    uint32_t outer_index;
     char* name;
 } wasi_component_alias_t;
 
@@ -314,9 +321,14 @@ uint32_t wasi_component_export_type_index(const wasi_component_t* component, uin
 int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index);
 uint32_t wasi_component_alias_count(const wasi_component_t* component);
 wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* component, uint32_t index);
+int wasi_component_alias_sort_is_core(const wasi_component_t* component, uint32_t index);
+uint8_t wasi_component_alias_sort_code(const wasi_component_t* component, uint32_t index);
+wasi_component_extern_kind_t wasi_component_alias_extern_kind(const wasi_component_t* component, uint32_t index);
 wasm_export_kind_t wasi_component_alias_core_export_kind(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_alias_instance_index(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_alias_name(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_alias_outer_count(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_alias_outer_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component);
 wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_module_index(const wasi_component_t* component, uint32_t index);
@@ -570,6 +582,42 @@ static int wasi__read_component_plain_name(wasi__reader_t* reader, char** out_na
 
 static int wasi__canon_option_has_immediate(uint8_t option) {
     return option == 0x03 || option == 0x04 || option == 0x05;
+}
+
+static wasi_component_extern_kind_t wasi__alias_component_sort_from_byte(uint8_t byte) {
+    switch (byte) {
+        case 0x01:
+            return WASI_COMPONENT_EXTERN_KIND_FUNC;
+        case 0x02:
+            return WASI_COMPONENT_EXTERN_KIND_VALUE;
+        case 0x03:
+            return WASI_COMPONENT_EXTERN_KIND_TYPE;
+        case 0x04:
+            return WASI_COMPONENT_EXTERN_KIND_COMPONENT;
+        case 0x05:
+            return WASI_COMPONENT_EXTERN_KIND_INSTANCE;
+        default:
+            return WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+    }
+}
+
+static const char* wasi__alias_sort_string(int sort_is_core, uint8_t sort_code) {
+    if (!sort_is_core) return wasi_component_extern_kind_string(wasi__alias_component_sort_from_byte(sort_code));
+
+    switch (sort_code) {
+        case 0x00:
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+            return wasi_component_core_export_kind_string((wasm_export_kind_t)sort_code);
+        case 0x10:
+            return "core-type";
+        case 0x11:
+            return "core-module";
+        default:
+            return "unknown";
+    }
 }
 
 static void wasi__component_core_instance_release(wasi_component_core_instance_t* instance) {
@@ -933,15 +981,20 @@ static wasi_error_t wasi__component_append_export(wasi_component_t* component,
 
 static wasi_error_t wasi__component_append_alias(wasi_component_t* component,
                                                  wasi_component_alias_kind_t kind,
+                                                 int sort_is_core,
+                                                 uint8_t sort_code,
+                                                 wasi_component_extern_kind_t extern_kind,
                                                  wasm_export_kind_t core_export_kind,
                                                  uint32_t instance_index,
                                                  uint8_t name_kind,
+                                                 uint32_t outer_count,
+                                                 uint32_t outer_index,
                                                  char* name) {
     wasi_component_alias_t* grown;
     size_t next_capacity;
     wasi_component_alias_t* entry;
 
-    if (!component || !name) {
+    if (!component || (kind != WASI_COMPONENT_ALIAS_KIND_OUTER && !name)) {
         WASM_FREE(name);
         return WASI_ERR_INVALID_ARGUMENT;
     }
@@ -960,9 +1013,14 @@ static wasi_error_t wasi__component_append_alias(wasi_component_t* component,
     entry = &component->aliases[component->num_aliases++];
     memset(entry, 0, sizeof(*entry));
     entry->kind = kind;
+    entry->sort_is_core = sort_is_core;
+    entry->sort_code = sort_code;
+    entry->extern_kind = extern_kind;
     entry->core_export_kind = core_export_kind;
     entry->instance_index = instance_index;
     entry->name_kind = name_kind;
+    entry->outer_count = outer_count;
+    entry->outer_index = outer_index;
     entry->name = name;
     return WASI_OK;
 }
@@ -1529,29 +1587,72 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
-        uint8_t sort = wasi__read_u8(&reader);
+        uint8_t first = wasi__read_u8(&reader);
+        int sort_is_core = 0;
+        uint8_t sort_code = first;
+        wasi_component_extern_kind_t extern_kind = WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+        wasm_export_kind_t core_export_kind = (wasm_export_kind_t)255;
+        uint8_t alias_op;
         if (reader.malformed) {
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component alias entry");
         }
-        if (sort == 0x00) {
-            uint8_t kind_byte = wasi__read_u8(&reader);
+        if (first == 0x00) {
+            sort_is_core = 1;
+            sort_code = wasi__read_u8(&reader);
+            if (sort_code <= 0x04) core_export_kind = (wasm_export_kind_t)sort_code;
+        } else {
+            extern_kind = wasi__alias_component_sort_from_byte(first);
+        }
+        alias_op = wasi__read_u8(&reader);
+        if (reader.malformed) {
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component alias descriptor");
+        }
+
+        if ((sort_is_core && alias_op == 0x01) || (!sort_is_core && alias_op == 0x00)) {
             uint32_t instance_index = wasi__read_leb128_u32(&reader);
-            uint8_t name_kind = 0;
             char* name = NULL;
             wasi_error_t err;
 
-            if (reader.malformed) {
-                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export alias header");
-            }
-            if (!wasi__read_component_name(&reader, &name_kind, &name)) {
-                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export alias name");
+            if (!wasi__read_component_plain_name(&reader, &name)) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed instance export alias name");
             }
             err = wasi__component_append_alias(component,
-                                               WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT,
-                                               (wasm_export_kind_t)kind_byte,
+                                               sort_is_core ? WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT
+                                                            : WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT,
+                                               sort_is_core,
+                                               sort_code,
+                                               extern_kind,
+                                               core_export_kind,
                                                instance_index,
-                                               name_kind,
+                                               0,
+                                               0,
+                                               0,
                                                name);
+            if (err != WASI_OK) {
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "component alias alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        } else if (alias_op == 0x02) {
+            uint32_t outer_count = wasi__read_leb128_u32(&reader);
+            uint32_t outer_index = wasi__read_leb128_u32(&reader);
+            wasi_error_t err;
+
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed outer alias descriptor");
+            }
+            err = wasi__component_append_alias(component,
+                                               WASI_COMPONENT_ALIAS_KIND_OUTER,
+                                               sort_is_core,
+                                               sort_code,
+                                               extern_kind,
+                                               core_export_kind,
+                                               UINT32_MAX,
+                                               0,
+                                               outer_count,
+                                               outer_index,
+                                               NULL);
             if (err != WASI_OK) {
                 return wasi__set_error_literal(engine,
                                                err,
@@ -1561,8 +1662,8 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
         } else {
             return wasi__set_errorf(engine,
                                     WASI_ERR_NOT_IMPLEMENTED,
-                                    "component alias sort 0x%02x not implemented",
-                                    (unsigned)sort);
+                                    "component alias opcode 0x%02x not implemented",
+                                    (unsigned)alias_op);
         }
     }
 
@@ -2573,6 +2674,21 @@ wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* co
     return component->aliases[index].kind;
 }
 
+int wasi_component_alias_sort_is_core(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return 0;
+    return component->aliases[index].sort_is_core;
+}
+
+uint8_t wasi_component_alias_sort_code(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return 0xFFu;
+    return component->aliases[index].sort_code;
+}
+
+wasi_component_extern_kind_t wasi_component_alias_extern_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+    return component->aliases[index].extern_kind;
+}
+
 wasm_export_kind_t wasi_component_alias_core_export_kind(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_aliases) return (wasm_export_kind_t)255;
     return component->aliases[index].core_export_kind;
@@ -2586,6 +2702,16 @@ uint32_t wasi_component_alias_instance_index(const wasi_component_t* component, 
 const char* wasi_component_alias_name(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_aliases) return NULL;
     return component->aliases[index].name;
+}
+
+uint32_t wasi_component_alias_outer_count(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return UINT32_MAX;
+    return component->aliases[index].outer_count;
+}
+
+uint32_t wasi_component_alias_outer_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return UINT32_MAX;
+    return component->aliases[index].outer_index;
 }
 
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component) {
@@ -2926,12 +3052,27 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         wasi__appendf(buffer,
                       buffer_size,
                       &offset,
-                      "alias[%u]: kind=%s core-kind=%s instance=%u name=%s\n",
+                      "alias[%u]: kind=%s target=%s",
                       (unsigned)i,
                       wasi_component_alias_kind_string(alias->kind),
-                      wasi_component_core_export_kind_string(alias->core_export_kind),
-                      (unsigned)alias->instance_index,
-                      alias->name ? alias->name : "");
+                      wasi__alias_sort_string(alias->sort_is_core, alias->sort_code));
+        if (alias->kind == WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT ||
+            alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " instance=%u name=%s",
+                          (unsigned)alias->instance_index,
+                          alias->name ? alias->name : "");
+        } else if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " count=%u index=%u",
+                          (unsigned)alias->outer_count,
+                          (unsigned)alias->outer_index);
+        }
+        wasi__appendf(buffer, buffer_size, &offset, "\n");
     }
 
     for (i = 0; i < component->num_core_instances; i++) {
@@ -3189,6 +3330,10 @@ const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind) {
     switch (kind) {
         case WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT:
             return "core-instance-export";
+        case WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT:
+            return "instance-export";
+        case WASI_COMPONENT_ALIAS_KIND_OUTER:
+            return "outer";
         default:
             return "unknown";
     }
