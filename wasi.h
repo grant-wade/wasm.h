@@ -5496,6 +5496,19 @@ static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
             }
             *out_count = 2u;
             return WASI_OK;
+        case 0x67u:
+            for (i = 0; i < resolved->data.fixed_list.length; i++) {
+                uint32_t added = 0;
+                wasi_error_t err = wasi__flat_types_for_valtype(engine,
+                                                                component,
+                                                                resolved->data.fixed_list.element_type,
+                                                                out_types ? out_types + cursor : NULL,
+                                                                &added);
+                if (err != WASI_OK) return err;
+                cursor += added;
+            }
+            *out_count = cursor;
+            return WASI_OK;
         case 0x72u:
         case 0x6Fu:
             for (i = 0; i < resolved->item_count; i++) {
@@ -6558,6 +6571,39 @@ static wasi_error_t wasi__store_value_to_memory(wasi_engine_t* engine,
             if (err != WASI_OK) return err;
             return wasi__memory_write_u32(engine, core_module, options->api.memory_index, guest_ptr + 4u, len, "list pair write failed");
         }
+        case 0x67u: {
+            uint32_t elem_size;
+            uint32_t elem_align;
+            size_t i;
+
+            if (value->kind != WASI_VALUE_KIND_FIXED_LIST)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected fixed-list argument");
+            if (value->of.seq.len != resolved->data.fixed_list.length)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "fixed-list argument length mismatch");
+
+            err = wasi__layout_valtype(engine,
+                                       component,
+                                       resolved->data.fixed_list.element_type,
+                                       &elem_size,
+                                       &elem_align);
+            if (err != WASI_OK) return err;
+            (void)elem_align;
+
+            for (i = 0; i < value->of.seq.len; i++) {
+                uint32_t elem_ptr;
+                err = wasi__guest_add_offset(engine, guest_ptr, (uint32_t)(i * (size_t)elem_size), &elem_ptr);
+                if (err != WASI_OK) return err;
+                err = wasi__store_value_to_memory(engine,
+                                                  component,
+                                                  resolved->data.fixed_list.element_type,
+                                                  &value->of.seq.values[i],
+                                                  core_module,
+                                                  options,
+                                                  elem_ptr);
+                if (err != WASI_OK) return err;
+            }
+            return WASI_OK;
+        }
         case 0x72u:
         case 0x6Fu: {
             uint32_t* offsets;
@@ -6779,6 +6825,26 @@ static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
             out_values[0] = wasm_i32((int32_t)ptr);
             out_values[1] = wasm_i32((int32_t)len);
             *out_count = 2u;
+            return WASI_OK;
+        case 0x67u:
+            if (value->kind != WASI_VALUE_KIND_FIXED_LIST)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected fixed-list argument");
+            if (value->of.seq.len != resolved->data.fixed_list.length)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "fixed-list argument length mismatch");
+            for (i = 0; i < resolved->data.fixed_list.length; i++) {
+                uint32_t added = 0;
+                err = wasi__lower_value(engine,
+                                        component,
+                                        resolved->data.fixed_list.element_type,
+                                        &value->of.seq.values[i],
+                                        core_module,
+                                        options,
+                                        out_values + cursor,
+                                        &added);
+                if (err != WASI_OK) return err;
+                cursor += added;
+            }
+            *out_count = cursor;
             return WASI_OK;
         case 0x72u:
         case 0x6Fu: {
@@ -7102,6 +7168,44 @@ static wasi_error_t wasi__load_value_from_memory(wasi_engine_t* engine,
             }
             return WASI_OK;
         }
+        case 0x67u: {
+            uint32_t elem_size;
+            uint32_t elem_align;
+            size_t i;
+
+            err = wasi__layout_valtype(engine,
+                                       component,
+                                       resolved->data.fixed_list.element_type,
+                                       &elem_size,
+                                       &elem_align);
+            if (err != WASI_OK) return err;
+            (void)elem_align;
+
+            out_value->kind = WASI_VALUE_KIND_FIXED_LIST;
+            out_value->of.seq.len = resolved->data.fixed_list.length;
+            out_value->of.seq.owned = 1;
+            if (resolved->data.fixed_list.length) {
+                out_value->of.seq.values = (wasi_value_t*)WASM_CALLOC(resolved->data.fixed_list.length,
+                                                                      sizeof(*out_value->of.seq.values));
+                if (!out_value->of.seq.values)
+                    return wasi__set_error_literal(engine, WASI_ERR_OOM, "fixed-list result alloc failed");
+            }
+
+            for (i = 0; i < resolved->data.fixed_list.length; i++) {
+                uint32_t elem_ptr;
+                err = wasi__guest_add_offset(engine, guest_ptr, (uint32_t)(i * (size_t)elem_size), &elem_ptr);
+                if (err != WASI_OK) return err;
+                err = wasi__load_value_from_memory(engine,
+                                                   component,
+                                                   resolved->data.fixed_list.element_type,
+                                                   core_module,
+                                                   options,
+                                                   elem_ptr,
+                                                   &out_value->of.seq.values[i]);
+                if (err != WASI_OK) return err;
+            }
+            return WASI_OK;
+        }
         case 0x72u:
         case 0x6Fu: {
             uint32_t* offsets;
@@ -7412,6 +7516,32 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
                 }
                 return WASI_OK;
             }
+        case 0x67u:
+            out_value->kind = WASI_VALUE_KIND_FIXED_LIST;
+            out_value->of.seq.len = resolved->data.fixed_list.length;
+            out_value->of.seq.owned = 1;
+            if (resolved->data.fixed_list.length) {
+                out_value->of.seq.values = (wasi_value_t*)WASM_CALLOC(resolved->data.fixed_list.length,
+                                                                      sizeof(*out_value->of.seq.values));
+                if (!out_value->of.seq.values)
+                    return wasi__set_error_literal(engine, WASI_ERR_OOM, "fixed-list result alloc failed");
+            }
+            for (i = 0; i < resolved->data.fixed_list.length; i++) {
+                uint32_t consumed = 0;
+                wasi_error_t item_err = wasi__lift_value(engine,
+                                                         component,
+                                                         resolved->data.fixed_list.element_type,
+                                                         flat_values + cursor,
+                                                         flat_count - cursor,
+                                                         core_module,
+                                                         options,
+                                                         &out_value->of.seq.values[i],
+                                                         &consumed);
+                if (item_err != WASI_OK) return item_err;
+                cursor += consumed;
+            }
+            *out_consumed = cursor;
+            return WASI_OK;
         case 0x72u:
         case 0x6Fu: {
             wasi_value_kind_t kind = resolved->opcode == 0x72u ? WASI_VALUE_KIND_RECORD : WASI_VALUE_KIND_TUPLE;
