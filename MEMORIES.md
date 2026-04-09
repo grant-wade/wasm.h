@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 9
+Memory Version: 10
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -42,7 +42,7 @@ This file is the canonical checked-in snapshot of repo memory.
 ## component-type-parser.md
 
 - Nested `core:type` declarations inside component/instance types in `wasi.h` are inline core module types: declaration opcode `0x00` is followed by module-type opcode `0x50`, not a core type index.
-- The current nested module-type parser in `wasi.h` skips module declaration lists covering core `type`/`rec` subtypes, imports, outer aliases, and exports; regressions live in `wasi_test.c`.
+- Nested and top-level core module types in `wasi.h` now retain module declaration lists for core `type`, `import`, `alias`, and `export` entries, with regressions in `wasi_test.c` covering both nested type-space and top-level core-type fixtures.
 - Top-level `core-type` sections in `wasi.h` need backtracking for entry opcode `0x50`: it can mean either a core module type or a non-final subtype, so parse against the remaining entry count instead of deciding locally.
 
 ## wasm-runtime.md
