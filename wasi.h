@@ -5119,6 +5119,66 @@ static const wasi_component_valtype_t* wasi__resolve_valtype(const wasi_componen
     return resolved;
 }
 
+static wasi_value_kind_t wasi__variant_value_kind(uint8_t opcode) {
+    switch (opcode) {
+        case 0x71u:
+            return WASI_VALUE_KIND_VARIANT;
+        case 0x6Bu:
+            return WASI_VALUE_KIND_OPTION;
+        case 0x6Au:
+            return WASI_VALUE_KIND_RESULT;
+        default:
+            return 0;
+    }
+}
+
+static uint32_t wasi__variant_case_count(const wasi_component_valtype_t* type) {
+    if (!type) return 0u;
+    switch (type->opcode) {
+        case 0x71u:
+            return type->item_count;
+        case 0x6Bu:
+        case 0x6Au:
+            return 2u;
+        default:
+            return 0u;
+    }
+}
+
+static int wasi__variant_case_has_payload(const wasi_component_valtype_t* type, uint32_t case_index) {
+    if (!type) return 0;
+    switch (type->opcode) {
+        case 0x71u:
+            return case_index < type->item_count && type->data.aggregate.items[case_index].has_type;
+        case 0x6Bu:
+            return case_index == 1u && type->data.unary.type != NULL;
+        case 0x6Au:
+            if (case_index == 0u) return type->data.result.ok_type != NULL;
+            if (case_index == 1u) return type->data.result.err_type != NULL;
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+static const wasi_component_valtype_t* wasi__variant_case_payload_type(const wasi_component_valtype_t* type,
+                                                                       uint32_t case_index) {
+    if (!type) return NULL;
+    switch (type->opcode) {
+        case 0x71u:
+            if (case_index >= type->item_count || !type->data.aggregate.items[case_index].has_type) return NULL;
+            return type->data.aggregate.items[case_index].type;
+        case 0x6Bu:
+            return case_index == 1u ? type->data.unary.type : NULL;
+        case 0x6Au:
+            if (case_index == 0u) return type->data.result.ok_type;
+            if (case_index == 1u) return type->data.result.err_type;
+            return NULL;
+        default:
+            return NULL;
+    }
+}
+
 static int wasi__valtype_is_scalar_or_string(const wasi_component_valtype_t* type) {
     if (!type) return 0;
     switch (type->opcode) {
@@ -5158,6 +5218,119 @@ static void wasi__canon_func_sig_release(wasi__canon_func_sig_t* sig) {
     WASM_FREE(sig->result_types);
     WASM_FREE(sig->post_return_types);
     memset(sig, 0, sizeof(*sig));
+}
+
+static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
+                                                 const wasi_component_t* component,
+                                                 const wasi_component_valtype_t* type,
+                                                 wasm_valtype_t* out_types,
+                                                 uint32_t* out_count);
+
+static wasi_error_t wasi__merge_variant_flat_types(wasi_engine_t* engine,
+                                                   const wasi_component_t* component,
+                                                   const wasi_component_valtype_t* type,
+                                                   wasm_valtype_t** out_types,
+                                                   uint32_t* out_count) {
+    uint32_t case_count;
+    wasm_valtype_t* merged = NULL;
+    uint8_t* seen = NULL;
+    uint32_t merged_count = 0;
+    uint32_t case_index;
+    wasi_error_t err = WASI_OK;
+
+    if (out_types) *out_types = NULL;
+    if (out_count) *out_count = 0u;
+    if (!out_count) return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "missing variant flat type count");
+
+    case_count = wasi__variant_case_count(type);
+    for (case_index = 0; case_index < case_count; case_index++) {
+        const wasi_component_valtype_t* payload_type;
+        wasm_valtype_t* case_types = NULL;
+        uint32_t case_flat_count = 0;
+        uint32_t slot;
+
+        if (!wasi__variant_case_has_payload(type, case_index)) continue;
+        payload_type = wasi__variant_case_payload_type(type, case_index);
+        err = wasi__flat_types_for_valtype(engine, component, payload_type, NULL, &case_flat_count);
+        if (err != WASI_OK) goto fail;
+
+        if (case_flat_count > merged_count) {
+            wasm_valtype_t* grown_types = (wasm_valtype_t*)WASM_REALLOC(merged,
+                                                                        (size_t)case_flat_count * sizeof(*grown_types));
+            uint8_t* grown_seen;
+            if (!grown_types) {
+                err = wasi__set_error_literal(engine, WASI_ERR_OOM, "variant flat signature alloc failed");
+                goto fail;
+            }
+            merged = grown_types;
+
+            grown_seen = (uint8_t*)WASM_REALLOC(seen, (size_t)case_flat_count * sizeof(*grown_seen));
+            if (!grown_seen) {
+                err = wasi__set_error_literal(engine, WASI_ERR_OOM, "variant flat signature alloc failed");
+                goto fail;
+            }
+            memset(grown_seen + merged_count, 0, (size_t)(case_flat_count - merged_count));
+            seen = grown_seen;
+            merged_count = case_flat_count;
+        }
+
+        if (case_flat_count) {
+            case_types = (wasm_valtype_t*)WASM_MALLOC((size_t)case_flat_count * sizeof(*case_types));
+            if (!case_types) {
+                err = wasi__set_error_literal(engine, WASI_ERR_OOM, "variant flat payload alloc failed");
+                goto fail;
+            }
+            err = wasi__flat_types_for_valtype(engine, component, payload_type, case_types, &case_flat_count);
+            if (err != WASI_OK) {
+                WASM_FREE(case_types);
+                goto fail;
+            }
+        }
+
+        for (slot = 0; slot < case_flat_count; slot++) {
+            if (!seen[slot]) {
+                merged[slot] = case_types[slot];
+                seen[slot] = 1u;
+            } else if (merged[slot] != case_types[slot]) {
+                WASM_FREE(case_types);
+                err = wasi__set_errorf(engine,
+                                       WASI_ERR_NOT_IMPLEMENTED,
+                                       "canonical abi variant payload slot %u type mismatch",
+                                       (unsigned)slot);
+                goto fail;
+            }
+        }
+
+        WASM_FREE(case_types);
+    }
+
+    if (out_types) {
+        *out_types = merged;
+    } else {
+        WASM_FREE(merged);
+    }
+    *out_count = merged_count;
+    WASM_FREE(seen);
+    return WASI_OK;
+
+fail:
+    WASM_FREE(merged);
+    WASM_FREE(seen);
+    return err;
+}
+
+static wasm_value_t wasi__zero_wasm_value(wasm_valtype_t type) {
+    switch (type) {
+        case WASM_TYPE_I64:
+            return wasm_i64(0);
+        case WASM_TYPE_F32:
+            return wasm_f32(0.0f);
+        case WASM_TYPE_F64:
+            return wasm_f64(0.0);
+        case WASM_TYPE_I32:
+        default:
+            return wasm_i32(0);
+    }
 }
 
 static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
@@ -5229,6 +5402,29 @@ static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
                 cursor++;
             }
             *out_count = cursor;
+            return WASI_OK;
+        }
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au: {
+            wasm_valtype_t* payload_types = NULL;
+            uint32_t payload_count = 0;
+            wasi_error_t err = wasi__merge_variant_flat_types(engine,
+                                                              component,
+                                                              resolved,
+                                                              &payload_types,
+                                                              &payload_count);
+            if (err != WASI_OK) return err;
+            if (out_types) {
+                out_types[0] = WASM_TYPE_I32;
+                if (payload_count) {
+                    memcpy(out_types + 1u,
+                           payload_types,
+                           (size_t)payload_count * sizeof(*payload_types));
+                }
+            }
+            WASM_FREE(payload_types);
+            *out_count = 1u + payload_count;
             return WASI_OK;
         }
         default:
@@ -5894,6 +6090,53 @@ static wasi_error_t wasi__layout_valtype(wasi_engine_t* engine,
                                          const wasi_component_t* component,
                                          const wasi_component_valtype_t* type,
                                          uint32_t* out_size,
+                                         uint32_t* out_align);
+
+static wasi_error_t wasi__layout_variant(wasi_engine_t* engine,
+                                         const wasi_component_t* component,
+                                         const wasi_component_valtype_t* type,
+                                         uint32_t* out_payload_offset,
+                                         uint32_t* out_size,
+                                         uint32_t* out_align) {
+    uint32_t case_count;
+    uint32_t payload_offset;
+    uint32_t max_payload_size = 0u;
+    uint32_t max_align = 4u;
+    uint32_t case_index;
+    wasi_error_t err;
+
+    if (out_payload_offset) *out_payload_offset = 0u;
+    if (!type || !out_size || !out_align)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid variant layout inputs");
+
+    case_count = wasi__variant_case_count(type);
+    for (case_index = 0; case_index < case_count; case_index++) {
+        const wasi_component_valtype_t* payload_type;
+        uint32_t case_size;
+        uint32_t case_align;
+
+        if (!wasi__variant_case_has_payload(type, case_index)) continue;
+        payload_type = wasi__variant_case_payload_type(type, case_index);
+        err = wasi__layout_valtype(engine, component, payload_type, &case_size, &case_align);
+        if (err != WASI_OK) return err;
+        if (case_align > max_align) max_align = case_align;
+        if (case_size > max_payload_size) max_payload_size = case_size;
+    }
+
+    err = wasi__canon_align_to(engine, 4u, max_align, &payload_offset);
+    if (err != WASI_OK) return err;
+    if (max_payload_size > UINT32_MAX - payload_offset)
+        return wasi__set_error_literal(engine, WASI_ERR_OOM, "canonical variant layout overflow");
+
+    *out_align = max_align;
+    if (out_payload_offset) *out_payload_offset = payload_offset;
+    return wasi__canon_align_to(engine, payload_offset + max_payload_size, max_align, out_size);
+}
+
+static wasi_error_t wasi__layout_valtype(wasi_engine_t* engine,
+                                         const wasi_component_t* component,
+                                         const wasi_component_valtype_t* type,
+                                         uint32_t* out_size,
                                          uint32_t* out_align) {
     const wasi_component_valtype_t* resolved = wasi__resolve_valtype(component, type);
 
@@ -5934,6 +6177,10 @@ static wasi_error_t wasi__layout_valtype(wasi_engine_t* engine,
         case 0x72u:
         case 0x6Fu:
             return wasi__layout_aggregate(engine, component, resolved, NULL, out_size, out_align);
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au:
+            return wasi__layout_variant(engine, component, resolved, NULL, out_size, out_align);
         case 0x6Eu: {
             uint32_t words = wasi__canon_flags_word_count(resolved->item_count);
             if (resolved->item_count <= 8u) {
@@ -6257,6 +6504,65 @@ static wasi_error_t wasi__store_value_to_memory(wasi_engine_t* engine,
             }
             return WASI_OK;
         }
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au: {
+            wasi_value_kind_t expected_kind = wasi__variant_value_kind(resolved->opcode);
+            uint32_t case_count = wasi__variant_case_count(resolved);
+            uint32_t case_index;
+            uint32_t payload_offset;
+            uint32_t variant_size;
+            uint32_t variant_align;
+            uint32_t payload_ptr;
+
+            if (value->kind != expected_kind)
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "expected %s argument",
+                                        wasi__component_type_detail_string(resolved->opcode));
+
+            case_index = value->of.variant.case_index;
+            if (case_index >= case_count)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "variant argument case index out of range");
+
+            err = wasi__memory_write_u32(engine,
+                                         core_module,
+                                         options->api.memory_index,
+                                         guest_ptr,
+                                         case_index,
+                                         "variant discriminant write failed");
+            if (err != WASI_OK) return err;
+
+            if (!wasi__variant_case_has_payload(resolved, case_index)) {
+                if (value->of.variant.has_payload || value->of.variant.payload)
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "variant argument payload mismatch");
+                return WASI_OK;
+            }
+            if (!value->of.variant.has_payload || !value->of.variant.payload)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "variant argument payload is missing");
+
+            err = wasi__layout_variant(engine,
+                                       component,
+                                       resolved,
+                                       &payload_offset,
+                                       &variant_size,
+                                       &variant_align);
+            if (err != WASI_OK) return err;
+            (void)variant_size;
+            (void)variant_align;
+
+            err = wasi__guest_add_offset(engine, guest_ptr, payload_offset, &payload_ptr);
+            if (err != WASI_OK) return err;
+            return wasi__store_value_to_memory(engine,
+                                               component,
+                                               wasi__variant_case_payload_type(resolved, case_index),
+                                               value->of.variant.payload,
+                                               core_module,
+                                               options,
+                                               payload_ptr);
+        }
         default:
             return wasi__store_scalar_to_memory(engine, resolved, value, core_module, options, guest_ptr);
     }
@@ -6390,6 +6696,67 @@ static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
                 return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "flags argument word count mismatch");
             for (i = 0; i < words; i++) out_values[i] = wasm_i32((int32_t)value->of.flags.words[i]);
             *out_count = words;
+            return WASI_OK;
+        }
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au: {
+            wasi_value_kind_t expected_kind = wasi__variant_value_kind(resolved->opcode);
+            uint32_t case_count = wasi__variant_case_count(resolved);
+            uint32_t case_index;
+            wasm_valtype_t* payload_types = NULL;
+            uint32_t payload_count = 0;
+
+            if (value->kind != expected_kind)
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "expected %s argument",
+                                        wasi__component_type_detail_string(resolved->opcode));
+
+            case_index = value->of.variant.case_index;
+            if (case_index >= case_count)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "variant argument case index out of range");
+
+            err = wasi__merge_variant_flat_types(engine,
+                                                 component,
+                                                 resolved,
+                                                 &payload_types,
+                                                 &payload_count);
+            if (err != WASI_OK) return err;
+
+            out_values[0] = wasm_i32((int32_t)case_index);
+            for (i = 0; i < payload_count; i++) out_values[i + 1u] = wasi__zero_wasm_value(payload_types[i]);
+
+            if (!wasi__variant_case_has_payload(resolved, case_index)) {
+                if (value->of.variant.has_payload || value->of.variant.payload) {
+                    WASM_FREE(payload_types);
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "variant argument payload mismatch");
+                }
+            } else {
+                if (!value->of.variant.has_payload || !value->of.variant.payload) {
+                    WASM_FREE(payload_types);
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "variant argument payload is missing");
+                }
+                err = wasi__lower_value(engine,
+                                        component,
+                                        wasi__variant_case_payload_type(resolved, case_index),
+                                        value->of.variant.payload,
+                                        core_module,
+                                        options,
+                                        out_values + 1u,
+                                        &cursor);
+                if (err != WASI_OK) {
+                    WASM_FREE(payload_types);
+                    return err;
+                }
+            }
+
+            WASM_FREE(payload_types);
+            *out_count = 1u + payload_count;
             return WASI_OK;
         }
         case 0x6Du:
@@ -6641,6 +7008,68 @@ static wasi_error_t wasi__load_value_from_memory(wasi_engine_t* engine,
             }
             return WASI_OK;
         }
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au: {
+            uint32_t case_index;
+            uint32_t case_count = wasi__variant_case_count(resolved);
+            uint32_t payload_offset;
+            uint32_t variant_size;
+            uint32_t variant_align;
+            uint32_t payload_ptr;
+
+            err = wasi__memory_read_u32(engine,
+                                        core_module,
+                                        options->api.memory_index,
+                                        guest_ptr,
+                                        &case_index,
+                                        "variant discriminant load failed");
+            if (err != WASI_OK) return err;
+            if (case_index >= case_count)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "variant result case index out of range");
+
+            out_value->kind = wasi__variant_value_kind(resolved->opcode);
+            out_value->of.variant.case_index = case_index;
+            if (!wasi__variant_case_has_payload(resolved, case_index)) return WASI_OK;
+
+            err = wasi__layout_variant(engine,
+                                       component,
+                                       resolved,
+                                       &payload_offset,
+                                       &variant_size,
+                                       &variant_align);
+            if (err != WASI_OK) return err;
+            (void)variant_size;
+            (void)variant_align;
+
+            out_value->of.variant.payload = (wasi_value_t*)WASM_CALLOC(1u, sizeof(*out_value->of.variant.payload));
+            if (!out_value->of.variant.payload)
+                return wasi__set_error_literal(engine, WASI_ERR_OOM, "variant payload alloc failed");
+
+            err = wasi__guest_add_offset(engine, guest_ptr, payload_offset, &payload_ptr);
+            if (err != WASI_OK) {
+                WASM_FREE(out_value->of.variant.payload);
+                out_value->of.variant.payload = NULL;
+                return err;
+            }
+            err = wasi__load_value_from_memory(engine,
+                                               component,
+                                               wasi__variant_case_payload_type(resolved, case_index),
+                                               core_module,
+                                               options,
+                                               payload_ptr,
+                                               out_value->of.variant.payload);
+            if (err != WASI_OK) {
+                wasi_value_destroy(out_value->of.variant.payload);
+                WASM_FREE(out_value->of.variant.payload);
+                out_value->of.variant.payload = NULL;
+                return err;
+            }
+
+            out_value->of.variant.has_payload = 1;
+            out_value->of.variant.payload_owned = 1;
+            return WASI_OK;
+        }
         default:
             return wasi__load_scalar_from_memory(engine, resolved, core_module, options, guest_ptr, out_value);
     }
@@ -6658,6 +7087,7 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
     const wasi_component_valtype_t* resolved = wasi__resolve_valtype(component, type);
     uint32_t i;
     uint32_t cursor = 0;
+    wasi_error_t err;
 
     if (!resolved || !flat_values || !core_module || !options || !out_value || !out_consumed)
         return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canonical lifting inputs");
@@ -6854,6 +7284,67 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
                 out_value->of.flags.words[i] = (uint32_t)flat_values[i].of.i32;
             }
             *out_consumed = words;
+            return WASI_OK;
+        }
+        case 0x71u:
+        case 0x6Bu:
+        case 0x6Au: {
+            uint32_t case_index;
+            uint32_t case_count = wasi__variant_case_count(resolved);
+            wasm_valtype_t* payload_types = NULL;
+            uint32_t payload_count = 0;
+
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "variant result requires one i32 discriminant");
+
+            case_index = (uint32_t)flat_values[0].of.i32;
+            if (case_index >= case_count)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "variant result case index out of range");
+
+            err = wasi__merge_variant_flat_types(engine,
+                                                 component,
+                                                 resolved,
+                                                 &payload_types,
+                                                 &payload_count);
+            if (err != WASI_OK) return err;
+            if (flat_count < 1u + payload_count) {
+                WASM_FREE(payload_types);
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "variant result arity mismatch");
+            }
+
+            out_value->kind = wasi__variant_value_kind(resolved->opcode);
+            out_value->of.variant.case_index = case_index;
+            *out_consumed = 1u + payload_count;
+
+            if (!wasi__variant_case_has_payload(resolved, case_index)) {
+                WASM_FREE(payload_types);
+                return WASI_OK;
+            }
+
+            out_value->of.variant.payload = (wasi_value_t*)WASM_CALLOC(1u, sizeof(*out_value->of.variant.payload));
+            if (!out_value->of.variant.payload) {
+                WASM_FREE(payload_types);
+                return wasi__set_error_literal(engine, WASI_ERR_OOM, "variant payload alloc failed");
+            }
+            err = wasi__lift_value(engine,
+                                   component,
+                                   wasi__variant_case_payload_type(resolved, case_index),
+                                   flat_values + 1u,
+                                   flat_count - 1u,
+                                   core_module,
+                                   options,
+                                   out_value->of.variant.payload,
+                                   &cursor);
+            WASM_FREE(payload_types);
+            if (err != WASI_OK) {
+                wasi_value_destroy(out_value->of.variant.payload);
+                WASM_FREE(out_value->of.variant.payload);
+                out_value->of.variant.payload = NULL;
+                return err;
+            }
+
+            out_value->of.variant.has_payload = 1;
+            out_value->of.variant.payload_owned = 1;
             return WASI_OK;
         }
         case 0x6Du:
