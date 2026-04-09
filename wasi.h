@@ -24,6 +24,8 @@ extern "C" {
 #endif
 
 typedef struct wasi_component_t wasi_component_t;
+typedef struct wasi_component_valtype_t wasi_component_valtype_t;
+typedef struct wasi_component_type_decl_t wasi_component_type_decl_t;
 
 typedef enum wasi_error_t {
     WASI_OK = 0,
@@ -67,6 +69,15 @@ typedef enum wasi_component_type_kind_t {
     WASI_COMPONENT_TYPE_KIND_INSTANCE,
     WASI_COMPONENT_TYPE_KIND_RESOURCE,
 } wasi_component_type_kind_t;
+
+typedef enum wasi_component_type_decl_kind_t {
+    WASI_COMPONENT_TYPE_DECL_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE,
+    WASI_COMPONENT_TYPE_DECL_KIND_TYPE,
+    WASI_COMPONENT_TYPE_DECL_KIND_ALIAS,
+    WASI_COMPONENT_TYPE_DECL_KIND_IMPORT,
+    WASI_COMPONENT_TYPE_DECL_KIND_EXPORT,
+} wasi_component_type_decl_kind_t;
 
 typedef enum wasi_component_alias_kind_t {
     WASI_COMPONENT_ALIAS_KIND_UNKNOWN = 0,
@@ -137,6 +148,7 @@ typedef enum wasi_component_canon_kind_t {
 typedef struct wasi_component_named_type_t {
     char* name;
     uint8_t type_code;
+    wasi_component_valtype_t* type;
 } wasi_component_named_type_t;
 
 typedef struct wasi_component_func_type_t {
@@ -159,6 +171,10 @@ typedef struct wasi_component_type_t {
     int has_secondary_index;
     uint32_t secondary_index;
     wasi_component_func_type_t func;
+    wasi_component_valtype_t* defined_type;
+    wasi_component_type_decl_t* decls;
+    uint32_t num_decls;
+    uint32_t decls_capacity;
 } wasi_component_type_t;
 
 typedef struct wasi_component_func_t {
@@ -229,6 +245,29 @@ typedef struct wasi_component_core_type_t {
     int has_primary_index;
     uint32_t primary_index;
 } wasi_component_core_type_t;
+
+typedef struct wasi_component_externdesc_t {
+    wasi_component_extern_kind_t kind;
+    uint8_t raw_kind;
+    uint8_t bound_tag;
+    int has_type_index;
+    uint32_t type_index;
+    wasi_component_valtype_t* value_type;
+} wasi_component_externdesc_t;
+
+struct wasi_component_type_decl_t {
+    wasi_component_type_decl_kind_t kind;
+    char* name;
+    char* interface_name;
+    char* interface_version;
+    uint8_t name_kind;
+    union {
+        wasi_component_core_type_t core_type;
+        wasi_component_type_t type;
+        wasi_component_alias_t alias;
+        wasi_component_externdesc_t externdesc;
+    } data;
+};
 
 typedef struct wasi_component_instance_export_t {
     char* name;
@@ -377,12 +416,35 @@ size_t wasi_component_section_size(const wasi_component_t* component, uint32_t i
 const char* wasi_component_section_name(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_type_count(const wasi_component_t* component);
 wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index);
+uint32_t wasi_component_type_decl_count(const wasi_component_t* component, uint32_t type_index);
+const wasi_component_type_decl_t* wasi_component_type_decl_at(const wasi_component_t* component,
+                                                              uint32_t type_index,
+                                                              uint32_t decl_index);
 uint32_t wasi_component_func_type_param_count(const wasi_component_t* component, uint32_t type_index);
 const char* wasi_component_func_type_param_name(const wasi_component_t* component, uint32_t type_index, uint32_t param_index);
 uint8_t wasi_component_func_type_param_code(const wasi_component_t* component, uint32_t type_index, uint32_t param_index);
+const wasi_component_valtype_t* wasi_component_func_type_param_type(const wasi_component_t* component,
+                                                                    uint32_t type_index,
+                                                                    uint32_t param_index);
 uint32_t wasi_component_func_type_result_count(const wasi_component_t* component, uint32_t type_index);
 const char* wasi_component_func_type_result_name(const wasi_component_t* component, uint32_t type_index, uint32_t result_index);
 uint8_t wasi_component_func_type_result_code(const wasi_component_t* component, uint32_t type_index, uint32_t result_index);
+const wasi_component_valtype_t* wasi_component_func_type_result_type(const wasi_component_t* component,
+                                                                     uint32_t type_index,
+                                                                     uint32_t result_index);
+const wasi_component_valtype_t* wasi_component_type_defined_valtype(const wasi_component_t* component,
+                                                                    uint32_t type_index);
+uint8_t wasi_component_valtype_opcode(const wasi_component_valtype_t* type);
+uint32_t wasi_component_valtype_item_count(const wasi_component_valtype_t* type);
+const char* wasi_component_valtype_item_name(const wasi_component_valtype_t* type, uint32_t item_index);
+int wasi_component_valtype_item_has_type(const wasi_component_valtype_t* type, uint32_t item_index);
+const wasi_component_valtype_t* wasi_component_valtype_item_type(const wasi_component_valtype_t* type,
+                                                                 uint32_t item_index);
+const wasi_component_valtype_t* wasi_component_valtype_element_type(const wasi_component_valtype_t* type);
+const wasi_component_valtype_t* wasi_component_valtype_ok_type(const wasi_component_valtype_t* type);
+const wasi_component_valtype_t* wasi_component_valtype_err_type(const wasi_component_valtype_t* type);
+uint32_t wasi_component_valtype_type_index(const wasi_component_valtype_t* type);
+uint32_t wasi_component_valtype_fixed_length(const wasi_component_valtype_t* type);
 uint32_t wasi_component_import_count(const wasi_component_t* component);
 const char* wasi_component_import_name(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_import_interface_name(const wasi_component_t* component, uint32_t index);
@@ -466,6 +528,7 @@ const char* wasi_component_extern_kind_string(wasi_component_extern_kind_t kind)
 const char* wasi_component_type_kind_string(wasi_component_type_kind_t kind);
 const char* wasi_component_primitive_type_string(uint8_t type_code);
 const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind);
+const char* wasi_component_type_decl_kind_string(wasi_component_type_decl_kind_t kind);
 const char* wasi_component_core_type_kind_string(wasi_component_core_type_kind_t kind);
 const char* wasi_component_core_instance_kind_string(wasi_component_core_instance_kind_t kind);
 const char* wasi_component_instance_kind_string(wasi_component_instance_kind_t kind);
@@ -497,10 +560,43 @@ typedef struct wasi__reader_t {
     int malformed;
 } wasi__reader_t;
 
+typedef struct wasi__component_valtype_item_t {
+    char* name;
+    int has_type;
+    wasi_component_valtype_t* type;
+} wasi__component_valtype_item_t;
+
+struct wasi_component_valtype_t {
+    uint8_t opcode;
+    uint32_t item_count;
+    union {
+        struct {
+            wasi__component_valtype_item_t* items;
+        } aggregate;
+        struct {
+            wasi_component_valtype_t* type;
+        } unary;
+        struct {
+            wasi_component_valtype_t* ok_type;
+            wasi_component_valtype_t* err_type;
+        } result;
+        struct {
+            wasi_component_valtype_t* element_type;
+            uint32_t length;
+        } fixed_list;
+        struct {
+            uint32_t type_index;
+        } index;
+    } data;
+};
+
 static wasi_error_t wasi__classify_binary(const uint8_t* bytes,
                                           size_t len,
                                           wasi_binary_kind_t* out_kind,
                                           uint8_t out_version[4]);
+static void wasi__component_valtype_release(wasi_component_valtype_t* type);
+static void wasi__component_type_release(wasi_component_type_t* type);
+static void wasi__component_type_decl_release(wasi_component_type_decl_t* decl);
 
 static void wasi__clear_error(wasi_engine_t* engine) {
     if (!engine) return;
@@ -876,15 +972,7 @@ static void wasi__component_release_storage(wasi_component_t* component) {
     component->canons_capacity = 0;
 
     for (i = 0; i < component->num_types; i++) {
-        uint32_t j;
-        for (j = 0; j < component->types[i].func.num_params; j++) {
-            WASM_FREE(component->types[i].func.params[j].name);
-        }
-        WASM_FREE(component->types[i].func.params);
-        for (j = 0; j < component->types[i].func.num_results; j++) {
-            WASM_FREE(component->types[i].func.results[j].name);
-        }
-        WASM_FREE(component->types[i].func.results);
+        wasi__component_type_release(&component->types[i]);
     }
     WASM_FREE(component->types);
     component->types = NULL;
@@ -952,6 +1040,7 @@ static void wasi__component_type_release(wasi_component_type_t* type) {
 
     for (i = 0; i < type->func.num_params; i++) {
         WASM_FREE(type->func.params[i].name);
+        wasi__component_valtype_release(type->func.params[i].type);
     }
     WASM_FREE(type->func.params);
     type->func.params = NULL;
@@ -960,24 +1049,108 @@ static void wasi__component_type_release(wasi_component_type_t* type) {
 
     for (i = 0; i < type->func.num_results; i++) {
         WASM_FREE(type->func.results[i].name);
+        wasi__component_valtype_release(type->func.results[i].type);
     }
     WASM_FREE(type->func.results);
     type->func.results = NULL;
     type->func.num_results = 0;
     type->func.results_capacity = 0;
+
+    wasi__component_valtype_release(type->defined_type);
+    type->defined_type = NULL;
+
+    for (i = 0; i < type->num_decls; i++) {
+        wasi__component_type_decl_release(&type->decls[i]);
+    }
+    WASM_FREE(type->decls);
+    type->decls = NULL;
+    type->num_decls = 0;
+    type->decls_capacity = 0;
+}
+
+static void wasi__component_externdesc_release(wasi_component_externdesc_t* desc) {
+    if (!desc) return;
+    wasi__component_valtype_release(desc->value_type);
+    desc->value_type = NULL;
+    desc->has_type_index = 0;
+    desc->type_index = UINT32_MAX;
+}
+
+static void wasi__component_type_decl_release(wasi_component_type_decl_t* decl) {
+    if (!decl) return;
+
+    switch (decl->kind) {
+        case WASI_COMPONENT_TYPE_DECL_KIND_TYPE:
+            wasi__component_type_release(&decl->data.type);
+            break;
+        case WASI_COMPONENT_TYPE_DECL_KIND_ALIAS:
+            WASM_FREE(decl->data.alias.name);
+            decl->data.alias.name = NULL;
+            break;
+        case WASI_COMPONENT_TYPE_DECL_KIND_IMPORT:
+        case WASI_COMPONENT_TYPE_DECL_KIND_EXPORT:
+            WASM_FREE(decl->name);
+            WASM_FREE(decl->interface_name);
+            WASM_FREE(decl->interface_version);
+            decl->name = NULL;
+            decl->interface_name = NULL;
+            decl->interface_version = NULL;
+            wasi__component_externdesc_release(&decl->data.externdesc);
+            break;
+        default:
+            break;
+    }
+}
+
+static void wasi__component_valtype_release(wasi_component_valtype_t* type) {
+    uint32_t i;
+
+    if (!type) return;
+
+    switch (type->opcode) {
+        case 0x72u:
+        case 0x71u:
+        case 0x6Fu:
+        case 0x6Eu:
+        case 0x6Du:
+            for (i = 0; i < type->item_count; i++) {
+                WASM_FREE(type->data.aggregate.items[i].name);
+                wasi__component_valtype_release(type->data.aggregate.items[i].type);
+            }
+            WASM_FREE(type->data.aggregate.items);
+            break;
+        case 0x70u:
+        case 0x6Bu:
+        case 0x66u:
+        case 0x65u:
+            wasi__component_valtype_release(type->data.unary.type);
+            break;
+        case 0x6Au:
+            wasi__component_valtype_release(type->data.result.ok_type);
+            wasi__component_valtype_release(type->data.result.err_type);
+            break;
+        case 0x67u:
+            wasi__component_valtype_release(type->data.fixed_list.element_type);
+            break;
+        default:
+            break;
+    }
+
+    WASM_FREE(type);
 }
 
 static wasi_error_t wasi__func_type_append_named(wasi_component_named_type_t** items,
                                                  uint32_t* count,
                                                  uint32_t* capacity,
                                                  char* name,
-                                                 uint8_t type_code) {
+                                                 wasi_component_valtype_t* type) {
     wasi_component_named_type_t* grown;
     size_t next_capacity;
     wasi_component_named_type_t* entry;
 
     if (!items || !count || !capacity) {
         WASM_FREE(name);
+        wasi__component_valtype_release(type);
         return WASI_ERR_INVALID_ARGUMENT;
     }
 
@@ -986,6 +1159,7 @@ static wasi_error_t wasi__func_type_append_named(wasi_component_named_type_t** i
         grown = (wasi_component_named_type_t*)WASM_REALLOC(*items, next_capacity * sizeof(*grown));
         if (!grown) {
             WASM_FREE(name);
+            wasi__component_valtype_release(type);
             return WASI_ERR_OOM;
         }
         *items = grown;
@@ -995,7 +1169,8 @@ static wasi_error_t wasi__func_type_append_named(wasi_component_named_type_t** i
     entry = &(*items)[(*count)++];
     memset(entry, 0, sizeof(*entry));
     entry->name = name;
-    entry->type_code = type_code;
+    entry->type_code = type ? type->opcode : 0u;
+    entry->type = type;
     return WASI_OK;
 }
 
@@ -1014,6 +1189,25 @@ static wasi_error_t wasi__component_append_type(wasi_component_t* component, con
     }
 
     component->types[component->num_types++] = *type;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_type_append_decl(wasi_component_type_t* type,
+                                                     const wasi_component_type_decl_t* decl) {
+    wasi_component_type_decl_t* grown;
+    size_t next_capacity;
+
+    if (!type || !decl) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (type->num_decls == type->decls_capacity) {
+        next_capacity = type->decls_capacity ? (size_t)type->decls_capacity * 2u : 4u;
+        grown = (wasi_component_type_decl_t*)WASM_REALLOC(type->decls, next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        type->decls = grown;
+        type->decls_capacity = (uint32_t)next_capacity;
+    }
+
+    type->decls[type->num_decls++] = *decl;
     return WASI_OK;
 }
 
@@ -1650,20 +1844,35 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
     return WASI_OK;
 }
 
-static int wasi__read_component_optional_valtype(wasi__reader_t* reader, uint32_t* out_count);
+static int wasi__read_component_optional_valtype(wasi__reader_t* reader,
+                                                 wasi_component_valtype_t** out_type,
+                                                 int* out_has_type);
 
-static int wasi__read_component_valtype(wasi__reader_t* reader, uint8_t* out_opcode) {
+static int wasi__read_component_valtype(wasi__reader_t* reader,
+                                        wasi_component_valtype_t** out_type,
+                                        uint8_t* out_opcode) {
     const uint8_t* start;
     uint8_t opcode;
     uint32_t count;
     uint32_t i;
+    wasi_component_valtype_t* type = NULL;
 
+    if (out_type) *out_type = NULL;
     if (out_opcode) *out_opcode = 0;
     if (!reader || !reader->ptr) return 0;
 
     start = reader->ptr;
     opcode = wasi__read_u8(reader);
     if (reader->malformed) return 0;
+
+    if (out_type) {
+        type = (wasi_component_valtype_t*)WASM_CALLOC(1u, sizeof(*type));
+        if (!type) {
+            reader->malformed = 1;
+            return 0;
+        }
+        type->opcode = opcode;
+    }
 
     switch (opcode) {
         case 0x64:
@@ -1683,87 +1892,194 @@ static int wasi__read_component_valtype(wasi__reader_t* reader, uint8_t* out_opc
             break;
         case 0x72:
             count = wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (reader->malformed) goto fail;
+            if (type) {
+                type->item_count = count;
+                if (count) {
+                    type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
+                                                                                               sizeof(*type->data.aggregate.items));
+                    if (!type->data.aggregate.items) {
+                        reader->malformed = 1;
+                        goto fail;
+                    }
+                }
+            }
             for (i = 0; i < count; i++) {
                 char* name = NULL;
-                if (!wasi__read_component_plain_name(reader, &name)) return 0;
-                WASM_FREE(name);
-                if (!wasi__read_component_valtype(reader, NULL)) return 0;
+                wasi_component_valtype_t* item_type = NULL;
+                if (!wasi__read_component_plain_name(reader, &name)) goto fail;
+                if (!wasi__read_component_valtype(reader, type ? &item_type : NULL, NULL)) {
+                    WASM_FREE(name);
+                    goto fail;
+                }
+                if (type) {
+                    type->data.aggregate.items[i].name = name;
+                    type->data.aggregate.items[i].has_type = 1;
+                    type->data.aggregate.items[i].type = item_type;
+                } else {
+                    WASM_FREE(name);
+                }
             }
             break;
         case 0x71:
             count = wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (reader->malformed) goto fail;
+            if (type) {
+                type->item_count = count;
+                if (count) {
+                    type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
+                                                                                               sizeof(*type->data.aggregate.items));
+                    if (!type->data.aggregate.items) {
+                        reader->malformed = 1;
+                        goto fail;
+                    }
+                }
+            }
             for (i = 0; i < count; i++) {
                 char* name = NULL;
+                wasi_component_valtype_t* item_type = NULL;
+                int has_type = 0;
                 uint8_t reserved;
-                if (!wasi__read_component_plain_name(reader, &name)) return 0;
-                WASM_FREE(name);
-                if (!wasi__read_component_optional_valtype(reader, NULL)) return 0;
+                if (!wasi__read_component_plain_name(reader, &name)) goto fail;
+                if (!wasi__read_component_optional_valtype(reader,
+                                                           type ? &item_type : NULL,
+                                                           &has_type)) {
+                    WASM_FREE(name);
+                    goto fail;
+                }
                 reserved = wasi__read_u8(reader);
                 if (reader->malformed || reserved != 0x00u) {
                     reader->malformed = 1;
-                    return 0;
+                    WASM_FREE(name);
+                    wasi__component_valtype_release(item_type);
+                    goto fail;
+                }
+                if (type) {
+                    type->data.aggregate.items[i].name = name;
+                    type->data.aggregate.items[i].has_type = has_type;
+                    type->data.aggregate.items[i].type = item_type;
+                } else {
+                    WASM_FREE(name);
                 }
             }
             break;
         case 0x70:
-            if (!wasi__read_component_valtype(reader, NULL)) return 0;
+            if (!wasi__read_component_valtype(reader, type ? &type->data.unary.type : NULL, NULL)) goto fail;
             break;
         case 0x67:
-            if (!wasi__read_component_valtype(reader, NULL)) return 0;
-            (void)wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (!wasi__read_component_valtype(reader,
+                                              type ? &type->data.fixed_list.element_type : NULL,
+                                              NULL)) {
+                goto fail;
+            }
+            if (type) type->data.fixed_list.length = wasi__read_leb128_u32(reader);
+            else (void)wasi__read_leb128_u32(reader);
+            if (reader->malformed) goto fail;
             break;
         case 0x6F:
             count = wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (reader->malformed) goto fail;
+            if (type) {
+                type->item_count = count;
+                if (count) {
+                    type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
+                                                                                               sizeof(*type->data.aggregate.items));
+                    if (!type->data.aggregate.items) {
+                        reader->malformed = 1;
+                        goto fail;
+                    }
+                }
+            }
             for (i = 0; i < count; i++) {
-                if (!wasi__read_component_valtype(reader, NULL)) return 0;
+                wasi_component_valtype_t* item_type = NULL;
+                if (!wasi__read_component_valtype(reader, type ? &item_type : NULL, NULL)) goto fail;
+                if (type) {
+                    type->data.aggregate.items[i].has_type = 1;
+                    type->data.aggregate.items[i].type = item_type;
+                }
             }
             break;
         case 0x6E:
         case 0x6D:
             count = wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (reader->malformed) goto fail;
+            if (type) {
+                type->item_count = count;
+                if (count) {
+                    type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
+                                                                                               sizeof(*type->data.aggregate.items));
+                    if (!type->data.aggregate.items) {
+                        reader->malformed = 1;
+                        goto fail;
+                    }
+                }
+            }
             for (i = 0; i < count; i++) {
                 char* name = NULL;
-                if (!wasi__read_component_plain_name(reader, &name)) return 0;
-                WASM_FREE(name);
+                if (!wasi__read_component_plain_name(reader, &name)) goto fail;
+                if (type) {
+                    type->data.aggregate.items[i].name = name;
+                } else {
+                    WASM_FREE(name);
+                }
             }
             break;
         case 0x6B:
-            if (!wasi__read_component_valtype(reader, NULL)) return 0;
+            if (!wasi__read_component_valtype(reader, type ? &type->data.unary.type : NULL, NULL)) goto fail;
             break;
         case 0x6A:
-            if (!wasi__read_component_optional_valtype(reader, NULL)) return 0;
-            if (!wasi__read_component_optional_valtype(reader, NULL)) return 0;
+            if (!wasi__read_component_optional_valtype(reader,
+                                                       type ? &type->data.result.ok_type : NULL,
+                                                       NULL)) {
+                goto fail;
+            }
+            if (!wasi__read_component_optional_valtype(reader,
+                                                       type ? &type->data.result.err_type : NULL,
+                                                       NULL)) {
+                goto fail;
+            }
             break;
         case 0x69:
         case 0x68:
-            (void)wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (type) type->data.index.type_index = wasi__read_leb128_u32(reader);
+            else (void)wasi__read_leb128_u32(reader);
+            if (reader->malformed) goto fail;
             break;
         case 0x66:
         case 0x65:
-            if (!wasi__read_component_optional_valtype(reader, NULL)) return 0;
+            if (!wasi__read_component_optional_valtype(reader, type ? &type->data.unary.type : NULL, NULL)) {
+                goto fail;
+            }
             break;
         default:
             reader->ptr = start;
-            (void)wasi__read_leb128_u32(reader);
-            if (reader->malformed) return 0;
+            if (type) {
+                type->opcode = 0x00u;
+                type->data.index.type_index = wasi__read_leb128_u32(reader);
+            } else {
+                (void)wasi__read_leb128_u32(reader);
+            }
+            if (reader->malformed) goto fail;
             opcode = 0x00u;
             break;
     }
 
     if (out_opcode) *out_opcode = opcode;
+    if (out_type) *out_type = type;
     return 1;
+
+fail:
+    wasi__component_valtype_release(type);
+    return 0;
 }
 
-static int wasi__read_component_optional_valtype(wasi__reader_t* reader, uint32_t* out_count) {
+static int wasi__read_component_optional_valtype(wasi__reader_t* reader,
+                                                 wasi_component_valtype_t** out_type,
+                                                 int* out_has_type) {
     uint8_t tag;
 
-    if (out_count) *out_count = 0;
+    if (out_type) *out_type = NULL;
+    if (out_has_type) *out_has_type = 0;
     if (!reader) return 0;
 
     tag = wasi__read_u8(reader);
@@ -1774,8 +2090,8 @@ static int wasi__read_component_optional_valtype(wasi__reader_t* reader, uint32_
         return 0;
     }
 
-    if (!wasi__read_component_valtype(reader, NULL)) return 0;
-    if (out_count) *out_count = 1;
+    if (!wasi__read_component_valtype(reader, out_type, NULL)) return 0;
+    if (out_has_type) *out_has_type = 1;
     return 1;
 }
 
@@ -1793,9 +2109,9 @@ static int wasi__read_component_resultlist(wasi__reader_t* reader,
     result_tag = wasi__read_u8(reader);
     if (reader->malformed) return 0;
     if (result_tag == 0x00u) {
-        uint8_t type_code;
-        if (!wasi__read_component_valtype(reader, &type_code)) return 0;
-        if (wasi__func_type_append_named(items, count, capacity, NULL, type_code) != WASI_OK) return 0;
+        wasi_component_valtype_t* type = NULL;
+        if (!wasi__read_component_valtype(reader, &type, NULL)) return 0;
+        if (wasi__func_type_append_named(items, count, capacity, NULL, type) != WASI_OK) return 0;
         if (out_item_count) *out_item_count = 1;
         return 1;
     }
@@ -1809,13 +2125,13 @@ static int wasi__read_component_resultlist(wasi__reader_t* reader,
     if (out_item_count) *out_item_count = i;
     while (i--) {
         char* name = NULL;
-        uint8_t type_code;
+        wasi_component_valtype_t* type = NULL;
         if (!wasi__read_component_plain_name(reader, &name)) return 0;
-        if (!wasi__read_component_valtype(reader, &type_code)) {
+        if (!wasi__read_component_valtype(reader, &type, NULL)) {
             WASM_FREE(name);
             return 0;
         }
-        if (wasi__func_type_append_named(items, count, capacity, name, type_code) != WASI_OK) {
+        if (wasi__func_type_append_named(items, count, capacity, name, type) != WASI_OK) {
             WASM_FREE(name);
             return 0;
         }
@@ -2170,10 +2486,6 @@ static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_co
     return 1;
 }
 
-static int wasi__skip_core_module_type(wasi__reader_t* reader) {
-    return wasi__read_core_module_type(reader, NULL);
-}
-
 static int wasi__is_core_subtype_opcode(uint8_t opcode) {
     return opcode == 0x4Eu || opcode == 0x4Fu || opcode == 0x50u ||
            opcode == 0x5Du || opcode == 0x5Eu || opcode == 0x5Fu || opcode == 0x60u;
@@ -2229,8 +2541,9 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
     return wasi__read_component_core_type_entries(reader, entries, index + 1u, count);
 }
 
-static wasi_error_t wasi__skip_nested_core_type_declaration(wasi_engine_t* engine,
-                                                            wasi__reader_t* reader) {
+static wasi_error_t wasi__read_nested_core_type_declaration(wasi_engine_t* engine,
+                                                            wasi__reader_t* reader,
+                                                            wasi_component_core_type_t* type) {
     uint8_t opcode;
 
     if (!engine || !reader) {
@@ -2249,19 +2562,29 @@ static wasi_error_t wasi__skip_nested_core_type_declaration(wasi_engine_t* engin
                                 (unsigned)opcode);
     }
 
-    if (!wasi__skip_core_module_type(reader)) {
+    if (!wasi__read_core_module_type(reader, type)) {
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested core module type");
     }
 
     return WASI_OK;
 }
 
-static int wasi__skip_component_externdesc(wasi__reader_t* reader) {
+static int wasi__read_component_externdesc(wasi__reader_t* reader, wasi_component_externdesc_t* desc) {
     uint8_t kind;
 
+    if (desc) {
+        memset(desc, 0, sizeof(*desc));
+        desc->kind = WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+        desc->type_index = UINT32_MAX;
+    }
     if (!reader) return 0;
     kind = wasi__read_u8(reader);
     if (reader->malformed) return 0;
+
+    if (desc) {
+        desc->raw_kind = kind;
+        desc->kind = wasi__extern_kind_from_byte(kind);
+    }
 
     switch (kind) {
         case 0x00:
@@ -2269,31 +2592,54 @@ static int wasi__skip_component_externdesc(wasi__reader_t* reader) {
                 reader->malformed = 1;
                 return 0;
             }
-            (void)wasi__read_leb128_u32(reader);
+            if (desc) {
+                desc->bound_tag = 0x11u;
+                desc->has_type_index = 1;
+                desc->type_index = wasi__read_leb128_u32(reader);
+            } else {
+                (void)wasi__read_leb128_u32(reader);
+            }
             return !reader->malformed;
         case 0x01:
         case 0x04:
         case 0x05:
-            (void)wasi__read_leb128_u32(reader);
+            if (desc) {
+                desc->has_type_index = 1;
+                desc->type_index = wasi__read_leb128_u32(reader);
+            } else {
+                (void)wasi__read_leb128_u32(reader);
+            }
             return !reader->malformed;
         case 0x02: {
             uint8_t bound = wasi__read_u8(reader);
             if (reader->malformed) return 0;
+            if (desc) desc->bound_tag = bound;
             if (bound == 0x00u) {
-                (void)wasi__read_leb128_u32(reader);
+                if (desc) {
+                    desc->has_type_index = 1;
+                    desc->type_index = wasi__read_leb128_u32(reader);
+                } else {
+                    (void)wasi__read_leb128_u32(reader);
+                }
                 return !reader->malformed;
             }
             if (bound != 0x01u) {
                 reader->malformed = 1;
                 return 0;
             }
-            return wasi__read_component_valtype(reader, NULL);
+            return wasi__read_component_valtype(reader, desc ? &desc->value_type : NULL, NULL);
         }
         case 0x03: {
             uint8_t bound = wasi__read_u8(reader);
             if (reader->malformed) return 0;
+            if (desc) desc->bound_tag = bound;
             if (bound == 0x00u) {
-                (void)wasi__read_leb128_u32(reader);
+                if (desc) {
+                    desc->has_type_index = 1;
+                    desc->type_index = wasi__read_leb128_u32(reader);
+                } else {
+                    (void)wasi__read_leb128_u32(reader);
+                }
                 return !reader->malformed;
             }
             if (bound != 0x01u) {
@@ -2308,31 +2654,60 @@ static int wasi__skip_component_externdesc(wasi__reader_t* reader) {
     }
 }
 
-static int wasi__skip_component_alias_inline(wasi__reader_t* reader) {
+static int wasi__read_component_alias_inline(wasi__reader_t* reader, wasi_component_alias_t* alias) {
     uint8_t first;
     int sort_is_core;
     uint8_t alias_op;
 
     if (!reader) return 0;
+    if (alias) {
+        memset(alias, 0, sizeof(*alias));
+        alias->extern_kind = WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+        alias->core_export_kind = (wasm_export_kind_t)255;
+        alias->instance_index = UINT32_MAX;
+    }
 
     first = wasi__read_u8(reader);
     if (reader->malformed) return 0;
     sort_is_core = first == 0x00u;
-    if (sort_is_core) (void)wasi__read_u8(reader);
+    if (alias) alias->sort_is_core = sort_is_core;
+    if (sort_is_core) {
+        uint8_t sort_code = wasi__read_u8(reader);
+        if (alias) {
+            alias->sort_code = sort_code;
+            if (sort_code <= 0x04u) alias->core_export_kind = (wasm_export_kind_t)sort_code;
+        }
+    } else if (alias) {
+        alias->sort_code = first;
+        alias->extern_kind = wasi__alias_component_sort_from_byte(first);
+    }
     alias_op = wasi__read_u8(reader);
     if (reader->malformed) return 0;
 
     if ((sort_is_core && alias_op == 0x01u) || (!sort_is_core && alias_op == 0x00u)) {
+        uint32_t instance_index;
         char* name = NULL;
-        (void)wasi__read_leb128_u32(reader);
+        instance_index = wasi__read_leb128_u32(reader);
         if (reader->malformed) return 0;
         if (!wasi__read_component_plain_name(reader, &name)) return 0;
-        WASM_FREE(name);
+        if (alias) {
+            alias->kind = sort_is_core ? WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT
+                                       : WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT;
+            alias->instance_index = instance_index;
+            alias->name = name;
+        } else {
+            WASM_FREE(name);
+        }
         return 1;
     }
     if (alias_op == 0x02u) {
-        (void)wasi__read_leb128_u32(reader);
-        (void)wasi__read_leb128_u32(reader);
+        uint32_t outer_count = wasi__read_leb128_u32(reader);
+        uint32_t outer_index = wasi__read_leb128_u32(reader);
+        if (alias) {
+            alias->kind = WASI_COMPONENT_ALIAS_KIND_OUTER;
+            alias->outer_count = outer_count;
+            alias->outer_index = outer_index;
+        }
         return !reader->malformed;
     }
 
@@ -2375,7 +2750,9 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                 if (!wasi__read_component_plain_name(reader, &name)) {
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func param name");
                 }
-                if (!wasi__read_component_valtype(reader, &type_code)) {
+                wasi_component_valtype_t* param_type = NULL;
+
+                if (!wasi__read_component_valtype(reader, &param_type, &type_code)) {
                     WASM_FREE(name);
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func param type");
                 }
@@ -2383,7 +2760,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                                                    &type->func.num_params,
                                                    &type->func.params_capacity,
                                                    name,
-                                                   type_code);
+                                                   param_type);
                 if (err != WASI_OK) {
                     WASM_FREE(name);
                     return wasi__set_error_literal(engine,
@@ -2417,22 +2794,58 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                 switch (decl_opcode) {
                     case 0x00:
                         {
-                            wasi_error_t err = wasi__skip_nested_core_type_declaration(engine, reader);
+                            wasi_component_type_decl_t decl;
+                            wasi_error_t err;
+                            memset(&decl, 0, sizeof(decl));
+                            decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE;
+                            err = wasi__read_nested_core_type_declaration(engine,
+                                                                          reader,
+                                                                          &decl.data.core_type);
                             if (err != WASI_OK) return err;
+                            err = wasi__component_type_append_decl(type, &decl);
+                            if (err != WASI_OK) {
+                                return wasi__set_error_literal(engine,
+                                                               err,
+                                                               err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                                   : wasi_error_string(err));
+                            }
                         }
                         break;
                     case 0x01: {
-                        wasi_component_type_t nested_type;
-                        wasi_error_t err = wasi__read_component_type_entry(engine, reader, &nested_type);
+                        wasi_component_type_decl_t decl;
+                        wasi_error_t err;
+                        memset(&decl, 0, sizeof(decl));
+                        decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_TYPE;
+                        err = wasi__read_component_type_entry(engine, reader, &decl.data.type);
                         if (err != WASI_OK) return err;
-                        wasi__component_type_release(&nested_type);
-                        break;
-                    }
-                    case 0x02:
-                        if (!wasi__skip_component_alias_inline(reader)) {
-                            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested type alias");
+                        err = wasi__component_type_append_decl(type, &decl);
+                        if (err != WASI_OK) {
+                            wasi__component_type_decl_release(&decl);
+                            return wasi__set_error_literal(engine,
+                                                           err,
+                                                           err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                               : wasi_error_string(err));
                         }
                         break;
+                    }
+                    case 0x02: {
+                        wasi_component_type_decl_t decl;
+                        wasi_error_t err;
+                        memset(&decl, 0, sizeof(decl));
+                        decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_ALIAS;
+                        if (!wasi__read_component_alias_inline(reader, &decl.data.alias)) {
+                            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested type alias");
+                        }
+                        err = wasi__component_type_append_decl(type, &decl);
+                        if (err != WASI_OK) {
+                            wasi__component_type_decl_release(&decl);
+                            return wasi__set_error_literal(engine,
+                                                           err,
+                                                           err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                               : wasi_error_string(err));
+                        }
+                        break;
+                    }
                     case 0x03:
                         if (opcode != 0x41u) {
                             return wasi__set_error_literal(engine,
@@ -2440,24 +2853,48 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                                                            "instance type import declaration is invalid");
                         }
                         {
-                            char* name = NULL;
-                            if (!wasi__read_component_name(reader, NULL, &name)) {
+                            wasi_component_type_decl_t decl;
+                            wasi_error_t err;
+                            memset(&decl, 0, sizeof(decl));
+                            decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_IMPORT;
+                            if (!wasi__read_component_name(reader, &decl.name_kind, &decl.name)) {
                                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type import name");
                             }
-                            WASM_FREE(name);
-                            if (!wasi__skip_component_externdesc(reader)) {
+                            wasi__resolve_interface_name(decl.name, &decl.interface_name, &decl.interface_version);
+                            if (!wasi__read_component_externdesc(reader, &decl.data.externdesc)) {
+                                wasi__component_type_decl_release(&decl);
                                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type import descriptor");
+                            }
+                            err = wasi__component_type_append_decl(type, &decl);
+                            if (err != WASI_OK) {
+                                wasi__component_type_decl_release(&decl);
+                                return wasi__set_error_literal(engine,
+                                                               err,
+                                                               err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                                   : wasi_error_string(err));
                             }
                         }
                         break;
                     case 0x04: {
-                        char* name = NULL;
-                        if (!wasi__read_component_name(reader, NULL, &name)) {
+                        wasi_component_type_decl_t decl;
+                        wasi_error_t err;
+                        memset(&decl, 0, sizeof(decl));
+                        decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_EXPORT;
+                        if (!wasi__read_component_name(reader, &decl.name_kind, &decl.name)) {
                             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type export name");
                         }
-                        WASM_FREE(name);
-                        if (!wasi__skip_component_externdesc(reader)) {
+                        wasi__resolve_interface_name(decl.name, &decl.interface_name, &decl.interface_version);
+                        if (!wasi__read_component_externdesc(reader, &decl.data.externdesc)) {
+                            wasi__component_type_decl_release(&decl);
                             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type export descriptor");
+                        }
+                        err = wasi__component_type_append_decl(type, &decl);
+                        if (err != WASI_OK) {
+                            wasi__component_type_decl_release(&decl);
+                            return wasi__set_error_literal(engine,
+                                                           err,
+                                                           err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                               : wasi_error_string(err));
                         }
                         break;
                     }
@@ -2516,7 +2953,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
         default:
             type->kind = WASI_COMPONENT_TYPE_KIND_DEFINED;
             reader->ptr--;
-            if (!wasi__read_component_valtype(reader, &type->detail_opcode)) {
+            if (!wasi__read_component_valtype(reader, &type->defined_type, &type->detail_opcode)) {
                 return wasi__set_errorf(engine,
                                         WASI_ERR_NOT_IMPLEMENTED,
                                         "component type opcode 0x%02x not implemented",
@@ -2996,6 +3433,7 @@ static int wasi__skip_component_resultlist(wasi__reader_t* reader, uint32_t* out
     ok = wasi__read_component_resultlist(reader, &items, &count, &capacity, &item_count);
     for (i = 0; i < count; i++) {
         WASM_FREE(items[i].name);
+        wasi__component_valtype_release(items[i].type);
     }
     WASM_FREE(items);
     if (out_count) *out_count = item_count;
@@ -3934,6 +4372,19 @@ wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* comp
     return component->types[type_index].kind;
 }
 
+uint32_t wasi_component_type_decl_count(const wasi_component_t* component, uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    return component->types[type_index].num_decls;
+}
+
+const wasi_component_type_decl_t* wasi_component_type_decl_at(const wasi_component_t* component,
+                                                              uint32_t type_index,
+                                                              uint32_t decl_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (decl_index >= component->types[type_index].num_decls) return NULL;
+    return &component->types[type_index].decls[decl_index];
+}
+
 uint32_t wasi_component_func_type_param_count(const wasi_component_t* component, uint32_t type_index) {
     if (!component || type_index >= component->num_types) return 0;
     if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
@@ -3954,6 +4405,15 @@ uint8_t wasi_component_func_type_param_code(const wasi_component_t* component, u
     return component->types[type_index].func.params[param_index].type_code;
 }
 
+const wasi_component_valtype_t* wasi_component_func_type_param_type(const wasi_component_t* component,
+                                                                    uint32_t type_index,
+                                                                    uint32_t param_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (param_index >= component->types[type_index].func.num_params) return NULL;
+    return component->types[type_index].func.params[param_index].type;
+}
+
 uint32_t wasi_component_func_type_result_count(const wasi_component_t* component, uint32_t type_index) {
     if (!component || type_index >= component->num_types) return 0;
     if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
@@ -3972,6 +4432,166 @@ uint8_t wasi_component_func_type_result_code(const wasi_component_t* component, 
     if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
     if (result_index >= component->types[type_index].func.num_results) return 0;
     return component->types[type_index].func.results[result_index].type_code;
+}
+
+const wasi_component_valtype_t* wasi_component_func_type_result_type(const wasi_component_t* component,
+                                                                     uint32_t type_index,
+                                                                     uint32_t result_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (result_index >= component->types[type_index].func.num_results) return NULL;
+    return component->types[type_index].func.results[result_index].type;
+}
+
+const wasi_component_valtype_t* wasi_component_type_defined_valtype(const wasi_component_t* component,
+                                                                    uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_DEFINED) return NULL;
+    return component->types[type_index].defined_type;
+}
+
+uint8_t wasi_component_valtype_opcode(const wasi_component_valtype_t* type) {
+    return type ? type->opcode : 0u;
+}
+
+uint32_t wasi_component_valtype_item_count(const wasi_component_valtype_t* type) {
+    if (!type) return 0u;
+    switch (type->opcode) {
+        case 0x72u:
+        case 0x71u:
+        case 0x6Fu:
+        case 0x6Eu:
+        case 0x6Du:
+            return type->item_count;
+        default:
+            return 0u;
+    }
+}
+
+const char* wasi_component_valtype_item_name(const wasi_component_valtype_t* type, uint32_t item_index) {
+    if (!type) return NULL;
+    if (item_index >= wasi_component_valtype_item_count(type)) return NULL;
+    return type->data.aggregate.items[item_index].name;
+}
+
+int wasi_component_valtype_item_has_type(const wasi_component_valtype_t* type, uint32_t item_index) {
+    if (!type) return 0;
+    if (item_index >= wasi_component_valtype_item_count(type)) return 0;
+    return type->data.aggregate.items[item_index].has_type;
+}
+
+const wasi_component_valtype_t* wasi_component_valtype_item_type(const wasi_component_valtype_t* type,
+                                                                 uint32_t item_index) {
+    if (!type) return NULL;
+    if (item_index >= wasi_component_valtype_item_count(type)) return NULL;
+    return type->data.aggregate.items[item_index].type;
+}
+
+const wasi_component_valtype_t* wasi_component_valtype_element_type(const wasi_component_valtype_t* type) {
+    if (!type) return NULL;
+    switch (type->opcode) {
+        case 0x70u:
+        case 0x6Bu:
+        case 0x66u:
+        case 0x65u:
+            return type->data.unary.type;
+        case 0x67u:
+            return type->data.fixed_list.element_type;
+        default:
+            return NULL;
+    }
+}
+
+const wasi_component_valtype_t* wasi_component_valtype_ok_type(const wasi_component_valtype_t* type) {
+    if (!type || type->opcode != 0x6Au) return NULL;
+    return type->data.result.ok_type;
+}
+
+const wasi_component_valtype_t* wasi_component_valtype_err_type(const wasi_component_valtype_t* type) {
+    if (!type || type->opcode != 0x6Au) return NULL;
+    return type->data.result.err_type;
+}
+
+uint32_t wasi_component_valtype_type_index(const wasi_component_valtype_t* type) {
+    if (!type) return UINT32_MAX;
+    switch (type->opcode) {
+        case 0x00u:
+        case 0x68u:
+        case 0x69u:
+            return type->data.index.type_index;
+        default:
+            return UINT32_MAX;
+    }
+}
+
+uint32_t wasi_component_valtype_fixed_length(const wasi_component_valtype_t* type) {
+    if (!type || type->opcode != 0x67u) return UINT32_MAX;
+    return type->data.fixed_list.length;
+}
+
+static void wasi__append_component_valtype_brief(char* buffer,
+                                                 size_t buffer_size,
+                                                 size_t* offset,
+                                                 const wasi_component_valtype_t* type) {
+    if (!type) {
+        wasi__appendf(buffer, buffer_size, offset, "none");
+        return;
+    }
+
+    switch (type->opcode) {
+        case 0x00u:
+            wasi__appendf(buffer, buffer_size, offset, "type[%u]", (unsigned)type->data.index.type_index);
+            break;
+        case 0x67u:
+            wasi__appendf(buffer, buffer_size, offset, "fixed-list(len=%u, ", (unsigned)type->data.fixed_list.length);
+            wasi__append_component_valtype_brief(buffer, buffer_size, offset, type->data.fixed_list.element_type);
+            wasi__appendf(buffer, buffer_size, offset, ")");
+            break;
+        case 0x68u:
+        case 0x69u:
+            wasi__appendf(buffer,
+                          buffer_size,
+                          offset,
+                          "%s[%u]",
+                          wasi__component_type_detail_string(type->opcode),
+                          (unsigned)type->data.index.type_index);
+            break;
+        default:
+            wasi__appendf(buffer,
+                          buffer_size,
+                          offset,
+                          "%s",
+                          wasi__component_type_detail_string(type->opcode));
+            break;
+    }
+}
+
+static void wasi__append_component_externdesc_brief(char* buffer,
+                                                    size_t buffer_size,
+                                                    size_t* offset,
+                                                    const wasi_component_externdesc_t* desc) {
+    if (!desc) {
+        wasi__appendf(buffer, buffer_size, offset, "<null>");
+        return;
+    }
+
+    wasi__appendf(buffer,
+                  buffer_size,
+                  offset,
+                  "%s",
+                  wasi_component_extern_kind_string(desc->kind));
+    if (desc->has_type_index) {
+        wasi__appendf(buffer, buffer_size, offset, " type=%u", (unsigned)desc->type_index);
+    }
+    if (desc->value_type) {
+        wasi__appendf(buffer, buffer_size, offset, " value=");
+        wasi__append_component_valtype_brief(buffer, buffer_size, offset, desc->value_type);
+    }
+    if (desc->kind == WASI_COMPONENT_EXTERN_KIND_VALUE ||
+        desc->kind == WASI_COMPONENT_EXTERN_KIND_TYPE ||
+        desc->bound_tag) {
+        wasi__appendf(buffer, buffer_size, offset, " bound=0x%02x", (unsigned)desc->bound_tag);
+    }
 }
 
 const char* wasi_component_import_name(const wasi_component_t* component, uint32_t index) {
@@ -4494,8 +5114,145 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                           &offset,
                           " detail=%s",
                           wasi__component_type_detail_string(type->detail_opcode));
+            switch (type->detail_opcode) {
+                case 0x72u:
+                    wasi__appendf(buffer, buffer_size, &offset, " fields=%u", (unsigned)type->defined_type->item_count);
+                    break;
+                case 0x71u:
+                    wasi__appendf(buffer, buffer_size, &offset, " cases=%u", (unsigned)type->defined_type->item_count);
+                    break;
+                case 0x6Fu:
+                    wasi__appendf(buffer, buffer_size, &offset, " items=%u", (unsigned)type->defined_type->item_count);
+                    break;
+                case 0x6Eu:
+                case 0x6Du:
+                    wasi__appendf(buffer, buffer_size, &offset, " names=%u", (unsigned)type->defined_type->item_count);
+                    break;
+                case 0x70u:
+                case 0x6Bu:
+                case 0x65u:
+                case 0x66u:
+                    wasi__appendf(buffer, buffer_size, &offset, " item=");
+                    wasi__append_component_valtype_brief(buffer,
+                                                         buffer_size,
+                                                         &offset,
+                                                         wasi_component_valtype_element_type(type->defined_type));
+                    break;
+                case 0x6Au:
+                    wasi__appendf(buffer, buffer_size, &offset, " ok=");
+                    wasi__append_component_valtype_brief(buffer,
+                                                         buffer_size,
+                                                         &offset,
+                                                         wasi_component_valtype_ok_type(type->defined_type));
+                    wasi__appendf(buffer, buffer_size, &offset, " err=");
+                    wasi__append_component_valtype_brief(buffer,
+                                                         buffer_size,
+                                                         &offset,
+                                                         wasi_component_valtype_err_type(type->defined_type));
+                    break;
+                case 0x67u:
+                    wasi__appendf(buffer,
+                                  buffer_size,
+                                  &offset,
+                                  " len=%u item=",
+                                  (unsigned)wasi_component_valtype_fixed_length(type->defined_type));
+                    wasi__append_component_valtype_brief(buffer,
+                                                         buffer_size,
+                                                         &offset,
+                                                         wasi_component_valtype_element_type(type->defined_type));
+                    break;
+                case 0x00u:
+                case 0x68u:
+                case 0x69u:
+                    wasi__appendf(buffer,
+                                  buffer_size,
+                                  &offset,
+                                  " index=%u",
+                                  (unsigned)wasi_component_valtype_type_index(type->defined_type));
+                    break;
+                default:
+                    break;
+            }
         }
         wasi__appendf(buffer, buffer_size, &offset, "\n");
+
+        if ((type->kind == WASI_COMPONENT_TYPE_KIND_COMPONENT ||
+             type->kind == WASI_COMPONENT_TYPE_KIND_INSTANCE) && type->num_decls) {
+            uint32_t decl_index;
+            for (decl_index = 0; decl_index < type->num_decls; decl_index++) {
+                const wasi_component_type_decl_t* decl = &type->decls[decl_index];
+                wasi__appendf(buffer,
+                              buffer_size,
+                              &offset,
+                              "  type-decl[%u,%u]: kind=%s",
+                              (unsigned)i,
+                              (unsigned)decl_index,
+                              wasi_component_type_decl_kind_string(decl->kind));
+                switch (decl->kind) {
+                    case WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE:
+                        wasi__appendf(buffer,
+                                      buffer_size,
+                                      &offset,
+                                      " core-kind=%s detail=%s",
+                                      wasi_component_core_type_kind_string(decl->data.core_type.kind),
+                                      wasi__component_core_type_detail_string(decl->data.core_type.detail_opcode));
+                        if (decl->data.core_type.kind == WASI_COMPONENT_CORE_TYPE_KIND_MODULE) {
+                            wasi__appendf(buffer,
+                                          buffer_size,
+                                          &offset,
+                                          " decls=%u",
+                                          (unsigned)decl->data.core_type.item_count);
+                        }
+                        break;
+                    case WASI_COMPONENT_TYPE_DECL_KIND_TYPE:
+                        wasi__appendf(buffer,
+                                      buffer_size,
+                                      &offset,
+                                      " type-kind=%s",
+                                      wasi_component_type_kind_string(decl->data.type.kind));
+                        break;
+                    case WASI_COMPONENT_TYPE_DECL_KIND_ALIAS:
+                        wasi__appendf(buffer,
+                                      buffer_size,
+                                      &offset,
+                                      " alias-kind=%s target=%s",
+                                      wasi_component_alias_kind_string(decl->data.alias.kind),
+                                      wasi__alias_sort_string(decl->data.alias.sort_is_core,
+                                                              decl->data.alias.sort_code));
+                        if (decl->data.alias.kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+                            wasi__appendf(buffer,
+                                          buffer_size,
+                                          &offset,
+                                          " count=%u index=%u",
+                                          (unsigned)decl->data.alias.outer_count,
+                                          (unsigned)decl->data.alias.outer_index);
+                        } else {
+                            wasi__appendf(buffer,
+                                          buffer_size,
+                                          &offset,
+                                          " instance=%u name=%s",
+                                          (unsigned)decl->data.alias.instance_index,
+                                          decl->data.alias.name ? decl->data.alias.name : "");
+                        }
+                        break;
+                    case WASI_COMPONENT_TYPE_DECL_KIND_IMPORT:
+                    case WASI_COMPONENT_TYPE_DECL_KIND_EXPORT:
+                        wasi__appendf(buffer,
+                                      buffer_size,
+                                      &offset,
+                                      " name=%s desc=",
+                                      decl->name ? decl->name : "");
+                        wasi__append_component_externdesc_brief(buffer,
+                                                                buffer_size,
+                                                                &offset,
+                                                                &decl->data.externdesc);
+                        break;
+                    default:
+                        break;
+                }
+                wasi__appendf(buffer, buffer_size, &offset, "\n");
+            }
+        }
     }
 
     for (i = 0; i < component->num_imports; i++) {
@@ -4851,6 +5608,23 @@ const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind) {
             return "instance-export";
         case WASI_COMPONENT_ALIAS_KIND_OUTER:
             return "outer";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_type_decl_kind_string(wasi_component_type_decl_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE:
+            return "core-type";
+        case WASI_COMPONENT_TYPE_DECL_KIND_TYPE:
+            return "type";
+        case WASI_COMPONENT_TYPE_DECL_KIND_ALIAS:
+            return "alias";
+        case WASI_COMPONENT_TYPE_DECL_KIND_IMPORT:
+            return "import";
+        case WASI_COMPONENT_TYPE_DECL_KIND_EXPORT:
+            return "export";
         default:
             return "unknown";
     }

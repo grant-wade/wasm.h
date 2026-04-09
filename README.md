@@ -4,7 +4,7 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, broader component type metadata, aliases, and canonical records; instantiation and canonical ABI execution are not implemented yet.
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, and canonical records; instantiation and canonical ABI execution are not implemented yet.
 
 ## Quick start
 
@@ -94,7 +94,7 @@ Current `wasi.h` capabilities are intentionally limited to binary introspection 
 - structured nested component records through `wasi_component_nested_component_*`
 - structured alias records now include instance-export and outer forms through `wasi_component_alias_*`
 - component start-section state through `wasi_component_has_start` and `wasi_component_start_func_index`
-- parsed component function types through `wasi_component_type_*` and `wasi_component_func_type_*`
+- parsed component function types, retained value-type ASTs, and nested component/instance type declarations through `wasi_component_type_*`, `wasi_component_type_decl_*`, `wasi_component_func_type_*`, and `wasi_component_valtype_*`
 - structured alias and canonical-function records through `wasi_component_alias_*` and `wasi_component_canon_*`
 - extracted embedded core modules through `wasi_component_core_module_*`
 

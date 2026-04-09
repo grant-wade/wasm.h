@@ -178,6 +178,22 @@ static const uint8_t wasi_test_component_with_nested_core_types[] = {
     0x42, 0x01, 0x00, 0x50, 0x00,
 };
 
+static const uint8_t wasi_test_component_with_type_declarations[] = {
+    0x00, 0x61, 0x73, 0x6D,
+    0x0D, 0x00, 0x01, 0x00,
+    0x07, 0x3C,
+    0x02,
+    0x41, 0x04,
+    0x01, 0x40, 0x00, 0x01, 0x00,
+    0x02, 0x03, 0x02, 0x01, 0x00,
+    0x03, 0x00, 0x03, 'c', 'f', 'g', 0x02, 0x01, 0x73,
+    0x04, 0x02, 0x0D, 'p', 'k', 'g', ':', 'i', 'f', 'a', 'c', 'e', '/', 'r', 'u', 'n',
+    0x05, '0', '.', '3', '.', '0', 0x01, 0x00,
+    0x42, 0x02,
+    0x01, 0x70, 0x7D,
+    0x04, 0x00, 0x03, 'c', 'f', 'g', 0x02, 0x00, 0x00,
+};
+
 static const uint8_t wasi_test_component_with_top_level_core_types[] = {
     0x00, 0x61, 0x73, 0x6D,
     0x0D, 0x00, 0x01, 0x00,
@@ -257,6 +273,7 @@ WL_TEST(test_wasi_loads_component_section_framing) {
 WL_TEST(test_wasi_parses_extended_component_types) {
     wasi_engine_t engine;
     wasi_component_t* component;
+    const wasi_component_valtype_t* type;
     char dump[1024];
     wasi_error_t err;
 
@@ -280,9 +297,52 @@ WL_TEST(test_wasi_parses_extended_component_types) {
     WL_CHECK(t, strstr(dump, "type[1]: kind=component decls=0") != NULL);
     WL_CHECK(t, strstr(dump, "type[2]: kind=instance decls=0") != NULL);
     WL_CHECK(t, strstr(dump, "type[3]: kind=resource async=0 rep=i32") != NULL);
-    WL_CHECK(t, strstr(dump, "type[4]: kind=defined detail=record") != NULL);
-    WL_CHECK(t, strstr(dump, "type[9]: kind=defined detail=future") != NULL);
-    WL_CHECK(t, strstr(dump, "type[10]: kind=defined detail=stream") != NULL);
+    WL_CHECK(t, strstr(dump, "type[4]: kind=defined detail=record fields=1") != NULL);
+    WL_CHECK(t, strstr(dump, "type[8]: kind=defined detail=result ok=string err=u32") != NULL);
+    WL_CHECK(t, strstr(dump, "type[9]: kind=defined detail=future item=string") != NULL);
+    WL_CHECK(t, strstr(dump, "type[10]: kind=defined detail=stream item=u8") != NULL);
+
+    type = wasi_component_type_defined_valtype(component, 4);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x72u);
+    WL_CHECK(t, wasi_component_valtype_item_count(type) == 1u);
+    WL_CHECK(t, strcmp(wasi_component_valtype_item_name(type, 0), "x") == 0);
+    WL_CHECK(t, wasi_component_valtype_item_has_type(type, 0));
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_item_type(type, 0)) == 0x79u);
+
+    type = wasi_component_type_defined_valtype(component, 5);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x71u);
+    WL_CHECK(t, wasi_component_valtype_item_count(type) == 1u);
+    WL_CHECK(t, strcmp(wasi_component_valtype_item_name(type, 0), "ok") == 0);
+    WL_CHECK(t, wasi_component_valtype_item_has_type(type, 0));
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_item_type(type, 0)) == 0x73u);
+
+    type = wasi_component_type_defined_valtype(component, 6);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x70u);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_element_type(type)) == 0x7Du);
+
+    type = wasi_component_type_defined_valtype(component, 7);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x6Bu);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_element_type(type)) == 0x73u);
+
+    type = wasi_component_type_defined_valtype(component, 8);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x6Au);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_ok_type(type)) == 0x73u);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_err_type(type)) == 0x79u);
+
+    type = wasi_component_type_defined_valtype(component, 9);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x65u);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_element_type(type)) == 0x73u);
+
+    type = wasi_component_type_defined_valtype(component, 10);
+    WL_REQUIRE(t, type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(type) == 0x66u);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_element_type(type)) == 0x7Du);
 
     wasi_free_component(component);
     wasi_destroy(&engine);
@@ -291,6 +351,7 @@ WL_TEST(test_wasi_parses_extended_component_types) {
 WL_TEST(test_wasi_parses_nested_core_types_in_type_space) {
     wasi_engine_t engine;
     wasi_component_t* component;
+    const wasi_component_type_decl_t* decl;
     char dump[768];
     wasi_error_t err;
 
@@ -305,10 +366,104 @@ WL_TEST(test_wasi_parses_nested_core_types_in_type_space) {
     WL_CHECK(t, wasi_component_type_count(component) == 2u);
     WL_CHECK(t, wasi_component_type_kind(component, 0) == WASI_COMPONENT_TYPE_KIND_COMPONENT);
     WL_CHECK(t, wasi_component_type_kind(component, 1) == WASI_COMPONENT_TYPE_KIND_INSTANCE);
+    WL_CHECK(t, wasi_component_type_decl_count(component, 0) == 1u);
+    WL_CHECK(t, wasi_component_type_decl_count(component, 1) == 1u);
+
+    decl = wasi_component_type_decl_at(component, 0, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE);
+    WL_CHECK(t, decl->data.core_type.kind == WASI_COMPONENT_CORE_TYPE_KIND_MODULE);
+    WL_CHECK(t, decl->data.core_type.item_count == 4u);
+
+    decl = wasi_component_type_decl_at(component, 1, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE);
+    WL_CHECK(t, decl->data.core_type.kind == WASI_COMPONENT_CORE_TYPE_KIND_MODULE);
+    WL_CHECK(t, decl->data.core_type.item_count == 0u);
 
     wasi_dump_component(component, dump, sizeof(dump));
     WL_CHECK(t, strstr(dump, "type[0]: kind=component decls=1") != NULL);
     WL_CHECK(t, strstr(dump, "type[1]: kind=instance decls=1") != NULL);
+    WL_CHECK(t, strstr(dump, "type-decl[0,0]: kind=core-type core-kind=module detail=module decls=4") != NULL);
+
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_retains_component_type_declarations) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    const wasi_component_type_decl_t* decl;
+    char dump[1024];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_type_declarations,
+                          sizeof(wasi_test_component_with_type_declarations));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    WL_CHECK(t, wasi_component_type_count(component) == 2u);
+    WL_CHECK(t, wasi_component_type_decl_count(component, 0) == 4u);
+    WL_CHECK(t, wasi_component_type_decl_count(component, 1) == 2u);
+
+    decl = wasi_component_type_decl_at(component, 0, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_TYPE);
+    WL_CHECK(t, decl->data.type.kind == WASI_COMPONENT_TYPE_KIND_FUNC);
+
+    decl = wasi_component_type_decl_at(component, 0, 1);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_ALIAS);
+    WL_CHECK(t, decl->data.alias.kind == WASI_COMPONENT_ALIAS_KIND_OUTER);
+    WL_CHECK(t, !decl->data.alias.sort_is_core);
+    WL_CHECK(t, decl->data.alias.sort_code == 0x03u);
+    WL_CHECK(t, decl->data.alias.extern_kind == WASI_COMPONENT_EXTERN_KIND_TYPE);
+    WL_CHECK(t, decl->data.alias.outer_count == 1u);
+    WL_CHECK(t, decl->data.alias.outer_index == 0u);
+
+    decl = wasi_component_type_decl_at(component, 0, 2);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_IMPORT);
+    WL_CHECK(t, strcmp(decl->name, "cfg") == 0);
+    WL_CHECK(t, decl->data.externdesc.kind == WASI_COMPONENT_EXTERN_KIND_VALUE);
+    WL_CHECK(t, decl->data.externdesc.bound_tag == 0x01u);
+    WL_REQUIRE(t, decl->data.externdesc.value_type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(decl->data.externdesc.value_type) == 0x73u);
+
+    decl = wasi_component_type_decl_at(component, 0, 3);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_EXPORT);
+    WL_CHECK(t, strcmp(decl->name, "pkg:iface/run@0.3.0") == 0);
+    WL_CHECK(t, strcmp(decl->interface_name, "pkg:iface/run") == 0);
+    WL_CHECK(t, strcmp(decl->interface_version, "0.3.0") == 0);
+    WL_CHECK(t, decl->data.externdesc.kind == WASI_COMPONENT_EXTERN_KIND_FUNC);
+    WL_CHECK(t, decl->data.externdesc.has_type_index);
+    WL_CHECK(t, decl->data.externdesc.type_index == 0u);
+
+    decl = wasi_component_type_decl_at(component, 1, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_TYPE);
+    WL_CHECK(t, decl->data.type.kind == WASI_COMPONENT_TYPE_KIND_DEFINED);
+    WL_REQUIRE(t, decl->data.type.defined_type != NULL);
+    WL_CHECK(t, wasi_component_valtype_opcode(decl->data.type.defined_type) == 0x70u);
+    WL_CHECK(t, wasi_component_valtype_opcode(wasi_component_valtype_element_type(decl->data.type.defined_type)) == 0x7Du);
+
+    decl = wasi_component_type_decl_at(component, 1, 1);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->kind == WASI_COMPONENT_TYPE_DECL_KIND_EXPORT);
+    WL_CHECK(t, strcmp(decl->name, "cfg") == 0);
+    WL_CHECK(t, decl->data.externdesc.kind == WASI_COMPONENT_EXTERN_KIND_VALUE);
+    WL_CHECK(t, decl->data.externdesc.bound_tag == 0x00u);
+    WL_CHECK(t, decl->data.externdesc.has_type_index);
+    WL_CHECK(t, decl->data.externdesc.type_index == 0u);
+
+    wasi_dump_component(component, dump, sizeof(dump));
+    WL_CHECK(t, strstr(dump, "type-decl[0,2]: kind=import name=cfg desc=value value=string bound=0x01") != NULL);
+    WL_CHECK(t, strstr(dump, "type-decl[0,3]: kind=export name=pkg:iface/run@0.3.0 desc=func type=0") != NULL);
+    WL_CHECK(t, strstr(dump, "type-decl[1,1]: kind=export name=cfg desc=value type=0 bound=0x00") != NULL);
 
     wasi_free_component(component);
     wasi_destroy(&engine);
@@ -721,6 +876,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_parses_component_imports_and_exports),
         WL_TEST_CASE(test_wasi_parses_extended_component_types),
         WL_TEST_CASE(test_wasi_parses_nested_core_types_in_type_space),
+        WL_TEST_CASE(test_wasi_retains_component_type_declarations),
         WL_TEST_CASE(test_wasi_parses_top_level_core_type_sections),
         WL_TEST_CASE(test_wasi_resolves_versioned_interface_names),
         WL_TEST_CASE(test_wasi_parses_component_core_instances),

@@ -143,15 +143,15 @@ Milestone 1 should not stop at “reader can skip past the bytes”. The parser 
 Minimum retained structure:
 
 - **Stable index spaces** — preserve the top-level component index spaces as explicit arrays/tables: core types, component types, funcs, core modules, nested components, core instances, component instances, values, aliases, imports, exports, canons, and the start record.
-- **Component value/type AST** — retain recursive definitions for `record`, `variant`, `enum`, `flags`, `tuple`, `list`, `option`, `result`, `own`, `borrow`, `stream`, `future`, and `error-context`. Do not collapse these to a single opcode if M2/M3/M11 will need field names, case names, child types, or flag counts.
-- **Function type AST** — retain ordered params/results with names and type references for component funcs, plus enough metadata to recover flattening and canonical ABI lowering decisions later.
-- **Component / instance type declarations** — retain nested declaration lists, not just a `decl_count`: nested `type`, nested `core:type`, nested `alias`, `import`, and `export` records should all survive parsing as structured nodes.
+- [DONE] **Component value/type AST** — retain recursive definitions for `record`, `variant`, `enum`, `flags`, `tuple`, `list`, `option`, `result`, `own`, `borrow`, `stream`, `future`, and `error-context`. Do not collapse these to a single opcode if M2/M3/M11 will need field names, case names, child types, or flag counts.
+- [DONE] **Function type AST** — retain ordered params/results with names and type references for component funcs, plus enough metadata to recover flattening and canonical ABI lowering decisions later.
+- [DONE] **Component / instance type declarations** — retain nested declaration lists, not just a `decl_count`: nested `type`, nested `core:type`, nested `alias`, `import`, and `export` records should all survive parsing as structured nodes.
 - **Core type AST** — retain top-level and nested `core:type` entries as structured nodes: module types, rec groups, subtypes, and their inner composite kinds (`func`, `struct`, `array`, `cont`) plus referenced indices where present.
 - **Core module type declarations** — inside core module types, retain import, type, alias, and export declarations with their extern-type payloads so M5 can do type-directed linking instead of byte-level reparsing.
-- **Extern descriptor AST** — retain parsed component extern descriptors and core extern types, not just resolved kinds, so import/export matching in M5 and wrapper generation in M11 have direct access to the structural type information.
-- **Canon AST** — retain every canonical function/builtin node with opcode, kind, async flag, options, referenced func/type/resource indices, callback-related immediates, and task/stream/future result metadata.
-- **Instantiation AST** — retain core-instance and component-instance instruction bodies as procedural records in original order, including argument maps, because M5 executes the component’s embedded linking program rather than reconstructing it heuristically.
-- **Names and versions** — preserve both the raw import/export name and the split interface name/version pair. Later milestones need both the canonicalized matching key and the original diagnostic spelling.
+- [DONE] **Extern descriptor AST** — retain parsed component extern descriptors and core extern types, not just resolved kinds, so import/export matching in M5 and wrapper generation in M11 have direct access to the structural type information.
+- [DONE] **Canon AST** — retain every canonical function/builtin node with opcode, kind, async flag, options, referenced func/type/resource indices, callback-related immediates, and task/stream/future result metadata.
+- [DONE] **Instantiation AST** — retain core-instance and component-instance instruction bodies as procedural records in original order, including argument maps, because M5 executes the component’s embedded linking program rather than reconstructing it heuristically.
+- [DONE] **Names and versions** — preserve both the raw import/export name and the split interface name/version pair. Later milestones need both the canonicalized matching key and the original diagnostic spelling.
 - **Source offsets** — keep section-relative or file-relative byte offsets for major AST nodes where cheap to do so. This is useful for `wasi_dump_component`, diffing against `wasm-tools dump`, and future diagnostics.
 
 What can remain shallow in Milestone 1:
