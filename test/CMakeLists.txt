@@ -265,7 +265,7 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
 
         add_test(
             NAME wasi.component.smoke
-            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" load-status parsed-sections
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" load-status parsed-structure
         )
         set_tests_properties(wasi.component.smoke PROPERTIES
             LABELS "wasi-component"

@@ -4,7 +4,7 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, core-instance records, component-instance records, start-section state, function-type metadata, aliases, and canonical lift/lower records; instantiation and canonical ABI execution are not implemented yet.
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, broader component type metadata, aliases, and canonical records; instantiation and canonical ABI execution are not implemented yet.
 
 ## Quick start
 
@@ -82,7 +82,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 ## wasi.h Status
 
-Current `wasi.h` capabilities are intentionally limited to binary introspection and early parser plumbing:
+Current `wasi.h` capabilities are intentionally limited to binary introspection and parser plumbing:
 
 - `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
 - core-vs-component detection through `wasi_detect_binary_kind`

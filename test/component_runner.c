@@ -11,7 +11,7 @@ static void component_runner_usage(const char* argv0) {
     fprintf(stderr, "    detect-component\n");
     fprintf(stderr, "    detect-core\n");
     fprintf(stderr, "    load-ok\n");
-    fprintf(stderr, "    load-status <unparsed|parsed-sections>\n");
+    fprintf(stderr, "    load-status <unparsed|parsed-sections|parsed-structure>\n");
     fprintf(stderr, "    type-param-count <type_index> <expected>\n");
     fprintf(stderr, "    type-result-count <type_index> <expected>\n");
     fprintf(stderr, "    alias-count <expected>\n");
@@ -93,6 +93,8 @@ static const char* component_runner_status_token(wasi_component_status_t status)
             return "unparsed";
         case WASI_COMPONENT_STATUS_PARSED_SECTIONS:
             return "parsed-sections";
+        case WASI_COMPONENT_STATUS_PARSED_STRUCTURE:
+            return "parsed-structure";
         default:
             return "unknown";
     }
