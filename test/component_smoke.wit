@@ -1,0 +1,6 @@
+package local:component-smoke;
+
+world smoke {
+    import host-log: func();
+    export ping: func();
+}

@@ -1,5 +1,6 @@
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
+wl_add_native_executable(component_runner component_runner.c)
 
 find_program(WL_WASM_TOOLS_EXECUTABLE
     NAMES wasm-tools
@@ -8,6 +9,8 @@ find_program(WL_WASM_TOOLS_EXECUTABLE
 
 set(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE OFF)
 set(WL_WASM_TOOLS_PARSE_AVAILABLE OFF)
+set(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE OFF)
+set(WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE OFF)
 if(WL_WASM_TOOLS_EXECUTABLE)
     execute_process(
         COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" json-from-wast --help
@@ -27,6 +30,26 @@ if(WL_WASM_TOOLS_EXECUTABLE)
     )
     if(WL_WASM_TOOLS_PARSE_RESULT EQUAL 0)
         set(WL_WASM_TOOLS_PARSE_AVAILABLE ON)
+    endif()
+
+    execute_process(
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" component embed --help
+        RESULT_VARIABLE WL_WASM_TOOLS_COMPONENT_EMBED_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(WL_WASM_TOOLS_COMPONENT_EMBED_RESULT EQUAL 0)
+        set(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE ON)
+    endif()
+
+    execute_process(
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" component new --help
+        RESULT_VARIABLE WL_WASM_TOOLS_COMPONENT_NEW_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(WL_WASM_TOOLS_COMPONENT_NEW_RESULT EQUAL 0)
+        set(WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE ON)
     endif()
 
     if(NOT WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE OR NOT WL_WASM_TOOLS_PARSE_AVAILABLE)
@@ -143,6 +166,126 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
     )
 
     add_custom_target(wasm-spectest DEPENDS wasm-spectest-run)
+endif()
+
+find_program(WL_WASMTIME_EXECUTABLE
+    NAMES wasmtime
+    DOC "Path to the system wasmtime executable used for future component reference comparisons."
+)
+
+if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE)
+    set(WL_COMPONENT_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/component")
+    set(WL_COMPONENT_SMOKE_WIT "${CMAKE_CURRENT_SOURCE_DIR}/component_smoke.wit")
+    set(WL_COMPONENT_SMOKE_DUMMY "${WL_COMPONENT_OUT_DIR}/smoke.dummy.wasm")
+    set(WL_COMPONENT_SMOKE_WASM "${WL_COMPONENT_OUT_DIR}/smoke.component.wasm")
+    set(WL_COMPONENT_FIXTURE "wasi-component-built")
+
+    add_custom_command(
+        OUTPUT "${WL_COMPONENT_SMOKE_DUMMY}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WL_COMPONENT_OUT_DIR}"
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" component embed
+                --dummy
+                --world smoke
+                "${WL_COMPONENT_SMOKE_WIT}"
+                -o "${WL_COMPONENT_SMOKE_DUMMY}"
+        DEPENDS
+            "${WL_COMPONENT_SMOKE_WIT}"
+        VERBATIM
+    )
+
+    add_custom_command(
+        OUTPUT "${WL_COMPONENT_SMOKE_WASM}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WL_COMPONENT_OUT_DIR}"
+        COMMAND "${WL_WASM_TOOLS_EXECUTABLE}" component new
+                "${WL_COMPONENT_SMOKE_DUMMY}"
+                -o "${WL_COMPONENT_SMOKE_WASM}"
+        DEPENDS
+            "${WL_COMPONENT_SMOKE_DUMMY}"
+        VERBATIM
+    )
+
+    add_custom_target(wasi-component-build DEPENDS component_runner "${WL_COMPONENT_SMOKE_WASM}")
+
+    if(BUILD_TESTING)
+        add_test(
+            NAME wasi.component.build
+            COMMAND ${CMAKE_COMMAND} --build ${PROJECT_BINARY_DIR} ${WL_BUILD_CONFIG_ARGS} --target wasi-component-build
+        )
+        set_tests_properties(wasi.component.build PROPERTIES
+            LABELS "wasi-component;build"
+            FIXTURES_SETUP "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.smoke
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" load-status parsed-sections
+        )
+        set_tests_properties(wasi.component.smoke PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.dump
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" dump-contains "section[0]"
+        )
+        set_tests_properties(wasi.component.dump PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.modules
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-module-count 2
+        )
+        set_tests_properties(wasi.component.modules PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.imports
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" import-name 0 host-log
+        )
+        set_tests_properties(wasi.component.imports PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.exports
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" export-name 0 ping
+        )
+        set_tests_properties(wasi.component.exports PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+    endif()
+
+    add_custom_target(wasi-component-run
+        COMMAND ${CMAKE_COMMAND}
+                -DWL_CTEST_COMMAND:FILEPATH=${CMAKE_CTEST_COMMAND}
+                -DWL_CTEST_BINARY_DIR:PATH=${PROJECT_BINARY_DIR}
+                -DWL_CTEST_LABEL:STRING=wasi-component
+                $<$<BOOL:${WL_GENERATOR_IS_MULTI_CONFIG}>:-DWL_CTEST_CONFIG:STRING=$<CONFIG>>
+                -P ${PROJECT_SOURCE_DIR}/cmake/RunCTestNoFail.cmake
+        DEPENDS wasi-component-build
+        USES_TERMINAL
+    )
+
+    add_custom_target(wasi-component-run-strict
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --test-dir ${PROJECT_BINARY_DIR} -L wasi-component ${WL_CTEST_CONFIG_ARGS}
+        DEPENDS wasi-component-build
+        USES_TERMINAL
+    )
+else()
+    message(STATUS "wasm-tools component subcommands unavailable; skipping wasi component smoke targets.")
+endif()
+
+if(WL_WASMTIME_EXECUTABLE)
+    message(STATUS "Found wasmtime at ${WL_WASMTIME_EXECUTABLE}; reference comparison hooks can be enabled as component execution coverage grows.")
+else()
+    message(STATUS "wasmtime not found; skipping component reference comparison targets.")
 endif()
 
 if(NOT WL_ENABLE_EMCC_TESTS)

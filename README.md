@@ -4,6 +4,8 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component section framing, and retains raw component bytes for future semantic parsing; instantiation and canonical ABI support are not implemented yet.
+
 ## Quick start
 
 ```c
@@ -143,10 +145,11 @@ cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the full test pass: unit tests (`wasm_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
+`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
 
 - `wasm`
 - `wasm2api`
+- `wasi_test`
 - `sqlite_wasm_demo`
 - `wasm_test`
 - `wl_test`
@@ -157,6 +160,7 @@ Additional targets:
 ```sh
 cmake --build build --target wasm               # CLI runner
 cmake --build build --target wasm2api            # Wrapper generator
+cmake --build build --target wasi-component-run  # Component smoke harness (when wasm-tools component is available)
 cmake --build build --target wasm-spectest-run   # Spectest only
 cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 ```

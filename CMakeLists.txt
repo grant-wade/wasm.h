@@ -67,6 +67,7 @@ wl_add_native_executable(wl_test wl_test.c)
 wl_add_native_executable(wasm_test wasm_test.c)
 wl_add_native_executable(wasm2api wasm2api.c)
 wl_add_native_executable(wasm wasm.c)
+wl_add_native_executable(wasi_test wasi_test.c)
 
 add_subdirectory(examples)
 
@@ -77,9 +78,15 @@ if(BUILD_TESTING)
     add_test(NAME wasm_test COMMAND wasm_test)
     set_tests_properties(wasm_test PROPERTIES LABELS "unit")
 
+    add_test(NAME wasi_test COMMAND wasi_test)
+    set_tests_properties(wasi_test PROPERTIES LABELS "unit")
+
     add_subdirectory(test)
 
-    set(WL_CHECK_TARGET_DEPS wl_test wasm_test)
+    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasi_test)
+    if(TARGET wasi-component-build)
+        list(APPEND WL_CHECK_TARGET_DEPS wasi-component-build)
+    endif()
     if(TARGET wasm-spectest-build)
         list(APPEND WL_CHECK_TARGET_DEPS wasm-spectest-build)
     endif()

@@ -86,7 +86,7 @@ wasi_destroy(&engine);
 
 ---
 
-## Milestone 0: Scaffolding & Infrastructure
+## [DONE] Milestone 0: Scaffolding & Infrastructure
 
 **Goal:** Project skeleton, build system, test harness, CI.
 
