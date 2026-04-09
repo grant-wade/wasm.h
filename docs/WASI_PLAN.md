@@ -19,8 +19,8 @@ Single-header C99 library implementing the WebAssembly Component Model, Canonica
 │  │   Binary   │  │    ABI     │  │   (0.3 → 1.0) │  │
 │  │   Parser   │  │ Lift/Lower │  │               │  │
 │  └─────┬──────┘  └─────┬──────┘  └──────┬────────┘  │
-│        │               │               │            │
-│  ┌─────┴───────────────┴───────────────┴──────────┐ │
+│        │               │                │           │
+│  ┌─────┴───────────────┴────────────────┴─────────┐ │
 │  │           Component Runtime                    │ │
 │  │  (instantiation, linking, handles, async task  │ │
 │  │   scheduler, waitable sets, stream/future)     │ │
@@ -29,7 +29,7 @@ Single-header C99 library implementing the WebAssembly Component Model, Canonica
                          │ depends on
 ┌────────────────────────┼────────────────────────────┐
 │                    wasm.h                           │
-│    (core module parse, validate, interpret)          │
+│    (core module parse, validate, interpret)         │
 │    (P1 stubs: wasm_bind_wasi_stubs, etc.)           │
 └─────────────────────────────────────────────────────┘
 ```
