@@ -82,7 +82,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 ## wasi.h Status
 
-Current `wasi.h` capabilities cover binary introspection plus the first low-level canonical ABI helpers needed for Milestone 2:
+Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface for Milestone 2:
 
 - `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
 - core-vs-component detection through `wasi_detect_binary_kind`

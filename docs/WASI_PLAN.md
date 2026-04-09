@@ -176,7 +176,7 @@ Design constraint for the retained AST:
 
 ---
 
-## Milestone 2: Canonical ABI — Scalar Types & Strings
+## [DONE] Milestone 2: Canonical ABI — Scalar Types & Strings
 
 **Goal:** Lift and lower scalar types and strings across the component boundary.
 
