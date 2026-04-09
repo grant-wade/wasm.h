@@ -33,6 +33,9 @@ typedef enum wasi_error_t {
     WASI_ERR_MALFORMED,
     WASI_ERR_UNSUPPORTED_BINARY,
     WASI_ERR_NOT_IMPLEMENTED,
+    WASI_ERR_TYPE_MISMATCH,
+    WASI_ERR_UNDEFINED_EXPORT,
+    WASI_ERR_RUNTIME,
     WASI_ERR_OOM,
     WASI_ERR_RUNTIME_INIT,
 } wasi_error_t;
@@ -501,7 +504,82 @@ struct wasi_component_t {
 
 typedef struct wasi_instance_t wasi_instance_t;
 
+typedef enum wasi_string_encoding_t {
+    WASI_STRING_ENCODING_UTF8 = 0,
+    WASI_STRING_ENCODING_UTF16,
+    WASI_STRING_ENCODING_LATIN1_UTF16,
+} wasi_string_encoding_t;
+
+typedef enum wasi_value_kind_t {
+    WASI_VALUE_KIND_BOOL = 0x7F,
+    WASI_VALUE_KIND_S8 = 0x7E,
+    WASI_VALUE_KIND_U8 = 0x7D,
+    WASI_VALUE_KIND_S16 = 0x7C,
+    WASI_VALUE_KIND_U16 = 0x7B,
+    WASI_VALUE_KIND_S32 = 0x7A,
+    WASI_VALUE_KIND_U32 = 0x79,
+    WASI_VALUE_KIND_S64 = 0x78,
+    WASI_VALUE_KIND_U64 = 0x77,
+    WASI_VALUE_KIND_F32 = 0x76,
+    WASI_VALUE_KIND_F64 = 0x75,
+    WASI_VALUE_KIND_CHAR = 0x74,
+    WASI_VALUE_KIND_STRING = 0x73,
+} wasi_value_kind_t;
+
+typedef struct wasi_string_t {
+    char* data;
+    size_t len;
+    int owned;
+} wasi_string_t;
+
+typedef struct wasi_value_t {
+    wasi_value_kind_t kind;
+    union {
+        uint8_t boolean;
+        int8_t s8;
+        uint8_t u8;
+        int16_t s16;
+        uint16_t u16;
+        int32_t s32;
+        uint32_t u32;
+        int64_t s64;
+        uint64_t u64;
+        float f32;
+        double f64;
+        uint32_t char32;
+        wasi_string_t string;
+    } of;
+} wasi_value_t;
+
+typedef struct wasi_canon_options_t {
+    uint32_t memory_index;
+    const char* cabi_realloc_name;
+    const char* post_return_name;
+    wasi_string_encoding_t string_encoding;
+} wasi_canon_options_t;
+
 void wasi_config_default(wasi_config_t* config);
+wasi_error_t wasi_value_set_string_copy(wasi_value_t* value, const char* bytes, size_t len);
+void wasi_value_init(wasi_value_t* value);
+void wasi_value_destroy(wasi_value_t* value);
+wasi_error_t wasi_canon_call(const wasi_component_t* component,
+                             uint32_t func_type_index,
+                             wasm_module_t* core_module,
+                             const char* core_export_name,
+                             const wasi_canon_options_t* options,
+                             const wasi_value_t* args,
+                             uint32_t num_args,
+                             wasi_value_t* results,
+                             uint32_t num_results);
+wasi_error_t wasi_canon_options_default(wasi_canon_options_t* options);
+wasi_instance_t* wasi_instantiate(const wasi_component_t* component);
+void wasi_free_instance(wasi_instance_t* instance);
+wasi_error_t wasi_call(wasi_instance_t* instance,
+                       const char* export_name,
+                       const wasi_value_t* args,
+                       uint32_t num_args,
+                       wasi_value_t* results,
+                       uint32_t num_results);
 wasi_error_t wasi_init(wasi_engine_t* engine, const wasi_config_t* config);
 void wasi_destroy(wasi_engine_t* engine);
 wasi_binary_kind_t wasi_detect_binary_kind(const uint8_t* bytes, size_t len);
@@ -4629,6 +4707,1336 @@ static wasi_error_t wasi__classify_binary(const uint8_t* bytes,
     return WASI_ERR_INVALID_VERSION;
 }
 
+#define WASI__CABI_REALLOC_EXPORT "cabi_realloc"
+
+typedef struct wasi__canon_runtime_options_t {
+    wasi_canon_options_t api;
+    int has_realloc_func_index;
+    uint32_t realloc_func_index;
+    int has_post_return_func_index;
+    uint32_t post_return_func_index;
+} wasi__canon_runtime_options_t;
+
+struct wasi_instance_t {
+    const wasi_component_t* component;
+    wasm_module_t* core_module;
+    uint32_t core_module_index;
+};
+
+static void wasi__value_clear(wasi_value_t* value) {
+    if (!value) return;
+    if (value->kind == WASI_VALUE_KIND_STRING && value->of.string.owned && value->of.string.data)
+        WASM_FREE(value->of.string.data);
+    memset(value, 0, sizeof(*value));
+}
+
+void wasi_value_init(wasi_value_t* value) {
+    if (!value) return;
+    memset(value, 0, sizeof(*value));
+}
+
+void wasi_value_destroy(wasi_value_t* value) {
+    wasi__value_clear(value);
+}
+
+wasi_error_t wasi_value_set_string_copy(wasi_value_t* value, const char* bytes, size_t len) {
+    char* copy;
+
+    if (!value) return WASI_ERR_INVALID_ARGUMENT;
+    if (!bytes && len) return WASI_ERR_INVALID_ARGUMENT;
+    if (len > ((size_t)-1) - 1u) return WASI_ERR_OOM;
+
+    copy = (char*)WASM_MALLOC(len + 1u);
+    if (!copy) return WASI_ERR_OOM;
+    if (len) memcpy(copy, bytes, len);
+    copy[len] = '\0';
+
+    wasi__value_clear(value);
+    value->kind = WASI_VALUE_KIND_STRING;
+    value->of.string.data = copy;
+    value->of.string.len = len;
+    value->of.string.owned = 1;
+    return WASI_OK;
+}
+
+wasi_error_t wasi_canon_options_default(wasi_canon_options_t* options) {
+    if (!options) return WASI_ERR_INVALID_ARGUMENT;
+    memset(options, 0, sizeof(*options));
+    options->cabi_realloc_name = WASI__CABI_REALLOC_EXPORT;
+    options->string_encoding = WASI_STRING_ENCODING_UTF8;
+    return WASI_OK;
+}
+
+static int wasi__is_valid_unicode_scalar(uint32_t codepoint) {
+    return codepoint <= 0x10FFFFu && !(codepoint >= 0xD800u && codepoint <= 0xDFFFu);
+}
+
+static int wasi__utf8_decode_one(const uint8_t* bytes, size_t len, size_t* cursor, uint32_t* out_codepoint) {
+    size_t index;
+    uint8_t b0;
+    uint32_t codepoint;
+
+    if (!bytes || !cursor || !out_codepoint || *cursor >= len) return 0;
+
+    index = *cursor;
+    b0 = bytes[index++];
+    if ((b0 & 0x80u) == 0) {
+        *cursor = index;
+        *out_codepoint = b0;
+        return 1;
+    }
+
+    if ((b0 & 0xE0u) == 0xC0u) {
+        uint8_t b1;
+        if (index >= len) return 0;
+        b1 = bytes[index++];
+        if ((b1 & 0xC0u) != 0x80u) return 0;
+        codepoint = (uint32_t)(b0 & 0x1Fu) << 6;
+        codepoint |= (uint32_t)(b1 & 0x3Fu);
+        if (codepoint < 0x80u) return 0;
+        *cursor = index;
+        *out_codepoint = codepoint;
+        return 1;
+    }
+
+    if ((b0 & 0xF0u) == 0xE0u) {
+        uint8_t b1;
+        uint8_t b2;
+        if (index + 1u >= len) return 0;
+        b1 = bytes[index++];
+        b2 = bytes[index++];
+        if ((b1 & 0xC0u) != 0x80u || (b2 & 0xC0u) != 0x80u) return 0;
+        codepoint = (uint32_t)(b0 & 0x0Fu) << 12;
+        codepoint |= (uint32_t)(b1 & 0x3Fu) << 6;
+        codepoint |= (uint32_t)(b2 & 0x3Fu);
+        if (codepoint < 0x800u || !wasi__is_valid_unicode_scalar(codepoint)) return 0;
+        *cursor = index;
+        *out_codepoint = codepoint;
+        return 1;
+    }
+
+    if ((b0 & 0xF8u) == 0xF0u) {
+        uint8_t b1;
+        uint8_t b2;
+        uint8_t b3;
+        if (index + 2u >= len) return 0;
+        b1 = bytes[index++];
+        b2 = bytes[index++];
+        b3 = bytes[index++];
+        if ((b1 & 0xC0u) != 0x80u || (b2 & 0xC0u) != 0x80u || (b3 & 0xC0u) != 0x80u) return 0;
+        codepoint = (uint32_t)(b0 & 0x07u) << 18;
+        codepoint |= (uint32_t)(b1 & 0x3Fu) << 12;
+        codepoint |= (uint32_t)(b2 & 0x3Fu) << 6;
+        codepoint |= (uint32_t)(b3 & 0x3Fu);
+        if (codepoint < 0x10000u || !wasi__is_valid_unicode_scalar(codepoint)) return 0;
+        *cursor = index;
+        *out_codepoint = codepoint;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int wasi__utf8_validate(const char* bytes, size_t len) {
+    size_t cursor = 0;
+    uint32_t codepoint;
+
+    while (cursor < len) {
+        if (!wasi__utf8_decode_one((const uint8_t*)bytes, len, &cursor, &codepoint)) return 0;
+    }
+    return 1;
+}
+
+static size_t wasi__utf8_encode_one(uint32_t codepoint, char out[4]) {
+    if (codepoint <= 0x7Fu) {
+        out[0] = (char)codepoint;
+        return 1u;
+    }
+    if (codepoint <= 0x7FFu) {
+        out[0] = (char)(0xC0u | (codepoint >> 6));
+        out[1] = (char)(0x80u | (codepoint & 0x3Fu));
+        return 2u;
+    }
+    if (codepoint <= 0xFFFFu) {
+        out[0] = (char)(0xE0u | (codepoint >> 12));
+        out[1] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (codepoint & 0x3Fu));
+        return 3u;
+    }
+
+    out[0] = (char)(0xF0u | (codepoint >> 18));
+    out[1] = (char)(0x80u | ((codepoint >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (codepoint & 0x3Fu));
+    return 4u;
+}
+
+static wasi_error_t wasi__utf8_to_utf16le(wasi_engine_t* engine,
+                                          const char* utf8,
+                                          size_t utf8_len,
+                                          uint8_t** out_bytes,
+                                          size_t* out_len) {
+    uint8_t* bytes;
+    size_t capacity;
+    size_t cursor = 0;
+    size_t written = 0;
+    uint32_t codepoint;
+
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    if (!out_bytes || !out_len) return WASI_ERR_INVALID_ARGUMENT;
+    if (!utf8 && utf8_len) return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "string bytes must not be NULL");
+    if (utf8_len > ((size_t)-1) / 2u) return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf16 conversion overflow");
+
+    capacity = utf8_len ? utf8_len * 2u : 1u;
+    bytes = (uint8_t*)WASM_MALLOC(capacity);
+    if (!bytes) return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf16 conversion alloc failed");
+
+    while (cursor < utf8_len) {
+        if (!wasi__utf8_decode_one((const uint8_t*)utf8, utf8_len, &cursor, &codepoint)) {
+            WASM_FREE(bytes);
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "invalid utf8 string");
+        }
+        if (codepoint <= 0xFFFFu) {
+            bytes[written++] = (uint8_t)(codepoint & 0xFFu);
+            bytes[written++] = (uint8_t)((codepoint >> 8) & 0xFFu);
+        } else {
+            uint32_t payload = codepoint - 0x10000u;
+            uint16_t high = (uint16_t)(0xD800u + (payload >> 10));
+            uint16_t low = (uint16_t)(0xDC00u + (payload & 0x3FFu));
+            bytes[written++] = (uint8_t)(high & 0xFFu);
+            bytes[written++] = (uint8_t)((high >> 8) & 0xFFu);
+            bytes[written++] = (uint8_t)(low & 0xFFu);
+            bytes[written++] = (uint8_t)((low >> 8) & 0xFFu);
+        }
+    }
+
+    *out_bytes = bytes;
+    *out_len = written;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__utf16le_to_utf8(wasi_engine_t* engine,
+                                          const uint8_t* utf16,
+                                          size_t code_units,
+                                          char** out_utf8,
+                                          size_t* out_len) {
+    char* utf8;
+    size_t capacity;
+    size_t index = 0;
+    size_t written = 0;
+
+    if (out_utf8) *out_utf8 = NULL;
+    if (out_len) *out_len = 0;
+    if (!out_utf8 || !out_len) return WASI_ERR_INVALID_ARGUMENT;
+    if (!utf16 && code_units) return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 bytes must not be NULL");
+    if (code_units > (((size_t)-1) - 1u) / 3u)
+        return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf8 conversion overflow");
+
+    capacity = code_units * 3u + 1u;
+    utf8 = (char*)WASM_MALLOC(capacity);
+    if (!utf8) return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf8 conversion alloc failed");
+
+    while (index < code_units) {
+        uint16_t unit = (uint16_t)utf16[index * 2u] | ((uint16_t)utf16[index * 2u + 1u] << 8);
+        uint32_t codepoint = unit;
+        char encoded[4];
+        size_t encoded_len;
+
+        index++;
+        if (unit >= 0xD800u && unit <= 0xDBFFu) {
+            uint16_t low;
+            if (index >= code_units) {
+                WASM_FREE(utf8);
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "unterminated utf16 surrogate pair");
+            }
+            low = (uint16_t)utf16[index * 2u] | ((uint16_t)utf16[index * 2u + 1u] << 8);
+            if (low < 0xDC00u || low > 0xDFFFu) {
+                WASM_FREE(utf8);
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "invalid utf16 surrogate pair");
+            }
+            index++;
+            codepoint = 0x10000u + (((uint32_t)(unit - 0xD800u)) << 10) + (uint32_t)(low - 0xDC00u);
+        } else if (unit >= 0xDC00u && unit <= 0xDFFFu) {
+            WASM_FREE(utf8);
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "unexpected utf16 low surrogate");
+        }
+
+        encoded_len = wasi__utf8_encode_one(codepoint, encoded);
+        memcpy(utf8 + written, encoded, encoded_len);
+        written += encoded_len;
+    }
+
+    utf8[written] = '\0';
+    *out_utf8 = utf8;
+    *out_len = written;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__set_runtime_error_from_module(wasi_engine_t* engine,
+                                                        const wasm_module_t* core_module,
+                                                        wasm_error_t wasm_err,
+                                                        const char* action) {
+    const char* detail = wasm_error_string(wasm_err);
+
+    if (core_module && core_module->rt && core_module->rt->error_msg[0]) detail = core_module->rt->error_msg;
+    return wasi__set_errorf(engine, WASI_ERR_RUNTIME, "%s: %s", action, detail);
+}
+
+static int wasi__component_type_is_func(const wasi_component_t* component, uint32_t type_index) {
+    return component && type_index < component->num_types && component->types[type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC;
+}
+
+static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
+                                                 const wasi_component_valtype_t* type,
+                                                 wasm_valtype_t* out_types,
+                                                 uint32_t* out_count) {
+    if (!type || !out_count) return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "missing component value type");
+
+    switch (type->opcode) {
+        case 0x7Fu:
+        case 0x7Eu:
+        case 0x7Du:
+        case 0x7Cu:
+        case 0x7Bu:
+        case 0x7Au:
+        case 0x79u:
+        case 0x74u:
+            if (out_types) out_types[0] = WASM_TYPE_I32;
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x78u:
+        case 0x77u:
+            if (out_types) out_types[0] = WASM_TYPE_I64;
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x76u:
+            if (out_types) out_types[0] = WASM_TYPE_F32;
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x75u:
+            if (out_types) out_types[0] = WASM_TYPE_F64;
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x73u:
+            if (out_types) {
+                out_types[0] = WASM_TYPE_I32;
+                out_types[1] = WASM_TYPE_I32;
+            }
+            *out_count = 2u;
+            return WASI_OK;
+        default:
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "canonical abi does not support %s yet",
+                                    wasi_component_primitive_type_string(type->opcode));
+    }
+}
+
+static wasi_error_t wasi__flatten_func_signature(wasi_engine_t* engine,
+                                                 const wasi_component_t* component,
+                                                 uint32_t type_index,
+                                                 wasm_valtype_t** out_params,
+                                                 uint32_t* out_num_params,
+                                                 wasm_valtype_t** out_results,
+                                                 uint32_t* out_num_results) {
+    uint32_t param_count;
+    uint32_t result_count;
+    uint32_t i;
+    uint32_t flat_params = 0;
+    uint32_t flat_results = 0;
+    wasm_valtype_t* params = NULL;
+    wasm_valtype_t* results = NULL;
+
+    if (out_params) *out_params = NULL;
+    if (out_results) *out_results = NULL;
+    if (out_num_params) *out_num_params = 0;
+    if (out_num_results) *out_num_results = 0;
+    if (!out_params || !out_num_params || !out_results || !out_num_results)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "missing flat signature outputs");
+    if (!wasi__component_type_is_func(component, type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component type index is not a function type");
+
+    param_count = wasi_component_func_type_param_count(component, type_index);
+    result_count = wasi_component_func_type_result_count(component, type_index);
+
+    for (i = 0; i < param_count; i++) {
+        uint32_t added = 0;
+        wasi_error_t err = wasi__flat_types_for_valtype(engine,
+                                                        wasi_component_func_type_param_type(component, type_index, i),
+                                                        NULL,
+                                                        &added);
+        if (err != WASI_OK) return err;
+        flat_params += added;
+    }
+    for (i = 0; i < result_count; i++) {
+        uint32_t added = 0;
+        wasi_error_t err = wasi__flat_types_for_valtype(engine,
+                                                        wasi_component_func_type_result_type(component, type_index, i),
+                                                        NULL,
+                                                        &added);
+        if (err != WASI_OK) return err;
+        flat_results += added;
+    }
+
+    if (flat_params) {
+        params = (wasm_valtype_t*)WASM_MALLOC((size_t)flat_params * sizeof(*params));
+        if (!params) return wasi__set_error_literal(engine, WASI_ERR_OOM, "flat param signature alloc failed");
+    }
+    if (flat_results) {
+        results = (wasm_valtype_t*)WASM_MALLOC((size_t)flat_results * sizeof(*results));
+        if (!results) {
+            WASM_FREE(params);
+            return wasi__set_error_literal(engine, WASI_ERR_OOM, "flat result signature alloc failed");
+        }
+    }
+
+    flat_params = 0;
+    flat_results = 0;
+    for (i = 0; i < param_count; i++) {
+        uint32_t added = 0;
+        wasi_error_t err = wasi__flat_types_for_valtype(engine,
+                                                        wasi_component_func_type_param_type(component, type_index, i),
+                                                        params ? params + flat_params : NULL,
+                                                        &added);
+        if (err != WASI_OK) {
+            WASM_FREE(params);
+            WASM_FREE(results);
+            return err;
+        }
+        flat_params += added;
+    }
+    for (i = 0; i < result_count; i++) {
+        uint32_t added = 0;
+        wasi_error_t err = wasi__flat_types_for_valtype(engine,
+                                                        wasi_component_func_type_result_type(component, type_index, i),
+                                                        results ? results + flat_results : NULL,
+                                                        &added);
+        if (err != WASI_OK) {
+            WASM_FREE(params);
+            WASM_FREE(results);
+            return err;
+        }
+        flat_results += added;
+    }
+
+    *out_params = params;
+    *out_num_params = flat_params;
+    *out_results = results;
+    *out_num_results = flat_results;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__validate_func_signature(wasi_engine_t* engine,
+                                                  const wasi_component_t* component,
+                                                  uint32_t type_index,
+                                                  wasm_module_t* core_module,
+                                                  uint32_t func_index,
+                                                  const char* func_label,
+                                                  wasm_valtype_t** out_flat_result_types,
+                                                  uint32_t* out_num_flat_results) {
+    wasm_valtype_t* flat_params = NULL;
+    wasm_valtype_t* flat_results = NULL;
+    uint32_t num_flat_params = 0;
+    uint32_t num_flat_results = 0;
+    uint32_t i;
+    wasi_error_t err;
+
+    if (out_flat_result_types) *out_flat_result_types = NULL;
+    if (out_num_flat_results) *out_num_flat_results = 0;
+    if (!engine || !component || !core_module || !func_label || !out_flat_result_types || !out_num_flat_results)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canonical call signature inputs");
+
+    err = wasi__flatten_func_signature(engine,
+                                      component,
+                                      type_index,
+                                      &flat_params,
+                                      &num_flat_params,
+                                      &flat_results,
+                                      &num_flat_results);
+    if (err != WASI_OK) return err;
+
+    if (func_index >= wasm_func_count(core_module)) {
+        WASM_FREE(flat_params);
+        WASM_FREE(flat_results);
+        return wasi__set_errorf(engine, WASI_ERR_UNDEFINED_EXPORT, "missing core function %s", func_label);
+    }
+
+    if (wasm_func_param_count(core_module, func_index) != num_flat_params ||
+        wasm_func_result_count(core_module, func_index) != num_flat_results) {
+        WASM_FREE(flat_params);
+        WASM_FREE(flat_results);
+        return wasi__set_errorf(engine,
+                                WASI_ERR_TYPE_MISMATCH,
+                                "core function %s flat arity mismatch",
+                                func_label);
+    }
+
+    for (i = 0; i < num_flat_params; i++) {
+        if (wasm_func_param_type(core_module, func_index, i) != flat_params[i]) {
+            WASM_FREE(flat_params);
+            WASM_FREE(flat_results);
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_TYPE_MISMATCH,
+                                    "core function %s param %u type mismatch",
+                                    func_label,
+                                    (unsigned)i);
+        }
+    }
+    for (i = 0; i < num_flat_results; i++) {
+        if (wasm_func_result_type(core_module, func_index, i) != flat_results[i]) {
+            WASM_FREE(flat_params);
+            WASM_FREE(flat_results);
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_TYPE_MISMATCH,
+                                    "core function %s result %u type mismatch",
+                                    func_label,
+                                    (unsigned)i);
+        }
+    }
+
+    WASM_FREE(flat_params);
+    *out_flat_result_types = flat_results;
+    *out_num_flat_results = num_flat_results;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__effective_canon_options(wasi__canon_runtime_options_t* out,
+                                                  const wasi_canon_options_t* options) {
+    wasi_error_t err;
+
+    if (!out) return WASI_ERR_INVALID_ARGUMENT;
+    memset(out, 0, sizeof(*out));
+    err = wasi_canon_options_default(&out->api);
+    if (err != WASI_OK) return err;
+    if (!options) return WASI_OK;
+
+    out->api.memory_index = options->memory_index;
+    out->api.post_return_name = options->post_return_name;
+    out->api.string_encoding = options->string_encoding;
+    if (options->cabi_realloc_name) out->api.cabi_realloc_name = options->cabi_realloc_name;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__resolve_lift_runtime_options(wasi_engine_t* engine,
+                                                       const wasi_component_canon_t* canon,
+                                                       wasi__canon_runtime_options_t* out) {
+    uint32_t i;
+    wasi_error_t err;
+
+    if (!engine || !canon || !out)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canon option resolution inputs");
+
+    err = wasi__effective_canon_options(out, NULL);
+    if (err != WASI_OK) return err;
+
+    for (i = 0; i < canon->num_options; i++) {
+        const wasi_component_canon_option_t* option = &canon->options[i];
+        switch (option->code) {
+            case 0x00u:
+                out->api.string_encoding = WASI_STRING_ENCODING_UTF8;
+                break;
+            case 0x01u:
+                out->api.string_encoding = WASI_STRING_ENCODING_UTF16;
+                break;
+            case 0x02u:
+                out->api.string_encoding = WASI_STRING_ENCODING_LATIN1_UTF16;
+                break;
+            case 0x03u:
+                if (!option->has_index)
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "canonical memory option missing index");
+                out->api.memory_index = option->index;
+                break;
+            case 0x04u:
+                if (!option->has_index)
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "canonical realloc option missing index");
+                out->has_realloc_func_index = 1;
+                out->realloc_func_index = option->index;
+                break;
+            case 0x05u:
+                if (!option->has_index)
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "canonical post-return option missing index");
+                out->has_post_return_func_index = 1;
+                out->post_return_func_index = option->index;
+                break;
+            case 0x06u:
+                return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "async canonical lifts are not implemented");
+            case 0x07u:
+                return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "callback canonical lifts are not implemented");
+            default:
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_NOT_IMPLEMENTED,
+                                        "canonical option 0x%02x not implemented",
+                                        (unsigned)option->code);
+        }
+    }
+
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__encode_guest_string(wasi_engine_t* engine,
+                                              wasi_string_encoding_t encoding,
+                                              const wasi_string_t* string,
+                                              uint8_t** out_bytes,
+                                              uint32_t* out_len_units,
+                                              uint32_t* out_size_bytes,
+                                              uint32_t* out_align) {
+    uint8_t* guest_bytes = NULL;
+    size_t guest_size = 0;
+
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len_units) *out_len_units = 0;
+    if (out_size_bytes) *out_size_bytes = 0;
+    if (out_align) *out_align = 1;
+    if (!out_bytes || !out_len_units || !out_size_bytes || !out_align || !string)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid string lowering inputs");
+
+    switch (encoding) {
+        case WASI_STRING_ENCODING_UTF8:
+            if (!wasi__utf8_validate(string->data, string->len))
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "invalid utf8 string");
+            if (string->len > UINT32_MAX)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "string too large for canonical abi");
+            if (string->len) {
+                guest_bytes = (uint8_t*)WASM_MALLOC(string->len);
+                if (!guest_bytes) return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf8 string alloc failed");
+                memcpy(guest_bytes, string->data, string->len);
+            }
+            *out_bytes = guest_bytes;
+            *out_len_units = (uint32_t)string->len;
+            *out_size_bytes = (uint32_t)string->len;
+            *out_align = 1u;
+            return WASI_OK;
+        case WASI_STRING_ENCODING_UTF16: {
+            wasi_error_t err = wasi__utf8_to_utf16le(engine, string->data, string->len, &guest_bytes, &guest_size);
+            if (err != WASI_OK) return err;
+            if ((guest_size / 2u) > UINT32_MAX) {
+                WASM_FREE(guest_bytes);
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 string too large for canonical abi");
+            }
+            *out_bytes = guest_bytes;
+            *out_len_units = (uint32_t)(guest_size / 2u);
+            *out_size_bytes = (uint32_t)guest_size;
+            *out_align = 2u;
+            return WASI_OK;
+        }
+        case WASI_STRING_ENCODING_LATIN1_UTF16:
+            return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "latin1+utf16 canonical strings not implemented yet");
+        default:
+            return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "unknown string encoding");
+    }
+}
+
+static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
+                                              const wasi__canon_runtime_options_t* options,
+                                              wasm_module_t* core_module,
+                                              uint32_t ptr,
+                                              uint32_t len_units,
+                                              wasi_value_t* out_value) {
+    size_t size_bytes = 0;
+    uint8_t* bytes = NULL;
+    wasi_error_t err;
+
+    if (!engine || !options || !core_module || !out_value)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid string lifting inputs");
+
+    switch (options->api.string_encoding) {
+        case WASI_STRING_ENCODING_UTF8:
+            size_bytes = (size_t)len_units;
+            break;
+        case WASI_STRING_ENCODING_UTF16:
+            if ((size_t)len_units > ((size_t)-1) / 2u)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 guest string too large");
+            size_bytes = (size_t)len_units * 2u;
+            break;
+        case WASI_STRING_ENCODING_LATIN1_UTF16:
+            return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "latin1+utf16 canonical strings not implemented yet");
+        default:
+            return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "unknown string encoding");
+    }
+
+    if (!size_bytes) {
+        wasi_value_init(out_value);
+        out_value->kind = WASI_VALUE_KIND_STRING;
+        out_value->of.string.data = NULL;
+        out_value->of.string.len = 0;
+        out_value->of.string.owned = 0;
+        return WASI_OK;
+    }
+
+    bytes = (uint8_t*)WASM_MALLOC(size_bytes);
+    if (!bytes) return wasi__set_error_literal(engine, WASI_ERR_OOM, "guest string buffer alloc failed");
+
+    if (wasm_memory_read(core_module, options->api.memory_index, ptr, bytes, size_bytes) != WASM_OK) {
+        WASM_FREE(bytes);
+        return wasi__set_runtime_error_from_module(engine, core_module, core_module->rt->last_error, "string lift memory read failed");
+    }
+
+    if (options->api.string_encoding == WASI_STRING_ENCODING_UTF8) {
+        if (!wasi__utf8_validate((const char*)bytes, size_bytes)) {
+            WASM_FREE(bytes);
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "guest string is not valid utf8");
+        }
+        err = wasi_value_set_string_copy(out_value, (const char*)bytes, size_bytes);
+        WASM_FREE(bytes);
+        return err == WASI_OK ? WASI_OK : wasi__set_error_literal(engine, err, err == WASI_ERR_OOM ? "string copy alloc failed" : "string copy failed");
+    }
+
+    if (options->api.string_encoding == WASI_STRING_ENCODING_UTF16) {
+        char* utf8 = NULL;
+        size_t utf8_len = 0;
+        err = wasi__utf16le_to_utf8(engine, bytes, len_units, &utf8, &utf8_len);
+        WASM_FREE(bytes);
+        if (err != WASI_OK) return err;
+        err = wasi_value_set_string_copy(out_value, utf8, utf8_len);
+        WASM_FREE(utf8);
+        return err == WASI_OK ? WASI_OK : wasi__set_error_literal(engine, err, err == WASI_ERR_OOM ? "string copy alloc failed" : "string copy failed");
+    }
+
+    WASM_FREE(bytes);
+    return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "unknown string encoding");
+}
+
+static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
+                                      const wasi_component_valtype_t* type,
+                                      const wasi_value_t* value,
+                                      wasm_module_t* core_module,
+                                      const wasi__canon_runtime_options_t* options,
+                                      wasm_value_t* out_values,
+                                      uint32_t* out_count) {
+    uint8_t* guest_bytes = NULL;
+    uint32_t guest_len_units = 0;
+    uint32_t guest_size_bytes = 0;
+    uint32_t align = 1;
+    wasm_value_t realloc_args[4];
+    wasm_value_t realloc_result;
+    wasm_error_t wasm_err;
+
+    if (!engine || !type || !value || !core_module || !options || !out_values || !out_count)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canonical lowering inputs");
+
+    switch (type->opcode) {
+        case 0x7Fu:
+            if (value->kind != WASI_VALUE_KIND_BOOL)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected bool argument");
+            if (value->of.boolean > 1u)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "bool argument must be 0 or 1");
+            out_values[0] = wasm_i32((int32_t)value->of.boolean);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x7Eu:
+            if (value->kind != WASI_VALUE_KIND_S8)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected s8 argument");
+            out_values[0] = wasm_i32((int32_t)value->of.s8);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x7Du:
+            if (value->kind != WASI_VALUE_KIND_U8)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected u8 argument");
+            out_values[0] = wasm_i32((int32_t)value->of.u8);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x7Cu:
+            if (value->kind != WASI_VALUE_KIND_S16)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected s16 argument");
+            out_values[0] = wasm_i32((int32_t)value->of.s16);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x7Bu:
+            if (value->kind != WASI_VALUE_KIND_U16)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected u16 argument");
+            out_values[0] = wasm_i32((int32_t)value->of.u16);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x7Au:
+            if (value->kind != WASI_VALUE_KIND_S32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected s32 argument");
+            out_values[0] = wasm_i32(value->of.s32);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x79u:
+            if (value->kind != WASI_VALUE_KIND_U32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected u32 argument");
+            out_values[0] = wasm_i32((int32_t)value->of.u32);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x78u:
+            if (value->kind != WASI_VALUE_KIND_S64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected s64 argument");
+            out_values[0] = wasm_i64(value->of.s64);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x77u:
+            if (value->kind != WASI_VALUE_KIND_U64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected u64 argument");
+            out_values[0] = wasm_i64((int64_t)value->of.u64);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x76u:
+            if (value->kind != WASI_VALUE_KIND_F32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected f32 argument");
+            out_values[0] = wasm_f32(value->of.f32);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x75u:
+            if (value->kind != WASI_VALUE_KIND_F64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected f64 argument");
+            out_values[0] = wasm_f64(value->of.f64);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x74u:
+            if (value->kind != WASI_VALUE_KIND_CHAR)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected char argument");
+            if (!wasi__is_valid_unicode_scalar(value->of.char32))
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "char argument is not a unicode scalar value");
+            out_values[0] = wasm_i32((int32_t)value->of.char32);
+            *out_count = 1u;
+            return WASI_OK;
+        case 0x73u:
+            if (value->kind != WASI_VALUE_KIND_STRING)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "expected string argument");
+            if ((!value->of.string.data && value->of.string.len) ||
+                (!options->has_realloc_func_index && (!options->api.cabi_realloc_name || !options->api.cabi_realloc_name[0])))
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "string lowering requires cabi_realloc");
+            if (value->of.string.len == 0u) {
+                out_values[0] = wasm_i32(0);
+                out_values[1] = wasm_i32(0);
+                *out_count = 2u;
+                return WASI_OK;
+            }
+            {
+                wasi_error_t err = wasi__encode_guest_string(engine,
+                                                             options->api.string_encoding,
+                                                             &value->of.string,
+                                                             &guest_bytes,
+                                                             &guest_len_units,
+                                                             &guest_size_bytes,
+                                                             &align);
+                if (err != WASI_OK) return err;
+            }
+            realloc_args[0] = wasm_i32(0);
+            realloc_args[1] = wasm_i32(0);
+            realloc_args[2] = wasm_i32((int32_t)align);
+            realloc_args[3] = wasm_i32((int32_t)guest_size_bytes);
+            if (options->has_realloc_func_index) {
+                wasm_err = wasm_call_index(core_module,
+                                           options->realloc_func_index,
+                                           realloc_args,
+                                           4u,
+                                           &realloc_result,
+                                           1u);
+            } else {
+                wasm_err = wasm_call(core_module,
+                                     options->api.cabi_realloc_name,
+                                     realloc_args,
+                                     4u,
+                                     &realloc_result,
+                                     1u);
+            }
+            if (wasm_err != WASM_OK) {
+                WASM_FREE(guest_bytes);
+                return wasi__set_runtime_error_from_module(engine, core_module, wasm_err, "cabi_realloc failed");
+            }
+            wasm_err = wasm_memory_write(core_module,
+                                         options->api.memory_index,
+                                         (uint32_t)realloc_result.of.i32,
+                                         guest_bytes,
+                                         guest_size_bytes);
+            WASM_FREE(guest_bytes);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_module(engine, core_module, wasm_err, "string lower memory write failed");
+            out_values[0] = wasm_i32(realloc_result.of.i32);
+            out_values[1] = wasm_i32((int32_t)guest_len_units);
+            *out_count = 2u;
+            return WASI_OK;
+        default:
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "canonical abi does not support %s yet",
+                                    wasi_component_primitive_type_string(type->opcode));
+    }
+}
+
+static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
+                                     const wasi_component_valtype_t* type,
+                                     const wasm_value_t* flat_values,
+                                     uint32_t flat_count,
+                                     wasm_module_t* core_module,
+                                     const wasi__canon_runtime_options_t* options,
+                                     wasi_value_t* out_value,
+                                     uint32_t* out_consumed) {
+    if (!engine || !type || !flat_values || !core_module || !options || !out_value || !out_consumed)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canonical lifting inputs");
+
+    *out_consumed = 0;
+    wasi_value_init(out_value);
+
+    switch (type->opcode) {
+        case 0x7Fu: {
+            uint32_t raw;
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "bool result requires one i32");
+            raw = (uint32_t)flat_values[0].of.i32;
+            if (raw > 1u) return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "bool result must be 0 or 1");
+            out_value->kind = WASI_VALUE_KIND_BOOL;
+            out_value->of.boolean = (uint8_t)raw;
+            *out_consumed = 1u;
+            return WASI_OK;
+        }
+        case 0x7Eu:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "s8 result requires one i32");
+            if (flat_values[0].of.i32 < INT8_MIN || flat_values[0].of.i32 > INT8_MAX)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "s8 result out of range");
+            out_value->kind = WASI_VALUE_KIND_S8;
+            out_value->of.s8 = (int8_t)flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x7Du:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "u8 result requires one i32");
+            if ((uint32_t)flat_values[0].of.i32 > UINT8_MAX)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "u8 result out of range");
+            out_value->kind = WASI_VALUE_KIND_U8;
+            out_value->of.u8 = (uint8_t)flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x7Cu:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "s16 result requires one i32");
+            if (flat_values[0].of.i32 < INT16_MIN || flat_values[0].of.i32 > INT16_MAX)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "s16 result out of range");
+            out_value->kind = WASI_VALUE_KIND_S16;
+            out_value->of.s16 = (int16_t)flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x7Bu:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "u16 result requires one i32");
+            if ((uint32_t)flat_values[0].of.i32 > UINT16_MAX)
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "u16 result out of range");
+            out_value->kind = WASI_VALUE_KIND_U16;
+            out_value->of.u16 = (uint16_t)flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x7Au:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "s32 result requires one i32");
+            out_value->kind = WASI_VALUE_KIND_S32;
+            out_value->of.s32 = flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x79u:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "u32 result requires one i32");
+            out_value->kind = WASI_VALUE_KIND_U32;
+            out_value->of.u32 = (uint32_t)flat_values[0].of.i32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x78u:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "s64 result requires one i64");
+            out_value->kind = WASI_VALUE_KIND_S64;
+            out_value->of.s64 = flat_values[0].of.i64;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x77u:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "u64 result requires one i64");
+            out_value->kind = WASI_VALUE_KIND_U64;
+            out_value->of.u64 = (uint64_t)flat_values[0].of.i64;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x76u:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_F32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "f32 result requires one f32");
+            out_value->kind = WASI_VALUE_KIND_F32;
+            out_value->of.f32 = flat_values[0].of.f32;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x75u:
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_F64)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "f64 result requires one f64");
+            out_value->kind = WASI_VALUE_KIND_F64;
+            out_value->of.f64 = flat_values[0].of.f64;
+            *out_consumed = 1u;
+            return WASI_OK;
+        case 0x74u: {
+            uint32_t raw;
+            if (flat_count < 1u || flat_values[0].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "char result requires one i32");
+            raw = (uint32_t)flat_values[0].of.i32;
+            if (!wasi__is_valid_unicode_scalar(raw))
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "char result is not a unicode scalar value");
+            out_value->kind = WASI_VALUE_KIND_CHAR;
+            out_value->of.char32 = raw;
+            *out_consumed = 1u;
+            return WASI_OK;
+        }
+        case 0x73u:
+            if (flat_count < 2u || flat_values[0].type != WASM_TYPE_I32 || flat_values[1].type != WASM_TYPE_I32)
+                return wasi__set_error_literal(engine, WASI_ERR_TYPE_MISMATCH, "string result requires two i32 values");
+            *out_consumed = 2u;
+            return wasi__decode_guest_string(engine,
+                                             options,
+                                             core_module,
+                                             (uint32_t)flat_values[0].of.i32,
+                                             (uint32_t)flat_values[1].of.i32,
+                                             out_value);
+        default:
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "canonical abi does not support %s yet",
+                                    wasi_component_primitive_type_string(type->opcode));
+    }
+}
+
+static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* component,
+                                                uint32_t func_type_index,
+                                                wasm_module_t* core_module,
+                                                uint32_t func_index,
+                                                const char* func_label,
+                                                const wasi__canon_runtime_options_t* options,
+                                                const wasi_value_t* args,
+                                                uint32_t num_args,
+                                                wasi_value_t* results,
+                                                uint32_t num_results) {
+    wasi_engine_t* engine;
+    wasm_valtype_t* flat_result_types = NULL;
+    wasm_value_t* flat_args = NULL;
+    wasm_value_t* flat_results = NULL;
+    wasi_value_t* lifted_results = NULL;
+    uint32_t num_flat_results = 0;
+    uint32_t flat_arg_capacity = 0;
+    uint32_t arg_cursor = 0;
+    uint32_t result_cursor = 0;
+    uint32_t i;
+    wasi_error_t err;
+    wasm_error_t wasm_err;
+
+    if (!component || !component->engine || !core_module || !func_label || !options || (!args && num_args) || (!results && num_results))
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    engine = component->engine;
+
+    if (!wasi__component_type_is_func(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component type index is not a function type");
+    if (num_args != wasi_component_func_type_param_count(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "canonical call argument count mismatch");
+    if (num_results != wasi_component_func_type_result_count(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "canonical call result count mismatch");
+
+    err = wasi__validate_func_signature(engine,
+                                        component,
+                                        func_type_index,
+                                        core_module,
+                                        func_index,
+                                        func_label,
+                                        &flat_result_types,
+                                        &num_flat_results);
+    if (err != WASI_OK) return err;
+
+    for (i = 0; i < num_args; i++) {
+        uint32_t added = 0;
+        err = wasi__flat_types_for_valtype(engine,
+                                           wasi_component_func_type_param_type(component, func_type_index, i),
+                                           NULL,
+                                           &added);
+        if (err != WASI_OK) goto cleanup;
+        flat_arg_capacity += added;
+    }
+
+    if (flat_arg_capacity) {
+        flat_args = (wasm_value_t*)WASM_CALLOC((size_t)flat_arg_capacity, sizeof(*flat_args));
+        if (!flat_args) {
+            err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canonical call arg buffer alloc failed");
+            goto cleanup;
+        }
+    }
+    if (num_flat_results) {
+        flat_results = (wasm_value_t*)WASM_CALLOC((size_t)num_flat_results, sizeof(*flat_results));
+        if (!flat_results) {
+            err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canonical call result buffer alloc failed");
+            goto cleanup;
+        }
+    }
+    if (num_results) {
+        lifted_results = (wasi_value_t*)WASM_CALLOC((size_t)num_results, sizeof(*lifted_results));
+        if (!lifted_results) {
+            err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canonical call lifted result alloc failed");
+            goto cleanup;
+        }
+    }
+
+    for (i = 0; i < num_args; i++) {
+        uint32_t produced = 0;
+        err = wasi__lower_value(engine,
+                                wasi_component_func_type_param_type(component, func_type_index, i),
+                                &args[i],
+                                core_module,
+                                options,
+                                flat_args ? flat_args + arg_cursor : NULL,
+                                &produced);
+        if (err != WASI_OK) goto cleanup;
+        arg_cursor += produced;
+    }
+
+    wasm_err = wasm_call_index(core_module,
+                               func_index,
+                               flat_args,
+                               flat_arg_capacity,
+                               flat_results,
+                               num_flat_results);
+    if (wasm_err != WASM_OK) {
+        err = wasi__set_runtime_error_from_module(engine, core_module, wasm_err, "canonical call failed");
+        goto cleanup;
+    }
+
+    for (i = 0; i < num_results; i++) {
+        uint32_t consumed = 0;
+        err = wasi__lift_value(engine,
+                               wasi_component_func_type_result_type(component, func_type_index, i),
+                               flat_results + result_cursor,
+                               num_flat_results - result_cursor,
+                               core_module,
+                               options,
+                               &lifted_results[i],
+                               &consumed);
+        if (err != WASI_OK) goto cleanup;
+        result_cursor += consumed;
+    }
+
+    if (options->has_post_return_func_index || (options->api.post_return_name && options->api.post_return_name[0])) {
+        uint32_t post_index = 0;
+        const char* post_label = options->api.post_return_name ? options->api.post_return_name : "<post-return>";
+
+        if (options->has_post_return_func_index) {
+            post_index = options->post_return_func_index;
+            post_label = "<post-return>";
+            if (post_index >= wasm_func_count(core_module)) {
+                err = wasi__set_error_literal(engine, WASI_ERR_UNDEFINED_EXPORT, "missing post-return function");
+                goto cleanup;
+            }
+        } else {
+            wasm_export_kind_t post_kind = WASM_EXPORT_FUNC;
+            if (!wasm_find_export(core_module, options->api.post_return_name, &post_kind, &post_index) || post_kind != WASM_EXPORT_FUNC) {
+                err = wasi__set_errorf(engine,
+                                       WASI_ERR_UNDEFINED_EXPORT,
+                                       "missing post-return export %s",
+                                       options->api.post_return_name);
+                goto cleanup;
+            }
+        }
+        if (wasm_func_param_count(core_module, post_index) != num_flat_results || wasm_func_result_count(core_module, post_index) != 0u) {
+            err = wasi__set_errorf(engine,
+                                   WASI_ERR_TYPE_MISMATCH,
+                                   "post-return function %s signature mismatch",
+                                   post_label);
+            goto cleanup;
+        }
+        for (i = 0; i < num_flat_results; i++) {
+            if (wasm_func_param_type(core_module, post_index, i) != flat_result_types[i]) {
+                err = wasi__set_errorf(engine,
+                                       WASI_ERR_TYPE_MISMATCH,
+                                       "post-return function %s parameter %u type mismatch",
+                                       post_label,
+                                       (unsigned)i);
+                goto cleanup;
+            }
+        }
+        wasm_err = wasm_call_index(core_module, post_index, flat_results, num_flat_results, NULL, 0u);
+        if (wasm_err != WASM_OK) {
+            err = wasi__set_runtime_error_from_module(engine, core_module, wasm_err, "post-return call failed");
+            goto cleanup;
+        }
+    }
+
+    for (i = 0; i < num_results; i++) {
+        results[i] = lifted_results[i];
+        memset(&lifted_results[i], 0, sizeof(lifted_results[i]));
+    }
+
+    err = WASI_OK;
+
+cleanup:
+    if (lifted_results) {
+        for (i = 0; i < num_results; i++) wasi_value_destroy(&lifted_results[i]);
+    }
+    WASM_FREE(lifted_results);
+    WASM_FREE(flat_args);
+    WASM_FREE(flat_results);
+    WASM_FREE(flat_result_types);
+    return err;
+}
+
+wasi_error_t wasi_canon_call(const wasi_component_t* component,
+                             uint32_t func_type_index,
+                             wasm_module_t* core_module,
+                             const char* core_export_name,
+                             const wasi_canon_options_t* options,
+                             const wasi_value_t* args,
+                             uint32_t num_args,
+                             wasi_value_t* results,
+                             uint32_t num_results) {
+    wasi_engine_t* engine;
+    wasi__canon_runtime_options_t effective_options;
+    wasm_export_kind_t kind = WASM_EXPORT_FUNC;
+    uint32_t func_index = 0;
+    wasi_error_t err;
+
+    if (!component || !component->engine || !core_module || !core_export_name || (!args && num_args) || (!results && num_results))
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    engine = component->engine;
+    wasi__clear_error(engine);
+
+    if (!wasi__component_type_is_func(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component type index is not a function type");
+    if (num_args != wasi_component_func_type_param_count(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "canonical call argument count mismatch");
+    if (num_results != wasi_component_func_type_result_count(component, func_type_index))
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "canonical call result count mismatch");
+
+    err = wasi__effective_canon_options(&effective_options, options);
+    if (err != WASI_OK) return wasi__set_error_literal(engine, err, wasi_error_string(err));
+
+    if (!wasm_find_export(core_module, core_export_name, &kind, &func_index) || kind != WASM_EXPORT_FUNC)
+        return wasi__set_errorf(engine, WASI_ERR_UNDEFINED_EXPORT, "missing core function export %s", core_export_name);
+
+    return wasi__canon_call_func_index(component,
+                                       func_type_index,
+                                       core_module,
+                                       func_index,
+                                       core_export_name,
+                                       &effective_options,
+                                       args,
+                                       num_args,
+                                       results,
+                                       num_results);
+}
+
+static int wasi__find_component_export(const wasi_component_t* component,
+                                       const char* export_name,
+                                       uint32_t* out_export_index) {
+    uint32_t i;
+
+    if (out_export_index) *out_export_index = 0;
+    if (!component || !export_name || !out_export_index) return 0;
+
+    for (i = 0; i < component->num_exports; i++) {
+        const char* name = component->exports[i].name;
+        if (name && strcmp(name, export_name) == 0) {
+            *out_export_index = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const wasi_component_canon_t* wasi__find_lift_for_defined_func(const wasi_component_t* component,
+                                                                      uint32_t defined_func_index) {
+    uint32_t i;
+
+    if (!component) return NULL;
+    for (i = 0; i < component->num_canons; i++) {
+        if (component->canons[i].kind == WASI_COMPONENT_CANON_KIND_LIFT &&
+            component->canons[i].defined_func_index == defined_func_index)
+            return &component->canons[i];
+    }
+    return NULL;
+}
+
+wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
+    wasi_instance_t* instance;
+    wasi_engine_t* engine;
+
+    if (!component || !component->engine) return NULL;
+    engine = component->engine;
+    wasi__clear_error(engine);
+
+    if (component->num_imports != 0u || component->num_core_instances != 0u || component->num_instances != 0u ||
+        component->num_aliases != 0u || component->num_nested_components != 0u || component->has_start) {
+        wasi__set_error_literal(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "wasi_instantiate currently supports only single-module components without linking or start functions");
+        return NULL;
+    }
+    if (component->num_core_modules != 1u || !component->core_modules[0].module) {
+        wasi__set_error_literal(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "wasi_instantiate currently requires exactly one embedded core module");
+        return NULL;
+    }
+
+    instance = (wasi_instance_t*)WASM_CALLOC(1, sizeof(*instance));
+    if (!instance) {
+        wasi__set_error_literal(engine, WASI_ERR_OOM, "instance alloc failed");
+        return NULL;
+    }
+
+    instance->component = component;
+    instance->core_module = component->core_modules[0].module;
+    instance->core_module_index = 0u;
+    return instance;
+}
+
+void wasi_free_instance(wasi_instance_t* instance) {
+    WASM_FREE(instance);
+}
+
+wasi_error_t wasi_call(wasi_instance_t* instance,
+                       const char* export_name,
+                       const wasi_value_t* args,
+                       uint32_t num_args,
+                       wasi_value_t* results,
+                       uint32_t num_results) {
+    const wasi_component_t* component;
+    wasi_engine_t* engine;
+    uint32_t export_index = 0;
+    uint32_t type_index = 0;
+    const wasi_component_export_t* export_;
+    const wasi_component_canon_t* canon;
+    wasi__canon_runtime_options_t options;
+    wasi_error_t err;
+
+    if (!instance || !instance->component || !export_name || (!args && num_args) || (!results && num_results))
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    component = instance->component;
+    engine = component->engine;
+    wasi__clear_error(engine);
+
+    if (!wasi__find_component_export(component, export_name, &export_index))
+        return wasi__set_errorf(engine, WASI_ERR_UNDEFINED_EXPORT, "missing component export %s", export_name);
+
+    export_ = &component->exports[export_index];
+    if (export_->kind != WASI_COMPONENT_EXTERN_KIND_FUNC)
+        return wasi__set_errorf(engine, WASI_ERR_TYPE_MISMATCH, "component export %s is not a function", export_name);
+    if (!wasi_component_export_func_type_index(component, export_index, &type_index))
+        return wasi__set_errorf(engine, WASI_ERR_TYPE_MISMATCH, "component export %s does not resolve to a function type", export_name);
+
+    canon = wasi__find_lift_for_defined_func(component, export_->index);
+    if (!canon)
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "component export %s is not backed by a supported canon lift",
+                                export_name);
+
+    err = wasi__resolve_lift_runtime_options(engine, canon, &options);
+    if (err != WASI_OK) return err;
+
+    return wasi__canon_call_func_index(component,
+                                       type_index,
+                                       instance->core_module,
+                                       canon->core_func_index,
+                                       export_name,
+                                       &options,
+                                       args,
+                                       num_args,
+                                       results,
+                                       num_results);
+}
+
 void wasi_config_default(wasi_config_t* config) {
     if (!config) return;
     memset(config, 0, sizeof(*config));
@@ -6490,6 +7898,12 @@ const char* wasi_error_string(wasi_error_t err) {
             return "unsupported binary kind";
         case WASI_ERR_NOT_IMPLEMENTED:
             return "not implemented";
+        case WASI_ERR_TYPE_MISMATCH:
+            return "type mismatch";
+        case WASI_ERR_UNDEFINED_EXPORT:
+            return "undefined export";
+        case WASI_ERR_RUNTIME:
+            return "runtime error";
         case WASI_ERR_OOM:
             return "out of memory";
         case WASI_ERR_RUNTIME_INIT:

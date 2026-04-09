@@ -82,7 +82,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 ## wasi.h Status
 
-Current `wasi.h` capabilities are intentionally limited to binary introspection and parser plumbing:
+Current `wasi.h` capabilities cover binary introspection plus the first low-level canonical ABI helpers needed for Milestone 2:
 
 - `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
 - core-vs-component detection through `wasi_detect_binary_kind`
@@ -98,8 +98,14 @@ Current `wasi.h` capabilities are intentionally limited to binary introspection 
 - structured alias and canonical-function records through `wasi_component_alias_*` and `wasi_component_canon_*`
 - extracted embedded core modules through `wasi_component_core_module_*`
 - file-relative source offsets for sections and major top-level AST records through the various `*_offset` accessors and `wasi_dump_component`
+- host-side canonical ABI values through `wasi_value_t` and `wasi_value_set_string_copy`
+- low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
+- minimal single-module instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
+- scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
+- UTF-8 and UTF-16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
+- parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
 
-`wasi.h` does not instantiate components yet. Today it is a parser/introspection surface, not an execution engine.
+`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, and a narrow instance path for simple single-module components whose exported functions are direct synchronous canon lifts.
 
 ### Memory and globals
 
