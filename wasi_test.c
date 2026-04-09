@@ -25,7 +25,7 @@ static const uint8_t wasi_test_component_with_sections[] = {
     0x00, 0x61, 0x73, 0x6D,
     0x0D, 0x00, 0x01, 0x00,
     0x00, 0x04, 0x03, 'w', 'i', 't',
-    0x02, 0x00,
+    0x02, 0x01, 0x00,
 };
 
 static const uint8_t wasi_test_component_with_core_module[] = {
@@ -50,6 +50,22 @@ static const uint8_t wasi_test_component_with_import_export[] = {
     0x01,
     0x00, 0x04, 'p', 'i', 'n', 'g',
     0x01, 0x01, 0x00,
+};
+
+static const uint8_t wasi_test_component_with_core_instances[] = {
+    0x00, 0x61, 0x73, 0x6D,
+    0x0D, 0x00, 0x01, 0x00,
+    0x02, 0x12,
+    0x02,
+    0x01,
+    0x01,
+    0x03, 'l', 'o', 'g',
+    0x00, 0x00,
+    0x00,
+    0x02,
+    0x01,
+    0x03, 'd', 'e', 'p',
+    0x12, 0x01,
 };
 
 WL_TEST(test_wasi_detects_core_modules) {
@@ -162,6 +178,11 @@ WL_TEST(test_wasi_parses_component_imports_and_exports) {
     WL_CHECK(t, strcmp(wasi_component_import_name(component, 0), "host-log") == 0);
     WL_CHECK(t, wasi_component_import_kind(component, 0) == WASI_COMPONENT_EXTERN_KIND_FUNC);
     WL_CHECK(t, wasi_component_import_type_index(component, 0) == 0u);
+    WL_CHECK(t, wasi_component_type_count(component) == 1u);
+    WL_CHECK(t, wasi_component_type_kind(component, 0) == WASI_COMPONENT_TYPE_KIND_FUNC);
+    WL_CHECK(t, strcmp(wasi_component_type_kind_string(wasi_component_type_kind(component, 0)), "func") == 0);
+    WL_CHECK(t, wasi_component_func_type_param_count(component, 0) == 0u);
+    WL_CHECK(t, wasi_component_func_type_result_count(component, 0) == 0u);
 
     WL_CHECK(t, wasi_component_export_count(component) == 1u);
     WL_CHECK(t, strcmp(wasi_component_export_name(component, 0), "ping") == 0);
@@ -170,10 +191,57 @@ WL_TEST(test_wasi_parses_component_imports_and_exports) {
     WL_CHECK(t, !wasi_component_export_has_type(component, 0));
     WL_CHECK(t, wasi_component_export_type_index(component, 0) == 0u);
     WL_CHECK(t, strcmp(wasi_component_extern_kind_string(wasi_component_export_kind(component, 0)), "func") == 0);
+    {
+        uint32_t resolved_type_index = UINT32_MAX;
+        WL_CHECK(t, !wasi_component_export_func_type_index(component, 0, &resolved_type_index));
+        WL_CHECK(t, resolved_type_index == 0u);
+    }
 
     wasi_dump_component(component, dump, sizeof(dump));
     WL_CHECK(t, strstr(dump, "import[0]: name=host-log kind=func type=0") != NULL);
     WL_CHECK(t, strstr(dump, "export[0]: name=ping kind=func index=1") != NULL);
+
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_parses_component_core_instances) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    char dump[512];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_core_instances,
+                          sizeof(wasi_test_component_with_core_instances));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    WL_CHECK(t, wasi_component_core_instance_count(component) == 2u);
+    WL_CHECK(t, wasi_component_core_instance_kind(component, 0) == WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS);
+    WL_CHECK(t, strcmp(wasi_component_core_instance_kind_string(wasi_component_core_instance_kind(component, 0)),
+                       "from-exports") == 0);
+    WL_CHECK(t, wasi_component_core_instance_export_count(component, 0) == 1u);
+    WL_CHECK(t, strcmp(wasi_component_core_instance_export_name(component, 0, 0), "log") == 0);
+    WL_CHECK(t, wasi_component_core_instance_export_kind(component, 0, 0) == WASM_EXPORT_FUNC);
+    WL_CHECK(t, wasi_component_core_instance_export_index(component, 0, 0) == 0u);
+
+    WL_CHECK(t, wasi_component_core_instance_kind(component, 1) == WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE);
+    WL_CHECK(t, wasi_component_core_instance_module_index(component, 1) == 2u);
+    WL_CHECK(t, wasi_component_core_instance_arg_count(component, 1) == 1u);
+    WL_CHECK(t, strcmp(wasi_component_core_instance_arg_name(component, 1, 0), "dep") == 0);
+    WL_CHECK(t, wasi_component_core_instance_arg_kind(component, 1, 0) == 0x12u);
+    WL_CHECK(t, strcmp(wasi_component_core_sort_string(wasi_component_core_instance_arg_kind(component, 1, 0)),
+                       "instance") == 0);
+    WL_CHECK(t, wasi_component_core_instance_arg_index(component, 1, 0) == 1u);
+
+    wasi_dump_component(component, dump, sizeof(dump));
+    WL_CHECK(t, strstr(dump, "core-instance[0]: kind=from-exports exports=1") != NULL);
+    WL_CHECK(t, strstr(dump, "core-instance-export[0,0]: name=log kind=func index=0") != NULL);
+    WL_CHECK(t, strstr(dump, "core-instance[1]: kind=instantiate module=2 args=1") != NULL);
+    WL_CHECK(t, strstr(dump, "core-instance-arg[1,0]: name=dep kind=instance index=1") != NULL);
 
     wasi_free_component(component);
     wasi_destroy(&engine);
@@ -205,6 +273,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_loads_component_section_framing),
         WL_TEST_CASE(test_wasi_extracts_embedded_core_modules),
         WL_TEST_CASE(test_wasi_parses_component_imports_and_exports),
+        WL_TEST_CASE(test_wasi_parses_component_core_instances),
         WL_TEST_CASE(test_wasi_rejects_bad_magic),
     };
 

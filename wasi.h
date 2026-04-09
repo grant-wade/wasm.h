@@ -56,6 +56,51 @@ typedef enum wasi_component_extern_kind_t {
     WASI_COMPONENT_EXTERN_KIND_UNKNOWN = 255,
 } wasi_component_extern_kind_t;
 
+typedef enum wasi_component_type_kind_t {
+    WASI_COMPONENT_TYPE_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_TYPE_KIND_FUNC,
+} wasi_component_type_kind_t;
+
+typedef enum wasi_component_alias_kind_t {
+    WASI_COMPONENT_ALIAS_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT,
+} wasi_component_alias_kind_t;
+
+typedef enum wasi_component_core_instance_kind_t {
+    WASI_COMPONENT_CORE_INSTANCE_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE,
+    WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS,
+} wasi_component_core_instance_kind_t;
+
+typedef enum wasi_component_canon_kind_t {
+    WASI_COMPONENT_CANON_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_CANON_KIND_LIFT,
+    WASI_COMPONENT_CANON_KIND_LOWER,
+} wasi_component_canon_kind_t;
+
+typedef struct wasi_component_named_type_t {
+    char* name;
+    uint8_t type_code;
+} wasi_component_named_type_t;
+
+typedef struct wasi_component_func_type_t {
+    wasi_component_named_type_t* params;
+    uint32_t num_params;
+    uint32_t params_capacity;
+    wasi_component_named_type_t* results;
+    uint32_t num_results;
+    uint32_t results_capacity;
+} wasi_component_func_type_t;
+
+typedef struct wasi_component_type_t {
+    wasi_component_type_kind_t kind;
+    wasi_component_func_type_t func;
+} wasi_component_type_t;
+
+typedef struct wasi_component_func_t {
+    uint32_t type_index;
+} wasi_component_func_t;
+
 typedef struct wasi_component_import_t {
     char* name;
     uint8_t name_kind;
@@ -71,6 +116,56 @@ typedef struct wasi_component_export_t {
     int has_type;
     uint32_t type_index;
 } wasi_component_export_t;
+
+typedef struct wasi_component_alias_t {
+    wasi_component_alias_kind_t kind;
+    wasm_export_kind_t core_export_kind;
+    uint32_t instance_index;
+    uint8_t name_kind;
+    char* name;
+} wasi_component_alias_t;
+
+typedef struct wasi_component_core_instance_export_t {
+    char* name;
+    wasm_export_kind_t kind;
+    uint32_t index;
+} wasi_component_core_instance_export_t;
+
+typedef struct wasi_component_core_instantiation_arg_t {
+    char* name;
+    uint8_t kind;
+    uint32_t index;
+} wasi_component_core_instantiation_arg_t;
+
+typedef struct wasi_component_core_instance_t {
+    wasi_component_core_instance_kind_t kind;
+    uint32_t module_index;
+    wasi_component_core_instance_export_t* exports;
+    uint32_t num_exports;
+    uint32_t exports_capacity;
+    wasi_component_core_instantiation_arg_t* args;
+    uint32_t num_args;
+    uint32_t args_capacity;
+} wasi_component_core_instance_t;
+
+typedef struct wasi_component_canon_option_t {
+    uint8_t code;
+    int has_index;
+    uint32_t index;
+} wasi_component_canon_option_t;
+
+typedef struct wasi_component_canon_t {
+    wasi_component_canon_kind_t kind;
+    uint8_t async_flag;
+    uint32_t func_index;
+    uint32_t core_func_index;
+    int has_type_index;
+    uint32_t type_index;
+    uint32_t defined_func_index;
+    wasi_component_canon_option_t* options;
+    uint32_t num_options;
+    uint32_t options_capacity;
+} wasi_component_canon_t;
 
 typedef struct wasi_component_section_t {
     uint8_t id;
@@ -109,12 +204,27 @@ typedef struct wasi_component_t {
     wasi_component_section_t* sections;
     uint32_t num_sections;
     uint32_t sections_capacity;
+    wasi_component_type_t* types;
+    uint32_t num_types;
+    uint32_t types_capacity;
     wasi_component_import_t* imports;
     uint32_t num_imports;
     uint32_t imports_capacity;
     wasi_component_export_t* exports;
     uint32_t num_exports;
     uint32_t exports_capacity;
+    wasi_component_alias_t* aliases;
+    uint32_t num_aliases;
+    uint32_t aliases_capacity;
+    wasi_component_core_instance_t* core_instances;
+    uint32_t num_core_instances;
+    uint32_t core_instances_capacity;
+    wasi_component_canon_t* canons;
+    uint32_t num_canons;
+    uint32_t canons_capacity;
+    wasi_component_func_t* funcs;
+    uint32_t num_funcs;
+    uint32_t funcs_capacity;
     wasi_component_core_module_t* core_modules;
     uint32_t num_core_modules;
     uint32_t core_modules_capacity;
@@ -135,6 +245,14 @@ uint32_t wasi_component_section_count(const wasi_component_t* component);
 uint8_t wasi_component_section_id(const wasi_component_t* component, uint32_t index);
 size_t wasi_component_section_size(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_section_name(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_type_count(const wasi_component_t* component);
+wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index);
+uint32_t wasi_component_func_type_param_count(const wasi_component_t* component, uint32_t type_index);
+const char* wasi_component_func_type_param_name(const wasi_component_t* component, uint32_t type_index, uint32_t param_index);
+uint8_t wasi_component_func_type_param_code(const wasi_component_t* component, uint32_t type_index, uint32_t param_index);
+uint32_t wasi_component_func_type_result_count(const wasi_component_t* component, uint32_t type_index);
+const char* wasi_component_func_type_result_name(const wasi_component_t* component, uint32_t type_index, uint32_t result_index);
+uint8_t wasi_component_func_type_result_code(const wasi_component_t* component, uint32_t type_index, uint32_t result_index);
 uint32_t wasi_component_import_count(const wasi_component_t* component);
 const char* wasi_component_import_name(const wasi_component_t* component, uint32_t index);
 wasi_component_extern_kind_t wasi_component_import_kind(const wasi_component_t* component, uint32_t index);
@@ -145,12 +263,48 @@ wasi_component_extern_kind_t wasi_component_export_kind(const wasi_component_t* 
 uint32_t wasi_component_export_index(const wasi_component_t* component, uint32_t index);
 int wasi_component_export_has_type(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_export_type_index(const wasi_component_t* component, uint32_t index);
+int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index);
+uint32_t wasi_component_alias_count(const wasi_component_t* component);
+wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* component, uint32_t index);
+wasm_export_kind_t wasi_component_alias_core_export_kind(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_alias_instance_index(const wasi_component_t* component, uint32_t index);
+const char* wasi_component_alias_name(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_instance_count(const wasi_component_t* component);
+wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_instance_module_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_instance_export_count(const wasi_component_t* component, uint32_t instance_index);
+const char* wasi_component_core_instance_export_name(const wasi_component_t* component, uint32_t instance_index, uint32_t export_index);
+wasm_export_kind_t wasi_component_core_instance_export_kind(const wasi_component_t* component, uint32_t instance_index, uint32_t export_index);
+uint32_t wasi_component_core_instance_export_index(const wasi_component_t* component, uint32_t instance_index, uint32_t export_index);
+uint32_t wasi_component_core_instance_arg_count(const wasi_component_t* component, uint32_t instance_index);
+const char* wasi_component_core_instance_arg_name(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
+uint8_t wasi_component_core_instance_arg_kind(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
+uint32_t wasi_component_core_instance_arg_index(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
+uint32_t wasi_component_canon_count(const wasi_component_t* component);
+wasi_component_canon_kind_t wasi_component_canon_kind(const wasi_component_t* component, uint32_t index);
+uint8_t wasi_component_canon_async_flag(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_canon_func_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_canon_core_func_index(const wasi_component_t* component, uint32_t index);
+int wasi_component_canon_has_type_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_canon_type_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_canon_defined_func_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_canon_option_count(const wasi_component_t* component, uint32_t index);
+uint8_t wasi_component_canon_option_code(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index);
+int wasi_component_canon_option_has_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index);
+uint32_t wasi_component_canon_option_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index);
 uint32_t wasi_component_core_module_count(const wasi_component_t* component);
 wasm_module_t* wasi_component_core_module_at(const wasi_component_t* component, uint32_t index);
 wasm_error_t wasi_component_core_module_error(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_core_module_error_message(const wasi_component_t* component, uint32_t index);
 void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t buffer_size);
 const char* wasi_component_extern_kind_string(wasi_component_extern_kind_t kind);
+const char* wasi_component_type_kind_string(wasi_component_type_kind_t kind);
+const char* wasi_component_primitive_type_string(uint8_t type_code);
+const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind);
+const char* wasi_component_core_instance_kind_string(wasi_component_core_instance_kind_t kind);
+const char* wasi_component_core_sort_string(uint8_t sort);
+const char* wasi_component_canon_kind_string(wasi_component_canon_kind_t kind);
+const char* wasi_component_core_export_kind_string(wasm_export_kind_t kind);
 const char* wasi_error_string(wasi_error_t err);
 const char* wasi_component_status_string(wasi_component_status_t status);
 
@@ -325,10 +479,104 @@ static int wasi__read_component_name(wasi__reader_t* reader,
     return 1;
 }
 
+static int wasi__read_component_plain_name(wasi__reader_t* reader, char** out_name) {
+    uint32_t name_len;
+
+    if (out_name) *out_name = NULL;
+    if (!reader || !out_name) return 0;
+
+    name_len = wasi__read_leb128_u32(reader);
+    if (reader->malformed || !wasi__has(reader, (size_t)name_len)) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    *out_name = wasi__dup_name_bytes(reader->ptr, (size_t)name_len);
+    if (!*out_name) {
+        reader->malformed = 1;
+        return 0;
+    }
+    reader->ptr += name_len;
+    return 1;
+}
+
+static int wasi__canon_option_has_immediate(uint8_t option) {
+    return option == 0x03 || option == 0x04 || option == 0x05;
+}
+
+static void wasi__component_core_instance_release(wasi_component_core_instance_t* instance) {
+    uint32_t i;
+
+    if (!instance) return;
+
+    for (i = 0; i < instance->num_exports; i++) {
+        WASM_FREE(instance->exports[i].name);
+    }
+    WASM_FREE(instance->exports);
+    instance->exports = NULL;
+    instance->num_exports = 0;
+    instance->exports_capacity = 0;
+
+    for (i = 0; i < instance->num_args; i++) {
+        WASM_FREE(instance->args[i].name);
+    }
+    WASM_FREE(instance->args);
+    instance->args = NULL;
+    instance->num_args = 0;
+    instance->args_capacity = 0;
+    instance->module_index = UINT32_MAX;
+    instance->kind = WASI_COMPONENT_CORE_INSTANCE_KIND_UNKNOWN;
+}
+
 static void wasi__component_release_storage(wasi_component_t* component) {
     uint32_t i;
 
     if (!component) return;
+
+    for (i = 0; i < component->num_aliases; i++) {
+        WASM_FREE(component->aliases[i].name);
+    }
+    WASM_FREE(component->aliases);
+    component->aliases = NULL;
+    component->num_aliases = 0;
+    component->aliases_capacity = 0;
+
+    for (i = 0; i < component->num_core_instances; i++) {
+        wasi__component_core_instance_release(&component->core_instances[i]);
+    }
+    WASM_FREE(component->core_instances);
+    component->core_instances = NULL;
+    component->num_core_instances = 0;
+    component->core_instances_capacity = 0;
+
+    for (i = 0; i < component->num_canons; i++) {
+        WASM_FREE(component->canons[i].options);
+    }
+    WASM_FREE(component->canons);
+    component->canons = NULL;
+    component->num_canons = 0;
+    component->canons_capacity = 0;
+
+    for (i = 0; i < component->num_types; i++) {
+        uint32_t j;
+        for (j = 0; j < component->types[i].func.num_params; j++) {
+            WASM_FREE(component->types[i].func.params[j].name);
+        }
+        WASM_FREE(component->types[i].func.params);
+        for (j = 0; j < component->types[i].func.num_results; j++) {
+            WASM_FREE(component->types[i].func.results[j].name);
+        }
+        WASM_FREE(component->types[i].func.results);
+    }
+    WASM_FREE(component->types);
+    component->types = NULL;
+    component->num_types = 0;
+    component->types_capacity = 0;
+
+    WASM_FREE(component->funcs);
+    component->funcs = NULL;
+    component->num_funcs = 0;
+    component->funcs_capacity = 0;
 
     for (i = 0; i < component->num_imports; i++) {
         WASM_FREE(component->imports[i].name);
@@ -365,6 +613,75 @@ static void wasi__component_release_storage(wasi_component_t* component) {
     WASM_FREE(component->bytes);
     component->bytes = NULL;
     component->size = 0;
+}
+
+static wasi_error_t wasi__func_type_append_named(wasi_component_named_type_t** items,
+                                                 uint32_t* count,
+                                                 uint32_t* capacity,
+                                                 char* name,
+                                                 uint8_t type_code) {
+    wasi_component_named_type_t* grown;
+    size_t next_capacity;
+    wasi_component_named_type_t* entry;
+
+    if (!items || !count || !capacity) {
+        WASM_FREE(name);
+        return WASI_ERR_INVALID_ARGUMENT;
+    }
+
+    if (*count == *capacity) {
+        next_capacity = *capacity ? (size_t)(*capacity) * 2u : 4u;
+        grown = (wasi_component_named_type_t*)WASM_REALLOC(*items, next_capacity * sizeof(*grown));
+        if (!grown) {
+            WASM_FREE(name);
+            return WASI_ERR_OOM;
+        }
+        *items = grown;
+        *capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &(*items)[(*count)++];
+    memset(entry, 0, sizeof(*entry));
+    entry->name = name;
+    entry->type_code = type_code;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_type(wasi_component_t* component, const wasi_component_type_t* type) {
+    wasi_component_type_t* grown;
+    size_t next_capacity;
+
+    if (!component || !type) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (component->num_types == component->types_capacity) {
+        next_capacity = component->types_capacity ? (size_t)component->types_capacity * 2u : 4u;
+        grown = (wasi_component_type_t*)WASM_REALLOC(component->types, next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        component->types = grown;
+        component->types_capacity = (uint32_t)next_capacity;
+    }
+
+    component->types[component->num_types++] = *type;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_func(wasi_component_t* component, uint32_t type_index) {
+    wasi_component_func_t* grown;
+    size_t next_capacity;
+
+    if (!component) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (component->num_funcs == component->funcs_capacity) {
+        next_capacity = component->funcs_capacity ? (size_t)component->funcs_capacity * 2u : 4u;
+        grown = (wasi_component_func_t*)WASM_REALLOC(component->funcs, next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        component->funcs = grown;
+        component->funcs_capacity = (uint32_t)next_capacity;
+    }
+
+    component->funcs[component->num_funcs].type_index = type_index;
+    component->num_funcs++;
+    return WASI_OK;
 }
 
 static wasi_error_t wasi__component_append_core_module(wasi_component_t* component,
@@ -470,6 +787,172 @@ static wasi_error_t wasi__component_append_export(wasi_component_t* component,
     entry->index = index;
     entry->has_type = has_type;
     entry->type_index = type_index;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_alias(wasi_component_t* component,
+                                                 wasi_component_alias_kind_t kind,
+                                                 wasm_export_kind_t core_export_kind,
+                                                 uint32_t instance_index,
+                                                 uint8_t name_kind,
+                                                 char* name) {
+    wasi_component_alias_t* grown;
+    size_t next_capacity;
+    wasi_component_alias_t* entry;
+
+    if (!component || !name) {
+        WASM_FREE(name);
+        return WASI_ERR_INVALID_ARGUMENT;
+    }
+
+    if (component->num_aliases == component->aliases_capacity) {
+        next_capacity = component->aliases_capacity ? (size_t)component->aliases_capacity * 2u : 4u;
+        grown = (wasi_component_alias_t*)WASM_REALLOC(component->aliases, next_capacity * sizeof(*grown));
+        if (!grown) {
+            WASM_FREE(name);
+            return WASI_ERR_OOM;
+        }
+        component->aliases = grown;
+        component->aliases_capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &component->aliases[component->num_aliases++];
+    memset(entry, 0, sizeof(*entry));
+    entry->kind = kind;
+    entry->core_export_kind = core_export_kind;
+    entry->instance_index = instance_index;
+    entry->name_kind = name_kind;
+    entry->name = name;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_core_instance_append_export(wasi_component_core_instance_t* instance,
+                                                                char* name,
+                                                                wasm_export_kind_t kind,
+                                                                uint32_t index) {
+    wasi_component_core_instance_export_t* grown;
+    size_t next_capacity;
+    wasi_component_core_instance_export_t* entry;
+
+    if (!instance || !name) {
+        WASM_FREE(name);
+        return WASI_ERR_INVALID_ARGUMENT;
+    }
+
+    if (instance->num_exports == instance->exports_capacity) {
+        next_capacity = instance->exports_capacity ? (size_t)instance->exports_capacity * 2u : 4u;
+        grown = (wasi_component_core_instance_export_t*)WASM_REALLOC(instance->exports,
+                                                                     next_capacity * sizeof(*grown));
+        if (!grown) {
+            WASM_FREE(name);
+            return WASI_ERR_OOM;
+        }
+        instance->exports = grown;
+        instance->exports_capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &instance->exports[instance->num_exports++];
+    memset(entry, 0, sizeof(*entry));
+    entry->name = name;
+    entry->kind = kind;
+    entry->index = index;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_core_instance_append_arg(wasi_component_core_instance_t* instance,
+                                                             char* name,
+                                                             uint8_t kind,
+                                                             uint32_t index) {
+    wasi_component_core_instantiation_arg_t* grown;
+    size_t next_capacity;
+    wasi_component_core_instantiation_arg_t* entry;
+
+    if (!instance || !name) {
+        WASM_FREE(name);
+        return WASI_ERR_INVALID_ARGUMENT;
+    }
+
+    if (instance->num_args == instance->args_capacity) {
+        next_capacity = instance->args_capacity ? (size_t)instance->args_capacity * 2u : 4u;
+        grown = (wasi_component_core_instantiation_arg_t*)WASM_REALLOC(instance->args,
+                                                                       next_capacity * sizeof(*grown));
+        if (!grown) {
+            WASM_FREE(name);
+            return WASI_ERR_OOM;
+        }
+        instance->args = grown;
+        instance->args_capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &instance->args[instance->num_args++];
+    memset(entry, 0, sizeof(*entry));
+    entry->name = name;
+    entry->kind = kind;
+    entry->index = index;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_core_instance(wasi_component_t* component,
+                                                         const wasi_component_core_instance_t* instance) {
+    wasi_component_core_instance_t* grown;
+    size_t next_capacity;
+
+    if (!component || !instance) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (component->num_core_instances == component->core_instances_capacity) {
+        next_capacity = component->core_instances_capacity ? (size_t)component->core_instances_capacity * 2u : 4u;
+        grown = (wasi_component_core_instance_t*)WASM_REALLOC(component->core_instances,
+                                                              next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        component->core_instances = grown;
+        component->core_instances_capacity = (uint32_t)next_capacity;
+    }
+
+    component->core_instances[component->num_core_instances++] = *instance;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__canon_append_option(wasi_component_canon_t* canon,
+                                              uint8_t code,
+                                              int has_index,
+                                              uint32_t index) {
+    wasi_component_canon_option_t* grown;
+    size_t next_capacity;
+    wasi_component_canon_option_t* entry;
+
+    if (!canon) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (canon->num_options == canon->options_capacity) {
+        next_capacity = canon->options_capacity ? (size_t)canon->options_capacity * 2u : 4u;
+        grown = (wasi_component_canon_option_t*)WASM_REALLOC(canon->options, next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        canon->options = grown;
+        canon->options_capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &canon->options[canon->num_options++];
+    entry->code = code;
+    entry->has_index = has_index;
+    entry->index = index;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_canon(wasi_component_t* component,
+                                                 const wasi_component_canon_t* canon) {
+    wasi_component_canon_t* grown;
+    size_t next_capacity;
+
+    if (!component || !canon) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (component->num_canons == component->canons_capacity) {
+        next_capacity = component->canons_capacity ? (size_t)component->canons_capacity * 2u : 4u;
+        grown = (wasi_component_canon_t*)WASM_REALLOC(component->canons, next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        component->canons = grown;
+        component->canons_capacity = (uint32_t)next_capacity;
+    }
+
+    component->canons[component->num_canons++] = *canon;
     return WASI_OK;
 }
 
@@ -645,10 +1128,508 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
                                            err == WASI_ERR_OOM ? "component import alloc failed"
                                                                : wasi_error_string(err));
         }
+        if (kind == WASI_COMPONENT_EXTERN_KIND_FUNC) {
+            err = wasi__component_append_func(component, type_index);
+            if (err != WASI_OK) {
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "component func alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        }
     }
 
     if (reader.ptr != reader.end) {
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in component import section");
+    }
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__parse_component_types(wasi_engine_t* engine,
+                                                wasi_component_t* component,
+                                                const wasi_component_section_t* section) {
+    wasi__reader_t reader;
+    uint32_t count;
+    uint32_t i;
+
+    reader.ptr = component->bytes + section->payload_offset;
+    reader.end = reader.ptr + section->payload_size;
+    reader.malformed = 0;
+    count = wasi__read_leb128_u32(&reader);
+    if (reader.malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type section");
+    }
+
+    for (i = 0; i < count; i++) {
+        wasi_component_type_t type;
+        uint8_t opcode;
+        wasi_error_t err;
+        uint32_t j;
+
+        memset(&type, 0, sizeof(type));
+        opcode = wasi__read_u8(&reader);
+        if (reader.malformed) {
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type entry");
+        }
+
+        if (opcode != 0x40) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "component type opcode 0x%02x not implemented",
+                                    (unsigned)opcode);
+        }
+
+        type.kind = WASI_COMPONENT_TYPE_KIND_FUNC;
+        {
+            uint32_t param_count = wasi__read_leb128_u32(&reader);
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func param count");
+            }
+            for (j = 0; j < param_count; j++) {
+                char* name = NULL;
+                uint8_t type_code;
+
+                if (!wasi__read_component_plain_name(&reader, &name)) {
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func param name");
+                }
+                type_code = wasi__read_u8(&reader);
+                if (reader.malformed) {
+                    WASM_FREE(name);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func param type");
+                }
+                err = wasi__func_type_append_named(&type.func.params,
+                                                   &type.func.num_params,
+                                                   &type.func.params_capacity,
+                                                   name,
+                                                   type_code);
+                if (err != WASI_OK) {
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "component func param alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
+        }
+
+        {
+            uint8_t result_tag = wasi__read_u8(&reader);
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func result tag");
+            }
+            if (result_tag == 0x00) {
+                uint8_t type_code = wasi__read_u8(&reader);
+                if (reader.malformed) {
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component func result type");
+                }
+                err = wasi__func_type_append_named(&type.func.results,
+                                                   &type.func.num_results,
+                                                   &type.func.results_capacity,
+                                                   NULL,
+                                                   type_code);
+                if (err != WASI_OK) {
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "component func result alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            } else if (result_tag == 0x01) {
+                uint32_t result_count = wasi__read_leb128_u32(&reader);
+                if (reader.malformed) {
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component named result count");
+                }
+                for (j = 0; j < result_count; j++) {
+                    char* name = NULL;
+                    uint8_t type_code;
+
+                    if (!wasi__read_component_plain_name(&reader, &name)) {
+                        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component named result name");
+                    }
+                    type_code = wasi__read_u8(&reader);
+                    if (reader.malformed) {
+                        WASM_FREE(name);
+                        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component named result type");
+                    }
+                    err = wasi__func_type_append_named(&type.func.results,
+                                                       &type.func.num_results,
+                                                       &type.func.results_capacity,
+                                                       name,
+                                                       type_code);
+                    if (err != WASI_OK) {
+                        return wasi__set_error_literal(engine,
+                                                       err,
+                                                       err == WASI_ERR_OOM ? "component named result alloc failed"
+                                                                           : wasi_error_string(err));
+                    }
+                }
+            } else {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_NOT_IMPLEMENTED,
+                                        "component func result tag 0x%02x not implemented",
+                                        (unsigned)result_tag);
+            }
+        }
+
+        err = wasi__component_append_type(component, &type);
+        if (err != WASI_OK) {
+            return wasi__set_error_literal(engine,
+                                           err,
+                                           err == WASI_ERR_OOM ? "component type alloc failed"
+                                                               : wasi_error_string(err));
+        }
+    }
+
+    if (reader.ptr != reader.end) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in component type section");
+    }
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
+                                                  wasi_component_t* component,
+                                                  const wasi_component_section_t* section) {
+    wasi__reader_t reader;
+    uint32_t count;
+    uint32_t i;
+
+    reader.ptr = component->bytes + section->payload_offset;
+    reader.end = reader.ptr + section->payload_size;
+    reader.malformed = 0;
+    count = wasi__read_leb128_u32(&reader);
+    if (reader.malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component alias section");
+    }
+
+    for (i = 0; i < count; i++) {
+        uint8_t sort = wasi__read_u8(&reader);
+        if (reader.malformed) {
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component alias entry");
+        }
+        if (sort == 0x00) {
+            uint8_t kind_byte = wasi__read_u8(&reader);
+            uint32_t instance_index = wasi__read_leb128_u32(&reader);
+            uint8_t name_kind = 0;
+            char* name = NULL;
+            wasi_error_t err;
+
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export alias header");
+            }
+            if (!wasi__read_component_name(&reader, &name_kind, &name)) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export alias name");
+            }
+            err = wasi__component_append_alias(component,
+                                               WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT,
+                                               (wasm_export_kind_t)kind_byte,
+                                               instance_index,
+                                               name_kind,
+                                               name);
+            if (err != WASI_OK) {
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "component alias alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        } else {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "component alias sort 0x%02x not implemented",
+                                    (unsigned)sort);
+        }
+    }
+
+    if (reader.ptr != reader.end) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in component alias section");
+    }
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__parse_component_core_instances(wasi_engine_t* engine,
+                                                         wasi_component_t* component,
+                                                         const wasi_component_section_t* section) {
+    wasi__reader_t reader;
+    uint32_t count;
+    uint32_t i;
+
+    reader.ptr = component->bytes + section->payload_offset;
+    reader.end = reader.ptr + section->payload_size;
+    reader.malformed = 0;
+    count = wasi__read_leb128_u32(&reader);
+    if (reader.malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance section");
+    }
+
+    for (i = 0; i < count; i++) {
+        uint8_t opcode = wasi__read_u8(&reader);
+        wasi_component_core_instance_t instance;
+        wasi_error_t err;
+        memset(&instance, 0, sizeof(instance));
+        instance.module_index = UINT32_MAX;
+        if (reader.malformed) {
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance opcode");
+        }
+
+        if (opcode == 0x00) {
+            uint32_t arg_count;
+            uint32_t arg_index;
+            instance.kind = WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE;
+            instance.module_index = wasi__read_leb128_u32(&reader);
+            arg_count = wasi__read_leb128_u32(&reader);
+            if (reader.malformed) {
+                wasi__component_core_instance_release(&instance);
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instantiation header");
+            }
+            for (arg_index = 0; arg_index < arg_count; arg_index++) {
+                char* name = NULL;
+                uint8_t sort;
+                uint32_t index;
+
+                if (!wasi__read_component_plain_name(&reader, &name)) {
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instantiation arg name");
+                }
+                sort = wasi__read_u8(&reader);
+                index = wasi__read_leb128_u32(&reader);
+                if (reader.malformed) {
+                    WASM_FREE(name);
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instantiation arg descriptor");
+                }
+                err = wasi__component_core_instance_append_arg(&instance, name, sort, index);
+                if (err != WASI_OK) {
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "core instantiation arg alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
+        } else if (opcode == 0x01) {
+            uint32_t export_count;
+            uint32_t export_index;
+            instance.kind = WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS;
+            export_count = wasi__read_leb128_u32(&reader);
+            if (reader.malformed) {
+                wasi__component_core_instance_release(&instance);
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export count");
+            }
+            for (export_index = 0; export_index < export_count; export_index++) {
+                char* name = NULL;
+                uint8_t kind_byte;
+                uint32_t index;
+
+                if (!wasi__read_component_plain_name(&reader, &name)) {
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export name");
+                }
+                kind_byte = wasi__read_u8(&reader);
+                index = wasi__read_leb128_u32(&reader);
+                if (reader.malformed) {
+                    WASM_FREE(name);
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export descriptor");
+                }
+                err = wasi__component_core_instance_append_export(&instance,
+                                                                 name,
+                                                                 (wasm_export_kind_t)kind_byte,
+                                                                 index);
+                if (err != WASI_OK) {
+                    wasi__component_core_instance_release(&instance);
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "core instance export alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
+        } else {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "core instance opcode 0x%02x not implemented",
+                                    (unsigned)opcode);
+        }
+
+        err = wasi__component_append_core_instance(component, &instance);
+        if (err != WASI_OK) {
+            wasi__component_core_instance_release(&instance);
+            return wasi__set_error_literal(engine,
+                                           err,
+                                           err == WASI_ERR_OOM ? "core instance alloc failed"
+                                                               : wasi_error_string(err));
+        }
+    }
+
+    if (reader.ptr != reader.end) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in core instance section");
+    }
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
+                                                wasi_component_t* component,
+                                                const wasi_component_section_t* section) {
+    wasi__reader_t reader;
+    uint32_t count;
+    uint32_t i;
+
+    reader.ptr = component->bytes + section->payload_offset;
+    reader.end = reader.ptr + section->payload_size;
+    reader.malformed = 0;
+    count = wasi__read_leb128_u32(&reader);
+    if (reader.malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canonical function section");
+    }
+
+    for (i = 0; i < count; i++) {
+        uint8_t opcode = wasi__read_u8(&reader);
+        wasi_component_canon_t canon;
+        if (reader.malformed) {
+            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canonical function opcode");
+        }
+        memset(&canon, 0, sizeof(canon));
+        canon.func_index = UINT32_MAX;
+        canon.core_func_index = UINT32_MAX;
+        canon.type_index = UINT32_MAX;
+        canon.defined_func_index = UINT32_MAX;
+        if (opcode == 0x00) {
+            uint8_t async_flag = wasi__read_u8(&reader);
+            uint32_t core_func_index = wasi__read_leb128_u32(&reader);
+            uint32_t option_count = wasi__read_leb128_u32(&reader);
+            uint32_t type_index;
+            uint32_t opt;
+            wasi_error_t err;
+            canon.kind = WASI_COMPONENT_CANON_KIND_LIFT;
+            canon.async_flag = async_flag;
+            canon.core_func_index = core_func_index;
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lift header");
+            }
+            for (opt = 0; opt < option_count; opt++) {
+                uint8_t option = wasi__read_u8(&reader);
+                uint32_t immediate = 0;
+                if (reader.malformed) {
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lift option");
+                }
+                switch (option) {
+                    case 0x00:
+                    case 0x01:
+                    case 0x02:
+                        break;
+                    case 0x03:
+                    case 0x04:
+                    case 0x05:
+                        immediate = wasi__read_leb128_u32(&reader);
+                        if (reader.malformed) {
+                            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lift option immediate");
+                        }
+                        break;
+                    default:
+                        return wasi__set_errorf(engine,
+                                                WASI_ERR_NOT_IMPLEMENTED,
+                                                "canonical option 0x%02x not implemented",
+                                                (unsigned)option);
+                }
+                err = wasi__canon_append_option(&canon,
+                                               option,
+                                               wasi__canon_option_has_immediate(option),
+                                               immediate);
+                if (err != WASI_OK) {
+                    WASM_FREE(canon.options);
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "canonical option alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
+            type_index = wasi__read_leb128_u32(&reader);
+            if (reader.malformed) {
+                WASM_FREE(canon.options);
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lift type index");
+            }
+            canon.has_type_index = 1;
+            canon.type_index = type_index;
+            canon.defined_func_index = component->num_funcs;
+            err = wasi__component_append_func(component, type_index);
+            if (err != WASI_OK) {
+                WASM_FREE(canon.options);
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "component func alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+            err = wasi__component_append_canon(component, &canon);
+            if (err != WASI_OK) {
+                WASM_FREE(canon.options);
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "canonical record alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        } else if (opcode == 0x01) {
+            uint8_t async_flag = wasi__read_u8(&reader);
+            uint32_t func_index = wasi__read_leb128_u32(&reader);
+            uint32_t option_count = wasi__read_leb128_u32(&reader);
+            uint32_t opt;
+            wasi_error_t err;
+            canon.kind = WASI_COMPONENT_CANON_KIND_LOWER;
+            canon.async_flag = async_flag;
+            canon.func_index = func_index;
+            if (reader.malformed) {
+                return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lower header");
+            }
+            for (opt = 0; opt < option_count; opt++) {
+                uint8_t option = wasi__read_u8(&reader);
+                uint32_t immediate = 0;
+                if (reader.malformed) {
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lower option");
+                }
+                switch (option) {
+                    case 0x00:
+                    case 0x01:
+                    case 0x02:
+                        break;
+                    case 0x03:
+                    case 0x04:
+                    case 0x05:
+                        immediate = wasi__read_leb128_u32(&reader);
+                        if (reader.malformed) {
+                            return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lower option immediate");
+                        }
+                        break;
+                    default:
+                        return wasi__set_errorf(engine,
+                                                WASI_ERR_NOT_IMPLEMENTED,
+                                                "canonical option 0x%02x not implemented",
+                                                (unsigned)option);
+                }
+                err = wasi__canon_append_option(&canon,
+                                               option,
+                                               wasi__canon_option_has_immediate(option),
+                                               immediate);
+                if (err != WASI_OK) {
+                    WASM_FREE(canon.options);
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "canonical option alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
+            err = wasi__component_append_canon(component, &canon);
+            if (err != WASI_OK) {
+                WASM_FREE(canon.options);
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "canonical record alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        } else {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "canonical opcode 0x%02x not implemented",
+                                    (unsigned)opcode);
+        }
+    }
+
+    if (reader.ptr != reader.end) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in canonical function section");
     }
     return WASI_OK;
 }
@@ -728,8 +1709,16 @@ static wasi_error_t wasi__parse_component_interfaces(wasi_engine_t* engine, wasi
 
         if (section->id == 10)
             err = wasi__parse_component_imports(engine, component, section);
+        else if (section->id == 2)
+            err = wasi__parse_component_core_instances(engine, component, section);
         else if (section->id == 11)
             err = wasi__parse_component_exports(engine, component, section);
+        else if (section->id == 7)
+            err = wasi__parse_component_types(engine, component, section);
+        else if (section->id == 8)
+            err = wasi__parse_component_canon(engine, component, section);
+        else if (section->id == 6)
+            err = wasi__parse_component_aliases(engine, component, section);
 
         if (err != WASI_OK) return err;
     }
@@ -1021,6 +2010,55 @@ uint32_t wasi_component_import_count(const wasi_component_t* component) {
     return component ? component->num_imports : 0;
 }
 
+uint32_t wasi_component_type_count(const wasi_component_t* component) {
+    return component ? component->num_types : 0;
+}
+
+wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return WASI_COMPONENT_TYPE_KIND_UNKNOWN;
+    return component->types[type_index].kind;
+}
+
+uint32_t wasi_component_func_type_param_count(const wasi_component_t* component, uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    return component->types[type_index].func.num_params;
+}
+
+const char* wasi_component_func_type_param_name(const wasi_component_t* component, uint32_t type_index, uint32_t param_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (param_index >= component->types[type_index].func.num_params) return NULL;
+    return component->types[type_index].func.params[param_index].name;
+}
+
+uint8_t wasi_component_func_type_param_code(const wasi_component_t* component, uint32_t type_index, uint32_t param_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    if (param_index >= component->types[type_index].func.num_params) return 0;
+    return component->types[type_index].func.params[param_index].type_code;
+}
+
+uint32_t wasi_component_func_type_result_count(const wasi_component_t* component, uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    return component->types[type_index].func.num_results;
+}
+
+const char* wasi_component_func_type_result_name(const wasi_component_t* component, uint32_t type_index, uint32_t result_index) {
+    if (!component || type_index >= component->num_types) return NULL;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (result_index >= component->types[type_index].func.num_results) return NULL;
+    return component->types[type_index].func.results[result_index].name;
+}
+
+uint8_t wasi_component_func_type_result_code(const wasi_component_t* component, uint32_t type_index, uint32_t result_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    if (result_index >= component->types[type_index].func.num_results) return 0;
+    return component->types[type_index].func.results[result_index].type_code;
+}
+
 const char* wasi_component_import_name(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_imports) return NULL;
     return component->imports[index].name;
@@ -1063,6 +2101,180 @@ int wasi_component_export_has_type(const wasi_component_t* component, uint32_t i
 uint32_t wasi_component_export_type_index(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_exports) return 0;
     return component->exports[index].type_index;
+}
+
+int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index) {
+    uint32_t func_index;
+
+    if (out_type_index) *out_type_index = 0;
+    if (!component || index >= component->num_exports || !out_type_index) return 0;
+    if (component->exports[index].kind != WASI_COMPONENT_EXTERN_KIND_FUNC) return 0;
+    if (component->exports[index].has_type) {
+        *out_type_index = component->exports[index].type_index;
+        return 1;
+    }
+    func_index = component->exports[index].index;
+    if (func_index >= component->num_funcs) return 0;
+    *out_type_index = component->funcs[func_index].type_index;
+    return 1;
+}
+
+uint32_t wasi_component_alias_count(const wasi_component_t* component) {
+    return component ? component->num_aliases : 0;
+}
+
+wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return WASI_COMPONENT_ALIAS_KIND_UNKNOWN;
+    return component->aliases[index].kind;
+}
+
+wasm_export_kind_t wasi_component_alias_core_export_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return (wasm_export_kind_t)255;
+    return component->aliases[index].core_export_kind;
+}
+
+uint32_t wasi_component_alias_instance_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return 0;
+    return component->aliases[index].instance_index;
+}
+
+const char* wasi_component_alias_name(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return NULL;
+    return component->aliases[index].name;
+}
+
+uint32_t wasi_component_core_instance_count(const wasi_component_t* component) {
+    return component ? component->num_core_instances : 0;
+}
+
+wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_instances) return WASI_COMPONENT_CORE_INSTANCE_KIND_UNKNOWN;
+    return component->core_instances[index].kind;
+}
+
+uint32_t wasi_component_core_instance_module_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_instances) return UINT32_MAX;
+    return component->core_instances[index].module_index;
+}
+
+uint32_t wasi_component_core_instance_export_count(const wasi_component_t* component, uint32_t instance_index) {
+    if (!component || instance_index >= component->num_core_instances) return 0;
+    return component->core_instances[instance_index].num_exports;
+}
+
+const char* wasi_component_core_instance_export_name(const wasi_component_t* component,
+                                                     uint32_t instance_index,
+                                                     uint32_t export_index) {
+    if (!component || instance_index >= component->num_core_instances) return NULL;
+    if (export_index >= component->core_instances[instance_index].num_exports) return NULL;
+    return component->core_instances[instance_index].exports[export_index].name;
+}
+
+wasm_export_kind_t wasi_component_core_instance_export_kind(const wasi_component_t* component,
+                                                            uint32_t instance_index,
+                                                            uint32_t export_index) {
+    if (!component || instance_index >= component->num_core_instances) return (wasm_export_kind_t)255;
+    if (export_index >= component->core_instances[instance_index].num_exports) return (wasm_export_kind_t)255;
+    return component->core_instances[instance_index].exports[export_index].kind;
+}
+
+uint32_t wasi_component_core_instance_export_index(const wasi_component_t* component,
+                                                   uint32_t instance_index,
+                                                   uint32_t export_index) {
+    if (!component || instance_index >= component->num_core_instances) return UINT32_MAX;
+    if (export_index >= component->core_instances[instance_index].num_exports) return UINT32_MAX;
+    return component->core_instances[instance_index].exports[export_index].index;
+}
+
+uint32_t wasi_component_core_instance_arg_count(const wasi_component_t* component, uint32_t instance_index) {
+    if (!component || instance_index >= component->num_core_instances) return 0;
+    return component->core_instances[instance_index].num_args;
+}
+
+const char* wasi_component_core_instance_arg_name(const wasi_component_t* component,
+                                                  uint32_t instance_index,
+                                                  uint32_t arg_index) {
+    if (!component || instance_index >= component->num_core_instances) return NULL;
+    if (arg_index >= component->core_instances[instance_index].num_args) return NULL;
+    return component->core_instances[instance_index].args[arg_index].name;
+}
+
+uint8_t wasi_component_core_instance_arg_kind(const wasi_component_t* component,
+                                              uint32_t instance_index,
+                                              uint32_t arg_index) {
+    if (!component || instance_index >= component->num_core_instances) return 0xFFu;
+    if (arg_index >= component->core_instances[instance_index].num_args) return 0xFFu;
+    return component->core_instances[instance_index].args[arg_index].kind;
+}
+
+uint32_t wasi_component_core_instance_arg_index(const wasi_component_t* component,
+                                                uint32_t instance_index,
+                                                uint32_t arg_index) {
+    if (!component || instance_index >= component->num_core_instances) return UINT32_MAX;
+    if (arg_index >= component->core_instances[instance_index].num_args) return UINT32_MAX;
+    return component->core_instances[instance_index].args[arg_index].index;
+}
+
+uint32_t wasi_component_canon_count(const wasi_component_t* component) {
+    return component ? component->num_canons : 0;
+}
+
+wasi_component_canon_kind_t wasi_component_canon_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return WASI_COMPONENT_CANON_KIND_UNKNOWN;
+    return component->canons[index].kind;
+}
+
+uint8_t wasi_component_canon_async_flag(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return 0;
+    return component->canons[index].async_flag;
+}
+
+uint32_t wasi_component_canon_func_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return UINT32_MAX;
+    return component->canons[index].func_index;
+}
+
+uint32_t wasi_component_canon_core_func_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return UINT32_MAX;
+    return component->canons[index].core_func_index;
+}
+
+int wasi_component_canon_has_type_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return 0;
+    return component->canons[index].has_type_index;
+}
+
+uint32_t wasi_component_canon_type_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return UINT32_MAX;
+    return component->canons[index].type_index;
+}
+
+uint32_t wasi_component_canon_defined_func_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return UINT32_MAX;
+    return component->canons[index].defined_func_index;
+}
+
+uint32_t wasi_component_canon_option_count(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return 0;
+    return component->canons[index].num_options;
+}
+
+uint8_t wasi_component_canon_option_code(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index) {
+    if (!component || canon_index >= component->num_canons) return 0;
+    if (option_index >= component->canons[canon_index].num_options) return 0;
+    return component->canons[canon_index].options[option_index].code;
+}
+
+int wasi_component_canon_option_has_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index) {
+    if (!component || canon_index >= component->num_canons) return 0;
+    if (option_index >= component->canons[canon_index].num_options) return 0;
+    return component->canons[canon_index].options[option_index].has_index;
+}
+
+uint32_t wasi_component_canon_option_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index) {
+    if (!component || canon_index >= component->num_canons) return 0;
+    if (option_index >= component->canons[canon_index].num_options) return 0;
+    return component->canons[canon_index].options[option_index].index;
 }
 
 uint32_t wasi_component_core_module_count(const wasi_component_t* component) {
@@ -1137,6 +2349,8 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
 
     for (i = 0; i < component->num_exports; i++) {
         const wasi_component_export_t* export_ = &component->exports[i];
+        uint32_t resolved_type_index = 0;
+        int has_resolved_type = wasi_component_export_func_type_index(component, i, &resolved_type_index);
         wasi__appendf(buffer,
                       buffer_size,
                       &offset,
@@ -1147,7 +2361,118 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                       (unsigned)export_->index);
         if (export_->has_type)
             wasi__appendf(buffer, buffer_size, &offset, " type=%u", (unsigned)export_->type_index);
+        else if (has_resolved_type)
+            wasi__appendf(buffer, buffer_size, &offset, " resolved-type=%u", (unsigned)resolved_type_index);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
+    }
+
+    for (i = 0; i < component->num_aliases; i++) {
+        const wasi_component_alias_t* alias = &component->aliases[i];
+        wasi__appendf(buffer,
+                      buffer_size,
+                      &offset,
+                      "alias[%u]: kind=%s core-kind=%s instance=%u name=%s\n",
+                      (unsigned)i,
+                      wasi_component_alias_kind_string(alias->kind),
+                      wasi_component_core_export_kind_string(alias->core_export_kind),
+                      (unsigned)alias->instance_index,
+                      alias->name ? alias->name : "");
+    }
+
+    for (i = 0; i < component->num_core_instances; i++) {
+        const wasi_component_core_instance_t* instance = &component->core_instances[i];
+        uint32_t j;
+
+        wasi__appendf(buffer,
+                      buffer_size,
+                      &offset,
+                      "core-instance[%u]: kind=%s",
+                      (unsigned)i,
+                      wasi_component_core_instance_kind_string(instance->kind));
+        if (instance->kind == WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " module=%u args=%u",
+                          (unsigned)instance->module_index,
+                          (unsigned)instance->num_args);
+        } else if (instance->kind == WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " exports=%u",
+                          (unsigned)instance->num_exports);
+        }
+        wasi__appendf(buffer, buffer_size, &offset, "\n");
+
+        for (j = 0; j < instance->num_exports; j++) {
+            const wasi_component_core_instance_export_t* export_ = &instance->exports[j];
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          "  core-instance-export[%u,%u]: name=%s kind=%s index=%u\n",
+                          (unsigned)i,
+                          (unsigned)j,
+                          export_->name ? export_->name : "",
+                          wasi_component_core_export_kind_string(export_->kind),
+                          (unsigned)export_->index);
+        }
+
+        for (j = 0; j < instance->num_args; j++) {
+            const wasi_component_core_instantiation_arg_t* arg = &instance->args[j];
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          "  core-instance-arg[%u,%u]: name=%s kind=%s index=%u\n",
+                          (unsigned)i,
+                          (unsigned)j,
+                          arg->name ? arg->name : "",
+                          wasi_component_core_sort_string(arg->kind),
+                          (unsigned)arg->index);
+        }
+    }
+
+    for (i = 0; i < component->num_canons; i++) {
+        const wasi_component_canon_t* canon = &component->canons[i];
+        uint32_t opt;
+        wasi__appendf(buffer,
+                      buffer_size,
+                      &offset,
+                      "canon[%u]: kind=%s async=%u",
+                      (unsigned)i,
+                      wasi_component_canon_kind_string(canon->kind),
+                      (unsigned)canon->async_flag);
+        if (canon->kind == WASI_COMPONENT_CANON_KIND_LIFT) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " core-func=%u type=%u defined-func=%u",
+                          (unsigned)canon->core_func_index,
+                          (unsigned)canon->type_index,
+                          (unsigned)canon->defined_func_index);
+        } else if (canon->kind == WASI_COMPONENT_CANON_KIND_LOWER) {
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          " func=%u",
+                          (unsigned)canon->func_index);
+        }
+        if (canon->num_options)
+            wasi__appendf(buffer, buffer_size, &offset, " options=%u", (unsigned)canon->num_options);
+        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        for (opt = 0; opt < canon->num_options; opt++) {
+            const wasi_component_canon_option_t* option = &canon->options[opt];
+            wasi__appendf(buffer,
+                          buffer_size,
+                          &offset,
+                          "  canon-option[%u,%u]: code=0x%02x",
+                          (unsigned)i,
+                          (unsigned)opt,
+                          (unsigned)option->code);
+            if (option->has_index)
+                wasi__appendf(buffer, buffer_size, &offset, " index=%u", (unsigned)option->index);
+            wasi__appendf(buffer, buffer_size, &offset, "\n");
+        }
     }
 
     for (i = 0; i < component->num_core_modules; i++) {
@@ -1181,6 +2506,119 @@ const char* wasi_component_extern_kind_string(wasi_component_extern_kind_t kind)
             return "component";
         case WASI_COMPONENT_EXTERN_KIND_INSTANCE:
             return "instance";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_type_kind_string(wasi_component_type_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_TYPE_KIND_FUNC:
+            return "func";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_primitive_type_string(uint8_t type_code) {
+    switch (type_code) {
+        case 0x7F:
+            return "bool";
+        case 0x7E:
+            return "s8";
+        case 0x7D:
+            return "u8";
+        case 0x7C:
+            return "s16";
+        case 0x7B:
+            return "u16";
+        case 0x7A:
+            return "s32";
+        case 0x79:
+            return "u32";
+        case 0x78:
+            return "s64";
+        case 0x77:
+            return "u64";
+        case 0x76:
+            return "f32";
+        case 0x75:
+            return "f64";
+        case 0x74:
+            return "char";
+        case 0x73:
+            return "string";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT:
+            return "core-instance-export";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_core_instance_kind_string(wasi_component_core_instance_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE:
+            return "instantiate";
+        case WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS:
+            return "from-exports";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_core_sort_string(uint8_t sort) {
+    switch (sort) {
+        case 0x00:
+            return "func";
+        case 0x01:
+            return "table";
+        case 0x02:
+            return "memory";
+        case 0x03:
+            return "global";
+        case 0x10:
+            return "type";
+        case 0x11:
+            return "module";
+        case 0x12:
+            return "instance";
+        case 0x13:
+            return "component";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_canon_kind_string(wasi_component_canon_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_CANON_KIND_LIFT:
+            return "lift";
+        case WASI_COMPONENT_CANON_KIND_LOWER:
+            return "lower";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_core_export_kind_string(wasm_export_kind_t kind) {
+    switch (kind) {
+        case WASM_EXPORT_FUNC:
+            return "func";
+        case WASM_EXPORT_TABLE:
+            return "table";
+        case WASM_EXPORT_MEM:
+            return "memory";
+        case WASM_EXPORT_GLOBAL:
+            return "global";
+        case WASM_EXPORT_TAG:
+            return "tag";
         default:
             return "unknown";
     }

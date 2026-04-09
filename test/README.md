@@ -51,7 +51,7 @@ The spectest targets behave the same way, but failures can come from either the 
 
 The spectest targets require a system `wasm-tools` executable with the `json-from-wast` subcommand available on `PATH` when CMake configures the project.
 
-If `wasm-tools component embed` and `wasm-tools component new` are available, this directory also generates a small dummy component from [component_smoke.wit](component_smoke.wit) and exercises it through the native `component_runner` harness. That harness currently verifies binary kind detection, section-framing parsing, and the expected "semantic parser not implemented" status from [../wasi.h](../wasi.h).
+If `wasm-tools component embed` and `wasm-tools component new` are available, this directory also generates a small dummy component from [component_smoke.wit](component_smoke.wit) and exercises it through the native `component_runner` harness. That harness now verifies binary kind detection, section framing, embedded core modules, imports/exports, function types, core instances, aliases, and canonical lift/lower records exposed by [../wasi.h](../wasi.h).
 
 If `json-from-wast` cannot compile a particular `.wast` file, the build fixture now records that as a skipped spectest case instead of failing the whole build or stopping later spec files from running.
 

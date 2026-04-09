@@ -4,7 +4,7 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component section framing, and retains raw component bytes for future semantic parsing; instantiation and canonical ABI support are not implemented yet.
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component section framing, extracts embedded core modules, and exposes structured component imports, exports, core-instance records, function-type metadata, aliases, and canonical lift/lower records; instantiation and canonical ABI execution are not implemented yet.
 
 ## Quick start
 
@@ -79,6 +79,21 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 | `wasm_bind_host_func(rt, module, name, fmt, cb, userdata)` | Bind a host function import using a format string. |
 | `wasm_bind_emscripten_stubs(rt)` | Register built-in `env` shims for common Emscripten imports. |
 | `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs. |
+
+## wasi.h Status
+
+Current `wasi.h` capabilities are intentionally limited to binary introspection and early parser plumbing:
+
+- `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
+- core-vs-component detection through `wasi_detect_binary_kind`
+- section introspection through `wasi_component_section_*`
+- structured component imports/exports through `wasi_component_import_*` and `wasi_component_export_*`
+- structured core-instance records through `wasi_component_core_instance_*`
+- parsed component function types through `wasi_component_type_*` and `wasi_component_func_type_*`
+- structured alias and canonical-function records through `wasi_component_alias_*` and `wasi_component_canon_*`
+- extracted embedded core modules through `wasi_component_core_module_*`
+
+`wasi.h` does not instantiate components yet. Today it is a parser/introspection surface, not an execution engine.
 
 ### Memory and globals
 

@@ -260,6 +260,123 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
             LABELS "wasi-component"
             FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
         )
+
+        add_test(
+            NAME wasi.component.import-type-params
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" type-param-count 0 2
+        )
+        set_tests_properties(wasi.component.import-type-params PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.export-type-params
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" export-type 0 1
+        )
+        set_tests_properties(wasi.component.export-type-params PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.export-type-results
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" type-result-count 1 1
+        )
+        set_tests_properties(wasi.component.export-type-results PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.aliases
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" alias-count 5
+        )
+        set_tests_properties(wasi.component.aliases PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.alias-names
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" alias-name 0 cm32p2_memory
+        )
+        set_tests_properties(wasi.component.alias-names PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.instances
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-instance-count 4
+        )
+        set_tests_properties(wasi.component.instances PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.instance-kinds
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-instance-kind 0 from-exports
+        )
+        set_tests_properties(wasi.component.instance-kinds PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.instance-exports
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-instance-export-name 0 0 host-log
+        )
+        set_tests_properties(wasi.component.instance-exports PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.instance-modules
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-instance-module 1 0
+        )
+        set_tests_properties(wasi.component.instance-modules PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.instance-args
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" core-instance-arg-name 1 0 cm32p2
+        )
+        set_tests_properties(wasi.component.instance-args PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.canons
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" canon-count 2
+        )
+        set_tests_properties(wasi.component.canons PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.canon-kinds
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" canon-kind 0 lower
+        )
+        set_tests_properties(wasi.component.canon-kinds PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
+
+        add_test(
+            NAME wasi.component.canon-options
+            COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_SMOKE_WASM}" canon-option-count 1 1
+        )
+        set_tests_properties(wasi.component.canon-options PROPERTIES
+            LABELS "wasi-component"
+            FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+        )
     endif()
 
     add_custom_target(wasi-component-run
