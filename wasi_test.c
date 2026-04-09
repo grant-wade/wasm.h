@@ -263,6 +263,13 @@ enum {
     WASI_TEST_COMPOUND_TYPE_OPTION = 3u,
     WASI_TEST_COMPOUND_TYPE_RESULT = 4u,
     WASI_TEST_COMPOUND_TYPE_VARIANT = 5u,
+    WASI_TEST_COMPOUND_TYPE_VARIANT_JOIN = 6u,
+};
+
+enum {
+    WASI_TEST_ENUM_TYPE_ECHO = 0u,
+    WASI_TEST_ENUM_TYPE_BAD_FLAT = 1u,
+    WASI_TEST_ENUM_TYPE_BAD_SPILLED = 2u,
 };
 
 typedef struct wasi_test_builder_t {
@@ -564,6 +571,41 @@ static void wasi_test_emit_variant_valtype(wasi_test_builder_t* b) {
     wasi_test_emit(b, 0x00u);
 }
 
+static void wasi_test_emit_variant_join_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x71u);
+    wasi_test_emit_leb128_u32(b, 3u);
+
+    wasi_test_emit_component_plain_name(b, "none");
+    wasi_test_emit(b, 0x00u);
+    wasi_test_emit(b, 0x00u);
+
+    wasi_test_emit_component_plain_name(b, "num");
+    wasi_test_emit(b, 0x01u);
+    wasi_test_emit(b, 0x79u);
+    wasi_test_emit(b, 0x00u);
+
+    wasi_test_emit_component_plain_name(b, "big");
+    wasi_test_emit(b, 0x01u);
+    wasi_test_emit(b, 0x77u);
+    wasi_test_emit(b, 0x00u);
+}
+
+static void wasi_test_emit_enum2_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x6Du);
+    wasi_test_emit_leb128_u32(b, 2u);
+    wasi_test_emit_component_plain_name(b, "a");
+    wasi_test_emit_component_plain_name(b, "b");
+}
+
+static void wasi_test_emit_enum_record_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x72u);
+    wasi_test_emit_leb128_u32(b, 2u);
+    wasi_test_emit_component_plain_name(b, "tag");
+    wasi_test_emit_enum2_valtype(b);
+    wasi_test_emit_component_plain_name(b, "value");
+    wasi_test_emit(b, 0x79u);
+}
+
 static void wasi_test_build_compound_types_component(wasi_test_builder_t* component) {
     wasi_test_builder_t sec = { 0 };
     uint32_t i;
@@ -572,7 +614,7 @@ static void wasi_test_build_compound_types_component(wasi_test_builder_t* compon
     wasi_test_emit_component_header(component);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 6u);
+    wasi_test_emit_leb128_u32(&sec, 7u);
 
     wasi_test_emit(&sec, 0x40u);
     wasi_test_emit_leb128_u32(&sec, 1u);
@@ -621,6 +663,13 @@ static void wasi_test_build_compound_types_component(wasi_test_builder_t* compon
     wasi_test_emit(&sec, 0x00u);
     wasi_test_emit_variant_valtype(&sec);
 
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_plain_name(&sec, "v");
+    wasi_test_emit_variant_join_valtype(&sec);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_variant_join_valtype(&sec);
+
     wasi_test_emit_section(component, 7u, sec.buf, sec.len);
 }
 
@@ -628,6 +677,7 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_builder_t sec = { 0 };
     static const uint8_t i32_params4[] = { 0x7F, 0x7F, 0x7F, 0x7F };
     static const uint8_t i32_result[] = { 0x7F };
+    static const uint8_t join_variant_params[] = { 0x7F, 0x7E, 0x7F };
     static const uint8_t i32_params6[] = { 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F };
     static const uint8_t i32_params3[] = { 0x7F, 0x7F, 0x7F };
     static const uint8_t i32_param[] = { 0x7F };
@@ -684,21 +734,27 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
         0x6A,
         0x0B,
     };
+    static const uint8_t join_variant_echo_ops[] = {
+        0x20, 0x02, 0x20, 0x00, 0x36, 0x02, 0x00,
+        0x20, 0x02, 0x20, 0x01, 0x37, 0x03, 0x08,
+        0x0B,
+    };
 
     memset(mod, 0, sizeof(*mod));
     wasi_test_emit_header(mod);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 5u);
+    wasi_test_emit_leb128_u32(&sec, 6u);
     wasi_test_emit_functype(&sec, i32_params4, 4u, i32_result, 1u);
     wasi_test_emit_functype(&sec, i32_params6, 6u, NULL, 0u);
     wasi_test_emit_functype(&sec, i32_params3, 3u, NULL, 0u);
     wasi_test_emit_functype(&sec, i32_param, 1u, i32_result, 1u);
     wasi_test_emit_functype(&sec, i32_params4, 4u, NULL, 0u);
+    wasi_test_emit_functype(&sec, join_variant_params, 3u, NULL, 0u);
     wasi_test_emit_section(mod, 1u, sec.buf, sec.len);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 7u);
+    wasi_test_emit_leb128_u32(&sec, 8u);
     wasi_test_emit_leb128_u32(&sec, 0u);
     wasi_test_emit_leb128_u32(&sec, 1u);
     wasi_test_emit_leb128_u32(&sec, 2u);
@@ -706,6 +762,7 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_leb128_u32(&sec, 4u);
     wasi_test_emit_leb128_u32(&sec, 4u);
     wasi_test_emit_leb128_u32(&sec, 4u);
+    wasi_test_emit_leb128_u32(&sec, 5u);
     wasi_test_emit_section(mod, 3u, sec.buf, sec.len);
 
     memset(&sec, 0, sizeof(sec));
@@ -724,7 +781,7 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_section(mod, 6u, sec.buf, sec.len);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 12u);
+    wasi_test_emit_leb128_u32(&sec, 13u);
     wasi_test_emit_export(&sec, "memory", 0x02u, 0u);
     wasi_test_emit_export(&sec, "cabi_realloc", 0x00u, 0u);
     wasi_test_emit_export(&sec, "record_echo", 0x00u, 1u);
@@ -733,6 +790,7 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_export(&sec, "option_echo", 0x00u, 4u);
     wasi_test_emit_export(&sec, "result_echo", 0x00u, 5u);
     wasi_test_emit_export(&sec, "variant_echo", 0x00u, 6u);
+    wasi_test_emit_export(&sec, "variant_join_echo", 0x00u, 7u);
     wasi_test_emit_export(&sec, "last_realloc_old_ptr", 0x03u, 1u);
     wasi_test_emit_export(&sec, "last_realloc_old_size", 0x03u, 2u);
     wasi_test_emit_export(&sec, "last_realloc_align", 0x03u, 3u);
@@ -740,7 +798,7 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_section(mod, 7u, sec.buf, sec.len);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 7u);
+    wasi_test_emit_leb128_u32(&sec, 8u);
     wasi_test_emit_code_body(&sec, cabi_realloc_locals, (uint32_t)sizeof(cabi_realloc_locals), cabi_realloc_ops, (uint32_t)sizeof(cabi_realloc_ops));
     wasi_test_emit_code_body(&sec, empty, 1u, record_echo_ops, (uint32_t)sizeof(record_echo_ops));
     wasi_test_emit_code_body(&sec, empty, 1u, flags_echo_ops, (uint32_t)sizeof(flags_echo_ops));
@@ -748,6 +806,109 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_code_body(&sec, empty, 1u, tagged_echo_ops, (uint32_t)sizeof(tagged_echo_ops));
     wasi_test_emit_code_body(&sec, empty, 1u, tagged_echo_ops, (uint32_t)sizeof(tagged_echo_ops));
     wasi_test_emit_code_body(&sec, empty, 1u, tagged_echo_ops, (uint32_t)sizeof(tagged_echo_ops));
+    wasi_test_emit_code_body(&sec, empty, 1u, join_variant_echo_ops, (uint32_t)sizeof(join_variant_echo_ops));
+    wasi_test_emit_section(mod, 10u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_enum_validation_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 3u);
+
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_plain_name(&sec, "e");
+    wasi_test_emit_enum2_valtype(&sec);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_enum2_valtype(&sec);
+
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_enum2_valtype(&sec);
+
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_enum_record_valtype(&sec);
+
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_enum_validation_core_module(wasi_test_builder_t* mod) {
+    wasi_test_builder_t sec = { 0 };
+    static const uint8_t i32_params4[] = { 0x7F, 0x7F, 0x7F, 0x7F };
+    static const uint8_t i32_result[] = { 0x7F };
+    static const uint8_t i32_param[] = { 0x7F };
+    static const uint8_t empty[] = { 0x00 };
+    static const uint8_t cabi_realloc_locals[] = { 0x01, 0x01, 0x7F };
+    static const uint8_t cabi_realloc_ops[] = {
+        0x23, 0x00,
+        0x21, 0x04,
+        0x23, 0x00,
+        0x20, 0x03,
+        0x6A,
+        0x24, 0x00,
+        0x20, 0x04,
+        0x0B,
+    };
+    static const uint8_t id_ops[] = { 0x20, 0x00, 0x0B };
+    static const uint8_t const2_ops[] = { 0x41, 0x02, 0x0B };
+    static const uint8_t bad_enum_record_ops[] = {
+        0x20, 0x00, 0x41, 0x02, 0x36, 0x02, 0x00,
+        0x20, 0x00, 0x41, 0x07, 0x36, 0x02, 0x04,
+        0x0B,
+    };
+
+    memset(mod, 0, sizeof(*mod));
+    wasi_test_emit_header(mod);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 4u);
+    wasi_test_emit_functype(&sec, i32_params4, 4u, i32_result, 1u);
+    wasi_test_emit_functype(&sec, i32_param, 1u, i32_result, 1u);
+    wasi_test_emit_functype(&sec, NULL, 0u, i32_result, 1u);
+    wasi_test_emit_functype(&sec, i32_param, 1u, NULL, 0u);
+    wasi_test_emit_section(mod, 1u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 4u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_leb128_u32(&sec, 3u);
+    wasi_test_emit_section(mod, 3u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_section(mod, 5u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x7F); wasi_test_emit(&sec, 0x01); wasi_test_emit(&sec, 0x41); wasi_test_emit(&sec, 0x20); wasi_test_emit(&sec, 0x0B);
+    wasi_test_emit_section(mod, 6u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 5u);
+    wasi_test_emit_export(&sec, "memory", 0x02u, 0u);
+    wasi_test_emit_export(&sec, "cabi_realloc", 0x00u, 0u);
+    wasi_test_emit_export(&sec, "id32", 0x00u, 1u);
+    wasi_test_emit_export(&sec, "const2", 0x00u, 2u);
+    wasi_test_emit_export(&sec, "bad_enum_record", 0x00u, 3u);
+    wasi_test_emit_section(mod, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 4u);
+    wasi_test_emit_code_body(&sec, cabi_realloc_locals, (uint32_t)sizeof(cabi_realloc_locals), cabi_realloc_ops, (uint32_t)sizeof(cabi_realloc_ops));
+    wasi_test_emit_code_body(&sec, empty, 1u, id_ops, (uint32_t)sizeof(id_ops));
+    wasi_test_emit_code_body(&sec, empty, 1u, const2_ops, (uint32_t)sizeof(const2_ops));
+    wasi_test_emit_code_body(&sec, empty, 1u, bad_enum_record_ops, (uint32_t)sizeof(bad_enum_record_ops));
     wasi_test_emit_section(mod, 10u, sec.buf, sec.len);
 }
 
@@ -2773,6 +2934,128 @@ WL_TEST(test_wasi_canon_call_roundtrips_variant) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_canon_call_roundtrips_joined_variant) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    wasm_module_t* core_module;
+    wasi_test_builder_t component_bytes;
+    wasi_test_builder_t module_bytes;
+    wasi_value_t arg;
+    wasi_value_t result;
+    wasi_value_t payload;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_compound_types_component(&component_bytes);
+    component = wasi_load(&engine, component_bytes.buf, component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_test_build_compound_core_module(&module_bytes);
+    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    WL_REQUIRE_MSG(t, core_module != NULL,
+                   "wasm_load failed: %s",
+                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+
+    memset(&arg, 0, sizeof(arg));
+    memset(&result, 0, sizeof(result));
+    memset(&payload, 0, sizeof(payload));
+
+    payload.kind = WASI_VALUE_KIND_U32;
+    payload.of.u32 = 99u;
+
+    arg.kind = WASI_VALUE_KIND_VARIANT;
+    arg.of.variant.case_index = 1u;
+    arg.of.variant.has_payload = 1;
+    arg.of.variant.payload = &payload;
+    arg.of.variant.payload_owned = 0;
+
+    err = wasi_canon_call(component, WASI_TEST_COMPOUND_TYPE_VARIANT_JOIN, core_module, "variant_join_echo", NULL, &arg, 1u, &result, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call variant_join_echo u32 failed: %s", engine.error_msg);
+    wasi_test_expect_realloc_args(t, core_module, 0, 0, 8, 16);
+    WL_CHECK(t, result.kind == WASI_VALUE_KIND_VARIANT);
+    WL_CHECK(t, result.of.variant.case_index == 1u);
+    WL_CHECK(t, result.of.variant.has_payload);
+    WL_REQUIRE(t, result.of.variant.payload != NULL);
+    WL_CHECK(t, result.of.variant.payload->kind == WASI_VALUE_KIND_U32);
+    WL_CHECK(t, result.of.variant.payload->of.u32 == 99u);
+
+    wasi_value_destroy(&result);
+    memset(&result, 0, sizeof(result));
+    memset(&payload, 0, sizeof(payload));
+
+    payload.kind = WASI_VALUE_KIND_U64;
+    payload.of.u64 = UINT64_C(0x0123456789ABCDEF);
+
+    arg.of.variant.case_index = 2u;
+    arg.of.variant.payload = &payload;
+
+    err = wasi_canon_call(component, WASI_TEST_COMPOUND_TYPE_VARIANT_JOIN, core_module, "variant_join_echo", NULL, &arg, 1u, &result, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call variant_join_echo u64 failed: %s", engine.error_msg);
+    wasi_test_expect_realloc_args(t, core_module, 0, 0, 8, 16);
+    WL_CHECK(t, result.kind == WASI_VALUE_KIND_VARIANT);
+    WL_CHECK(t, result.of.variant.case_index == 2u);
+    WL_CHECK(t, result.of.variant.has_payload);
+    WL_REQUIRE(t, result.of.variant.payload != NULL);
+    WL_CHECK(t, result.of.variant.payload->kind == WASI_VALUE_KIND_U64);
+    WL_CHECK(t, result.of.variant.payload->of.u64 == UINT64_C(0x0123456789ABCDEF));
+
+    wasi_value_destroy(&result);
+    wasm_free_module(core_module);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_canon_call_validates_enum_results) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    wasm_module_t* core_module;
+    wasi_test_builder_t component_bytes;
+    wasi_test_builder_t module_bytes;
+    wasi_value_t arg;
+    wasi_value_t result;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_enum_validation_component(&component_bytes);
+    component = wasi_load(&engine, component_bytes.buf, component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_test_build_enum_validation_core_module(&module_bytes);
+    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    WL_REQUIRE_MSG(t, core_module != NULL,
+                   "wasm_load failed: %s",
+                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+
+    memset(&arg, 0, sizeof(arg));
+    memset(&result, 0, sizeof(result));
+    arg.kind = WASI_VALUE_KIND_ENUM;
+    arg.of.enum_case = 1u;
+
+    err = wasi_canon_call(component, WASI_TEST_ENUM_TYPE_ECHO, core_module, "id32", NULL, &arg, 1u, &result, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call enum echo failed: %s", engine.error_msg);
+    WL_CHECK(t, result.kind == WASI_VALUE_KIND_ENUM);
+    WL_CHECK(t, result.of.enum_case == 1u);
+
+    wasi_value_destroy(&result);
+    memset(&result, 0, sizeof(result));
+
+    err = wasi_canon_call(component, WASI_TEST_ENUM_TYPE_BAD_FLAT, core_module, "const2", NULL, NULL, 0u, &result, 1u);
+    WL_CHECK(t, err == WASI_ERR_MALFORMED);
+    WL_CHECK(t, strstr(engine.error_msg, "enum result case index out of range") != NULL);
+
+    err = wasi_canon_call(component, WASI_TEST_ENUM_TYPE_BAD_SPILLED, core_module, "bad_enum_record", NULL, NULL, 0u, &result, 1u);
+    WL_CHECK(t, err == WASI_ERR_MALFORMED);
+    WL_CHECK(t, strstr(engine.error_msg, "enum result case index out of range") != NULL);
+
+    wasm_free_module(core_module);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_rejects_bad_magic) {
     uint8_t bad_header[8];
     wasi_engine_t engine;
@@ -2822,6 +3105,8 @@ int main(void) {
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_option),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_result),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_variant),
+        WL_TEST_CASE(test_wasi_canon_call_roundtrips_joined_variant),
+        WL_TEST_CASE(test_wasi_canon_call_validates_enum_results),
         WL_TEST_CASE(test_wasi_instance_calls_utf8_canon_lift_exports),
         WL_TEST_CASE(test_wasi_instance_calls_utf16_canon_lift_exports),
         WL_TEST_CASE(test_wasi_instance_calls_latin1_utf16_canon_lift_exports),
