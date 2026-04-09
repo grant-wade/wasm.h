@@ -89,6 +89,7 @@ Current `wasi.h` capabilities are intentionally limited to binary introspection 
 - section introspection through `wasi_component_section_*`
 - structured component imports/exports through `wasi_component_import_*` and `wasi_component_export_*`
 - structured core-instance records through `wasi_component_core_instance_*`
+- structured top-level core-type records through `wasi_component_core_type_*`
 - structured component-instance records through `wasi_component_instance_*`
 - structured nested component records through `wasi_component_nested_component_*`
 - structured alias records now include instance-export and outer forms through `wasi_component_alias_*`

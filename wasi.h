@@ -81,6 +81,12 @@ typedef enum wasi_component_core_instance_kind_t {
     WASI_COMPONENT_CORE_INSTANCE_KIND_FROM_EXPORTS,
 } wasi_component_core_instance_kind_t;
 
+typedef enum wasi_component_core_type_kind_t {
+    WASI_COMPONENT_CORE_TYPE_KIND_UNKNOWN = 0,
+    WASI_COMPONENT_CORE_TYPE_KIND_MODULE,
+    WASI_COMPONENT_CORE_TYPE_KIND_TYPE,
+} wasi_component_core_type_kind_t;
+
 typedef enum wasi_component_instance_kind_t {
     WASI_COMPONENT_INSTANCE_KIND_UNKNOWN = 0,
     WASI_COMPONENT_INSTANCE_KIND_INSTANTIATE,
@@ -215,6 +221,15 @@ typedef struct wasi_component_core_instance_t {
     uint32_t args_capacity;
 } wasi_component_core_instance_t;
 
+typedef struct wasi_component_core_type_t {
+    wasi_component_core_type_kind_t kind;
+    uint8_t opcode;
+    uint8_t detail_opcode;
+    uint32_t item_count;
+    int has_primary_index;
+    uint32_t primary_index;
+} wasi_component_core_type_t;
+
 typedef struct wasi_component_instance_export_t {
     char* name;
     uint8_t name_kind;
@@ -318,6 +333,9 @@ struct wasi_component_t {
     wasi_component_alias_t* aliases;
     uint32_t num_aliases;
     uint32_t aliases_capacity;
+    wasi_component_core_type_t* core_types;
+    uint32_t num_core_types;
+    uint32_t core_types_capacity;
     wasi_component_core_instance_t* core_instances;
     uint32_t num_core_instances;
     uint32_t core_instances_capacity;
@@ -390,6 +408,13 @@ uint32_t wasi_component_alias_instance_index(const wasi_component_t* component, 
 const char* wasi_component_alias_name(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_alias_outer_count(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_alias_outer_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_type_count(const wasi_component_t* component);
+wasi_component_core_type_kind_t wasi_component_core_type_kind(const wasi_component_t* component, uint32_t index);
+uint8_t wasi_component_core_type_opcode(const wasi_component_t* component, uint32_t index);
+uint8_t wasi_component_core_type_detail_opcode(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_type_item_count(const wasi_component_t* component, uint32_t index);
+int wasi_component_core_type_has_primary_index(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_core_type_primary_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component);
 wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_module_index(const wasi_component_t* component, uint32_t index);
@@ -441,6 +466,7 @@ const char* wasi_component_extern_kind_string(wasi_component_extern_kind_t kind)
 const char* wasi_component_type_kind_string(wasi_component_type_kind_t kind);
 const char* wasi_component_primitive_type_string(uint8_t type_code);
 const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind);
+const char* wasi_component_core_type_kind_string(wasi_component_core_type_kind_t kind);
 const char* wasi_component_core_instance_kind_string(wasi_component_core_instance_kind_t kind);
 const char* wasi_component_instance_kind_string(wasi_component_instance_kind_t kind);
 const char* wasi_component_core_sort_string(uint8_t sort);
@@ -820,6 +846,11 @@ static void wasi__component_release_storage(wasi_component_t* component) {
     component->num_aliases = 0;
     component->aliases_capacity = 0;
 
+    WASM_FREE(component->core_types);
+    component->core_types = NULL;
+    component->num_core_types = 0;
+    component->core_types_capacity = 0;
+
     for (i = 0; i < component->num_core_instances; i++) {
         wasi__component_core_instance_release(&component->core_instances[i]);
     }
@@ -983,6 +1014,26 @@ static wasi_error_t wasi__component_append_type(wasi_component_t* component, con
     }
 
     component->types[component->num_types++] = *type;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_core_type(wasi_component_t* component,
+                                                     const wasi_component_core_type_t* type) {
+    wasi_component_core_type_t* grown;
+    size_t next_capacity;
+
+    if (!component || !type) return WASI_ERR_INVALID_ARGUMENT;
+
+    if (component->num_core_types == component->core_types_capacity) {
+        next_capacity = component->core_types_capacity ? (size_t)component->core_types_capacity * 2u : 4u;
+        grown = (wasi_component_core_type_t*)WASM_REALLOC(component->core_types,
+                                                          next_capacity * sizeof(*grown));
+        if (!grown) return WASI_ERR_OOM;
+        component->core_types = grown;
+        component->core_types_capacity = (uint32_t)next_capacity;
+    }
+
+    component->core_types[component->num_core_types++] = *type;
     return WASI_OK;
 }
 
@@ -1842,21 +1893,35 @@ static int wasi__skip_core_field_type(wasi__reader_t* reader) {
     return 1;
 }
 
-static int wasi__skip_core_subtype(wasi__reader_t* reader) {
-    uint8_t opcode;
+static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
+                                           uint8_t opcode,
+                                           wasi_component_core_type_t* type) {
     uint32_t count;
     uint32_t i;
 
     if (!reader) return 0;
 
-    opcode = wasi__read_u8(reader);
-    if (reader->malformed) return 0;
+    if (type) {
+        type->kind = WASI_COMPONENT_CORE_TYPE_KIND_TYPE;
+        type->opcode = opcode;
+        type->detail_opcode = opcode;
+        type->item_count = 1u;
+        type->has_primary_index = 0;
+        type->primary_index = UINT32_MAX;
+    }
 
     if (opcode == 0x4Eu) {
         count = wasi__read_leb128_u32(reader);
         if (reader->malformed) return 0;
+        if (type) type->item_count = count;
         for (i = 0; i < count; i++) {
-            if (!wasi__skip_core_subtype(reader)) return 0;
+            uint8_t nested_opcode = wasi__read_u8(reader);
+            if (reader->malformed) return 0;
+            if (!wasi__read_core_subtype_payload(reader,
+                                                 nested_opcode,
+                                                 i + 1u == count ? type : NULL)) {
+                return 0;
+            }
         }
         return 1;
     }
@@ -1870,6 +1935,7 @@ static int wasi__skip_core_subtype(wasi__reader_t* reader) {
         }
         opcode = wasi__read_u8(reader);
         if (reader->malformed) return 0;
+        if (type) type->detail_opcode = opcode;
     }
 
     switch (opcode) {
@@ -1897,12 +1963,27 @@ static int wasi__skip_core_subtype(wasi__reader_t* reader) {
         case 0x5Eu:
             return wasi__skip_core_field_type(reader);
         case 0x5Du:
-            (void)wasi__read_leb128_u32(reader);
+            if (type) {
+                type->has_primary_index = 1;
+                type->primary_index = wasi__read_leb128_u32(reader);
+            } else {
+                (void)wasi__read_leb128_u32(reader);
+            }
             return !reader->malformed;
         default:
             reader->malformed = 1;
             return 0;
     }
+}
+
+static int wasi__skip_core_subtype(wasi__reader_t* reader) {
+    uint8_t opcode;
+
+    if (!reader) return 0;
+
+    opcode = wasi__read_u8(reader);
+    if (reader->malformed) return 0;
+    return wasi__read_core_subtype_payload(reader, opcode, NULL);
 }
 
 static int wasi__skip_core_table_type(wasi__reader_t* reader) {
@@ -2032,7 +2113,7 @@ static int wasi__skip_core_module_alias(wasi__reader_t* reader) {
     return !reader->malformed;
 }
 
-static int wasi__skip_core_module_type(wasi__reader_t* reader) {
+static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_core_type_t* type) {
     uint32_t decl_count;
     uint32_t i;
 
@@ -2040,6 +2121,14 @@ static int wasi__skip_core_module_type(wasi__reader_t* reader) {
 
     decl_count = wasi__read_leb128_u32(reader);
     if (reader->malformed) return 0;
+    if (type) {
+        type->kind = WASI_COMPONENT_CORE_TYPE_KIND_MODULE;
+        type->opcode = 0x50u;
+        type->detail_opcode = 0x50u;
+        type->item_count = decl_count;
+        type->has_primary_index = 0;
+        type->primary_index = UINT32_MAX;
+    }
 
     for (i = 0; i < decl_count; i++) {
         uint8_t decl_opcode = wasi__read_u8(reader);
@@ -2079,6 +2168,65 @@ static int wasi__skip_core_module_type(wasi__reader_t* reader) {
     }
 
     return 1;
+}
+
+static int wasi__skip_core_module_type(wasi__reader_t* reader) {
+    return wasi__read_core_module_type(reader, NULL);
+}
+
+static int wasi__is_core_subtype_opcode(uint8_t opcode) {
+    return opcode == 0x4Eu || opcode == 0x4Fu || opcode == 0x50u ||
+           opcode == 0x5Du || opcode == 0x5Eu || opcode == 0x5Fu || opcode == 0x60u;
+}
+
+static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
+                                                  wasi_component_core_type_t* entries,
+                                                  uint32_t index,
+                                                  uint32_t count) {
+    uint8_t opcode;
+    wasi_component_core_type_t type;
+    wasi__reader_t branch_reader;
+
+    if (!reader || !entries) return 0;
+    if (index == count) return reader->ptr == reader->end;
+
+    opcode = wasi__read_u8(reader);
+    if (reader->malformed) return 0;
+
+    if (opcode == 0x50u) {
+        memset(&type, 0, sizeof(type));
+        branch_reader = *reader;
+        if (wasi__read_core_module_type(&branch_reader, &type)) {
+            entries[index] = type;
+            if (wasi__read_component_core_type_entries(&branch_reader, entries, index + 1u, count)) {
+                *reader = branch_reader;
+                return 1;
+            }
+        }
+
+        memset(&type, 0, sizeof(type));
+        branch_reader = *reader;
+        if (wasi__read_core_subtype_payload(&branch_reader, opcode, &type)) {
+            entries[index] = type;
+            if (wasi__read_component_core_type_entries(&branch_reader, entries, index + 1u, count)) {
+                *reader = branch_reader;
+                return 1;
+            }
+        }
+
+        reader->malformed = 1;
+        return 0;
+    }
+
+    if (!wasi__is_core_subtype_opcode(opcode)) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    memset(&type, 0, sizeof(type));
+    if (!wasi__read_core_subtype_payload(reader, opcode, &type)) return 0;
+    entries[index] = type;
+    return wasi__read_component_core_type_entries(reader, entries, index + 1u, count);
 }
 
 static wasi_error_t wasi__skip_nested_core_type_declaration(wasi_engine_t* engine,
@@ -2413,6 +2561,47 @@ static wasi_error_t wasi__parse_component_types(wasi_engine_t* engine,
     if (reader.ptr != reader.end) {
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "trailing bytes in component type section");
     }
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__parse_component_core_types(wasi_engine_t* engine,
+                                                     wasi_component_t* component,
+                                                     const wasi_component_section_t* section) {
+    wasi__reader_t reader;
+    wasi_component_core_type_t* entries;
+    uint32_t count;
+    uint32_t i;
+
+    reader.ptr = component->bytes + section->payload_offset;
+    reader.end = reader.ptr + section->payload_size;
+    reader.malformed = 0;
+    count = wasi__read_leb128_u32(&reader);
+    if (reader.malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core type section");
+    }
+
+    entries = (wasi_component_core_type_t*)WASM_CALLOC(count ? count : 1u, sizeof(*entries));
+    if (!entries) {
+        return wasi__set_error_literal(engine, WASI_ERR_OOM, "core type alloc failed");
+    }
+
+    if (!wasi__read_component_core_type_entries(&reader, entries, 0, count)) {
+        WASM_FREE(entries);
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core type section");
+    }
+
+    for (i = 0; i < count; i++) {
+        wasi_error_t err = wasi__component_append_core_type(component, &entries[i]);
+        if (err != WASI_OK) {
+            WASM_FREE(entries);
+            return wasi__set_error_literal(engine,
+                                           err,
+                                           err == WASI_ERR_OOM ? "core type alloc failed"
+                                                               : wasi_error_string(err));
+        }
+    }
+
+    WASM_FREE(entries);
     return WASI_OK;
 }
 
@@ -3322,6 +3511,8 @@ static wasi_error_t wasi__parse_component_interfaces(wasi_engine_t* engine, wasi
             err = wasi__parse_component_imports(engine, component, section);
         else if (section->id == 2)
             err = wasi__parse_component_core_instances(engine, component, section);
+        else if (section->id == 3)
+            err = wasi__parse_component_core_types(engine, component, section);
         else if (section->id == 5)
             err = wasi__parse_component_instances(engine, component, section);
         else if (section->id == 9)
@@ -3525,6 +3716,23 @@ static const char* wasi__component_type_detail_string(uint8_t opcode) {
             return "record";
         default:
             return wasi_component_primitive_type_string(opcode);
+    }
+}
+
+static const char* wasi__component_core_type_detail_string(uint8_t opcode) {
+    switch (opcode) {
+        case 0x50:
+            return "module";
+        case 0x60:
+            return "func";
+        case 0x5F:
+            return "struct";
+        case 0x5E:
+            return "array";
+        case 0x5D:
+            return "cont";
+        default:
+            return "unknown";
     }
 }
 
@@ -3897,6 +4105,40 @@ uint32_t wasi_component_alias_outer_index(const wasi_component_t* component, uin
     return component->aliases[index].outer_index;
 }
 
+uint32_t wasi_component_core_type_count(const wasi_component_t* component) {
+    return component ? component->num_core_types : 0;
+}
+
+wasi_component_core_type_kind_t wasi_component_core_type_kind(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return WASI_COMPONENT_CORE_TYPE_KIND_UNKNOWN;
+    return component->core_types[index].kind;
+}
+
+uint8_t wasi_component_core_type_opcode(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return 0u;
+    return component->core_types[index].opcode;
+}
+
+uint8_t wasi_component_core_type_detail_opcode(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return 0u;
+    return component->core_types[index].detail_opcode;
+}
+
+uint32_t wasi_component_core_type_item_count(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return 0u;
+    return component->core_types[index].item_count;
+}
+
+int wasi_component_core_type_has_primary_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return 0;
+    return component->core_types[index].has_primary_index;
+}
+
+uint32_t wasi_component_core_type_primary_index(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return UINT32_MAX;
+    return component->core_types[index].primary_index;
+}
+
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component) {
     return component ? component->num_core_instances : 0;
 }
@@ -4174,13 +4416,14 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
     wasi__appendf(buffer,
                   buffer_size,
                   &offset,
-                  "kind=%s layer=0x%02x status=%s sections=%u core-modules=%u\n",
+                  "kind=%s layer=0x%02x status=%s sections=%u core-types=%u core-modules=%u\n",
                   component->binary_kind == WASI_BINARY_KIND_COMPONENT ? "component"
                   : component->binary_kind == WASI_BINARY_KIND_CORE_MODULE ? "core"
                   : "unknown",
                   (unsigned)wasi_component_layer(component),
                   wasi_component_status_string(component->status),
                   (unsigned)component->num_sections,
+                  (unsigned)component->num_core_types,
                   (unsigned)component->num_core_modules);
 
     for (i = 0; i < component->num_sections; i++) {
@@ -4196,6 +4439,25 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                       (unsigned long long)section->payload_size);
         if (section->name && section->name[0])
             wasi__appendf(buffer, buffer_size, &offset, " custom=%s", section->name);
+        wasi__appendf(buffer, buffer_size, &offset, "\n");
+    }
+
+    for (i = 0; i < component->num_core_types; i++) {
+        const wasi_component_core_type_t* type = &component->core_types[i];
+        wasi__appendf(buffer,
+                      buffer_size,
+                      &offset,
+                      "core-type[%u]: kind=%s detail=%s",
+                      (unsigned)i,
+                      wasi_component_core_type_kind_string(type->kind),
+                      wasi__component_core_type_detail_string(type->detail_opcode));
+        if (type->kind == WASI_COMPONENT_CORE_TYPE_KIND_MODULE) {
+            wasi__appendf(buffer, buffer_size, &offset, " decls=%u", (unsigned)type->item_count);
+        } else if (type->opcode == 0x4Eu) {
+            wasi__appendf(buffer, buffer_size, &offset, " group=%u", (unsigned)type->item_count);
+        }
+        if (type->has_primary_index)
+            wasi__appendf(buffer, buffer_size, &offset, " index=%u", (unsigned)type->primary_index);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
     }
 
@@ -4589,6 +4851,17 @@ const char* wasi_component_alias_kind_string(wasi_component_alias_kind_t kind) {
             return "instance-export";
         case WASI_COMPONENT_ALIAS_KIND_OUTER:
             return "outer";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wasi_component_core_type_kind_string(wasi_component_core_type_kind_t kind) {
+    switch (kind) {
+        case WASI_COMPONENT_CORE_TYPE_KIND_MODULE:
+            return "module";
+        case WASI_COMPONENT_CORE_TYPE_KIND_TYPE:
+            return "type";
         default:
             return "unknown";
     }

@@ -178,6 +178,18 @@ static const uint8_t wasi_test_component_with_nested_core_types[] = {
     0x42, 0x01, 0x00, 0x50, 0x00,
 };
 
+static const uint8_t wasi_test_component_with_top_level_core_types[] = {
+    0x00, 0x61, 0x73, 0x6D,
+    0x0D, 0x00, 0x01, 0x00,
+    0x03, 0x13,
+    0x03,
+    0x60, 0x00, 0x00,
+    0x50, 0x02,
+    0x01, 0x60, 0x01, 0x7F, 0x01, 0x7F,
+    0x03, 0x01, 0x67, 0x00, 0x00,
+    0x5D, 0x01,
+};
+
 WL_TEST(test_wasi_detects_core_modules) {
     WL_CHECK(t, wasi_detect_binary_kind(wasi_test_core_header, sizeof(wasi_test_core_header)) ==
                     WASI_BINARY_KIND_CORE_MODULE);
@@ -297,6 +309,40 @@ WL_TEST(test_wasi_parses_nested_core_types_in_type_space) {
     wasi_dump_component(component, dump, sizeof(dump));
     WL_CHECK(t, strstr(dump, "type[0]: kind=component decls=1") != NULL);
     WL_CHECK(t, strstr(dump, "type[1]: kind=instance decls=1") != NULL);
+
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_parses_top_level_core_type_sections) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    char dump[768];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_top_level_core_types,
+                          sizeof(wasi_test_component_with_top_level_core_types));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    WL_CHECK(t, wasi_component_core_type_count(component) == 3u);
+    WL_CHECK(t, wasi_component_core_type_kind(component, 0) == WASI_COMPONENT_CORE_TYPE_KIND_TYPE);
+    WL_CHECK(t, wasi_component_core_type_detail_opcode(component, 0) == 0x60u);
+    WL_CHECK(t, wasi_component_core_type_kind(component, 1) == WASI_COMPONENT_CORE_TYPE_KIND_MODULE);
+    WL_CHECK(t, wasi_component_core_type_item_count(component, 1) == 2u);
+    WL_CHECK(t, wasi_component_core_type_kind(component, 2) == WASI_COMPONENT_CORE_TYPE_KIND_TYPE);
+    WL_CHECK(t, wasi_component_core_type_detail_opcode(component, 2) == 0x5Du);
+    WL_CHECK(t, wasi_component_core_type_has_primary_index(component, 2));
+    WL_CHECK(t, wasi_component_core_type_primary_index(component, 2) == 1u);
+
+    wasi_dump_component(component, dump, sizeof(dump));
+    WL_CHECK(t, strstr(dump, "core-types=3") != NULL);
+    WL_CHECK(t, strstr(dump, "core-type[0]: kind=type detail=func") != NULL);
+    WL_CHECK(t, strstr(dump, "core-type[1]: kind=module detail=module decls=2") != NULL);
+    WL_CHECK(t, strstr(dump, "core-type[2]: kind=type detail=cont index=1") != NULL);
 
     wasi_free_component(component);
     wasi_destroy(&engine);
@@ -675,6 +721,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_parses_component_imports_and_exports),
         WL_TEST_CASE(test_wasi_parses_extended_component_types),
         WL_TEST_CASE(test_wasi_parses_nested_core_types_in_type_space),
+        WL_TEST_CASE(test_wasi_parses_top_level_core_type_sections),
         WL_TEST_CASE(test_wasi_resolves_versioned_interface_names),
         WL_TEST_CASE(test_wasi_parses_component_core_instances),
         WL_TEST_CASE(test_wasi_parses_component_instances),
