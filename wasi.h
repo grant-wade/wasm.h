@@ -5590,8 +5590,10 @@ static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
             align = 1u;
             break;
         case WASI_STRING_ENCODING_UTF16:
-            if ((size_t)len_units > ((size_t)-1) / 2u)
+#if SIZE_MAX <= UINT32_MAX
+            if (len_units > (uint32_t)(SIZE_MAX / 2u))
                 return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 guest string too large");
+#endif
             size_bytes = (size_t)len_units * 2u;
             align = 2u;
             break;
@@ -5599,8 +5601,10 @@ static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
             align = 2u;
             if (len_units & WASI__CANON_STRING_UTF16_TAG) {
                 uint32_t utf16_units = len_units & ~WASI__CANON_STRING_UTF16_TAG;
-                if ((size_t)utf16_units > ((size_t)-1) / 2u)
+#if SIZE_MAX <= UINT32_MAX
+                if (utf16_units > (uint32_t)(SIZE_MAX / 2u))
                     return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 guest string too large");
+#endif
                 size_bytes = (size_t)utf16_units * 2u;
             } else {
                 size_bytes = (size_t)len_units;
