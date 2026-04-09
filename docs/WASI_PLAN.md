@@ -136,6 +136,36 @@ A component binary uses the same `\0asm` magic with layer byte 0x0d (vs. 0x01 fo
 - Instantiation / alias / start section parsing
 - Diagnostic API: `wasi_dump_component(comp)` prints structure summary
 
+### Retained AST Scope
+
+Milestone 1 should not stop at “reader can skip past the bytes”. The parser needs an internal retained AST rich enough to support later milestones without reparsing the original binary from scratch.
+
+Minimum retained structure:
+
+- **Stable index spaces** — preserve the top-level component index spaces as explicit arrays/tables: core types, component types, funcs, core modules, nested components, core instances, component instances, values, aliases, imports, exports, canons, and the start record.
+- **Component value/type AST** — retain recursive definitions for `record`, `variant`, `enum`, `flags`, `tuple`, `list`, `option`, `result`, `own`, `borrow`, `stream`, `future`, and `error-context`. Do not collapse these to a single opcode if M2/M3/M11 will need field names, case names, child types, or flag counts.
+- **Function type AST** — retain ordered params/results with names and type references for component funcs, plus enough metadata to recover flattening and canonical ABI lowering decisions later.
+- **Component / instance type declarations** — retain nested declaration lists, not just a `decl_count`: nested `type`, nested `core:type`, nested `alias`, `import`, and `export` records should all survive parsing as structured nodes.
+- **Core type AST** — retain top-level and nested `core:type` entries as structured nodes: module types, rec groups, subtypes, and their inner composite kinds (`func`, `struct`, `array`, `cont`) plus referenced indices where present.
+- **Core module type declarations** — inside core module types, retain import, type, alias, and export declarations with their extern-type payloads so M5 can do type-directed linking instead of byte-level reparsing.
+- **Extern descriptor AST** — retain parsed component extern descriptors and core extern types, not just resolved kinds, so import/export matching in M5 and wrapper generation in M11 have direct access to the structural type information.
+- **Canon AST** — retain every canonical function/builtin node with opcode, kind, async flag, options, referenced func/type/resource indices, callback-related immediates, and task/stream/future result metadata.
+- **Instantiation AST** — retain core-instance and component-instance instruction bodies as procedural records in original order, including argument maps, because M5 executes the component’s embedded linking program rather than reconstructing it heuristically.
+- **Names and versions** — preserve both the raw import/export name and the split interface name/version pair. Later milestones need both the canonicalized matching key and the original diagnostic spelling.
+- **Source offsets** — keep section-relative or file-relative byte offsets for major AST nodes where cheap to do so. This is useful for `wasi_dump_component`, diffing against `wasm-tools dump`, and future diagnostics.
+
+What can remain shallow in Milestone 1:
+
+- The public C API does not need to expose the entire AST immediately.
+- Layout/alignment calculations for canonical ABI types can wait until M2/M3.
+- Semantic linking, type checking across instances, and canonical lift/lower execution can wait until M5.
+
+Design constraint for the retained AST:
+
+- It should be **index-based and arena-friendly**, so later milestones can cheaply reference nodes by index rather than copying trees.
+- It should distinguish **component-level types** from **core-level types** even when their binary encodings share lead bytes such as `0x50`.
+- It should preserve enough naming detail that M11 (`wasm2api` component mode) can generate useful C identifiers without going back to the original bytes.
+
 ### Validation
 
 - Round-trip: load component binaries from `wasm-tools component new`, verify core modules extract and validate
