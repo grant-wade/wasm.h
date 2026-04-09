@@ -1772,6 +1772,342 @@ static int wasi__read_component_resultlist(wasi__reader_t* reader,
     return 1;
 }
 
+static void wasi__core_reader_begin(const wasi__reader_t* reader, wasm__reader_t* core_reader) {
+    if (!core_reader) return;
+    core_reader->ptr = reader ? reader->ptr : NULL;
+    core_reader->end = reader ? reader->end : NULL;
+    core_reader->malformed = reader ? reader->malformed : 1;
+}
+
+static void wasi__core_reader_end(wasi__reader_t* reader, const wasm__reader_t* core_reader) {
+    if (!reader || !core_reader) return;
+    reader->ptr = core_reader->ptr;
+    reader->end = core_reader->end;
+    reader->malformed = core_reader->malformed;
+}
+
+static void wasi__skip_core_valtype(wasi__reader_t* reader) {
+    wasm__reader_t core_reader;
+
+    if (!reader) return;
+    wasi__core_reader_begin(reader, &core_reader);
+    wasm__skip_valtype(&core_reader);
+    wasi__core_reader_end(reader, &core_reader);
+}
+
+static void wasi__skip_core_reftype(wasi__reader_t* reader) {
+    wasm__reader_t core_reader;
+
+    if (!reader) return;
+    wasi__core_reader_begin(reader, &core_reader);
+    wasm__skip_reftype(&core_reader);
+    wasi__core_reader_end(reader, &core_reader);
+}
+
+static uint64_t wasi__read_core_leb128_u64(wasi__reader_t* reader) {
+    wasm__reader_t core_reader;
+    uint64_t value;
+
+    if (!reader) return 0;
+    wasi__core_reader_begin(reader, &core_reader);
+    value = wasm__read_leb128_u64(&core_reader);
+    wasi__core_reader_end(reader, &core_reader);
+    return value;
+}
+
+static int wasi__skip_core_storage_type(wasi__reader_t* reader) {
+    if (!reader || !wasi__has(reader, 1)) {
+        if (reader) reader->malformed = 1;
+        return 0;
+    }
+
+    if (wasm__is_packedtype_byte(*reader->ptr)) {
+        reader->ptr++;
+        return 1;
+    }
+
+    wasi__skip_core_valtype(reader);
+    return !reader->malformed;
+}
+
+static int wasi__skip_core_field_type(wasi__reader_t* reader) {
+    uint8_t mutability;
+
+    if (!wasi__skip_core_storage_type(reader)) return 0;
+    mutability = wasi__read_u8(reader);
+    if (reader->malformed || mutability > 1u) {
+        reader->malformed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int wasi__skip_core_subtype(wasi__reader_t* reader) {
+    uint8_t opcode;
+    uint32_t count;
+    uint32_t i;
+
+    if (!reader) return 0;
+
+    opcode = wasi__read_u8(reader);
+    if (reader->malformed) return 0;
+
+    if (opcode == 0x4Eu) {
+        count = wasi__read_leb128_u32(reader);
+        if (reader->malformed) return 0;
+        for (i = 0; i < count; i++) {
+            if (!wasi__skip_core_subtype(reader)) return 0;
+        }
+        return 1;
+    }
+
+    if (opcode == 0x50u || opcode == 0x4Fu) {
+        count = wasi__read_leb128_u32(reader);
+        if (reader->malformed) return 0;
+        for (i = 0; i < count; i++) {
+            (void)wasi__read_leb128_u32(reader);
+            if (reader->malformed) return 0;
+        }
+        opcode = wasi__read_u8(reader);
+        if (reader->malformed) return 0;
+    }
+
+    switch (opcode) {
+        case 0x60u:
+            count = wasi__read_leb128_u32(reader);
+            if (reader->malformed) return 0;
+            for (i = 0; i < count; i++) {
+                wasi__skip_core_valtype(reader);
+                if (reader->malformed) return 0;
+            }
+            count = wasi__read_leb128_u32(reader);
+            if (reader->malformed) return 0;
+            for (i = 0; i < count; i++) {
+                wasi__skip_core_valtype(reader);
+                if (reader->malformed) return 0;
+            }
+            return 1;
+        case 0x5Fu:
+            count = wasi__read_leb128_u32(reader);
+            if (reader->malformed) return 0;
+            for (i = 0; i < count; i++) {
+                if (!wasi__skip_core_field_type(reader)) return 0;
+            }
+            return 1;
+        case 0x5Eu:
+            return wasi__skip_core_field_type(reader);
+        case 0x5Du:
+            (void)wasi__read_leb128_u32(reader);
+            return !reader->malformed;
+        default:
+            reader->malformed = 1;
+            return 0;
+    }
+}
+
+static int wasi__skip_core_table_type(wasi__reader_t* reader) {
+    uint8_t flags;
+    int has_max;
+
+    if (!reader) return 0;
+
+    if (!wasi__has(reader, 1)) {
+        reader->malformed = 1;
+        return 0;
+    }
+    if (*reader->ptr == 0x40u) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    wasi__skip_core_reftype(reader);
+    if (reader->malformed) return 0;
+
+    flags = wasi__read_u8(reader);
+    if (reader->malformed || (flags & ~0x07u) != 0) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    has_max = (flags & 0x01u) != 0;
+    (void)wasi__read_core_leb128_u64(reader);
+    if (reader->malformed) return 0;
+    if (has_max) {
+        (void)wasi__read_core_leb128_u64(reader);
+        if (reader->malformed) return 0;
+    }
+    return 1;
+}
+
+static int wasi__skip_core_memory_type(wasi__reader_t* reader) {
+    uint8_t flags;
+    int has_max;
+
+    if (!reader) return 0;
+
+    flags = wasi__read_u8(reader);
+    if (reader->malformed || (flags & ~0x0Fu) != 0) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    has_max = (flags & 0x01u) != 0;
+    (void)wasi__read_core_leb128_u64(reader);
+    if (reader->malformed) return 0;
+    if (has_max) {
+        (void)wasi__read_core_leb128_u64(reader);
+        if (reader->malformed) return 0;
+    }
+    return 1;
+}
+
+static int wasi__skip_core_global_type(wasi__reader_t* reader) {
+    uint8_t mutability;
+
+    if (!reader) return 0;
+    wasi__skip_core_valtype(reader);
+    if (reader->malformed) return 0;
+
+    mutability = wasi__read_u8(reader);
+    if (reader->malformed || mutability > 1u) {
+        reader->malformed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int wasi__skip_core_module_externtype(wasi__reader_t* reader) {
+    uint8_t kind;
+
+    if (!reader) return 0;
+    kind = wasi__read_u8(reader);
+    if (reader->malformed) return 0;
+
+    switch (kind) {
+        case 0x00u:
+            (void)wasi__read_leb128_u32(reader);
+            return !reader->malformed;
+        case 0x01u:
+            return wasi__skip_core_table_type(reader);
+        case 0x02u:
+            return wasi__skip_core_memory_type(reader);
+        case 0x03u:
+            return wasi__skip_core_global_type(reader);
+        case 0x04u:
+            if (wasi__read_u8(reader) != 0x00u) {
+                reader->malformed = 1;
+                return 0;
+            }
+            (void)wasi__read_leb128_u32(reader);
+            return !reader->malformed;
+        default:
+            reader->malformed = 1;
+            return 0;
+    }
+}
+
+static int wasi__skip_core_module_alias(wasi__reader_t* reader) {
+    uint8_t sort;
+    uint8_t alias_kind;
+
+    if (!reader) return 0;
+
+    sort = wasi__read_u8(reader);
+    alias_kind = wasi__read_u8(reader);
+    if (reader->malformed) return 0;
+
+    if (sort != 0x00u && sort != 0x01u && sort != 0x02u && sort != 0x03u &&
+        sort != 0x04u && sort != 0x10u && sort != 0x11u) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    if (alias_kind != 0x01u) {
+        reader->malformed = 1;
+        return 0;
+    }
+
+    (void)wasi__read_leb128_u32(reader);
+    (void)wasi__read_leb128_u32(reader);
+    return !reader->malformed;
+}
+
+static int wasi__skip_core_module_type(wasi__reader_t* reader) {
+    uint32_t decl_count;
+    uint32_t i;
+
+    if (!reader) return 0;
+
+    decl_count = wasi__read_leb128_u32(reader);
+    if (reader->malformed) return 0;
+
+    for (i = 0; i < decl_count; i++) {
+        uint8_t decl_opcode = wasi__read_u8(reader);
+        if (reader->malformed) return 0;
+
+        switch (decl_opcode) {
+            case 0x00u: {
+                char* module_name = NULL;
+                char* name = NULL;
+                if (!wasi__read_component_plain_name(reader, &module_name)) return 0;
+                if (!wasi__read_component_plain_name(reader, &name)) {
+                    WASM_FREE(module_name);
+                    return 0;
+                }
+                WASM_FREE(module_name);
+                WASM_FREE(name);
+                if (!wasi__skip_core_module_externtype(reader)) return 0;
+                break;
+            }
+            case 0x01u:
+                if (!wasi__skip_core_subtype(reader)) return 0;
+                break;
+            case 0x02u:
+                if (!wasi__skip_core_module_alias(reader)) return 0;
+                break;
+            case 0x03u: {
+                char* name = NULL;
+                if (!wasi__read_component_plain_name(reader, &name)) return 0;
+                WASM_FREE(name);
+                if (!wasi__skip_core_module_externtype(reader)) return 0;
+                break;
+            }
+            default:
+                reader->malformed = 1;
+                return 0;
+        }
+    }
+
+    return 1;
+}
+
+static wasi_error_t wasi__skip_nested_core_type_declaration(wasi_engine_t* engine,
+                                                            wasi__reader_t* reader) {
+    uint8_t opcode;
+
+    if (!engine || !reader) {
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component core type reader missing state");
+    }
+
+    opcode = wasi__read_u8(reader);
+    if (reader->malformed) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested core type declaration");
+    }
+
+    if (opcode != 0x50u) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "nested core type opcode 0x%02x not implemented",
+                                (unsigned)opcode);
+    }
+
+    if (!wasi__skip_core_module_type(reader)) {
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested core module type");
+    }
+
+    return WASI_OK;
+}
+
 static int wasi__skip_component_externdesc(wasi__reader_t* reader) {
     uint8_t kind;
 
@@ -1932,9 +2268,11 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                 }
                 switch (decl_opcode) {
                     case 0x00:
-                        return wasi__set_error_literal(engine,
-                                                       WASI_ERR_NOT_IMPLEMENTED,
-                                                       "component core type declarations not implemented");
+                        {
+                            wasi_error_t err = wasi__skip_nested_core_type_declaration(engine, reader);
+                            if (err != WASI_OK) return err;
+                        }
+                        break;
                     case 0x01: {
                         wasi_component_type_t nested_type;
                         wasi_error_t err = wasi__read_component_type_entry(engine, reader, &nested_type);

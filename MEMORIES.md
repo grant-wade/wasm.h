@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 7
+Memory Version: 8
 
 Current curated contents of `/memories/repo/` as of 2026-04-07.
 
@@ -38,6 +38,11 @@ This file is the canonical checked-in snapshot of repo memory.
 - Text modules in positive and negative cases are compiled and validated through `wasm-tools parse` and `wasm-tools validate` from inside the runner when needed.
 - The runner parses wrapped signed integer spellings from JSON and intentionally normalizes only semantically equivalent diagnostics.
 - Spectest externref handles should be encoded away from the runtime's low-bit GC/i31 tags before `any.convert_extern`; otherwise host refs like `ref.extern 0` can be misclassified as `i31ref` in `br_on_cast`/`ref_cast` coverage.
+
+## component-type-parser.md
+
+- Nested `core:type` declarations inside component/instance types in `wasi.h` are inline core module types: declaration opcode `0x00` is followed by module-type opcode `0x50`, not a core type index.
+- The current nested module-type parser in `wasi.h` skips module declaration lists covering core `type`/`rec` subtypes, imports, outer aliases, and exports; regressions live in `wasi_test.c`.
 
 ## wasm-runtime.md
 
