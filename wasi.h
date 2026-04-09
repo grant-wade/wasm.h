@@ -4708,6 +4708,8 @@ static wasi_error_t wasi__classify_binary(const uint8_t* bytes,
 }
 
 #define WASI__CABI_REALLOC_EXPORT "cabi_realloc"
+#define WASI__CANON_STRING_UTF16_TAG 0x80000000u
+#define WASI__CANON_STRING_MAX_CODE_UNITS 0x7FFFFFFFu
 
 typedef struct wasi__canon_runtime_options_t {
     wasi_canon_options_t api;
@@ -4965,6 +4967,44 @@ static wasi_error_t wasi__utf16le_to_utf8(wasi_engine_t* engine,
         encoded_len = wasi__utf8_encode_one(codepoint, encoded);
         memcpy(utf8 + written, encoded, encoded_len);
         written += encoded_len;
+    }
+
+    utf8[written] = '\0';
+    *out_utf8 = utf8;
+    *out_len = written;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__latin1_to_utf8(wasi_engine_t* engine,
+                                         const uint8_t* latin1,
+                                         size_t latin1_len,
+                                         char** out_utf8,
+                                         size_t* out_len) {
+    char* utf8;
+    size_t capacity;
+    size_t i;
+    size_t written = 0;
+
+    if (out_utf8) *out_utf8 = NULL;
+    if (out_len) *out_len = 0;
+    if (!out_utf8 || !out_len) return WASI_ERR_INVALID_ARGUMENT;
+    if (!latin1 && latin1_len)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "latin1 bytes must not be NULL");
+    if (latin1_len > (((size_t)-1) - 1u) / 2u)
+        return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf8 conversion overflow");
+
+    capacity = latin1_len * 2u + 1u;
+    utf8 = (char*)WASM_MALLOC(capacity);
+    if (!utf8) return wasi__set_error_literal(engine, WASI_ERR_OOM, "utf8 conversion alloc failed");
+
+    for (i = 0; i < latin1_len; i++) {
+        uint8_t byte = latin1[i];
+        if (byte < 0x80u) {
+            utf8[written++] = (char)byte;
+        } else {
+            utf8[written++] = (char)(0xC0u | (byte >> 6));
+            utf8[written++] = (char)(0x80u | (byte & 0x3Fu));
+        }
     }
 
     utf8[written] = '\0';
@@ -5320,8 +5360,49 @@ static wasi_error_t wasi__encode_guest_string(wasi_engine_t* engine,
             *out_align = 2u;
             return WASI_OK;
         }
-        case WASI_STRING_ENCODING_LATIN1_UTF16:
-            return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "latin1+utf16 canonical strings not implemented yet");
+        case WASI_STRING_ENCODING_LATIN1_UTF16: {
+            size_t cursor = 0;
+            size_t written = 0;
+            uint32_t codepoint;
+
+            if (string->len > WASI__CANON_STRING_MAX_CODE_UNITS)
+                return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "string too large for canonical abi");
+
+            guest_bytes = string->len ? (uint8_t*)WASM_MALLOC(string->len) : NULL;
+            if (string->len && !guest_bytes)
+                return wasi__set_error_literal(engine, WASI_ERR_OOM, "latin1 string alloc failed");
+
+            while (cursor < string->len) {
+                if (!wasi__utf8_decode_one((const uint8_t*)string->data, string->len, &cursor, &codepoint)) {
+                    WASM_FREE(guest_bytes);
+                    return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "invalid utf8 string");
+                }
+                if (codepoint >= 0x100u) {
+                    wasi_error_t err;
+                    WASM_FREE(guest_bytes);
+                    err = wasi__utf8_to_utf16le(engine, string->data, string->len, &guest_bytes, &guest_size);
+                    if (err != WASI_OK) return err;
+                    if ((guest_size / 2u) > WASI__CANON_STRING_MAX_CODE_UNITS) {
+                        WASM_FREE(guest_bytes);
+                        return wasi__set_error_literal(engine,
+                                                       WASI_ERR_INVALID_ARGUMENT,
+                                                       "utf16 string too large for canonical abi");
+                    }
+                    *out_bytes = guest_bytes;
+                    *out_len_units = ((uint32_t)(guest_size / 2u)) | WASI__CANON_STRING_UTF16_TAG;
+                    *out_size_bytes = (uint32_t)guest_size;
+                    *out_align = 2u;
+                    return WASI_OK;
+                }
+                guest_bytes[written++] = (uint8_t)codepoint;
+            }
+
+            *out_bytes = guest_bytes;
+            *out_len_units = (uint32_t)written;
+            *out_size_bytes = (uint32_t)written;
+            *out_align = 2u;
+            return WASI_OK;
+        }
         default:
             return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "unknown string encoding");
     }
@@ -5335,6 +5416,7 @@ static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
                                               wasi_value_t* out_value) {
     size_t size_bytes = 0;
     uint8_t* bytes = NULL;
+    uint32_t align = 1u;
     wasi_error_t err;
 
     if (!engine || !options || !core_module || !out_value)
@@ -5343,17 +5425,31 @@ static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
     switch (options->api.string_encoding) {
         case WASI_STRING_ENCODING_UTF8:
             size_bytes = (size_t)len_units;
+            align = 1u;
             break;
         case WASI_STRING_ENCODING_UTF16:
             if ((size_t)len_units > ((size_t)-1) / 2u)
                 return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 guest string too large");
             size_bytes = (size_t)len_units * 2u;
+            align = 2u;
             break;
         case WASI_STRING_ENCODING_LATIN1_UTF16:
-            return wasi__set_error_literal(engine, WASI_ERR_NOT_IMPLEMENTED, "latin1+utf16 canonical strings not implemented yet");
+            align = 2u;
+            if (len_units & WASI__CANON_STRING_UTF16_TAG) {
+                uint32_t utf16_units = len_units & ~WASI__CANON_STRING_UTF16_TAG;
+                if ((size_t)utf16_units > ((size_t)-1) / 2u)
+                    return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "utf16 guest string too large");
+                size_bytes = (size_t)utf16_units * 2u;
+            } else {
+                size_bytes = (size_t)len_units;
+            }
+            break;
         default:
             return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "unknown string encoding");
     }
+
+    if (size_bytes && (ptr & (align - 1u)) != 0u)
+        return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "guest string pointer is misaligned");
 
     if (!size_bytes) {
         wasi_value_init(out_value);
@@ -5386,6 +5482,23 @@ static wasi_error_t wasi__decode_guest_string(wasi_engine_t* engine,
         char* utf8 = NULL;
         size_t utf8_len = 0;
         err = wasi__utf16le_to_utf8(engine, bytes, len_units, &utf8, &utf8_len);
+        WASM_FREE(bytes);
+        if (err != WASI_OK) return err;
+        err = wasi_value_set_string_copy(out_value, utf8, utf8_len);
+        WASM_FREE(utf8);
+        return err == WASI_OK ? WASI_OK : wasi__set_error_literal(engine, err, err == WASI_ERR_OOM ? "string copy alloc failed" : "string copy failed");
+    }
+
+    if (options->api.string_encoding == WASI_STRING_ENCODING_LATIN1_UTF16) {
+        char* utf8 = NULL;
+        size_t utf8_len = 0;
+
+        if (len_units & WASI__CANON_STRING_UTF16_TAG) {
+            uint32_t utf16_units = len_units & ~WASI__CANON_STRING_UTF16_TAG;
+            err = wasi__utf16le_to_utf8(engine, bytes, utf16_units, &utf8, &utf8_len);
+        } else {
+            err = wasi__latin1_to_utf8(engine, bytes, size_bytes, &utf8, &utf8_len);
+        }
         WASM_FREE(bytes);
         if (err != WASI_OK) return err;
         err = wasi_value_set_string_copy(out_value, utf8, utf8_len);
@@ -5536,6 +5649,10 @@ static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
             if (wasm_err != WASM_OK) {
                 WASM_FREE(guest_bytes);
                 return wasi__set_runtime_error_from_module(engine, core_module, wasm_err, "cabi_realloc failed");
+            }
+            if (guest_size_bytes && (((uint32_t)realloc_result.of.i32) & (align - 1u)) != 0u) {
+                WASM_FREE(guest_bytes);
+                return wasi__set_error_literal(engine, WASI_ERR_RUNTIME, "cabi_realloc returned misaligned pointer");
             }
             wasm_err = wasm_memory_write(core_module,
                                          options->api.memory_index,

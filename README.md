@@ -102,7 +102,7 @@ Current `wasi.h` capabilities cover binary introspection plus the first low-leve
 - low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
 - minimal single-module instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
 - scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
-- UTF-8 and UTF-16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
+- UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
 - parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
 
 `wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, and a narrow instance path for simple single-module components whose exported functions are direct synchronous canon lifts.

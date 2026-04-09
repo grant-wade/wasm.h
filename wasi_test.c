@@ -429,7 +429,7 @@ static void wasi_test_emit_component_export(wasi_test_builder_t* b,
 
 static void wasi_test_build_string_lift_component(wasi_test_builder_t* component,
                                                   const wasi_test_builder_t* core_module,
-                                                  int utf16) {
+                                                  int string_encoding) {
     wasi_test_builder_t sec = { 0 };
 
     memset(component, 0, sizeof(*component));
@@ -453,8 +453,9 @@ static void wasi_test_build_string_lift_component(wasi_test_builder_t* component
     wasi_test_emit(&sec, 0x00u);
     wasi_test_emit(&sec, 0x00u);
     wasi_test_emit_leb128_u32(&sec, 1u);
-    wasi_test_emit_leb128_u32(&sec, utf16 ? 4u : 3u);
-    if (utf16) wasi_test_emit(&sec, 0x01u);
+    wasi_test_emit_leb128_u32(&sec, string_encoding ? 4u : 3u);
+    if (string_encoding == 1) wasi_test_emit(&sec, 0x01u);
+    if (string_encoding == 2) wasi_test_emit(&sec, 0x02u);
     wasi_test_emit(&sec, 0x03u);
     wasi_test_emit_leb128_u32(&sec, 0u);
     wasi_test_emit(&sec, 0x04u);
@@ -1557,6 +1558,87 @@ WL_TEST(test_wasi_canon_call_roundtrips_utf16_strings) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_canon_call_roundtrips_latin1_utf16_strings) {
+    static const char cafe[] = "caf\xC3\xA9";
+    static const char smile[] = "\xF0\x9F\x99\x82";
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    wasm_module_t* core_module;
+    wasi_test_builder_t module_bytes;
+    wasi_canon_options_t options;
+    wasi_value_t args[1];
+    wasi_value_t results[1];
+    wasm_value_t global_value;
+    uint8_t bytes[4];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_m2_func_types,
+                          sizeof(wasi_test_component_with_m2_func_types));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_test_build_m2_core_module(&module_bytes);
+    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    WL_REQUIRE_MSG(t, core_module != NULL,
+                   "wasm_load failed: %s",
+                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+
+    err = wasi_canon_options_default(&options);
+    WL_REQUIRE(t, err == WASI_OK);
+    options.string_encoding = WASI_STRING_ENCODING_LATIN1_UTF16;
+    options.post_return_name = "cabi_post_echo";
+
+    memset(args, 0, sizeof(args));
+    memset(results, 0, sizeof(results));
+    args[0].kind = WASI_VALUE_KIND_STRING;
+    args[0].of.string.data = (char*)cafe;
+    args[0].of.string.len = sizeof(cafe) - 1u;
+    args[0].of.string.owned = 0;
+
+    err = wasi_canon_call(component, 5u, core_module, "echo", &options, args, 1u, results, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call latin1 string failed: %s", engine.error_msg);
+    WL_CHECK(t, results[0].kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, results[0].of.string.len == sizeof(cafe) - 1u);
+    WL_CHECK(t, memcmp(results[0].of.string.data, cafe, sizeof(cafe) - 1u) == 0);
+
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_len", &global_value) == WASM_OK);
+    WL_CHECK(t, (uint32_t)global_value.of.i32 == 4u);
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_ptr", &global_value) == WASM_OK);
+    WL_REQUIRE(t, wasm_memory_read(core_module, 0u, (uint32_t)global_value.of.i32, bytes, 4u) == WASM_OK);
+    WL_CHECK(t, bytes[0] == 'c');
+    WL_CHECK(t, bytes[1] == 'a');
+    WL_CHECK(t, bytes[2] == 'f');
+    WL_CHECK(t, bytes[3] == 0xE9u);
+
+    wasi_value_destroy(&results[0]);
+    memset(results, 0, sizeof(results));
+    args[0].of.string.data = (char*)smile;
+    args[0].of.string.len = sizeof(smile) - 1u;
+
+    err = wasi_canon_call(component, 5u, core_module, "echo", &options, args, 1u, results, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call latin1+utf16 fallback failed: %s", engine.error_msg);
+    WL_CHECK(t, results[0].kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, results[0].of.string.len == sizeof(smile) - 1u);
+    WL_CHECK(t, memcmp(results[0].of.string.data, smile, sizeof(smile) - 1u) == 0);
+
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_len", &global_value) == WASM_OK);
+    WL_CHECK(t, (uint32_t)global_value.of.i32 == 0x80000002u);
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_ptr", &global_value) == WASM_OK);
+    WL_REQUIRE(t, wasm_memory_read(core_module, 0u, (uint32_t)global_value.of.i32, bytes, sizeof(bytes)) == WASM_OK);
+    WL_CHECK(t, bytes[0] == 0x3Du);
+    WL_CHECK(t, bytes[1] == 0xD8u);
+    WL_CHECK(t, bytes[2] == 0x42u);
+    WL_CHECK(t, bytes[3] == 0xDEu);
+
+    wasi_value_destroy(&results[0]);
+    wasm_free_module(core_module);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_canon_call_rejects_invalid_scalar_values) {
     wasi_engine_t engine;
     wasi_component_t* component;
@@ -1706,6 +1788,83 @@ WL_TEST(test_wasi_instance_calls_utf16_canon_lift_exports) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_instance_calls_latin1_utf16_canon_lift_exports) {
+    static const char cafe[] = "caf\xC3\xA9";
+    static const char smile[] = "\xF0\x9F\x99\x82";
+    wasi_engine_t engine;
+    wasi_test_builder_t module_bytes;
+    wasi_test_builder_t component_bytes;
+    wasi_component_t* component;
+    wasi_instance_t* instance;
+    wasm_module_t* core_module;
+    wasi_value_t args[1];
+    wasi_value_t results[1];
+    wasm_value_t global_value;
+    uint8_t bytes[4];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_m2_core_module(&module_bytes);
+    wasi_test_build_string_lift_component(&component_bytes, &module_bytes, 2);
+
+    component = wasi_load(&engine, component_bytes.buf, component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    instance = wasi_instantiate(component);
+    WL_REQUIRE_MSG(t, instance != NULL, "wasi_instantiate failed: %s", engine.error_msg);
+
+    memset(args, 0, sizeof(args));
+    memset(results, 0, sizeof(results));
+    args[0].kind = WASI_VALUE_KIND_STRING;
+    args[0].of.string.data = (char*)cafe;
+    args[0].of.string.len = sizeof(cafe) - 1u;
+    args[0].of.string.owned = 0;
+
+    err = wasi_call(instance, "echo", args, 1u, results, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_call latin1 failed: %s", engine.error_msg);
+    WL_CHECK(t, results[0].kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, results[0].of.string.len == sizeof(cafe) - 1u);
+    WL_CHECK(t, memcmp(results[0].of.string.data, cafe, sizeof(cafe) - 1u) == 0);
+
+    core_module = wasi_component_core_module_at(component, 0u);
+    WL_REQUIRE(t, core_module != NULL);
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_len", &global_value) == WASM_OK);
+    WL_CHECK(t, (uint32_t)global_value.of.i32 == 4u);
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_ptr", &global_value) == WASM_OK);
+    WL_REQUIRE(t, wasm_memory_read(core_module, 0u, (uint32_t)global_value.of.i32, bytes, 4u) == WASM_OK);
+    WL_CHECK(t, bytes[0] == 'c');
+    WL_CHECK(t, bytes[1] == 'a');
+    WL_CHECK(t, bytes[2] == 'f');
+    WL_CHECK(t, bytes[3] == 0xE9u);
+
+    wasi_value_destroy(&results[0]);
+    memset(results, 0, sizeof(results));
+    args[0].of.string.data = (char*)smile;
+    args[0].of.string.len = sizeof(smile) - 1u;
+
+    err = wasi_call(instance, "echo", args, 1u, results, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_call latin1+utf16 fallback failed: %s", engine.error_msg);
+    WL_CHECK(t, results[0].kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, results[0].of.string.len == sizeof(smile) - 1u);
+    WL_CHECK(t, memcmp(results[0].of.string.data, smile, sizeof(smile) - 1u) == 0);
+
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_len", &global_value) == WASM_OK);
+    WL_CHECK(t, (uint32_t)global_value.of.i32 == 0x80000002u);
+    WL_REQUIRE(t, wasm_global_get(core_module, "last_post_ptr", &global_value) == WASM_OK);
+    WL_REQUIRE(t, wasm_memory_read(core_module, 0u, (uint32_t)global_value.of.i32, bytes, sizeof(bytes)) == WASM_OK);
+    WL_CHECK(t, bytes[0] == 0x3Du);
+    WL_CHECK(t, bytes[1] == 0xD8u);
+    WL_CHECK(t, bytes[2] == 0x42u);
+    WL_CHECK(t, bytes[3] == 0xDEu);
+
+    wasi_value_destroy(&results[0]);
+    wasi_free_instance(instance);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instance_surfaces_lift_validation_failures) {
     wasi_engine_t engine;
     wasi_test_builder_t module_bytes;
@@ -1778,9 +1937,11 @@ int main(void) {
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_m2_scalars),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_utf8_strings),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_utf16_strings),
+        WL_TEST_CASE(test_wasi_canon_call_roundtrips_latin1_utf16_strings),
         WL_TEST_CASE(test_wasi_canon_call_rejects_invalid_scalar_values),
         WL_TEST_CASE(test_wasi_instance_calls_utf8_canon_lift_exports),
         WL_TEST_CASE(test_wasi_instance_calls_utf16_canon_lift_exports),
+        WL_TEST_CASE(test_wasi_instance_calls_latin1_utf16_canon_lift_exports),
         WL_TEST_CASE(test_wasi_instance_surfaces_lift_validation_failures),
         WL_TEST_CASE(test_wasi_parses_canon_builtins),
         WL_TEST_CASE(test_wasi_parses_current_canon_async_option),
