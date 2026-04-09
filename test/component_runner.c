@@ -26,6 +26,10 @@ static void component_runner_usage(const char* argv0) {
     fprintf(stderr, "    component-instance-export-name <instance_index> <export_index> <expected>\n");
     fprintf(stderr, "    component-instance-component <index> <expected_component_index>\n");
     fprintf(stderr, "    component-instance-arg-name <instance_index> <arg_index> <expected>\n");
+    fprintf(stderr, "    nested-component-count <expected>\n");
+    fprintf(stderr, "    nested-component-section-count <index> <expected>\n");
+    fprintf(stderr, "    nested-component-import-name <component_index> <import_index> <expected>\n");
+    fprintf(stderr, "    nested-component-instance-kind <component_index> <instance_index> <instantiate|from-exports>\n");
     fprintf(stderr, "    start-present <0|1>\n");
     fprintf(stderr, "    start-func <expected_func_index>\n");
     fprintf(stderr, "    start-args <expected_count>\n");
@@ -426,6 +430,108 @@ int main(int argc, char** argv) {
         actual = wasi_component_instance_arg_name(component,
                                                   (uint32_t)instance_index,
                                                   (uint32_t)arg_index);
+        exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "nested-component-count") == 0) {
+        unsigned long expected;
+        char* end = NULL;
+        if (argc != 4) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected nested component count: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        exit_code = wasi_component_nested_component_count(component) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "nested-component-section-count") == 0) {
+        unsigned long index;
+        unsigned long expected;
+        char* end = NULL;
+        const wasi_component_t* nested;
+        if (argc != 5) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested component index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        expected = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid expected nested section count: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        nested = wasi_component_nested_component_at(component, (uint32_t)index);
+        exit_code = nested && wasi_component_section_count(nested) == (uint32_t)expected ? 0 : 1;
+    } else if (strcmp(mode, "nested-component-import-name") == 0) {
+        unsigned long component_index;
+        unsigned long import_index;
+        char* end = NULL;
+        const wasi_component_t* nested;
+        const char* actual;
+        if (argc != 6) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        component_index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested component index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        import_index = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested import index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        nested = wasi_component_nested_component_at(component, (uint32_t)component_index);
+        actual = nested ? wasi_component_import_name(nested, (uint32_t)import_index) : NULL;
+        exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
+    } else if (strcmp(mode, "nested-component-instance-kind") == 0) {
+        unsigned long component_index;
+        unsigned long instance_index;
+        char* end = NULL;
+        const wasi_component_t* nested;
+        const char* actual;
+        if (argc != 6) {
+            component_runner_usage(argv[0]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        component_index = strtoul(argv[3], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested component index: %s\n", argv[3]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        instance_index = strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0') {
+            fprintf(stderr, "invalid nested instance index: %s\n", argv[4]);
+            wasi_free_component(component);
+            wasi_destroy(&engine);
+            goto cleanup;
+        }
+        nested = wasi_component_nested_component_at(component, (uint32_t)component_index);
+        actual = nested ? wasi_component_instance_kind_string(wasi_component_instance_kind(nested, (uint32_t)instance_index)) : NULL;
         exit_code = actual && strcmp(actual, argv[5]) == 0 ? 0 : 1;
     } else if (strcmp(mode, "start-present") == 0) {
         unsigned long expected;

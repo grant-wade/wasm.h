@@ -465,6 +465,34 @@ if(WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAIL
                 LABELS "wasi-component"
                 FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
             )
+
+            add_test(
+                NAME wasi.component.nested-components
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" nested-component-count 1
+            )
+            set_tests_properties(wasi.component.nested-components PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.nested-component-sections
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" nested-component-section-count 0 2
+            )
+            set_tests_properties(wasi.component.nested-component-sections PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
+            add_test(
+                NAME wasi.component.nested-component-imports
+                COMMAND $<TARGET_FILE:component_runner> "${WL_COMPONENT_INSTANCE_SMOKE_WASM}" nested-component-import-name 0 0 host-log
+            )
+            set_tests_properties(wasi.component.nested-component-imports PROPERTIES
+                LABELS "wasi-component"
+                FIXTURES_REQUIRED "${WL_COMPONENT_FIXTURE}"
+            )
+
         endif()
 
         add_test(

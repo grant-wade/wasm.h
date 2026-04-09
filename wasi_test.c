@@ -306,6 +306,39 @@ WL_TEST(test_wasi_parses_component_instances) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_extracts_nested_components) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    const wasi_component_t* nested;
+    char dump[896];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_component_instances,
+                          sizeof(wasi_test_component_with_component_instances));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    WL_CHECK(t, wasi_component_nested_component_count(component) == 1u);
+    WL_CHECK(t, wasi_component_nested_component_offset(component, 0) == 49u);
+    WL_CHECK(t, wasi_component_nested_component_size(component, 0) == 30u);
+    nested = wasi_component_nested_component_at(component, 0);
+    WL_REQUIRE(t, nested != NULL);
+    WL_CHECK(t, wasi_component_binary_kind(nested) == WASI_BINARY_KIND_COMPONENT);
+    WL_CHECK(t, wasi_component_section_count(nested) == 2u);
+    WL_CHECK(t, wasi_component_import_count(nested) == 1u);
+    WL_CHECK(t, strcmp(wasi_component_import_name(nested, 0), "host-log") == 0);
+    WL_CHECK(t, wasi_component_instance_count(nested) == 0u);
+
+    wasi_dump_component(component, dump, sizeof(dump));
+    WL_CHECK(t, strstr(dump, "nested-component[0]: offset=49 size=30 sections=2") != NULL);
+
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_parses_component_start) {
     wasi_engine_t engine;
     wasi_component_t* component;
@@ -360,6 +393,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_parses_component_imports_and_exports),
         WL_TEST_CASE(test_wasi_parses_component_core_instances),
         WL_TEST_CASE(test_wasi_parses_component_instances),
+        WL_TEST_CASE(test_wasi_extracts_nested_components),
         WL_TEST_CASE(test_wasi_parses_component_start),
         WL_TEST_CASE(test_wasi_rejects_bad_magic),
     };

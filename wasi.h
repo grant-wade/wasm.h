@@ -23,6 +23,8 @@
 extern "C" {
 #endif
 
+typedef struct wasi_component_t wasi_component_t;
+
 typedef enum wasi_error_t {
     WASI_OK = 0,
     WASI_ERR_INVALID_ARGUMENT,
@@ -213,6 +215,12 @@ typedef struct wasi_component_core_module_t {
     char load_error_msg[256];
 } wasi_component_core_module_t;
 
+typedef struct wasi_component_nested_component_t {
+    size_t payload_offset;
+    size_t payload_size;
+    wasi_component_t* component;
+} wasi_component_nested_component_t;
+
 typedef struct wasi_config_t {
     wasm_config_t runtime_config;
     int has_runtime_config;
@@ -224,7 +232,7 @@ typedef struct wasi_engine_t {
     char error_msg[256];
 } wasi_engine_t;
 
-typedef struct wasi_component_t {
+struct wasi_component_t {
     wasi_engine_t* engine;
     uint8_t* bytes;
     size_t size;
@@ -261,11 +269,14 @@ typedef struct wasi_component_t {
     wasi_component_core_module_t* core_modules;
     uint32_t num_core_modules;
     uint32_t core_modules_capacity;
+    wasi_component_nested_component_t* nested_components;
+    uint32_t num_nested_components;
+    uint32_t nested_components_capacity;
     int has_start;
     uint32_t start_func_index;
     uint32_t start_arg_count;
     uint32_t start_result_count;
-} wasi_component_t;
+};
 
 typedef struct wasi_instance_t wasi_instance_t;
 
@@ -348,6 +359,10 @@ uint32_t wasi_component_core_module_count(const wasi_component_t* component);
 wasm_module_t* wasi_component_core_module_at(const wasi_component_t* component, uint32_t index);
 wasm_error_t wasi_component_core_module_error(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_core_module_error_message(const wasi_component_t* component, uint32_t index);
+uint32_t wasi_component_nested_component_count(const wasi_component_t* component);
+const wasi_component_t* wasi_component_nested_component_at(const wasi_component_t* component, uint32_t index);
+size_t wasi_component_nested_component_offset(const wasi_component_t* component, uint32_t index);
+size_t wasi_component_nested_component_size(const wasi_component_t* component, uint32_t index);
 void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t buffer_size);
 const char* wasi_component_extern_kind_string(wasi_component_extern_kind_t kind);
 const char* wasi_component_type_kind_string(wasi_component_type_kind_t kind);
@@ -687,6 +702,14 @@ static void wasi__component_release_storage(wasi_component_t* component) {
     component->num_core_modules = 0;
     component->core_modules_capacity = 0;
 
+    for (i = 0; i < component->num_nested_components; i++) {
+        wasi_free_component(component->nested_components[i].component);
+    }
+    WASM_FREE(component->nested_components);
+    component->nested_components = NULL;
+    component->num_nested_components = 0;
+    component->nested_components_capacity = 0;
+
     for (i = 0; i < component->num_sections; i++) {
         WASM_FREE(component->sections[i].name);
     }
@@ -798,6 +821,39 @@ static wasi_error_t wasi__component_append_core_module(wasi_component_t* compone
     entry->load_error = load_error;
     if (load_error_msg && load_error_msg[0])
         (void)snprintf(entry->load_error_msg, sizeof(entry->load_error_msg), "%s", load_error_msg);
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__component_append_nested_component(wasi_component_t* component,
+                                                            size_t payload_offset,
+                                                            size_t payload_size,
+                                                            wasi_component_t* nested_component) {
+    wasi_component_nested_component_t* grown;
+    size_t next_capacity;
+    wasi_component_nested_component_t* entry;
+
+    if (!component || !nested_component) {
+        wasi_free_component(nested_component);
+        return WASI_ERR_INVALID_ARGUMENT;
+    }
+
+    if (component->num_nested_components == component->nested_components_capacity) {
+        next_capacity = component->nested_components_capacity ? (size_t)component->nested_components_capacity * 2u : 4u;
+        grown = (wasi_component_nested_component_t*)WASM_REALLOC(component->nested_components,
+                                                                 next_capacity * sizeof(*grown));
+        if (!grown) {
+            wasi_free_component(nested_component);
+            return WASI_ERR_OOM;
+        }
+        component->nested_components = grown;
+        component->nested_components_capacity = (uint32_t)next_capacity;
+    }
+
+    entry = &component->nested_components[component->num_nested_components++];
+    memset(entry, 0, sizeof(*entry));
+    entry->payload_offset = payload_offset;
+    entry->payload_size = payload_size;
+    entry->component = nested_component;
     return WASI_OK;
 }
 
@@ -2136,6 +2192,59 @@ static wasi_error_t wasi__extract_core_modules(wasi_engine_t* engine, wasi_compo
     return WASI_OK;
 }
 
+static wasi_error_t wasi__extract_nested_components(wasi_engine_t* engine, wasi_component_t* component) {
+    uint32_t i;
+
+    if (!engine || !component) {
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component missing state");
+    }
+
+    for (i = 0; i < component->num_sections; i++) {
+        const wasi_component_section_t* section = &component->sections[i];
+        wasi_component_t* nested_component;
+        wasi_binary_kind_t binary_kind;
+        uint8_t version[4];
+        wasi_error_t err;
+
+        if (section->id != 4) continue;
+
+        err = wasi__classify_binary(component->bytes + section->payload_offset,
+                                    section->payload_size,
+                                    &binary_kind,
+                                    version);
+        if (err != WASI_OK || binary_kind != WASI_BINARY_KIND_COMPONENT) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_MALFORMED,
+                                    "nested component %u has invalid binary header",
+                                    (unsigned)component->num_nested_components);
+        }
+
+        nested_component = wasi_load(engine,
+                                     component->bytes + section->payload_offset,
+                                     section->payload_size);
+        if (!nested_component) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_MALFORMED,
+                                    "nested component %u failed to load: %s",
+                                    (unsigned)component->num_nested_components,
+                                    engine->error_msg[0] ? engine->error_msg : wasi_error_string(engine->last_error));
+        }
+
+        err = wasi__component_append_nested_component(component,
+                                                      section->payload_offset,
+                                                      section->payload_size,
+                                                      nested_component);
+        if (err != WASI_OK) {
+            return wasi__set_error_literal(engine,
+                                           err,
+                                           err == WASI_ERR_OOM ? "nested component alloc failed"
+                                                               : wasi_error_string(err));
+        }
+    }
+
+    return WASI_OK;
+}
+
 static void wasi__appendf(char* buffer, size_t buffer_size, size_t* offset, const char* fmt, ...) {
     int written;
     va_list args;
@@ -2295,6 +2404,7 @@ wasi_component_t* wasi_load(wasi_engine_t* engine, const uint8_t* bytes, size_t 
     err = wasi__parse_component_sections(engine, component);
     if (err == WASI_OK) err = wasi__parse_component_interfaces(engine, component);
     if (err == WASI_OK) err = wasi__extract_core_modules(engine, component);
+    if (err == WASI_OK) err = wasi__extract_nested_components(engine, component);
     if (err != WASI_OK) {
         wasi__component_release_storage(component);
         WASM_FREE(component);
@@ -2722,6 +2832,25 @@ const char* wasi_component_core_module_error_message(const wasi_component_t* com
     return component->core_modules[index].load_error_msg[0] ? component->core_modules[index].load_error_msg : NULL;
 }
 
+uint32_t wasi_component_nested_component_count(const wasi_component_t* component) {
+    return component ? component->num_nested_components : 0;
+}
+
+const wasi_component_t* wasi_component_nested_component_at(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_nested_components) return NULL;
+    return component->nested_components[index].component;
+}
+
+size_t wasi_component_nested_component_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_nested_components) return 0;
+    return component->nested_components[index].payload_offset;
+}
+
+size_t wasi_component_nested_component_size(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_nested_components) return 0;
+    return component->nested_components[index].payload_size;
+}
+
 void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t buffer_size) {
     size_t offset = 0;
     uint32_t i;
@@ -2978,6 +3107,20 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         if (core_module->load_error_msg[0])
             wasi__appendf(buffer, buffer_size, &offset, " error=%s", core_module->load_error_msg);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
+    }
+
+    for (i = 0; i < component->num_nested_components; i++) {
+        const wasi_component_nested_component_t* nested = &component->nested_components[i];
+
+        wasi__appendf(buffer,
+                      buffer_size,
+                      &offset,
+                      "nested-component[%u]: offset=%llu size=%llu sections=%u status=%s\n",
+                      (unsigned)i,
+                      (unsigned long long)nested->payload_offset,
+                      (unsigned long long)nested->payload_size,
+                      (unsigned)(nested->component ? nested->component->num_sections : 0u),
+                      nested->component ? wasi_component_status_string(nested->component->status) : "missing");
     }
 }
 
