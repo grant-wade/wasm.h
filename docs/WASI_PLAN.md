@@ -109,7 +109,7 @@ wasi_destroy(&engine);
 
 ---
 
-## Milestone 1: Component Binary Parser
+## [DONE] Milestone 1: Component Binary Parser
 
 **Goal:** Parse the component binary format, extract core modules, recover the full component structure.
 
@@ -152,7 +152,7 @@ Minimum retained structure:
 - [DONE] **Canon AST** — retain every canonical function/builtin node with opcode, kind, async flag, options, referenced func/type/resource indices, callback-related immediates, and task/stream/future result metadata.
 - [DONE] **Instantiation AST** — retain core-instance and component-instance instruction bodies as procedural records in original order, including argument maps, because M5 executes the component’s embedded linking program rather than reconstructing it heuristically.
 - [DONE] **Names and versions** — preserve both the raw import/export name and the split interface name/version pair. Later milestones need both the canonicalized matching key and the original diagnostic spelling.
-- **Source offsets** — keep section-relative or file-relative byte offsets for major AST nodes where cheap to do so. This is useful for `wasi_dump_component`, diffing against `wasm-tools dump`, and future diagnostics.
+- [DONE] **Source offsets** — keep section-relative or file-relative byte offsets for major AST nodes where cheap to do so. This is useful for `wasi_dump_component`, diffing against `wasm-tools dump`, and future diagnostics.
 
 What can remain shallow in Milestone 1:
 

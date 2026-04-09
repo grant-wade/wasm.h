@@ -966,6 +966,123 @@ WL_TEST(test_wasi_parses_component_start) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_tracks_component_source_offsets) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    const wasi_component_type_decl_t* decl;
+    const wasi_component_core_type_t* core_type;
+    const wasi_component_core_module_decl_t* module_decl;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_import_export,
+                          sizeof(wasi_test_component_with_import_export));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_section_offset(component, 0) == 8u);
+    WL_CHECK(t, wasi_component_section_payload_offset(component, 0) == 10u);
+    WL_CHECK(t, wasi_component_section_offset(component, 1) == 15u);
+    WL_CHECK(t, wasi_component_section_payload_offset(component, 1) == 17u);
+    WL_CHECK(t, wasi_component_section_offset(component, 2) == 30u);
+    WL_CHECK(t, wasi_component_section_payload_offset(component, 2) == 32u);
+    WL_CHECK(t, wasi_component_type_offset(component, 0) == 11u);
+    WL_CHECK(t, wasi_component_import_offset(component, 0) == 18u);
+    WL_CHECK(t, wasi_component_export_offset(component, 0) == 33u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_type_declarations,
+                          sizeof(wasi_test_component_with_type_declarations));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_type_offset(component, 0) == 11u);
+    WL_CHECK(t, wasi_component_type_offset(component, 1) == 56u);
+
+    decl = wasi_component_type_decl_at(component, 0, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 13u);
+    WL_CHECK(t, decl->data.type.offset == 14u);
+
+    decl = wasi_component_type_decl_at(component, 0, 1);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 18u);
+    WL_CHECK(t, decl->data.alias.offset == 19u);
+
+    decl = wasi_component_type_decl_at(component, 0, 2);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 23u);
+
+    decl = wasi_component_type_decl_at(component, 0, 3);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 32u);
+
+    decl = wasi_component_type_decl_at(component, 1, 0);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 58u);
+    WL_CHECK(t, decl->data.type.offset == 59u);
+
+    decl = wasi_component_type_decl_at(component, 1, 1);
+    WL_REQUIRE(t, decl != NULL);
+    WL_CHECK(t, decl->offset == 61u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_top_level_core_types,
+                          sizeof(wasi_test_component_with_top_level_core_types));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_core_type_offset(component, 0) == 11u);
+    WL_CHECK(t, wasi_component_core_type_offset(component, 1) == 14u);
+    WL_CHECK(t, wasi_component_core_type_offset(component, 2) == 27u);
+    core_type = wasi_component_core_type_at(component, 1);
+    WL_REQUIRE(t, core_type != NULL);
+    module_decl = &core_type->data.module.decls[0];
+    WL_CHECK(t, module_decl->offset == 16u);
+    module_decl = &core_type->data.module.decls[1];
+    WL_CHECK(t, module_decl->offset == 22u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_core_instances,
+                          sizeof(wasi_test_component_with_core_instances));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_core_instance_offset(component, 0) == 11u);
+    WL_CHECK(t, wasi_component_core_instance_offset(component, 1) == 19u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_alias_variants,
+                          sizeof(wasi_test_component_with_alias_variants));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_alias_offset(component, 0) == 50u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_start,
+                          sizeof(wasi_test_component_with_start));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_start_offset(component) == 27u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_canon_builtins,
+                          sizeof(wasi_test_component_with_canon_builtins));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_canon_offset(component, 0) == 20u);
+    WL_CHECK(t, wasi_component_canon_offset(component, 7) == 32u);
+    wasi_free_component(component);
+
+    component = wasi_load(&engine,
+                          wasi_test_component_with_core_module,
+                          sizeof(wasi_test_component_with_core_module));
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_core_module_offset(component, 0) == 10u);
+    WL_CHECK(t, wasi_component_core_module_size(component, 0) == 8u);
+    wasi_free_component(component);
+
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_rejects_bad_magic) {
     uint8_t bad_header[8];
     wasi_engine_t engine;
@@ -1003,6 +1120,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_extracts_nested_components),
         WL_TEST_CASE(test_wasi_parses_alias_variants),
         WL_TEST_CASE(test_wasi_parses_component_start),
+        WL_TEST_CASE(test_wasi_tracks_component_source_offsets),
         WL_TEST_CASE(test_wasi_parses_canon_builtins),
         WL_TEST_CASE(test_wasi_parses_current_canon_async_option),
         WL_TEST_CASE(test_wasi_rejects_bad_magic),

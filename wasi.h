@@ -171,6 +171,7 @@ typedef struct wasi_component_func_type_t {
 } wasi_component_func_type_t;
 
 typedef struct wasi_component_type_t {
+    size_t offset;
     wasi_component_type_kind_t kind;
     uint8_t opcode;
     uint8_t async_flag;
@@ -188,10 +189,12 @@ typedef struct wasi_component_type_t {
 } wasi_component_type_t;
 
 typedef struct wasi_component_func_t {
+    size_t offset;
     uint32_t type_index;
 } wasi_component_func_t;
 
 typedef struct wasi_component_import_t {
+    size_t offset;
     char* name;
     char* interface_name;
     char* interface_version;
@@ -201,6 +204,7 @@ typedef struct wasi_component_import_t {
 } wasi_component_import_t;
 
 typedef struct wasi_component_export_t {
+    size_t offset;
     char* name;
     char* interface_name;
     char* interface_version;
@@ -212,6 +216,7 @@ typedef struct wasi_component_export_t {
 } wasi_component_export_t;
 
 typedef struct wasi_component_alias_t {
+    size_t offset;
     wasi_component_alias_kind_t kind;
     int sort_is_core;
     uint8_t sort_code;
@@ -237,6 +242,7 @@ typedef struct wasi_component_core_instantiation_arg_t {
 } wasi_component_core_instantiation_arg_t;
 
 typedef struct wasi_component_core_instance_t {
+    size_t offset;
     wasi_component_core_instance_kind_t kind;
     uint32_t module_index;
     wasi_component_core_instance_export_t* exports;
@@ -299,6 +305,7 @@ typedef struct wasi_component_core_module_alias_t {
 } wasi_component_core_module_alias_t;
 
 struct wasi_component_core_module_decl_t {
+    size_t offset;
     wasi_component_core_module_decl_kind_t kind;
     char* module_name;
     char* name;
@@ -310,6 +317,7 @@ struct wasi_component_core_module_decl_t {
 };
 
 struct wasi_component_core_type_t {
+    size_t offset;
     wasi_component_core_type_kind_t kind;
     uint8_t opcode;
     uint8_t detail_opcode;
@@ -348,6 +356,7 @@ typedef struct wasi_component_externdesc_t {
 } wasi_component_externdesc_t;
 
 struct wasi_component_type_decl_t {
+    size_t offset;
     wasi_component_type_decl_kind_t kind;
     char* name;
     char* interface_name;
@@ -375,6 +384,7 @@ typedef struct wasi_component_instantiation_arg_t {
 } wasi_component_instantiation_arg_t;
 
 typedef struct wasi_component_instance_t {
+    size_t offset;
     wasi_component_instance_kind_t kind;
     uint32_t component_index;
     wasi_component_instance_export_t* exports;
@@ -392,6 +402,7 @@ typedef struct wasi_component_canon_option_t {
 } wasi_component_canon_option_t;
 
 typedef struct wasi_component_canon_t {
+    size_t offset;
     wasi_component_canon_kind_t kind;
     uint8_t opcode;
     uint8_t async_flag;
@@ -486,6 +497,7 @@ struct wasi_component_t {
     uint32_t num_nested_components;
     uint32_t nested_components_capacity;
     int has_start;
+    size_t start_offset;
     uint32_t start_func_index;
     uint32_t start_arg_count;
     uint32_t start_result_count;
@@ -503,10 +515,13 @@ wasi_binary_kind_t wasi_component_binary_kind(const wasi_component_t* component)
 wasi_component_status_t wasi_component_status(const wasi_component_t* component);
 uint8_t wasi_component_layer(const wasi_component_t* component);
 uint32_t wasi_component_section_count(const wasi_component_t* component);
+size_t wasi_component_section_offset(const wasi_component_t* component, uint32_t index);
+size_t wasi_component_section_payload_offset(const wasi_component_t* component, uint32_t index);
 uint8_t wasi_component_section_id(const wasi_component_t* component, uint32_t index);
 size_t wasi_component_section_size(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_section_name(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_type_count(const wasi_component_t* component);
+size_t wasi_component_type_offset(const wasi_component_t* component, uint32_t type_index);
 wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index);
 uint32_t wasi_component_type_decl_count(const wasi_component_t* component, uint32_t type_index);
 const wasi_component_type_decl_t* wasi_component_type_decl_at(const wasi_component_t* component,
@@ -538,12 +553,14 @@ const wasi_component_valtype_t* wasi_component_valtype_err_type(const wasi_compo
 uint32_t wasi_component_valtype_type_index(const wasi_component_valtype_t* type);
 uint32_t wasi_component_valtype_fixed_length(const wasi_component_valtype_t* type);
 uint32_t wasi_component_import_count(const wasi_component_t* component);
+size_t wasi_component_import_offset(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_import_name(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_import_interface_name(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_import_interface_version(const wasi_component_t* component, uint32_t index);
 wasi_component_extern_kind_t wasi_component_import_kind(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_import_type_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_export_count(const wasi_component_t* component);
+size_t wasi_component_export_offset(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_export_name(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_export_interface_name(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_export_interface_version(const wasi_component_t* component, uint32_t index);
@@ -553,6 +570,7 @@ int wasi_component_export_has_type(const wasi_component_t* component, uint32_t i
 uint32_t wasi_component_export_type_index(const wasi_component_t* component, uint32_t index);
 int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index);
 uint32_t wasi_component_alias_count(const wasi_component_t* component);
+size_t wasi_component_alias_offset(const wasi_component_t* component, uint32_t index);
 wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* component, uint32_t index);
 int wasi_component_alias_sort_is_core(const wasi_component_t* component, uint32_t index);
 uint8_t wasi_component_alias_sort_code(const wasi_component_t* component, uint32_t index);
@@ -563,6 +581,7 @@ const char* wasi_component_alias_name(const wasi_component_t* component, uint32_
 uint32_t wasi_component_alias_outer_count(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_alias_outer_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_type_count(const wasi_component_t* component);
+size_t wasi_component_core_type_offset(const wasi_component_t* component, uint32_t index);
 const wasi_component_core_type_t* wasi_component_core_type_at(const wasi_component_t* component, uint32_t index);
 wasi_component_core_type_kind_t wasi_component_core_type_kind(const wasi_component_t* component, uint32_t index);
 uint8_t wasi_component_core_type_opcode(const wasi_component_t* component, uint32_t index);
@@ -571,6 +590,7 @@ uint32_t wasi_component_core_type_item_count(const wasi_component_t* component, 
 int wasi_component_core_type_has_primary_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_type_primary_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component);
+size_t wasi_component_core_instance_offset(const wasi_component_t* component, uint32_t index);
 wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_module_index(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_core_instance_export_count(const wasi_component_t* component, uint32_t instance_index);
@@ -592,11 +612,14 @@ uint32_t wasi_component_instance_arg_count(const wasi_component_t* component, ui
 const char* wasi_component_instance_arg_name(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
 wasi_component_extern_kind_t wasi_component_instance_arg_kind(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
 uint32_t wasi_component_instance_arg_index(const wasi_component_t* component, uint32_t instance_index, uint32_t arg_index);
+size_t wasi_component_instance_offset(const wasi_component_t* component, uint32_t index);
 int wasi_component_has_start(const wasi_component_t* component);
+size_t wasi_component_start_offset(const wasi_component_t* component);
 uint32_t wasi_component_start_func_index(const wasi_component_t* component);
 uint32_t wasi_component_start_arg_count(const wasi_component_t* component);
 uint32_t wasi_component_start_result_count(const wasi_component_t* component);
 uint32_t wasi_component_canon_count(const wasi_component_t* component);
+size_t wasi_component_canon_offset(const wasi_component_t* component, uint32_t index);
 wasi_component_canon_kind_t wasi_component_canon_kind(const wasi_component_t* component, uint32_t index);
 uint8_t wasi_component_canon_async_flag(const wasi_component_t* component, uint32_t index);
 uint32_t wasi_component_canon_func_index(const wasi_component_t* component, uint32_t index);
@@ -609,6 +632,8 @@ uint8_t wasi_component_canon_option_code(const wasi_component_t* component, uint
 int wasi_component_canon_option_has_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index);
 uint32_t wasi_component_canon_option_index(const wasi_component_t* component, uint32_t canon_index, uint32_t option_index);
 uint32_t wasi_component_core_module_count(const wasi_component_t* component);
+size_t wasi_component_core_module_offset(const wasi_component_t* component, uint32_t index);
+size_t wasi_component_core_module_size(const wasi_component_t* component, uint32_t index);
 wasm_module_t* wasi_component_core_module_at(const wasi_component_t* component, uint32_t index);
 wasm_error_t wasi_component_core_module_error(const wasi_component_t* component, uint32_t index);
 const char* wasi_component_core_module_error_message(const wasi_component_t* component, uint32_t index);
@@ -649,6 +674,7 @@ const char* wasi_component_status_string(wasi_component_status_t status);
 #define WASI__COMPONENT_VERSION_BYTE_3 0x00u
 
 typedef struct wasi__reader_t {
+    const uint8_t* base;
     const uint8_t* ptr;
     const uint8_t* end;
     int malformed;
@@ -749,6 +775,11 @@ static int wasi__is_component_version(const uint8_t version[4]) {
 
 static int wasi__has(const wasi__reader_t* reader, size_t size) {
     return reader && reader->ptr && reader->end && (size_t)(reader->end - reader->ptr) >= size;
+}
+
+static size_t wasi__reader_offset(const wasi__reader_t* reader) {
+    if (!reader || !reader->base || !reader->ptr || reader->ptr < reader->base) return 0u;
+    return (size_t)(reader->ptr - reader->base);
 }
 
 static uint8_t wasi__read_u8(wasi__reader_t* reader) {
@@ -1405,7 +1436,9 @@ static wasi_error_t wasi__component_append_core_type(wasi_component_t* component
     return WASI_OK;
 }
 
-static wasi_error_t wasi__component_append_func(wasi_component_t* component, uint32_t type_index) {
+static wasi_error_t wasi__component_append_func(wasi_component_t* component,
+                                                size_t offset,
+                                                uint32_t type_index) {
     wasi_component_func_t* grown;
     size_t next_capacity;
 
@@ -1419,6 +1452,7 @@ static wasi_error_t wasi__component_append_func(wasi_component_t* component, uin
         component->funcs_capacity = (uint32_t)next_capacity;
     }
 
+    component->funcs[component->num_funcs].offset = offset;
     component->funcs[component->num_funcs].type_index = type_index;
     component->num_funcs++;
     return WASI_OK;
@@ -1490,6 +1524,7 @@ static wasi_error_t wasi__component_append_nested_component(wasi_component_t* co
 }
 
 static wasi_error_t wasi__component_append_import(wasi_component_t* component,
+                                                  size_t offset,
                                                   char* name,
                                                   uint8_t name_kind,
                                                   wasi_component_extern_kind_t kind,
@@ -1517,6 +1552,7 @@ static wasi_error_t wasi__component_append_import(wasi_component_t* component,
 
     entry = &component->imports[component->num_imports++];
     memset(entry, 0, sizeof(*entry));
+    entry->offset = offset;
     entry->name = name;
     wasi__resolve_interface_name(name, &entry->interface_name, &entry->interface_version);
     entry->name_kind = name_kind;
@@ -1526,6 +1562,7 @@ static wasi_error_t wasi__component_append_import(wasi_component_t* component,
 }
 
 static wasi_error_t wasi__component_append_export(wasi_component_t* component,
+                                                  size_t offset,
                                                   char* name,
                                                   uint8_t name_kind,
                                                   wasi_component_extern_kind_t kind,
@@ -1555,6 +1592,7 @@ static wasi_error_t wasi__component_append_export(wasi_component_t* component,
 
     entry = &component->exports[component->num_exports++];
     memset(entry, 0, sizeof(*entry));
+    entry->offset = offset;
     entry->name = name;
     wasi__resolve_interface_name(name, &entry->interface_name, &entry->interface_version);
     entry->name_kind = name_kind;
@@ -1566,6 +1604,7 @@ static wasi_error_t wasi__component_append_export(wasi_component_t* component,
 }
 
 static wasi_error_t wasi__component_append_alias(wasi_component_t* component,
+                                                 size_t offset,
                                                  wasi_component_alias_kind_t kind,
                                                  int sort_is_core,
                                                  uint8_t sort_code,
@@ -1598,6 +1637,7 @@ static wasi_error_t wasi__component_append_alias(wasi_component_t* component,
 
     entry = &component->aliases[component->num_aliases++];
     memset(entry, 0, sizeof(*entry));
+    entry->offset = offset;
     entry->kind = kind;
     entry->sort_is_core = sort_is_core;
     entry->sort_code = sort_code;
@@ -1904,6 +1944,7 @@ static wasi_error_t wasi__parse_component_sections(wasi_engine_t* engine, wasi_c
         return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component missing bytes");
     }
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + 8;
     reader.end = component->bytes + component->size;
     reader.malformed = 0;
@@ -1929,6 +1970,7 @@ static wasi_error_t wasi__parse_component_sections(wasi_engine_t* engine, wasi_c
         }
 
         payload_start = reader.ptr;
+        payload_reader.base = component->bytes;
         payload_reader.ptr = payload_start;
         payload_reader.end = payload_start + payload_size;
         payload_reader.malformed = 0;
@@ -1966,6 +2008,7 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -1975,6 +2018,7 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         char* name = NULL;
         uint8_t name_kind = 0;
         uint8_t kind_byte;
@@ -1994,7 +2038,7 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component import descriptor");
         }
 
-        err = wasi__component_append_import(component, name, name_kind, kind, type_index);
+        err = wasi__component_append_import(component, entry_offset, name, name_kind, kind, type_index);
         if (err != WASI_OK) {
             return wasi__set_error_literal(engine,
                                            err,
@@ -2002,7 +2046,7 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
                                                                : wasi_error_string(err));
         }
         if (kind == WASI_COMPONENT_EXTERN_KIND_FUNC) {
-            err = wasi__component_append_func(component, type_index);
+            err = wasi__component_append_func(component, entry_offset, type_index);
             if (err != WASI_OK) {
                 return wasi__set_error_literal(engine,
                                                err,
@@ -2643,12 +2687,15 @@ static int wasi__read_core_module_alias(wasi__reader_t* reader, wasi_component_c
 static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
                                            uint8_t opcode,
                                            wasi_component_core_type_t* type) {
+    size_t offset;
     uint32_t count;
     uint32_t i;
 
     if (!reader || !type) return 0;
 
+    offset = type ? type->offset : 0u;
     memset(type, 0, sizeof(*type));
+    type->offset = offset;
     type->kind = WASI_COMPONENT_CORE_TYPE_KIND_TYPE;
     type->opcode = opcode;
     type->detail_opcode = opcode;
@@ -2671,6 +2718,7 @@ static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
             }
         }
         for (i = 0; i < count; i++) {
+            size_t nested_offset = wasi__reader_offset(reader);
             uint8_t nested_opcode = wasi__read_u8(reader);
             wasi_component_core_type_t* nested_type;
             if (reader->malformed) return 0;
@@ -2679,6 +2727,7 @@ static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
                 reader->malformed = 1;
                 return 0;
             }
+            nested_type->offset = nested_offset;
             if (!wasi__read_core_subtype_payload(reader, nested_opcode, nested_type)) {
                 wasi__component_core_type_release(nested_type);
                 WASM_FREE(nested_type);
@@ -2745,15 +2794,18 @@ static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
 }
 
 static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_core_type_t* type) {
+    size_t offset;
     uint32_t decl_count;
     uint32_t i;
 
     if (!reader || !type) return 0;
 
+    offset = type ? type->offset : 0u;
     memset(type, 0, sizeof(*type));
     decl_count = wasi__read_leb128_u32(reader);
     if (reader->malformed) return 0;
 
+    type->offset = offset;
     type->kind = WASI_COMPONENT_CORE_TYPE_KIND_MODULE;
     type->opcode = 0x50u;
     type->detail_opcode = 0x50u;
@@ -2761,11 +2813,13 @@ static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_co
     type->primary_index = UINT32_MAX;
 
     for (i = 0; i < decl_count; i++) {
+        size_t decl_offset = wasi__reader_offset(reader);
         uint8_t decl_opcode = wasi__read_u8(reader);
         wasi_component_core_module_decl_t decl;
         if (reader->malformed) return 0;
 
         memset(&decl, 0, sizeof(decl));
+        decl.offset = decl_offset;
         switch (decl_opcode) {
             case 0x00u:
                 decl.kind = WASI_COMPONENT_CORE_MODULE_DECL_KIND_IMPORT;
@@ -2777,6 +2831,7 @@ static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_co
                 }
                 break;
             case 0x01u: {
+                size_t subtype_offset = wasi__reader_offset(reader);
                 uint8_t subtype_opcode = wasi__read_u8(reader);
                 if (reader->malformed) return 0;
                 decl.kind = WASI_COMPONENT_CORE_MODULE_DECL_KIND_TYPE;
@@ -2785,6 +2840,7 @@ static int wasi__read_core_module_type(wasi__reader_t* reader, wasi_component_co
                     reader->malformed = 1;
                     return 0;
                 }
+                decl.data.type->offset = subtype_offset;
                 if (!wasi__read_core_subtype_payload(reader, subtype_opcode, decl.data.type)) {
                     wasi__component_core_module_decl_release(&decl);
                     return 0;
@@ -2827,6 +2883,7 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
                                                   wasi_component_core_type_t* entries,
                                                   uint32_t index,
                                                   uint32_t count) {
+    size_t entry_offset;
     uint8_t opcode;
     wasi_component_core_type_t type;
     wasi__reader_t branch_reader;
@@ -2834,11 +2891,13 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
     if (!reader || !entries) return 0;
     if (index == count) return reader->ptr == reader->end;
 
+    entry_offset = wasi__reader_offset(reader);
     opcode = wasi__read_u8(reader);
     if (reader->malformed) return 0;
 
     if (opcode == 0x50u) {
         memset(&type, 0, sizeof(type));
+        type.offset = entry_offset;
         branch_reader = *reader;
         if (wasi__read_core_module_type(&branch_reader, &type)) {
             entries[index] = type;
@@ -2850,6 +2909,7 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
         }
 
         memset(&type, 0, sizeof(type));
+    type.offset = entry_offset;
         branch_reader = *reader;
         if (wasi__read_core_subtype_payload(&branch_reader, opcode, &type)) {
             entries[index] = type;
@@ -2870,6 +2930,7 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
     }
 
     memset(&type, 0, sizeof(type));
+    type.offset = entry_offset;
     if (!wasi__read_core_subtype_payload(reader, opcode, &type)) return 0;
     entries[index] = type;
     return wasi__read_component_core_type_entries(reader, entries, index + 1u, count);
@@ -2884,6 +2945,7 @@ static wasi_error_t wasi__read_nested_core_type_declaration(wasi_engine_t* engin
         return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "component core type reader missing state");
     }
 
+    if (type) type->offset = wasi__reader_offset(reader);
     opcode = wasi__read_u8(reader);
     if (reader->malformed) {
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested core type declaration");
@@ -2989,13 +3051,16 @@ static int wasi__read_component_externdesc(wasi__reader_t* reader, wasi_componen
 }
 
 static int wasi__read_component_alias_inline(wasi__reader_t* reader, wasi_component_alias_t* alias) {
+    size_t offset;
     uint8_t first;
     int sort_is_core;
     uint8_t alias_op;
 
     if (!reader) return 0;
+    offset = wasi__reader_offset(reader);
     if (alias) {
         memset(alias, 0, sizeof(*alias));
+        alias->offset = offset;
         alias->extern_kind = WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
         alias->core_export_kind = (wasm_export_kind_t)255;
         alias->instance_index = UINT32_MAX;
@@ -3060,6 +3125,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
     }
 
     memset(type, 0, sizeof(*type));
+    type->offset = wasi__reader_offset(reader);
     opcode = wasi__read_u8(reader);
     if (reader->malformed) {
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type entry");
@@ -3121,6 +3187,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type declaration count");
             }
             for (i = 0; i < decl_count; i++) {
+                size_t decl_offset = wasi__reader_offset(reader);
                 uint8_t decl_opcode = wasi__read_u8(reader);
                 if (reader->malformed) {
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested type declaration");
@@ -3131,6 +3198,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                             wasi_component_type_decl_t decl;
                             wasi_error_t err;
                             memset(&decl, 0, sizeof(decl));
+                            decl.offset = decl_offset;
                             decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE;
                             err = wasi__read_nested_core_type_declaration(engine,
                                                                           reader,
@@ -3149,6 +3217,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                         wasi_component_type_decl_t decl;
                         wasi_error_t err;
                         memset(&decl, 0, sizeof(decl));
+                        decl.offset = decl_offset;
                         decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_TYPE;
                         err = wasi__read_component_type_entry(engine, reader, &decl.data.type);
                         if (err != WASI_OK) return err;
@@ -3166,6 +3235,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                         wasi_component_type_decl_t decl;
                         wasi_error_t err;
                         memset(&decl, 0, sizeof(decl));
+                        decl.offset = decl_offset;
                         decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_ALIAS;
                         if (!wasi__read_component_alias_inline(reader, &decl.data.alias)) {
                             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested type alias");
@@ -3190,6 +3260,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                             wasi_component_type_decl_t decl;
                             wasi_error_t err;
                             memset(&decl, 0, sizeof(decl));
+                            decl.offset = decl_offset;
                             decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_IMPORT;
                             if (!wasi__read_component_name(reader, &decl.name_kind, &decl.name)) {
                                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type import name");
@@ -3213,6 +3284,7 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                         wasi_component_type_decl_t decl;
                         wasi_error_t err;
                         memset(&decl, 0, sizeof(decl));
+                        decl.offset = decl_offset;
                         decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_EXPORT;
                         if (!wasi__read_component_name(reader, &decl.name_kind, &decl.name)) {
                             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component type export name");
@@ -3304,6 +3376,7 @@ static wasi_error_t wasi__parse_component_types(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -3343,6 +3416,7 @@ static wasi_error_t wasi__parse_component_core_types(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -3392,6 +3466,7 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         uint8_t first = wasi__read_u8(&reader);
         int sort_is_core = 0;
         uint8_t sort_code = first;
@@ -3422,6 +3497,7 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed instance export alias name");
             }
             err = wasi__component_append_alias(component,
+                                               entry_offset,
                                                sort_is_core ? WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT
                                                             : WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT,
                                                sort_is_core,
@@ -3448,6 +3524,7 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed outer alias descriptor");
             }
             err = wasi__component_append_alias(component,
+                                               entry_offset,
                                                WASI_COMPONENT_ALIAS_KIND_OUTER,
                                                sort_is_core,
                                                sort_code,
@@ -3485,6 +3562,7 @@ static wasi_error_t wasi__parse_component_core_instances(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -3494,10 +3572,12 @@ static wasi_error_t wasi__parse_component_core_instances(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         uint8_t opcode = wasi__read_u8(&reader);
         wasi_component_core_instance_t instance;
         wasi_error_t err;
         memset(&instance, 0, sizeof(instance));
+        instance.offset = entry_offset;
         instance.module_index = UINT32_MAX;
         if (reader.malformed) {
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance opcode");
@@ -3605,6 +3685,7 @@ static wasi_error_t wasi__parse_component_instances(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -3614,11 +3695,13 @@ static wasi_error_t wasi__parse_component_instances(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         uint8_t opcode = wasi__read_u8(&reader);
         wasi_component_instance_t instance;
         wasi_error_t err;
 
         memset(&instance, 0, sizeof(instance));
+        instance.offset = entry_offset;
         instance.component_index = UINT32_MAX;
         if (reader.malformed) {
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component instance opcode");
@@ -3736,9 +3819,11 @@ static wasi_error_t wasi__parse_component_start(wasi_engine_t* engine,
         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "duplicate component start section");
     }
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
+    component->start_offset = wasi__reader_offset(&reader);
     func_index = wasi__read_leb128_u32(&reader);
     arg_count = wasi__read_leb128_u32(&reader);
     result_count = wasi__read_leb128_u32(&reader);
@@ -3855,6 +3940,7 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -3864,6 +3950,7 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         uint8_t opcode = wasi__read_u8(&reader);
         wasi_component_canon_t canon;
         wasi_error_t err = WASI_OK;
@@ -3871,6 +3958,7 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canonical function opcode");
         }
         memset(&canon, 0, sizeof(canon));
+        canon.offset = entry_offset;
         canon.opcode = opcode;
         canon.func_index = UINT32_MAX;
         canon.core_func_index = UINT32_MAX;
@@ -3935,7 +4023,7 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon lift type index");
                 }
                 canon.defined_func_index = component->num_funcs;
-                err = wasi__component_append_func(component, canon.type_index);
+                err = wasi__component_append_func(component, entry_offset, canon.type_index);
                 if (err != WASI_OK) {
                     WASM_FREE(canon.options);
                     return wasi__set_error_literal(engine,
@@ -4213,6 +4301,7 @@ static wasi_error_t wasi__parse_component_exports(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
@@ -4222,6 +4311,7 @@ static wasi_error_t wasi__parse_component_exports(wasi_engine_t* engine,
     }
 
     for (i = 0; i < count; i++) {
+        size_t entry_offset = wasi__reader_offset(&reader);
         char* name = NULL;
         uint8_t name_kind = 0;
         uint8_t kind_byte;
@@ -4253,7 +4343,14 @@ static wasi_error_t wasi__parse_component_exports(wasi_engine_t* engine,
             }
         }
 
-        err = wasi__component_append_export(component, name, name_kind, kind, index, has_type, type_index);
+        err = wasi__component_append_export(component,
+                            entry_offset,
+                            name,
+                            name_kind,
+                            kind,
+                            index,
+                            has_type,
+                            type_index);
         if (err != WASI_OK) {
             return wasi__set_error_literal(engine,
                                            err,
@@ -4678,6 +4775,16 @@ uint32_t wasi_component_section_count(const wasi_component_t* component) {
     return component ? component->num_sections : 0;
 }
 
+size_t wasi_component_section_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_sections) return 0;
+    return component->sections[index].section_offset;
+}
+
+size_t wasi_component_section_payload_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_sections) return 0;
+    return component->sections[index].payload_offset;
+}
+
 uint8_t wasi_component_section_id(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_sections) return 0;
     return component->sections[index].id;
@@ -4699,6 +4806,11 @@ uint32_t wasi_component_import_count(const wasi_component_t* component) {
 
 uint32_t wasi_component_type_count(const wasi_component_t* component) {
     return component ? component->num_types : 0;
+}
+
+size_t wasi_component_type_offset(const wasi_component_t* component, uint32_t type_index) {
+    if (!component || type_index >= component->num_types) return 0;
+    return component->types[type_index].offset;
 }
 
 wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index) {
@@ -5019,8 +5131,18 @@ uint32_t wasi_component_import_type_index(const wasi_component_t* component, uin
     return component->imports[index].type_index;
 }
 
+size_t wasi_component_import_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_imports) return 0;
+    return component->imports[index].offset;
+}
+
 uint32_t wasi_component_export_count(const wasi_component_t* component) {
     return component ? component->num_exports : 0;
+}
+
+size_t wasi_component_export_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_exports) return 0;
+    return component->exports[index].offset;
 }
 
 const char* wasi_component_export_name(const wasi_component_t* component, uint32_t index) {
@@ -5079,6 +5201,11 @@ uint32_t wasi_component_alias_count(const wasi_component_t* component) {
     return component ? component->num_aliases : 0;
 }
 
+size_t wasi_component_alias_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_aliases) return 0;
+    return component->aliases[index].offset;
+}
+
 wasi_component_alias_kind_t wasi_component_alias_kind(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_aliases) return WASI_COMPONENT_ALIAS_KIND_UNKNOWN;
     return component->aliases[index].kind;
@@ -5128,6 +5255,11 @@ uint32_t wasi_component_core_type_count(const wasi_component_t* component) {
     return component ? component->num_core_types : 0;
 }
 
+size_t wasi_component_core_type_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_types) return 0;
+    return component->core_types[index].offset;
+}
+
 const wasi_component_core_type_t* wasi_component_core_type_at(const wasi_component_t* component, uint32_t index) {
     if (!component || index >= component->num_core_types) return NULL;
     return &component->core_types[index];
@@ -5165,6 +5297,11 @@ uint32_t wasi_component_core_type_primary_index(const wasi_component_t* componen
 
 uint32_t wasi_component_core_instance_count(const wasi_component_t* component) {
     return component ? component->num_core_instances : 0;
+}
+
+size_t wasi_component_core_instance_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_instances) return 0;
+    return component->core_instances[index].offset;
 }
 
 wasi_component_core_instance_kind_t wasi_component_core_instance_kind(const wasi_component_t* component, uint32_t index) {
@@ -5307,8 +5444,18 @@ uint32_t wasi_component_instance_arg_index(const wasi_component_t* component,
     return component->instances[instance_index].args[arg_index].index;
 }
 
+size_t wasi_component_instance_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_instances) return 0;
+    return component->instances[index].offset;
+}
+
 int wasi_component_has_start(const wasi_component_t* component) {
     return component ? component->has_start : 0;
+}
+
+size_t wasi_component_start_offset(const wasi_component_t* component) {
+    if (!component || !component->has_start) return 0;
+    return component->start_offset;
 }
 
 uint32_t wasi_component_start_func_index(const wasi_component_t* component) {
@@ -5328,6 +5475,11 @@ uint32_t wasi_component_start_result_count(const wasi_component_t* component) {
 
 uint32_t wasi_component_canon_count(const wasi_component_t* component) {
     return component ? component->num_canons : 0;
+}
+
+size_t wasi_component_canon_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_canons) return 0;
+    return component->canons[index].offset;
 }
 
 wasi_component_canon_kind_t wasi_component_canon_kind(const wasi_component_t* component, uint32_t index) {
@@ -5390,6 +5542,16 @@ uint32_t wasi_component_canon_option_index(const wasi_component_t* component, ui
 
 uint32_t wasi_component_core_module_count(const wasi_component_t* component) {
     return component ? component->num_core_modules : 0;
+}
+
+size_t wasi_component_core_module_offset(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_modules) return 0;
+    return component->core_modules[index].payload_offset;
+}
+
+size_t wasi_component_core_module_size(const wasi_component_t* component, uint32_t index) {
+    if (!component || index >= component->num_core_modules) return 0;
+    return component->core_modules[index].payload_size;
 }
 
 wasm_module_t* wasi_component_core_module_at(const wasi_component_t* component, uint32_t index) {
@@ -5523,6 +5685,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         }
         if (type->has_primary_index)
             wasi__appendf(buffer, buffer_size, &offset, " index=%u", (unsigned)type->primary_index);
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu", (unsigned long long)type->offset);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
 
         if (type->kind == WASI_COMPONENT_CORE_TYPE_KIND_MODULE) {
@@ -5579,6 +5742,11 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                     default:
                         break;
                 }
+                wasi__appendf(buffer,
+                              buffer_size,
+                              &offset,
+                              " offset=%llu",
+                              (unsigned long long)decl->offset);
                 wasi__appendf(buffer, buffer_size, &offset, "\n");
             }
         }
@@ -5677,6 +5845,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                     break;
             }
         }
+            wasi__appendf(buffer, buffer_size, &offset, " offset=%llu", (unsigned long long)type->offset);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
 
         if ((type->kind == WASI_COMPONENT_TYPE_KIND_COMPONENT ||
@@ -5753,6 +5922,11 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                     default:
                         break;
                 }
+                wasi__appendf(buffer,
+                              buffer_size,
+                              &offset,
+                              " offset=%llu",
+                              (unsigned long long)decl->offset);
                 wasi__appendf(buffer, buffer_size, &offset, "\n");
             }
         }
@@ -5763,11 +5937,12 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         wasi__appendf(buffer,
                       buffer_size,
                       &offset,
-                      "import[%u]: name=%s kind=%s type=%u\n",
+                      "import[%u]: name=%s kind=%s type=%u offset=%llu\n",
                       (unsigned)i,
                       import->name ? import->name : "",
                       wasi_component_extern_kind_string(import->kind),
-                      (unsigned)import->type_index);
+                      (unsigned)import->type_index,
+                      (unsigned long long)import->offset);
         if (import->interface_version) {
             wasi__appendf(buffer,
                           buffer_size,
@@ -5795,7 +5970,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
             wasi__appendf(buffer, buffer_size, &offset, " type=%u", (unsigned)export_->type_index);
         else if (has_resolved_type)
             wasi__appendf(buffer, buffer_size, &offset, " resolved-type=%u", (unsigned)resolved_type_index);
-        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu\n", (unsigned long long)export_->offset);
         if (export_->interface_version) {
             wasi__appendf(buffer,
                           buffer_size,
@@ -5832,7 +6007,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                           (unsigned)alias->outer_count,
                           (unsigned)alias->outer_index);
         }
-        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu\n", (unsigned long long)alias->offset);
     }
 
     for (i = 0; i < component->num_core_instances; i++) {
@@ -5859,7 +6034,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                           " exports=%u",
                           (unsigned)instance->num_exports);
         }
-        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu\n", (unsigned long long)instance->offset);
 
         for (j = 0; j < instance->num_exports; j++) {
             const wasi_component_core_instance_export_t* export_ = &instance->exports[j];
@@ -5912,7 +6087,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                           " exports=%u",
                           (unsigned)instance->num_exports);
         }
-        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu\n", (unsigned long long)instance->offset);
 
         for (j = 0; j < instance->num_exports; j++) {
             const wasi_component_instance_export_t* export_ = &instance->exports[j];
@@ -5945,10 +6120,11 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         wasi__appendf(buffer,
                       buffer_size,
                       &offset,
-                      "start: func=%u args=%u results=%u\n",
+                      "start: func=%u args=%u results=%u offset=%llu\n",
                       (unsigned)component->start_func_index,
                       (unsigned)component->start_arg_count,
-                      (unsigned)component->start_result_count);
+                      (unsigned)component->start_result_count,
+                      (unsigned long long)component->start_offset);
     }
 
     for (i = 0; i < component->num_canons; i++) {
@@ -5987,7 +6163,7 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
         }
         if (canon->num_options)
             wasi__appendf(buffer, buffer_size, &offset, " options=%u", (unsigned)canon->num_options);
-        wasi__appendf(buffer, buffer_size, &offset, "\n");
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu\n", (unsigned long long)canon->offset);
         for (opt = 0; opt < canon->num_options; opt++) {
             const wasi_component_canon_option_t* option = &canon->options[opt];
             wasi__appendf(buffer,
