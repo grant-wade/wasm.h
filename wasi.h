@@ -478,6 +478,7 @@ typedef struct wasi__core_func_import_bridge_t {
     wasi__core_func_bridge_kind_t kind;
     wasm_module_t* source_module;
     struct wasi_instance_t* component_instance;
+    const struct wasi_component_t* func_type_component;
     uint32_t func_index;
     uint32_t func_type_index;
     uint32_t canon_index;
@@ -588,6 +589,7 @@ typedef struct wasi_engine_t {
 
 struct wasi_component_t {
     wasi_engine_t* engine;
+    const struct wasi_component_t* parent_component;
     uint8_t* bytes;
     size_t size;
     uint8_t version_bytes[4];
@@ -1798,6 +1800,7 @@ static wasi_error_t wasi__component_append_nested_component(wasi_component_t* co
     memset(entry, 0, sizeof(*entry));
     entry->payload_offset = payload_offset;
     entry->payload_size = payload_size;
+    nested_component->parent_component = component;
     entry->component = nested_component;
     return WASI_OK;
 }
@@ -5365,6 +5368,7 @@ typedef enum wasi__resolved_core_func_kind_t {
 typedef struct wasi__resolved_core_func_t {
     wasi__resolved_core_func_kind_t kind;
     wasm_module_t* module;
+    const wasi_component_t* func_type_component;
     uint32_t func_index;
     uint32_t func_type_index;
     uint32_t canon_index;
@@ -5381,6 +5385,7 @@ static wasi_error_t wasi__resolve_component_func_call_type(wasi_engine_t* engine
                                                            const wasi_component_t* component,
                                                            uint32_t func_index,
                                                            const char* func_label,
+                                                           const wasi_component_t** out_type_component,
                                                            uint32_t* out_type_index);
 static wasi_error_t wasi__resolve_core_func(wasi_engine_t* engine,
                                             const wasi_component_t* component,
@@ -5398,6 +5403,7 @@ static wasi_error_t wasi__append_core_func_bridge(wasi_engine_t* engine,
                                                   wasi__core_func_bridge_kind_t kind,
                                                   wasm_module_t* source_module,
                                                   wasi_instance_t* component_instance,
+                                                  const wasi_component_t* func_type_component,
                                                   uint32_t func_index,
                                                   uint32_t func_type_index,
                                                   uint32_t canon_index,
@@ -5425,6 +5431,7 @@ static wasi_error_t wasi__append_core_func_bridge(wasi_engine_t* engine,
     bridge->kind = kind;
     bridge->source_module = source_module;
     bridge->component_instance = component_instance;
+    bridge->func_type_component = func_type_component;
     bridge->func_index = func_index;
     bridge->func_type_index = func_type_index;
     bridge->canon_index = canon_index;
@@ -5470,6 +5477,7 @@ static wasi_error_t wasi__register_core_instance_export(wasi_engine_t* engine,
             if (wasi__append_core_func_bridge(engine,
                                               WASI__CORE_FUNC_BRIDGE_FORWARD,
                                               source_module,
+                                              NULL,
                                               NULL,
                                               export_index,
                                               UINT32_MAX,
@@ -5679,11 +5687,11 @@ static wasi_error_t wasi__load_embedded_core_module(wasi_engine_t* engine,
 }
 
 static int wasi__component_type_is_func(const wasi_component_t* component, uint32_t type_index) {
-    return component && type_index < component->num_types && component->types[type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC;
+    return wasi_component_type_kind(component, type_index) == WASI_COMPONENT_TYPE_KIND_FUNC;
 }
 
 static int wasi__component_type_is_resource(const wasi_component_t* component, uint32_t type_index) {
-    return component && type_index < component->num_types && component->types[type_index].kind == WASI_COMPONENT_TYPE_KIND_RESOURCE;
+    return wasi_component_type_kind(component, type_index) == WASI_COMPONENT_TYPE_KIND_RESOURCE;
 }
 
 static const wasi__resource_type_info_t* wasi__resource_type_info(const wasi_engine_t* engine,
@@ -5835,6 +5843,7 @@ static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine
                                                            wasi_value_t* out_value);
 static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
                                               const wasi_component_canon_t* canon,
+                                              const wasi_component_t* func_type_component,
                                               int has_func_type,
                                               uint32_t func_type_index,
                                               const wasi__canon_runtime_options_t* options,
@@ -5989,29 +5998,125 @@ static wasi_error_t wasi__release_handle_slot(wasi_engine_t* engine,
     return err;
 }
 
-static int wasi__resolve_component_func_type_index(const wasi_component_t* component,
-                                                   uint32_t type_index,
-                                                   uint32_t* out_type_index) {
-    uint32_t current = type_index;
-    uint32_t depth = 0u;
+static int wasi__component_alias_defines_type(const wasi_component_alias_t* alias) {
+    return alias && !alias->sort_is_core && alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_TYPE;
+}
 
-    if (out_type_index) *out_type_index = 0u;
-    if (!component || !out_type_index) return 0;
+static uint32_t wasi__component_type_alias_count(const wasi_component_t* component) {
+    uint32_t count = 0u;
+    uint32_t i;
 
-    while (current < component->num_types && depth < 32u) {
-        const wasi_component_type_t* type = &component->types[current];
+    if (!component) return 0u;
+    for (i = 0; i < component->num_aliases; i++) {
+        if (wasi__component_alias_defines_type(&component->aliases[i])) count++;
+    }
+    return count;
+}
 
-        if (type->kind == WASI_COMPONENT_TYPE_KIND_FUNC) {
-            *out_type_index = current;
+static int wasi__component_type_entry_at(const wasi_component_t* component,
+                                         uint32_t type_index,
+                                         uint32_t* out_local_type_index,
+                                         const wasi_component_alias_t** out_alias) {
+    uint32_t next_type = 0u;
+    uint32_t next_alias = 0u;
+    uint32_t current_index = 0u;
+
+    if (out_local_type_index) *out_local_type_index = UINT32_MAX;
+    if (out_alias) *out_alias = NULL;
+    if (!component) return 0;
+
+    while (next_type < component->num_types || next_alias < component->num_aliases) {
+        const wasi_component_alias_t* alias = NULL;
+        int choose_alias = 0;
+
+        while (next_alias < component->num_aliases &&
+               !wasi__component_alias_defines_type(&component->aliases[next_alias])) {
+            next_alias++;
+        }
+
+        if (next_alias < component->num_aliases) alias = &component->aliases[next_alias];
+        if (alias &&
+            (next_type >= component->num_types || alias->offset < component->types[next_type].offset)) {
+            choose_alias = 1;
+        }
+
+        if (current_index == type_index) {
+            if (choose_alias) {
+                if (out_alias) *out_alias = alias;
+            } else if (next_type < component->num_types && out_local_type_index) {
+                *out_local_type_index = next_type;
+            }
             return 1;
         }
-        if (type->kind != WASI_COMPONENT_TYPE_KIND_DEFINED || !type->defined_type || type->defined_type->opcode != 0x00u)
-            return 0;
-        current = type->defined_type->data.index.type_index;
-        depth++;
+
+        if (choose_alias) {
+            next_alias++;
+        } else if (next_type < component->num_types) {
+            next_type++;
+        } else {
+            break;
+        }
+        current_index++;
     }
 
     return 0;
+}
+
+static int wasi__resolve_component_type_view_depth(const wasi_component_t* component,
+                                                   uint32_t type_index,
+                                                   const wasi_component_t** out_component,
+                                                   uint32_t* out_local_type_index,
+                                                   const wasi_component_type_t** out_type,
+                                                   uint32_t depth) {
+    uint32_t local_type_index = UINT32_MAX;
+    const wasi_component_alias_t* alias = NULL;
+    uint32_t remaining_outers;
+
+    if (out_component) *out_component = NULL;
+    if (out_local_type_index) *out_local_type_index = UINT32_MAX;
+    if (out_type) *out_type = NULL;
+    if (!component || depth >= 32u) return 0;
+
+    if (!wasi__component_type_entry_at(component, type_index, &local_type_index, &alias)) {
+        return 0;
+    }
+
+    if (local_type_index != UINT32_MAX) {
+        if (out_component) *out_component = component;
+        if (out_local_type_index) *out_local_type_index = local_type_index;
+        if (out_type) *out_type = &component->types[local_type_index];
+        return 1;
+    }
+
+    if (!alias || alias->kind != WASI_COMPONENT_ALIAS_KIND_OUTER || alias->sort_is_core) {
+        return 0;
+    }
+
+    remaining_outers = alias->outer_count;
+    while (remaining_outers-- > 0u) {
+        component = component->parent_component;
+        if (!component) return 0;
+    }
+
+    return wasi__resolve_component_type_view_depth(component,
+                                                   alias->outer_index,
+                                                   out_component,
+                                                   out_local_type_index,
+                                                   out_type,
+                                                   depth + 1u);
+}
+
+static int wasi__resolve_component_type_view(const wasi_component_t* component,
+                                             uint32_t type_index,
+                                             const wasi_component_t** out_component,
+                                             uint32_t* out_local_type_index,
+                                             const wasi_component_type_t** out_type) {
+    return wasi__resolve_component_type_view_depth(component,
+                                                   type_index,
+                                                   out_component,
+                                                   out_local_type_index,
+                                                   out_type,
+                                                   0u);
 }
 
 static int wasi__component_alias_defines_func(const wasi_component_alias_t* alias) {
@@ -7110,13 +7215,14 @@ static wasi_error_t wasi__resolve_component_func_call_type(wasi_engine_t* engine
                                                            const wasi_component_t* component,
                                                            uint32_t func_index,
                                                            const char* func_label,
+                                                           const wasi_component_t** out_type_component,
                                                            uint32_t* out_type_index) {
     const wasi_component_t* resolved_component = component;
     uint32_t local_func_index = UINT32_MAX;
-    uint32_t resolved_type_index = UINT32_MAX;
 
+    if (out_type_component) *out_type_component = NULL;
     if (out_type_index) *out_type_index = UINT32_MAX;
-    if (!engine || !component || !out_type_index) {
+    if (!engine || !component || !out_type_component || !out_type_index) {
         return wasi__set_error_literal(engine,
                                        WASI_ERR_INVALID_ARGUMENT,
                                        "invalid component function type resolution request");
@@ -7150,16 +7256,16 @@ static wasi_error_t wasi__resolve_component_func_call_type(wasi_engine_t* engine
                                 func_label ? func_label : "",
                                 (unsigned)local_func_index);
     }
-    if (!wasi__resolve_component_func_type_index(resolved_component,
-                                                 resolved_component->funcs[local_func_index].type_index,
-                                                 &resolved_type_index)) {
+    if (!wasi__component_type_is_func(resolved_component,
+                                      resolved_component->funcs[local_func_index].type_index)) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_TYPE_MISMATCH,
                                 "component function %s does not resolve to a function type",
                                 func_label ? func_label : "");
     }
 
-    *out_type_index = resolved_type_index;
+    *out_type_component = resolved_component;
+    *out_type_index = resolved_component->funcs[local_func_index].type_index;
     return WASI_OK;
 }
 
@@ -7270,6 +7376,7 @@ static wasi_error_t wasi__call_component_func(wasi_instance_t* instance,
                                               uint32_t num_results) {
     const wasi_component_t* component;
     const wasi_component_t* resolved_component;
+    const wasi_component_t* type_component = NULL;
     wasi_engine_t* engine;
     wasi__resolved_component_func_t resolved_func;
     uint32_t local_func_index = UINT32_MAX;
@@ -7317,11 +7424,19 @@ static wasi_error_t wasi__call_component_func(wasi_instance_t* instance,
     call_context.instance = instance;
 
     if (has_func_type_index) {
+        if (!wasi__component_type_is_func(component, func_type_index)) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_TYPE_MISMATCH,
+                                    "component function %s does not resolve to a function type",
+                                    func_label);
+        }
+        type_component = component;
         effective_type_index = func_type_index;
     } else if (resolved_component->funcs[local_func_index].type_index != UINT32_MAX &&
-               wasi__resolve_component_func_type_index(resolved_component,
-                                                      resolved_component->funcs[local_func_index].type_index,
-                                                      &effective_type_index)) {
+               wasi__component_type_is_func(resolved_component,
+                                            resolved_component->funcs[local_func_index].type_index)) {
+        type_component = resolved_component;
+        effective_type_index = resolved_component->funcs[local_func_index].type_index;
     } else {
         effective_type_index = UINT32_MAX;
     }
@@ -7346,7 +7461,7 @@ static wasi_error_t wasi__call_component_func(wasi_instance_t* instance,
         if (err != WASI_OK) return err;
         options.call_context = &call_context;
 
-        err = wasi__canon_call_func_index(resolved_component,
+        err = wasi__canon_call_func_index(type_component,
                                           effective_type_index,
                                           target_module,
                                           target_func_index,
@@ -7363,6 +7478,7 @@ static wasi_error_t wasi__call_component_func(wasi_instance_t* instance,
         options.call_context = &call_context;
         err = wasi__call_resource_canon(instance,
                                         canon,
+                                        type_component,
                                         effective_type_index != UINT32_MAX,
                                         effective_type_index,
                                         &options,
@@ -7569,6 +7685,7 @@ static wasi_error_t wasi__resolve_core_func(wasi_engine_t* engine,
     }
 
     out_func->kind = WASI__RESOLVED_CORE_FUNC_CANON_LOWER;
+    out_func->func_type_component = NULL;
     out_func->func_index = canon->func_index;
     out_func->canon_index = (uint32_t)(canon - component->canons);
     return wasi__resolve_component_func_call_type(engine,
@@ -7576,6 +7693,7 @@ static wasi_error_t wasi__resolve_core_func(wasi_engine_t* engine,
                                                   component,
                                                   canon->func_index,
                                                   func_label,
+                                                  &out_func->func_type_component,
                                                   &out_func->func_type_index);
 }
 
@@ -7583,6 +7701,7 @@ static wasi_error_t wasi__register_core_lower_bridge_export(wasi_engine_t* engin
                                                             const char* module_name,
                                                             const char* export_name,
                                                             wasi_instance_t* component_instance,
+                                                            const wasi_component_t* func_type_component,
                                                             uint32_t func_index,
                                                             uint32_t func_type_index,
                                                             uint32_t canon_index) {
@@ -7601,6 +7720,7 @@ static wasi_error_t wasi__register_core_lower_bridge_export(wasi_engine_t* engin
                                       WASI__CORE_FUNC_BRIDGE_CANON_LOWER,
                                       NULL,
                                       component_instance,
+                                      func_type_component,
                                       func_index,
                                       func_type_index,
                                       canon_index,
@@ -7697,6 +7817,7 @@ static wasi_error_t wasi__register_core_instance_runtime_namespace(wasi_engine_t
                                                           module_name,
                                                           export_->name ? export_->name : "",
                                                           (wasi_instance_t*)instance,
+                                                          resolved.func_type_component,
                                                           resolved.func_index,
                                                           resolved.func_type_index,
                                                           resolved.canon_index);
@@ -7757,6 +7878,7 @@ static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine
 
 static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
                                               const wasi_component_canon_t* canon,
+                                              const wasi_component_t* func_type_component,
                                               int has_func_type,
                                               uint32_t func_type_index,
                                               const wasi__canon_runtime_options_t* options,
@@ -7789,7 +7911,7 @@ static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
     }
 
     if (has_func_type) {
-        if (!wasi__component_type_is_func(component, func_type_index)) {
+        if (!func_type_component || !wasi__component_type_is_func(func_type_component, func_type_index)) {
             return wasi__set_error_literal(engine,
                                            WASI_ERR_TYPE_MISMATCH,
                                            "resource canonical function export does not resolve to a function type");
@@ -7797,43 +7919,43 @@ static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
 
         switch (canon->kind) {
             case WASI_COMPONENT_CANON_KIND_RESOURCE_NEW:
-                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
-                    wasi_component_func_type_result_count(component, func_type_index) != 1u) {
+                if (wasi_component_func_type_param_count(func_type_component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(func_type_component, func_type_index) != 1u) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.new export signature mismatch");
                 }
-                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
-                result_opcode = wasi_component_func_type_result_code(component, func_type_index, 0u);
+                param_opcode = wasi_component_func_type_param_code(func_type_component, func_type_index, 0u);
+                result_opcode = wasi_component_func_type_result_code(func_type_component, func_type_index, 0u);
                 if ((param_opcode != 0x79u && param_opcode != 0x7Au) || result_opcode != 0x69u) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.new export signature mismatch");
                 }
-                if (!wasi_component_func_type_result_type(component, func_type_index, 0u) ||
-                    wasi_component_func_type_result_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                if (!wasi_component_func_type_result_type(func_type_component, func_type_index, 0u) ||
+                    wasi_component_func_type_result_type(func_type_component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.new export result type mismatch");
                 }
                 break;
             case WASI_COMPONENT_CANON_KIND_RESOURCE_REP:
-                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
-                    wasi_component_func_type_result_count(component, func_type_index) != 1u) {
+                if (wasi_component_func_type_param_count(func_type_component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(func_type_component, func_type_index) != 1u) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.rep export signature mismatch");
                 }
-                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
-                result_opcode = wasi_component_func_type_result_code(component, func_type_index, 0u);
+                param_opcode = wasi_component_func_type_param_code(func_type_component, func_type_index, 0u);
+                result_opcode = wasi_component_func_type_result_code(func_type_component, func_type_index, 0u);
                 if ((param_opcode != 0x68u && param_opcode != 0x69u) ||
                     (result_opcode != 0x79u && result_opcode != 0x7Au)) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.rep export signature mismatch");
                 }
-                if (!wasi_component_func_type_param_type(component, func_type_index, 0u) ||
-                    wasi_component_func_type_param_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                if (!wasi_component_func_type_param_type(func_type_component, func_type_index, 0u) ||
+                    wasi_component_func_type_param_type(func_type_component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.rep export parameter type mismatch");
@@ -7841,20 +7963,20 @@ static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
                 require_own = param_opcode == 0x69u;
                 break;
             case WASI_COMPONENT_CANON_KIND_RESOURCE_DROP:
-                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
-                    wasi_component_func_type_result_count(component, func_type_index) != 0u) {
+                if (wasi_component_func_type_param_count(func_type_component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(func_type_component, func_type_index) != 0u) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.drop export signature mismatch");
                 }
-                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
+                param_opcode = wasi_component_func_type_param_code(func_type_component, func_type_index, 0u);
                 if (param_opcode != 0x69u) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.drop export signature mismatch");
                 }
-                if (!wasi_component_func_type_param_type(component, func_type_index, 0u) ||
-                    wasi_component_func_type_param_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                if (!wasi_component_func_type_param_type(func_type_component, func_type_index, 0u) ||
+                    wasi_component_func_type_param_type(func_type_component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_TYPE_MISMATCH,
                                                    "resource.drop export parameter type mismatch");
@@ -11172,7 +11294,7 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
     options.call_context = &call_context;
 
     err = wasi__select_core_bridge_signature(engine,
-                                             component,
+                                             bridge->func_type_component,
                                              bridge->func_type_index,
                                              args,
                                              num_args,
@@ -11180,16 +11302,16 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
                                              &sig);
     if (err != WASI_OK) goto cleanup;
 
-    if (wasi_component_func_type_param_count(component, bridge->func_type_index)) {
-        lifted_args = (wasi_value_t*)WASM_CALLOC(wasi_component_func_type_param_count(component, bridge->func_type_index),
+    if (wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index)) {
+        lifted_args = (wasi_value_t*)WASM_CALLOC(wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index),
                                                  sizeof(*lifted_args));
         if (!lifted_args) {
             err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canon lower arg alloc failed");
             goto cleanup;
         }
     }
-    if (wasi_component_func_type_result_count(component, bridge->func_type_index)) {
-        lifted_results = (wasi_value_t*)WASM_CALLOC(wasi_component_func_type_result_count(component, bridge->func_type_index),
+    if (wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index)) {
+        lifted_results = (wasi_value_t*)WASM_CALLOC(wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index),
                                                     sizeof(*lifted_results));
         if (!lifted_results) {
             err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canon lower result alloc failed");
@@ -11204,15 +11326,15 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
                                           "canon lower spilled params require a leading i32 pointer");
             goto cleanup;
         }
-        spill_offsets = wasi_component_func_type_param_count(component, bridge->func_type_index)
-                            ? (uint32_t*)WASM_MALLOC((size_t)wasi_component_func_type_param_count(component, bridge->func_type_index) * sizeof(*spill_offsets))
+        spill_offsets = wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index)
+                            ? (uint32_t*)WASM_MALLOC((size_t)wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index) * sizeof(*spill_offsets))
                             : NULL;
-        if (wasi_component_func_type_param_count(component, bridge->func_type_index) && !spill_offsets) {
+        if (wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index) && !spill_offsets) {
             err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canon lower spill layout alloc failed");
             goto cleanup;
         }
         err = wasi__layout_func_values(engine,
-                                       component,
+                                       bridge->func_type_component,
                                        bridge->func_type_index,
                                        0,
                                        spill_offsets,
@@ -11220,13 +11342,13 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
                                        &spill_align);
         if (err != WASI_OK) goto cleanup;
         spill_ptr = (uint32_t)args[0].of.i32;
-        for (i = 0; i < wasi_component_func_type_param_count(component, bridge->func_type_index); i++) {
+        for (i = 0; i < wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index); i++) {
             uint32_t item_ptr;
             err = wasi__guest_add_offset(engine, spill_ptr, spill_offsets[i], &item_ptr);
             if (err != WASI_OK) goto cleanup;
             err = wasi__load_value_from_memory(engine,
-                                               component,
-                                               wasi_component_func_type_param_type(component, bridge->func_type_index, i),
+                                               bridge->func_type_component,
+                                               wasi_component_func_type_param_type(bridge->func_type_component, bridge->func_type_index, i),
                                                core_module,
                                                &options,
                                                item_ptr,
@@ -11234,11 +11356,11 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
             if (err != WASI_OK) goto cleanup;
         }
     } else {
-        for (i = 0; i < wasi_component_func_type_param_count(component, bridge->func_type_index); i++) {
+        for (i = 0; i < wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index); i++) {
             uint32_t consumed = 0u;
             err = wasi__lift_value(engine,
-                                   component,
-                                   wasi_component_func_type_param_type(component, bridge->func_type_index, i),
+                                   bridge->func_type_component,
+                                   wasi_component_func_type_param_type(bridge->func_type_component, bridge->func_type_index, i),
                                    args + arg_cursor,
                                    num_args - arg_cursor,
                                    core_module,
@@ -11256,24 +11378,24 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
                                     bridge->func_type_index,
                                     "<canon lower>",
                                     lifted_args,
-                                    wasi_component_func_type_param_count(component, bridge->func_type_index),
+                                    wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index),
                                     lifted_results,
-                                    wasi_component_func_type_result_count(component, bridge->func_type_index));
+                                    wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index));
     if (err != WASI_OK) goto cleanup;
 
     WASM_FREE(spill_offsets);
     spill_offsets = NULL;
     spill_ptr = 0u;
     if (sig.results_spilled) {
-        spill_offsets = wasi_component_func_type_result_count(component, bridge->func_type_index)
-                            ? (uint32_t*)WASM_MALLOC((size_t)wasi_component_func_type_result_count(component, bridge->func_type_index) * sizeof(*spill_offsets))
+        spill_offsets = wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index)
+                            ? (uint32_t*)WASM_MALLOC((size_t)wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index) * sizeof(*spill_offsets))
                             : NULL;
-        if (wasi_component_func_type_result_count(component, bridge->func_type_index) && !spill_offsets) {
+        if (wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index) && !spill_offsets) {
             err = wasi__set_error_literal(engine, WASI_ERR_OOM, "canon lower result spill layout alloc failed");
             goto cleanup;
         }
         err = wasi__layout_func_values(engine,
-                                       component,
+                                       bridge->func_type_component,
                                        bridge->func_type_index,
                                        1,
                                        spill_offsets,
@@ -11294,13 +11416,13 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
             spill_ptr = (uint32_t)args[num_args - 1u].of.i32;
         }
 
-        for (i = 0; i < wasi_component_func_type_result_count(component, bridge->func_type_index); i++) {
+        for (i = 0; i < wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index); i++) {
             uint32_t item_ptr;
             err = wasi__guest_add_offset(engine, spill_ptr, spill_offsets[i], &item_ptr);
             if (err != WASI_OK) goto cleanup;
             err = wasi__store_value_to_memory(engine,
-                                              component,
-                                              wasi_component_func_type_result_type(component, bridge->func_type_index, i),
+                                              bridge->func_type_component,
+                                              wasi_component_func_type_result_type(bridge->func_type_component, bridge->func_type_index, i),
                                               &lifted_results[i],
                                               core_module,
                                               &options,
@@ -11312,11 +11434,11 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
             results[0] = wasm_i32((int32_t)spill_ptr);
         }
     } else {
-        for (i = 0; i < wasi_component_func_type_result_count(component, bridge->func_type_index); i++) {
+        for (i = 0; i < wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index); i++) {
             uint32_t produced = 0u;
             err = wasi__lower_value(engine,
-                                    component,
-                                    wasi_component_func_type_result_type(component, bridge->func_type_index, i),
+                                    bridge->func_type_component,
+                                    wasi_component_func_type_result_type(bridge->func_type_component, bridge->func_type_index, i),
                                     &lifted_results[i],
                                     core_module,
                                     &options,
@@ -11331,11 +11453,11 @@ static wasi_error_t wasi__invoke_canon_lower_bridge(const wasi__core_func_import
 
 cleanup:
     if (lifted_results) {
-        for (i = 0; i < wasi_component_func_type_result_count(component, bridge->func_type_index); i++)
+        for (i = 0; i < wasi_component_func_type_result_count(bridge->func_type_component, bridge->func_type_index); i++)
             wasi_value_destroy(&lifted_results[i]);
     }
     if (lifted_args) {
-        for (i = 0; i < wasi_component_func_type_param_count(component, bridge->func_type_index); i++)
+        for (i = 0; i < wasi_component_func_type_param_count(bridge->func_type_component, bridge->func_type_index); i++)
             wasi_value_destroy(&lifted_args[i]);
     }
     WASM_FREE(spill_offsets);
@@ -11512,6 +11634,7 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
         if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
             if (!alias->sort_is_core &&
                 (alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_FUNC ||
+                 alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_TYPE ||
                  alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_INSTANCE ||
                  alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_COMPONENT)) {
                 continue;
@@ -12746,95 +12869,124 @@ uint32_t wasi_component_import_count(const wasi_component_t* component) {
 }
 
 uint32_t wasi_component_type_count(const wasi_component_t* component) {
-    return component ? component->num_types : 0;
+    return component ? component->num_types + wasi__component_type_alias_count(component) : 0;
 }
 
 size_t wasi_component_type_offset(const wasi_component_t* component, uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    return component->types[type_index].offset;
+    uint32_t local_type_index = UINT32_MAX;
+    const wasi_component_alias_t* alias = NULL;
+
+    if (!wasi__component_type_entry_at(component, type_index, &local_type_index, &alias)) return 0;
+    if (local_type_index != UINT32_MAX) return component->types[local_type_index].offset;
+    return alias ? alias->offset : 0;
 }
 
 wasi_component_type_kind_t wasi_component_type_kind(const wasi_component_t* component, uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return WASI_COMPONENT_TYPE_KIND_UNKNOWN;
-    return component->types[type_index].kind;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type)
+        return WASI_COMPONENT_TYPE_KIND_UNKNOWN;
+    return type->kind;
 }
 
 uint32_t wasi_component_type_decl_count(const wasi_component_t* component, uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    return component->types[type_index].num_decls;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return 0;
+    return type->num_decls;
 }
 
 const wasi_component_type_decl_t* wasi_component_type_decl_at(const wasi_component_t* component,
                                                               uint32_t type_index,
                                                               uint32_t decl_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (decl_index >= component->types[type_index].num_decls) return NULL;
-    return &component->types[type_index].decls[decl_index];
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (decl_index >= type->num_decls) return NULL;
+    return &type->decls[decl_index];
 }
 
 uint32_t wasi_component_func_type_param_count(const wasi_component_t* component, uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
-    return component->types[type_index].func.num_params;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return 0;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    return type->func.num_params;
 }
 
 const char* wasi_component_func_type_param_name(const wasi_component_t* component, uint32_t type_index, uint32_t param_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
-    if (param_index >= component->types[type_index].func.num_params) return NULL;
-    return component->types[type_index].func.params[param_index].name;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (param_index >= type->func.num_params) return NULL;
+    return type->func.params[param_index].name;
 }
 
 uint8_t wasi_component_func_type_param_code(const wasi_component_t* component, uint32_t type_index, uint32_t param_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
-    if (param_index >= component->types[type_index].func.num_params) return 0;
-    return component->types[type_index].func.params[param_index].type_code;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return 0;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    if (param_index >= type->func.num_params) return 0;
+    return type->func.params[param_index].type_code;
 }
 
 const wasi_component_valtype_t* wasi_component_func_type_param_type(const wasi_component_t* component,
                                                                     uint32_t type_index,
                                                                     uint32_t param_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
-    if (param_index >= component->types[type_index].func.num_params) return NULL;
-    return component->types[type_index].func.params[param_index].type;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (param_index >= type->func.num_params) return NULL;
+    return type->func.params[param_index].type;
 }
 
 uint32_t wasi_component_func_type_result_count(const wasi_component_t* component, uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
-    return component->types[type_index].func.num_results;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return 0;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    return type->func.num_results;
 }
 
 const char* wasi_component_func_type_result_name(const wasi_component_t* component, uint32_t type_index, uint32_t result_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
-    if (result_index >= component->types[type_index].func.num_results) return NULL;
-    return component->types[type_index].func.results[result_index].name;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (result_index >= type->func.num_results) return NULL;
+    return type->func.results[result_index].name;
 }
 
 uint8_t wasi_component_func_type_result_code(const wasi_component_t* component, uint32_t type_index, uint32_t result_index) {
-    if (!component || type_index >= component->num_types) return 0;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
-    if (result_index >= component->types[type_index].func.num_results) return 0;
-    return component->types[type_index].func.results[result_index].type_code;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return 0;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return 0;
+    if (result_index >= type->func.num_results) return 0;
+    return type->func.results[result_index].type_code;
 }
 
 const wasi_component_valtype_t* wasi_component_func_type_result_type(const wasi_component_t* component,
                                                                      uint32_t type_index,
                                                                      uint32_t result_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
-    if (result_index >= component->types[type_index].func.num_results) return NULL;
-    return component->types[type_index].func.results[result_index].type;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) return NULL;
+    if (result_index >= type->func.num_results) return NULL;
+    return type->func.results[result_index].type;
 }
 
 const wasi_component_valtype_t* wasi_component_type_defined_valtype(const wasi_component_t* component,
                                                                     uint32_t type_index) {
-    if (!component || type_index >= component->num_types) return NULL;
-    if (component->types[type_index].kind != WASI_COMPONENT_TYPE_KIND_DEFINED) return NULL;
-    return component->types[type_index].defined_type;
+    const wasi_component_type_t* type = NULL;
+
+    if (!wasi__resolve_component_type_view(component, type_index, NULL, NULL, &type) || !type) return NULL;
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_DEFINED) return NULL;
+    return type->defined_type;
 }
 
 uint8_t wasi_component_valtype_opcode(const wasi_component_valtype_t* type) {
@@ -13124,15 +13276,14 @@ uint32_t wasi_component_export_type_index(const wasi_component_t* component, uin
 
 int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index) {
     uint32_t func_index;
-    uint32_t resolved_type_index;
 
     if (out_type_index) *out_type_index = 0;
     if (!component || index >= component->num_exports || !out_type_index) return 0;
     if (component->exports[index].kind != WASI_COMPONENT_EXTERN_KIND_FUNC) return 0;
     if (component->exports[index].has_type) {
         uint32_t annotated_type_index = component->exports[index].type_index;
-        if (wasi__resolve_component_func_type_index(component, annotated_type_index, &resolved_type_index)) {
-            *out_type_index = resolved_type_index;
+        if (wasi__component_type_is_func(component, annotated_type_index)) {
+            *out_type_index = annotated_type_index;
             return 1;
         }
     }
@@ -13149,7 +13300,9 @@ int wasi_component_export_func_type_index(const wasi_component_t* component, uin
         return 0;
     }
     if (func_index >= component->num_funcs) return 0;
-    return wasi__resolve_component_func_type_index(component, component->funcs[func_index].type_index, out_type_index);
+    if (!wasi__component_type_is_func(component, component->funcs[func_index].type_index)) return 0;
+    *out_type_index = component->funcs[func_index].type_index;
+    return 1;
 }
 
 uint32_t wasi_component_alias_count(const wasi_component_t* component) {

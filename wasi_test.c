@@ -2502,6 +2502,24 @@ static void wasi_test_build_outer_func_alias_child_component(wasi_test_builder_t
     wasi_test_emit_section(component, 11u, sec.buf, sec.len);
 }
 
+static void wasi_test_build_outer_type_alias_child_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_outer_alias(&sec, 0x03u, 1u, 0u);
+    wasi_test_emit_component_outer_alias(&sec, 0x01u, 1u, 0u);
+    wasi_test_emit_section(component, 6u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_typed_component_export(&sec, "echo", 0x01u, 0u, 0u);
+    wasi_test_emit_section(component, 11u, sec.buf, sec.len);
+}
+
 static void wasi_test_build_outer_instance_alias_child_component(wasi_test_builder_t* component) {
     wasi_test_builder_t sec = { 0 };
 
@@ -6043,6 +6061,76 @@ WL_TEST(test_wasi_instantiate_resolves_outer_func_aliases) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_instantiate_resolves_outer_type_aliases_for_export_types) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_module_bytes;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t child_component_bytes;
+    wasi_test_builder_t parent_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* parent_component;
+    const wasi_component_t* nested_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* parent_instance;
+    wasi_value_t args[1];
+    wasi_value_t results[1];
+    uint32_t export_type_index = UINT32_MAX;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_core_instance_source_module(&source_module_bytes);
+    wasi_test_build_core_instance_u32_component(&source_component_bytes, &source_module_bytes);
+    wasi_test_build_outer_type_alias_child_component(&child_component_bytes);
+    wasi_test_build_parent_outer_func_alias_component(&parent_component_bytes, &child_component_bytes);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    err = wasi_bind_import_func(&engine, "wasi:test/ops/inc@0.3.0", source_instance, "echo");
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_func failed: %s", engine.error_msg);
+
+    parent_component = wasi_load(&engine, parent_component_bytes.buf, parent_component_bytes.len);
+    WL_REQUIRE_MSG(t, parent_component != NULL, "wasi_load parent failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_nested_component_count(parent_component) == 1u);
+
+    nested_component = wasi_component_nested_component_at(parent_component, 0u);
+    WL_REQUIRE(t, nested_component != NULL);
+    WL_CHECK(t, wasi_component_type_count(nested_component) == 1u);
+    WL_CHECK(t, wasi_component_export_count(nested_component) == 1u);
+    WL_CHECK(t, wasi_component_export_has_type(nested_component, 0u));
+    WL_CHECK(t, wasi_component_export_type_index(nested_component, 0u) == 0u);
+    WL_REQUIRE(t, wasi_component_export_func_type_index(nested_component, 0u, &export_type_index));
+    WL_CHECK(t, export_type_index == 0u);
+    WL_CHECK(t, wasi_component_type_kind(nested_component, export_type_index) == WASI_COMPONENT_TYPE_KIND_FUNC);
+    WL_CHECK(t, wasi_component_func_type_param_count(nested_component, export_type_index) == 1u);
+    WL_CHECK(t, wasi_component_func_type_param_code(nested_component, export_type_index, 0u) == 0x79u);
+    WL_CHECK(t, wasi_component_func_type_result_count(nested_component, export_type_index) == 1u);
+    WL_CHECK(t, wasi_component_func_type_result_code(nested_component, export_type_index, 0u) == 0x79u);
+
+    parent_instance = wasi_instantiate(parent_component);
+    WL_REQUIRE_MSG(t, parent_instance != NULL, "wasi_instantiate parent failed: %s", engine.error_msg);
+
+    memset(args, 0, sizeof(args));
+    memset(results, 0, sizeof(results));
+    args[0].kind = WASI_VALUE_KIND_U32;
+    args[0].of.u32 = 99u;
+
+    err = wasi_call(parent_instance, "echo", args, 1u, results, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_call echo failed: %s", engine.error_msg);
+    WL_CHECK(t, results[0].kind == WASI_VALUE_KIND_U32);
+    WL_CHECK(t, results[0].of.u32 == 100u);
+
+    wasi_free_instance(parent_instance);
+    wasi_free_component(parent_component);
+    wasi_free_instance(source_instance);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instantiate_resolves_outer_instance_aliases) {
     wasi_engine_t engine;
     wasi_test_builder_t source_module_bytes;
@@ -7452,6 +7540,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_call_resolves_component_export_alias_lifts),
         WL_TEST_CASE(test_wasi_instantiate_executes_nested_component_instances),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_func_aliases),
+        WL_TEST_CASE(test_wasi_instantiate_resolves_outer_type_aliases_for_export_types),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_instance_aliases),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_component_aliases),
         WL_TEST_CASE(test_wasi_instantiate_resolves_bound_instance_imports),
