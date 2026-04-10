@@ -3008,10 +3008,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_scalars) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_scalar_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(args, 0, sizeof(args));
     memset(results, 0, sizeof(results));
@@ -3252,10 +3252,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_utf8_strings) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_scalar_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     err = wasi_canon_options_default(&options);
     WL_REQUIRE(t, err == WASI_OK);
@@ -3309,10 +3309,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_utf16_strings) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_scalar_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     err = wasi_canon_options_default(&options);
     WL_REQUIRE(t, err == WASI_OK);
@@ -3371,10 +3371,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_latin1_utf16_strings) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_scalar_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     err = wasi_canon_options_default(&options);
     WL_REQUIRE(t, err == WASI_OK);
@@ -3449,10 +3449,10 @@ WL_TEST(test_wasi_canon_call_rejects_invalid_scalar_values) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_scalar_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(results, 0, sizeof(results));
     err = wasi_canon_call(component, WASI_TEST_SCALAR_TYPE_BAD_BOOL_RESULT, core_module, "const2", NULL, NULL, 0u, results, 1u);
@@ -3787,10 +3787,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_record_and_list) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(args, 0, sizeof(args));
     memset(results, 0, sizeof(results));
@@ -3862,10 +3862,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_tuple) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -3944,10 +3944,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_flags) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -3989,10 +3989,10 @@ WL_TEST(test_wasi_canon_call_spills_large_param_lists) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(args, 0, sizeof(args));
     memset(&result, 0, sizeof(result));
@@ -4032,10 +4032,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_option) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4101,10 +4101,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_result) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4174,10 +4174,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_variant) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4247,10 +4247,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_joined_variant) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4320,10 +4320,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_flat_fixed_list) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4379,10 +4379,10 @@ WL_TEST(test_wasi_canon_call_roundtrips_spilled_fixed_list) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4443,10 +4443,10 @@ WL_TEST(test_wasi_canon_call_rejects_fixed_list_length_mismatch) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_compound_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));
@@ -4518,10 +4518,10 @@ WL_TEST(test_wasi_canon_call_validates_enum_results) {
     WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
 
     wasi_test_build_enum_validation_core_module(&module_bytes);
-    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    core_module = wasm_load(engine.runtime, module_bytes.buf, module_bytes.len);
     WL_REQUIRE_MSG(t, core_module != NULL,
                    "wasm_load failed: %s",
-                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+                   wasm_runtime_error_message(engine.runtime));
 
     memset(&arg, 0, sizeof(arg));
     memset(&result, 0, sizeof(result));

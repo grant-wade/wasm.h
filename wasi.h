@@ -447,7 +447,7 @@ typedef struct wasi_config_t {
 } wasi_config_t;
 
 typedef struct wasi_engine_t {
-    wasm_runtime_t runtime;
+    wasm_runtime_t* runtime;
     wasi_error_t last_error;
     char error_msg[256];
 } wasi_engine_t;
@@ -4581,15 +4581,14 @@ static wasi_error_t wasi__extract_core_modules(wasi_engine_t* engine, wasi_compo
                                     (unsigned)component->num_core_modules);
         }
 
-        module = wasm_load(&engine->runtime,
+        module = wasm_load(engine->runtime,
                            component->bytes + section->payload_offset,
                            section->payload_size);
         if (!module) {
-            const char* load_error_msg = engine->runtime.error_msg[0]
-                                             ? engine->runtime.error_msg
-                                             : wasm_error_string(engine->runtime.last_error);
+            wasm_error_t load_error = wasm_runtime_last_error(engine->runtime);
+            const char* load_error_msg = wasm_runtime_error_message(engine->runtime);
 
-            if (engine->runtime.last_error != WASM_ERR_UNKNOWN_IMPORT) {
+            if (load_error != WASM_ERR_UNKNOWN_IMPORT) {
                 return wasi__set_errorf(engine,
                                         WASI_ERR_MALFORMED,
                                         "embedded core module %u failed to load: %s",
@@ -4601,7 +4600,7 @@ static wasi_error_t wasi__extract_core_modules(wasi_engine_t* engine, wasi_compo
                                                      section->payload_offset,
                                                      section->payload_size,
                                                      NULL,
-                                                     engine->runtime.last_error,
+                                                     load_error,
                                                      load_error_msg);
             if (err != WASI_OK) {
                 return wasi__set_error_literal(engine,
@@ -4609,8 +4608,7 @@ static wasi_error_t wasi__extract_core_modules(wasi_engine_t* engine, wasi_compo
                                                err == WASI_ERR_OOM ? "embedded core module alloc failed"
                                                                    : wasi_error_string(err));
             }
-            engine->runtime.last_error = WASM_OK;
-            engine->runtime.error_msg[0] = '\0';
+            wasm_runtime_clear_error(engine->runtime);
             continue;
         }
 
@@ -5127,8 +5125,9 @@ static wasi_error_t wasi__set_runtime_error_from_module(wasi_engine_t* engine,
                                                         wasm_error_t wasm_err,
                                                         const char* action) {
     const char* detail = wasm_error_string(wasm_err);
+    const wasm_runtime_t* rt = wasm_module_runtime(core_module);
 
-    if (core_module && core_module->rt && core_module->rt->error_msg[0]) detail = core_module->rt->error_msg;
+    if (rt && wasm_runtime_last_error(rt) != WASM_OK) detail = wasm_runtime_error_message(rt);
     return wasi__set_errorf(engine, WASI_ERR_RUNTIME, "%s: %s", action, detail);
 }
 
@@ -8257,14 +8256,21 @@ wasi_error_t wasi_init(wasi_engine_t* engine, const wasi_config_t* config) {
     memset(engine, 0, sizeof(*engine));
     if (config && config->has_runtime_config) runtime_config = &config->runtime_config;
 
-    wasm_err = wasm_init(&engine->runtime, runtime_config);
+    engine->runtime = wasm_runtime_new(runtime_config);
+    if (!engine->runtime) {
+        return wasi__set_error_literal(engine, WASI_ERR_RUNTIME_INIT, "wasm runtime allocation failed");
+    }
+
+    wasm_err = wasm_runtime_last_error(engine->runtime);
     if (wasm_err != WASM_OK) {
+        const char* detail = wasm_runtime_error_message(engine->runtime);
+
+        wasm_runtime_free(engine->runtime);
+        engine->runtime = NULL;
         return wasi__set_errorf(engine,
                                 WASI_ERR_RUNTIME_INIT,
                                 "wasm_init failed: %s",
-                                engine->runtime.error_msg[0]
-                                    ? engine->runtime.error_msg
-                                    : wasm_error_string(wasm_err));
+                                detail ? detail : wasm_error_string(wasm_err));
     }
 
     wasi__clear_error(engine);
@@ -8273,7 +8279,8 @@ wasi_error_t wasi_init(wasi_engine_t* engine, const wasi_config_t* config) {
 
 void wasi_destroy(wasi_engine_t* engine) {
     if (!engine) return;
-    wasm_destroy(&engine->runtime);
+    wasm_runtime_free(engine->runtime);
+    engine->runtime = NULL;
     engine->last_error = WASI_OK;
     engine->error_msg[0] = '\0';
 }

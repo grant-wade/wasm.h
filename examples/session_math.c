@@ -142,12 +142,11 @@ typedef struct session_math_ctx_t session_math_ctx_t;
 
 struct session_math_ctx_t {
     wasm_runtime_t* rt;
-    wasm_runtime_t owned_rt;
+    wasm_runtime_t* owned_rt;
     wasm_module_t* mod;
     wasm_error_t last_error;
     char last_error_msg[256];
     int owns_runtime;
-    int runtime_initialized;
     uint32_t memory_export_index;
     uint32_t idx_init_init_state;
     uint32_t idx_add;
@@ -182,9 +181,7 @@ static void session_math_set_error(session_math_ctx_t* ctx, wasm_error_t err, co
     snprintf(ctx->last_error_msg, sizeof(ctx->last_error_msg), "%s",
              message ? message : "");
     if (!ctx->rt) return;
-    ctx->rt->last_error = err;
-    snprintf(ctx->rt->error_msg, sizeof(ctx->rt->error_msg), "%s",
-             message ? message : "");
+    wasm_runtime_set_error(ctx->rt, err, message);
 }
 
 static void session_math_clear_error(session_math_ctx_t* ctx) {
@@ -193,14 +190,14 @@ static void session_math_clear_error(session_math_ctx_t* ctx) {
     ctx->last_error = WASM_OK;
     ctx->last_error_msg[0] = '\0';
     if (!ctx->rt) return;
-    ctx->rt->last_error = WASM_OK;
-    ctx->rt->error_msg[0] = '\0';
+    wasm_runtime_clear_error(ctx->rt);
 }
 
 static void session_math_capture_runtime_error(session_math_ctx_t* ctx, wasm_error_t err, const char* fallback) {
     const char* message = fallback;
 
-    if (ctx && ctx->rt && ctx->rt->error_msg[0]) message = ctx->rt->error_msg;
+    if (ctx && ctx->rt && wasm_runtime_last_error(ctx->rt) != WASM_OK)
+        message = wasm_runtime_error_message(ctx->rt);
     if (!message) message = wasm_error_string(err);
     session_math_set_error(ctx, err, message);
 }
@@ -213,7 +210,7 @@ static session_math_ctx_t* session_math__require_ctx(void) {
 
 static wasm_error_t session_math_configure_runtime(wasm_runtime_t* rt) {
     if (!rt) return WASM_ERR_MALFORMED;
-    rt->enabled_features = session_math_required_features_mask;
+    wasm_runtime_set_enabled_features(rt, session_math_required_features_mask);
     return WASM_OK;
 }
 
@@ -238,14 +235,18 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
     if (rt) {
         ctx->rt = rt;
     } else {
-        ctx->rt = &ctx->owned_rt;
-        err = wasm_init(ctx->rt, runtime_config);
+        ctx->owned_rt = wasm_runtime_new(runtime_config);
+        ctx->rt = ctx->owned_rt;
+        if (!ctx->rt) {
+            session_math_set_error(ctx, WASM_ERR_OOM, "runtime allocation failed");
+            return ctx;
+        }
+        err = wasm_runtime_last_error(ctx->rt);
         if (err != WASM_OK) {
             session_math_capture_runtime_error(ctx, err, "runtime init failed");
             return ctx;
         }
         ctx->owns_runtime = 1;
-        ctx->runtime_initialized = 1;
     }
     rt = ctx->rt;
     err = session_math_configure_runtime(ctx->rt);
@@ -255,7 +256,7 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
     }
     ctx->mod = wasm_load(ctx->rt, wasm_bytes, len);
     if (!ctx->mod) {
-        session_math_capture_runtime_error(ctx, ctx->rt->last_error, "failed to load module");
+        session_math_capture_runtime_error(ctx, wasm_runtime_last_error(ctx->rt), "failed to load module");
         return ctx;
     }
     wasm_module_set_userdata(ctx->mod, ctx);
@@ -331,7 +332,7 @@ fail_loaded_module:
 static void session_math__free_ctx(session_math_ctx_t* ctx) {
     if (!ctx) return;
     if (ctx->mod) wasm_free_module(ctx->mod);
-    if (ctx->owns_runtime && ctx->runtime_initialized) wasm_destroy(&ctx->owned_rt);
+    if (ctx->owns_runtime) wasm_runtime_free(ctx->owned_rt);
     free(ctx);
 }
 

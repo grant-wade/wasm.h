@@ -20,30 +20,36 @@ The repository also now includes an experimental `wasi.h` scaffold for component
 #include "wasm.h"
 
 int main(void) {
-	wasm_runtime_t rt;
+	wasm_runtime_t* rt;
 	wasm_module_t* mod;
 	int32_t result = 0;
 
-	if (wasm_init(&rt, NULL) != WASM_OK) return 1;
+	rt = wasm_runtime_new(NULL);
+	if (!rt) return 1;
+	if (wasm_runtime_last_error(rt) != WASM_OK) {
+		fprintf(stderr, "init: %s\n", wasm_runtime_error_message(rt));
+		wasm_runtime_free(rt);
+		return 1;
+	}
 
-	mod = wasm_load(&rt, wasm_bytes, wasm_len);
+	mod = wasm_load(rt, wasm_bytes, wasm_len);
 	if (!mod) {
-		fprintf(stderr, "load: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
-		wasm_destroy(&rt);
+		fprintf(stderr, "load: %s\n", wasm_runtime_error_message(rt));
+		wasm_runtime_free(rt);
 		return 1;
 	}
 
 	if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK) {
-		fprintf(stderr, "call: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
+		fprintf(stderr, "call: %s\n", wasm_runtime_error_message(rt));
 		wasm_free_module(mod);
-		wasm_destroy(&rt);
+		wasm_runtime_free(rt);
 		return 1;
 	}
 
 	printf("result: %d\n", result);
 
 	wasm_free_module(mod);
-	wasm_destroy(&rt);
+	wasm_runtime_free(rt);
 	return 0;
 }
 ```
@@ -58,6 +64,8 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 | Function | Purpose |
 | --- | --- |
+| `wasm_runtime_new(config)` | Allocate and initialize a runtime. |
+| `wasm_runtime_free(rt)` | Destroy and free a runtime allocated by `wasm_runtime_new`. |
 | `wasm_init(rt, config)` | Initialize a runtime. Pass `NULL` for defaults. |
 | `wasm_destroy(rt)` | Free all runtime resources. |
 | `wasm_load(rt, bytes, len)` | Load, validate, and instantiate a module. |
@@ -124,6 +132,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 | `wasm_enable_feature(rt, flag)` | Enable a proposal feature flag. |
 | `wasm_disable_feature(rt, flag)` | Disable a proposal feature flag. |
 | `wasm_enable_all_features(rt)` | Enable all implemented proposals. |
+| `wasm_runtime_error_message(rt)` | Most recent runtime error text. |
 | `wasm_set_fuel(mod, n)` | Set an instruction fuel limit. |
 | `wasm_get_fuel(mod)` | Read remaining fuel. |
 | `wasm_dump_backtrace(mod)` | Print a call-stack backtrace. |
@@ -146,6 +155,8 @@ wasm_init(&rt, &cfg);
 ```
 
 Set `lazy_validation` to defer per-function body validation until first execution. The default is `0`, which preserves eager whole-module validation.
+
+For interface-only users, `wasm_runtime_t` and `wasm_module_t` should be treated as opaque handles. Prefer `wasm_runtime_new()` and `wasm_runtime_free()` over relying on the concrete runtime layout.
 
 ### Custom allocators
 
