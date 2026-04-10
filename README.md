@@ -108,7 +108,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - file-relative source offsets for sections and major top-level AST records through the various `*_offset` accessors and `wasi_dump_component`
 - host-side canonical ABI values through `wasi_value_t` and `wasi_value_set_string_copy`
 - low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
-- minimal single-module instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
+- narrow component instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
 - scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
 - compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, `result`, and `enum`, including flat param lowering and spill-based result lifting on the current low-level path
 - UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
@@ -116,7 +116,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - host-defined resource registration and per-instance handle tables through `wasi_define_resource`, `wasi_instance_bind_resource_type`, `wasi_resource_new`, `wasi_resource_rep`, and `wasi_resource_drop`
 - synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported single-module canon lifts, including outstanding-borrow guards and own-handle round-trips
 
-`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, resource-handle groundwork for Milestone 4, and a narrow instance path for simple single-module components whose exported functions are direct synchronous canon lifts.
+`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, resource-handle groundwork for Milestone 4, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, and whose exported functions are direct synchronous canon lifts.
 
 ### Memory and globals
 

@@ -5649,6 +5649,13 @@ static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* componen
                                                 uint32_t num_results);
 static const wasi_component_canon_t* wasi__find_defined_canon(const wasi_component_t* component,
                                                               uint32_t defined_func_index);
+static wasi_error_t wasi__resolve_canon_lift_target(wasi_engine_t* engine,
+                                                    const wasi_component_t* component,
+                                                    const wasi_instance_t* instance,
+                                                    const wasi_component_canon_t* canon,
+                                                    const char* target_label,
+                                                    wasm_module_t** out_module,
+                                                    uint32_t* out_func_index);
 static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine,
                                                            uint8_t result_opcode,
                                                            uint32_t representation,
@@ -5664,7 +5671,9 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     wasi__canon_runtime_options_t options;
     wasi__canon_call_context_t call_context;
     wasi_value_t arg;
+    wasm_module_t* target_module = NULL;
     uint32_t raw_representation = 0u;
+    uint32_t target_func_index = UINT32_MAX;
     uint8_t param_opcode;
     wasi_error_t err;
 
@@ -5735,14 +5744,23 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     err = wasi__resolve_lift_runtime_options(engine, canon, &options);
     if (err != WASI_OK) return err;
 
+    err = wasi__resolve_canon_lift_target(engine,
+                                          component,
+                                          instance,
+                                          canon,
+                                          "<resource destructor>",
+                                          &target_module,
+                                          &target_func_index);
+    if (err != WASI_OK) return err;
+
     memset(&call_context, 0, sizeof(call_context));
     call_context.instance = instance;
     options.call_context = &call_context;
 
     err = wasi__canon_call_func_index(component,
                                       canon->type_index,
-                                      instance->core_module,
-                                      canon->core_func_index,
+                                      target_module,
+                                      target_func_index,
                                       "<resource destructor>",
                                       &options,
                                       &arg,
@@ -5813,6 +5831,90 @@ static const wasi_component_canon_t* wasi__find_defined_canon(const wasi_compone
             return &component->canons[i];
     }
     return NULL;
+}
+
+static wasi_error_t wasi__resolve_canon_lift_target(wasi_engine_t* engine,
+                                                    const wasi_component_t* component,
+                                                    const wasi_instance_t* instance,
+                                                    const wasi_component_canon_t* canon,
+                                                    const char* target_label,
+                                                    wasm_module_t** out_module,
+                                                    uint32_t* out_func_index) {
+    uint32_t func_alias_index = 0u;
+    uint32_t i;
+    const char* label = (target_label && target_label[0]) ? target_label : "<canon lift>";
+
+    if (out_module) *out_module = NULL;
+    if (out_func_index) *out_func_index = UINT32_MAX;
+    if (!engine || !component || !instance || !canon || !out_module || !out_func_index) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid canonical lift target resolution request");
+    }
+
+    for (i = 0; i < component->num_aliases; i++) {
+        const wasi_component_alias_t* alias = &component->aliases[i];
+
+        if (alias->offset >= canon->offset) continue;
+        if (alias->kind != WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT ||
+            !alias->sort_is_core ||
+            alias->core_export_kind != WASM_EXPORT_FUNC) {
+            continue;
+        }
+
+        if (func_alias_index == canon->core_func_index) {
+            const wasi__core_instance_runtime_t* source_runtime;
+            wasm_export_kind_t kind = WASM_EXPORT_FUNC;
+            uint32_t func_index = 0u;
+
+            if (alias->instance_index >= instance->num_core_instances) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "canonical lift target %s references invalid core instance %u",
+                                        label,
+                                        (unsigned)alias->instance_index);
+            }
+
+            source_runtime = &instance->core_instances[alias->instance_index];
+            if (!source_runtime->module) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "canonical lift target %s references unresolved core instance %u",
+                                        label,
+                                        (unsigned)alias->instance_index);
+            }
+            if (!alias->name || !alias->name[0]) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_MALFORMED,
+                                        "canonical lift target %s references a malformed core export alias",
+                                        label);
+            }
+            if (!wasm_find_export(source_runtime->module, alias->name, &kind, &func_index) || kind != WASM_EXPORT_FUNC) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_UNDEFINED_EXPORT,
+                                        "canonical lift target %s missing aliased core function %s",
+                                        label,
+                                        alias->name);
+            }
+
+            *out_module = source_runtime->module;
+            *out_func_index = func_index;
+            return WASI_OK;
+        }
+
+        func_alias_index++;
+    }
+
+    if (!instance->core_module) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_INVALID_ARGUMENT,
+                                "canonical lift target %s has no resolved core module",
+                                label);
+    }
+
+    *out_module = instance->core_module;
+    *out_func_index = canon->core_func_index;
+    return WASI_OK;
 }
 
 static wasi_error_t wasi__resource_representation_from_value(wasi_engine_t* engine,
@@ -9256,11 +9358,22 @@ wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
     wasi__clear_error(engine);
 
     if (component->num_imports != 0u || component->num_instances != 0u ||
-        component->num_aliases != 0u || component->num_nested_components != 0u || component->has_start) {
+        component->num_nested_components != 0u || component->has_start) {
         wasi__set_error_literal(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
                                 "wasi_instantiate currently supports only the narrow single-instance path without component linking or start functions");
         return NULL;
+    }
+
+    for (i = 0; i < component->num_aliases; i++) {
+        const wasi_component_alias_t* alias = &component->aliases[i];
+
+        if (alias->kind != WASI_COMPONENT_ALIAS_KIND_CORE_INSTANCE_EXPORT || !alias->sort_is_core) {
+            wasi__set_error_literal(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "wasi_instantiate currently supports only top-level core instance export aliases on the narrow instance path");
+            return NULL;
+        }
     }
 
     if (component->num_core_instances == 0u) {
@@ -9340,13 +9453,6 @@ wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
                                  (unsigned)arg->index);
                 return NULL;
             }
-            if (source_runtime->owns_module) {
-                wasi_free_instance(instance);
-                wasi__set_error_literal(engine,
-                                        WASI_ERR_NOT_IMPLEMENTED,
-                                        "core instantiation args currently require source instances backed by eagerly loaded embedded modules");
-                return NULL;
-            }
             if (wasi__register_core_instance_namespace(engine,
                                                        arg->name ? arg->name : "",
                                                        source_runtime->module) != WASI_OK) {
@@ -9414,6 +9520,8 @@ wasi_error_t wasi_call(wasi_instance_t* instance,
     const wasi_component_canon_t* canon;
     wasi__canon_runtime_options_t options;
     wasi__canon_call_context_t call_context;
+    wasm_module_t* target_module = NULL;
+    uint32_t target_func_index = UINT32_MAX;
     wasi_error_t err;
 
     if (!instance || !instance->component || !export_name || (!args && num_args) || (!results && num_results))
@@ -9452,12 +9560,21 @@ wasi_error_t wasi_call(wasi_instance_t* instance,
 
         err = wasi__resolve_lift_runtime_options(engine, canon, &options);
         if (err != WASI_OK) return err;
+
+        err = wasi__resolve_canon_lift_target(engine,
+                              component,
+                              instance,
+                              canon,
+                              export_name,
+                              &target_module,
+                              &target_func_index);
+        if (err != WASI_OK) return err;
         options.call_context = &call_context;
 
         err = wasi__canon_call_func_index(component,
                                           type_index,
-                                          instance->core_module,
-                                          canon->core_func_index,
+                          target_module,
+                          target_func_index,
                                           export_name,
                                           &options,
                                           args,
