@@ -463,6 +463,16 @@ typedef struct wasi__bound_resource_type_t {
     wasi_resource_type_t resource_type;
 } wasi__bound_resource_type_t;
 
+typedef struct wasi__core_func_import_bridge_t {
+    wasm_module_t* source_module;
+    uint32_t func_index;
+} wasi__core_func_import_bridge_t;
+
+typedef struct wasi__core_instance_runtime_t {
+    wasm_module_t* module;
+    uint8_t owns_module;
+} wasi__core_instance_runtime_t;
+
 typedef struct wasi__handle_slot_t {
     void* representation;
     wasi_resource_type_t resource_type;
@@ -477,6 +487,9 @@ typedef struct wasi_engine_t {
     wasi__resource_type_info_t* resource_types;
     uint32_t num_resource_types;
     uint32_t resource_types_capacity;
+    wasi__core_func_import_bridge_t* core_func_bridges;
+    uint32_t num_core_func_bridges;
+    uint32_t core_func_bridges_capacity;
     wasi_error_t last_error;
     char error_msg[256];
 } wasi_engine_t;
@@ -4872,6 +4885,8 @@ struct wasi_instance_t {
     const wasi_component_t* component;
     wasm_module_t* core_module;
     uint32_t core_module_index;
+    wasi__core_instance_runtime_t* core_instances;
+    uint32_t num_core_instances;
     wasi__bound_resource_type_t* resource_types;
     uint32_t num_resource_types;
     uint32_t resource_types_capacity;
@@ -5232,6 +5247,287 @@ static char* wasi__dup_cstr(const char* src) {
     if (!copy) return NULL;
     memcpy(copy, src, len);
     return copy;
+}
+
+static wasm_error_t wasi__forward_core_instance_func(wasm_module_t* mod,
+                                                     const wasm_value_t* args,
+                                                     uint32_t num_args,
+                                                     wasm_value_t* results,
+                                                     uint32_t num_results,
+                                                     void* userdata) {
+    const wasi__core_func_import_bridge_t* bridge = (const wasi__core_func_import_bridge_t*)userdata;
+
+    (void)mod;
+    if (!bridge || !bridge->source_module) return WASM_ERR_MALFORMED;
+    return wasm_call_index(bridge->source_module, bridge->func_index, args, num_args, results, num_results);
+}
+
+static wasi_error_t wasi__append_core_func_bridge(wasi_engine_t* engine,
+                                                  wasm_module_t* source_module,
+                                                  uint32_t func_index,
+                                                  wasi__core_func_import_bridge_t** out_bridge) {
+    wasi__core_func_import_bridge_t* grown;
+    size_t next_capacity;
+    wasi__core_func_import_bridge_t* bridge;
+
+    if (out_bridge) *out_bridge = NULL;
+    if (!engine || !out_bridge)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid core function bridge request");
+
+    if (engine->num_core_func_bridges == engine->core_func_bridges_capacity) {
+        next_capacity = engine->core_func_bridges_capacity ? (size_t)engine->core_func_bridges_capacity * 2u : 8u;
+        grown = (wasi__core_func_import_bridge_t*)WASM_REALLOC(engine->core_func_bridges,
+                                                               next_capacity * sizeof(*grown));
+        if (!grown)
+            return wasi__set_error_literal(engine, WASI_ERR_OOM, "core function bridge alloc failed");
+        engine->core_func_bridges = grown;
+        engine->core_func_bridges_capacity = (uint32_t)next_capacity;
+    }
+
+    bridge = &engine->core_func_bridges[engine->num_core_func_bridges++];
+    bridge->source_module = source_module;
+    bridge->func_index = func_index;
+    *out_bridge = bridge;
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__set_runtime_error_from_runtime(wasi_engine_t* engine, const char* action) {
+    const char* detail = engine && engine->runtime ? wasm_runtime_error_message(engine->runtime) : NULL;
+    if (!detail || !detail[0]) detail = engine && engine->runtime ? wasm_error_string(wasm_runtime_last_error(engine->runtime)) : "runtime error";
+    return wasi__set_errorf(engine, WASI_ERR_RUNTIME, "%s: %s", action, detail);
+}
+
+static wasi_error_t wasi__register_core_instance_export(wasi_engine_t* engine,
+                                                        const char* module_name,
+                                                        const char* export_name,
+                                                        wasm_module_t* source_module,
+                                                        wasm_export_kind_t kind,
+                                                        uint32_t export_index) {
+    wasm_error_t wasm_err;
+
+    if (!engine || !engine->runtime || !module_name || !export_name || !source_module) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid core instance export registration");
+    }
+
+    switch (kind) {
+        case WASM_EXPORT_FUNC: {
+            wasi__core_func_import_bridge_t* bridge = NULL;
+            wasm_import_t import_;
+
+            if (export_index >= wasm_func_count(source_module)) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core instance export %s.%s references missing function %u",
+                                        module_name,
+                                        export_name,
+                                        (unsigned)export_index);
+            }
+
+            wasm_runtime_clear_error(engine->runtime);
+            if (wasi__append_core_func_bridge(engine, source_module, export_index, &bridge) != WASI_OK)
+                return engine->last_error;
+
+            memset(&import_, 0, sizeof(import_));
+            import_.module = module_name;
+            import_.name = export_name;
+            import_.has_type_context = 1;
+            import_.type_module = source_module;
+            import_.type_index = source_module->funcs[export_index].type_idx;
+            import_.type.num_params = UINT32_MAX;
+            import_.type.num_results = UINT32_MAX;
+            import_.func = wasi__forward_core_instance_func;
+            import_.userdata = bridge;
+
+            wasm_err = wasm_register_import(engine->runtime, &import_);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_runtime(engine, "core instance function import registration failed");
+            return WASI_OK;
+        }
+
+        case WASM_EXPORT_GLOBAL: {
+            wasm_global_import_t import_;
+
+            if (export_index >= wasm_global_count(source_module)) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core instance export %s.%s references missing global %u",
+                                        module_name,
+                                        export_name,
+                                        (unsigned)export_index);
+            }
+
+            memset(&import_, 0, sizeof(import_));
+            import_.module = module_name;
+            import_.name = export_name;
+            import_.type = wasm_global_type(source_module, export_index);
+            import_.is_mutable = wasm_global_is_mutable(source_module, export_index);
+            {
+                const wasm_reftype_t* ref_type = wasm_global_reftype(source_module, export_index);
+                if (ref_type) import_.ref_type = *ref_type;
+            }
+            import_.value = wasm_global_value_ref_at(source_module, export_index);
+
+            wasm_runtime_clear_error(engine->runtime);
+            wasm_err = wasm_register_global_import(engine->runtime, &import_);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_runtime(engine, "core instance global import registration failed");
+            return WASI_OK;
+        }
+
+        case WASM_EXPORT_TABLE: {
+            wasm_table_import_t import_;
+
+            if (export_index >= wasm_table_count(source_module)) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core instance export %s.%s references missing table %u",
+                                        module_name,
+                                        export_name,
+                                        (unsigned)export_index);
+            }
+
+            memset(&import_, 0, sizeof(import_));
+            import_.module = module_name;
+            import_.name = export_name;
+            import_.table = wasm_table_ref_at(source_module, export_index);
+
+            wasm_runtime_clear_error(engine->runtime);
+            wasm_err = wasm_register_table_import(engine->runtime, &import_);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_runtime(engine, "core instance table import registration failed");
+            return WASI_OK;
+        }
+
+        case WASM_EXPORT_MEM: {
+            wasm_memory_import_t import_;
+
+            if (export_index >= wasm_memory_count(source_module)) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core instance export %s.%s references missing memory %u",
+                                        module_name,
+                                        export_name,
+                                        (unsigned)export_index);
+            }
+
+            memset(&import_, 0, sizeof(import_));
+            import_.module = module_name;
+            import_.name = export_name;
+            import_.memory = wasm_memory_ref_at(source_module, export_index);
+
+            wasm_runtime_clear_error(engine->runtime);
+            wasm_err = wasm_register_memory_import(engine->runtime, &import_);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_runtime(engine, "core instance memory import registration failed");
+            return WASI_OK;
+        }
+
+        case WASM_EXPORT_TAG: {
+            wasm_tag_import_t import_;
+
+            if (export_index >= wasm_tag_count(source_module)) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core instance export %s.%s references missing tag %u",
+                                        module_name,
+                                        export_name,
+                                        (unsigned)export_index);
+            }
+
+            memset(&import_, 0, sizeof(import_));
+            import_.module = module_name;
+            import_.name = export_name;
+            import_.has_type_context = 1;
+            import_.type_module = source_module;
+            import_.type_index = source_module->tags[export_index].type_idx;
+            import_.identity = source_module->tags[export_index].identity;
+
+            wasm_runtime_clear_error(engine->runtime);
+            wasm_err = wasm_register_tag_import(engine->runtime, &import_);
+            if (wasm_err != WASM_OK)
+                return wasi__set_runtime_error_from_runtime(engine, "core instance tag import registration failed");
+            return WASI_OK;
+        }
+
+        default:
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "core instance export kind %u is not supported for import registration",
+                                    (unsigned)kind);
+    }
+}
+
+static wasi_error_t wasi__register_core_instance_namespace(wasi_engine_t* engine,
+                                                           const char* module_name,
+                                                           wasm_module_t* source_module) {
+    uint32_t i;
+
+    if (!engine || !module_name || !source_module) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid core instance namespace registration");
+    }
+
+    for (i = 0; i < wasm_export_count(source_module); i++) {
+        const char* export_name = wasm_export_name(source_module, i);
+        wasi_error_t err = wasi__register_core_instance_export(engine,
+                                                               module_name,
+                                                               export_name ? export_name : "",
+                                                               source_module,
+                                                               wasm_export_kind(source_module, i),
+                                                               wasm_export_index(source_module, i));
+        if (err != WASI_OK) return err;
+    }
+
+    return WASI_OK;
+}
+
+static wasi_error_t wasi__load_embedded_core_module(wasi_engine_t* engine,
+                                                    const wasi_component_t* component,
+                                                    uint32_t module_index,
+                                                    wasm_module_t** out_module,
+                                                    int* out_owned) {
+    const wasi_component_core_module_t* core_module;
+    wasm_module_t* module;
+
+    if (out_module) *out_module = NULL;
+    if (out_owned) *out_owned = 0;
+    if (!engine || !component || !out_module || !out_owned) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid core module load request");
+    }
+    if (module_index >= component->num_core_modules) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_UNDEFINED_EXPORT,
+                                "missing embedded core module %u",
+                                (unsigned)module_index);
+    }
+
+    core_module = &component->core_modules[module_index];
+    if (core_module->module) {
+        *out_module = core_module->module;
+        *out_owned = 0;
+        return WASI_OK;
+    }
+
+    wasm_runtime_clear_error(engine->runtime);
+    module = wasm_load(engine->runtime,
+                       component->bytes + core_module->payload_offset,
+                       core_module->payload_size);
+    if (!module) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "embedded core module %u failed to instantiate: %s",
+                                (unsigned)module_index,
+                                wasm_runtime_error_message(engine->runtime));
+    }
+
+    *out_module = module;
+    *out_owned = 1;
+    return WASI_OK;
 }
 
 static int wasi__component_type_is_func(const wasi_component_t* component, uint32_t type_index) {
@@ -8951,23 +9247,29 @@ static int wasi__find_component_export(const wasi_component_t* component,
 wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
     wasi_instance_t* instance;
     wasi_engine_t* engine;
+    uint32_t core_module_index = 0u;
+    wasm_module_t* final_core_module = NULL;
+    uint32_t i;
 
     if (!component || !component->engine) return NULL;
     engine = component->engine;
     wasi__clear_error(engine);
 
-    if (component->num_imports != 0u || component->num_core_instances != 0u || component->num_instances != 0u ||
+    if (component->num_imports != 0u || component->num_instances != 0u ||
         component->num_aliases != 0u || component->num_nested_components != 0u || component->has_start) {
         wasi__set_error_literal(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
-                                "wasi_instantiate currently supports only single-module components without linking or start functions");
+                                "wasi_instantiate currently supports only the narrow single-instance path without component linking or start functions");
         return NULL;
     }
-    if (component->num_core_modules != 1u || !component->core_modules[0].module) {
-        wasi__set_error_literal(engine,
-                                WASI_ERR_NOT_IMPLEMENTED,
-                                "wasi_instantiate currently requires exactly one embedded core module");
-        return NULL;
+
+    if (component->num_core_instances == 0u) {
+        if (component->num_core_modules != 1u || !component->core_modules[0].module) {
+            wasi__set_error_literal(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "wasi_instantiate currently requires exactly one embedded core module when no core instance is present");
+            return NULL;
+        }
     }
 
     instance = (wasi_instance_t*)WASM_CALLOC(1, sizeof(*instance));
@@ -8977,8 +9279,99 @@ wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
     }
 
     instance->component = component;
-    instance->core_module = component->core_modules[0].module;
-    instance->core_module_index = 0u;
+    if (component->num_core_instances == 0u) {
+        instance->core_module = component->core_modules[core_module_index].module;
+        instance->core_module_index = core_module_index;
+        return instance;
+    }
+
+    instance->core_instances = (wasi__core_instance_runtime_t*)WASM_CALLOC(component->num_core_instances,
+                                                                           sizeof(*instance->core_instances));
+    if (!instance->core_instances) {
+        wasi_free_instance(instance);
+        wasi__set_error_literal(engine, WASI_ERR_OOM, "core instance runtime alloc failed");
+        return NULL;
+    }
+    instance->num_core_instances = component->num_core_instances;
+
+    for (i = 0; i < component->num_core_instances; i++) {
+        const wasi_component_core_instance_t* core_instance = &component->core_instances[i];
+        wasm_module_t* resolved_module = NULL;
+        int owns_module = 0;
+
+        if (core_instance->kind != WASI_COMPONENT_CORE_INSTANCE_KIND_INSTANTIATE) {
+            wasi_free_instance(instance);
+            wasi__set_error_literal(engine,
+                                    WASI_ERR_NOT_IMPLEMENTED,
+                                    "wasi_instantiate currently supports only instantiated core instances");
+            return NULL;
+        }
+
+        for (uint32_t arg_index = 0; arg_index < core_instance->num_args; arg_index++) {
+            const wasi_component_core_instantiation_arg_t* arg = &core_instance->args[arg_index];
+            const wasi__core_instance_runtime_t* source_runtime;
+
+            if (arg->kind != 0x12u) {
+                wasi_free_instance(instance);
+                wasi__set_errorf(engine,
+                                 WASI_ERR_NOT_IMPLEMENTED,
+                                 "core instantiation arg %s uses unsupported sort %s",
+                                 arg->name ? arg->name : "",
+                                 wasi_component_core_sort_string(arg->kind));
+                return NULL;
+            }
+            if (arg->index >= i || arg->index >= instance->num_core_instances) {
+                wasi_free_instance(instance);
+                wasi__set_errorf(engine,
+                                 WASI_ERR_INVALID_ARGUMENT,
+                                 "core instantiation arg %s references invalid instance %u",
+                                 arg->name ? arg->name : "",
+                                 (unsigned)arg->index);
+                return NULL;
+            }
+
+            source_runtime = &instance->core_instances[arg->index];
+            if (!source_runtime->module) {
+                wasi_free_instance(instance);
+                wasi__set_errorf(engine,
+                                 WASI_ERR_INVALID_ARGUMENT,
+                                 "core instantiation arg %s references unresolved instance %u",
+                                 arg->name ? arg->name : "",
+                                 (unsigned)arg->index);
+                return NULL;
+            }
+            if (source_runtime->owns_module) {
+                wasi_free_instance(instance);
+                wasi__set_error_literal(engine,
+                                        WASI_ERR_NOT_IMPLEMENTED,
+                                        "core instantiation args currently require source instances backed by eagerly loaded embedded modules");
+                return NULL;
+            }
+            if (wasi__register_core_instance_namespace(engine,
+                                                       arg->name ? arg->name : "",
+                                                       source_runtime->module) != WASI_OK) {
+                wasi_free_instance(instance);
+                return NULL;
+            }
+        }
+
+        if (wasi__load_embedded_core_module(engine,
+                                            component,
+                                            core_instance->module_index,
+                                            &resolved_module,
+                                            &owns_module) != WASI_OK) {
+            wasi_free_instance(instance);
+            return NULL;
+        }
+
+        instance->core_instances[i].module = resolved_module;
+        instance->core_instances[i].owns_module = (uint8_t)(owns_module ? 1u : 0u);
+        final_core_module = resolved_module;
+        core_module_index = core_instance->module_index;
+    }
+
+    instance->core_module = final_core_module;
+    instance->core_module_index = core_module_index;
     return instance;
 }
 
@@ -8994,7 +9387,14 @@ void wasi_free_instance(wasi_instance_t* instance) {
                 wasi__release_handle_slot(engine, instance, &instance->handles[i]);
         }
     }
+    if (instance->core_instances) {
+        for (i = 0; i < instance->num_core_instances; i++) {
+            if (instance->core_instances[i].owns_module && instance->core_instances[i].module)
+                wasm_free_module(instance->core_instances[i].module);
+        }
+    }
     WASM_FREE(instance->handles);
+    WASM_FREE(instance->core_instances);
     WASM_FREE(instance->resource_types);
     WASM_FREE(instance);
 }
@@ -9135,9 +9535,13 @@ void wasi_destroy(wasi_engine_t* engine) {
         WASM_FREE(engine->resource_types[i].resource_name);
     }
     WASM_FREE(engine->resource_types);
+    WASM_FREE(engine->core_func_bridges);
     engine->resource_types = NULL;
     engine->num_resource_types = 0u;
     engine->resource_types_capacity = 0u;
+    engine->core_func_bridges = NULL;
+    engine->num_core_func_bridges = 0u;
+    engine->core_func_bridges_capacity = 0u;
     wasm_runtime_free(engine->runtime);
     engine->runtime = NULL;
     engine->last_error = WASI_OK;

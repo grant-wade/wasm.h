@@ -312,6 +312,8 @@ A component's instantiation section is procedural: it executes a sequence of ins
 - Nested components (component containing sub-components)
 - Canon lift/lower wiring verified by calling a simple exported function end-to-end
 
+**Status:** In progress. The runtime still does not execute the general component linking program, but the narrow `wasi_instantiate` path now accepts trivial core-instance instantiation records, including a small sequential subset where a later core instance can satisfy function imports from an earlier, eagerly loaded core instance via `with "name" (instance ...)`.
+
 ---
 
 ## Milestone 6: Async Runtime Foundation
