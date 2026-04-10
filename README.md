@@ -4,7 +4,7 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, canonical records, and file-relative source offsets for the major retained AST nodes; instantiation and canonical ABI execution are not implemented yet.
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, executes a narrow but real component-instantiation/linking path, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, canonical records, and file-relative source offsets for the major retained AST nodes.
 
 ## Quick start
 
@@ -109,6 +109,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - host-side canonical ABI values through `wasi_value_t` and `wasi_value_set_string_copy`
 - low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
 - narrow component instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
+- engine-bound instance import resolution through `wasi_bind_import_instance`
 - scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
 - compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, `result`, and `enum`, including flat param lowering and spill-based result lifting on the current low-level path
 - UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
@@ -117,7 +118,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts, including outstanding-borrow guards, own-handle round-trips, origin-preserving cross-instance resource transfer machinery, and alias-aware component destructor dispatch
 - narrow `canon lower` import bridging on the current instance path, including core-instance `from exports` namespaces that can expose lowered component funcs to later embedded core modules and route resource handles through the same synchronous lift/lower machinery
 
-`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, completed Milestone 4 resource lifecycle support, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, can materialize top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks, can route exported component functions through static `instance { export ... }` aliases, and whose exported functions ultimately resolve to direct synchronous canon lifts. Outer component aliases and nested component scopes still remain outside the supported narrow path.
+`wasi.h` still does not implement the full general component linking program. Today it provides parser/introspection, a low-level canonical ABI layer, completed Milestone 4 resource lifecycle support, and a broader M5 slice that can instantiate nested component instances, bind their `func`/`instance` arg maps, resolve top-level instance imports against engine-bound interfaces by fully qualified name/version, materialize top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks, and route exported component functions through live child-component instances rather than only static `instance { export ... }` records. Outer component aliases, imported components, direct engine-bound component function imports, and start sections still remain outside the supported path.
 
 ### Memory and globals
 

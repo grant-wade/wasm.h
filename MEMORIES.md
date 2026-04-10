@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 14
+Memory Version: 15
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -44,6 +44,12 @@ This file is the canonical checked-in snapshot of repo memory.
 - Nested `core:type` declarations inside component/instance types in `wasi.h` are inline core module types: declaration opcode `0x00` is followed by module-type opcode `0x50`, not a core type index.
 - Nested and top-level core module types in `wasi.h` now retain module declaration lists for core `type`, `import`, `alias`, and `export` entries, with regressions in `wasi_test.c` covering both nested type-space and top-level core-type fixtures.
 - Top-level `core-type` sections in `wasi.h` need backtracking for entry opcode `0x50`: it can mean either a core module type or a non-final subtype, so parse against the remaining entry count instead of deciding locally.
+
+## component-linker.md
+
+- `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func` and `instance` imports, and alias resolution through live child instances rather than only static `from exports` records.
+- Engine-level `wasi_bind_import_instance()` bindings now satisfy top-level component instance imports by fully qualified interface name/version; unresolved instance imports fail at instantiation time with named diagnostics.
+- The current linker still does not resolve outer aliases, imported components, direct component func imports from the engine, or start sections.
 
 ## wasm-runtime.md
 
