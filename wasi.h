@@ -4484,6 +4484,20 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                 WASM_FREE(canon.options);
                 return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canonical function payload");
             }
+
+            if (canon.kind == WASI_COMPONENT_CANON_KIND_RESOURCE_NEW ||
+                canon.kind == WASI_COMPONENT_CANON_KIND_RESOURCE_DROP ||
+                canon.kind == WASI_COMPONENT_CANON_KIND_RESOURCE_REP) {
+                canon.defined_func_index = component->num_funcs;
+                err = wasi__component_append_func(component, entry_offset, UINT32_MAX);
+                if (err != WASI_OK) {
+                    WASM_FREE(canon.options);
+                    return wasi__set_error_literal(engine,
+                                                   err,
+                                                   err == WASI_ERR_OOM ? "component func alloc failed"
+                                                                       : wasi_error_string(err));
+                }
+            }
         }
 
         err = wasi__component_append_canon(component, &canon);
@@ -4872,6 +4886,13 @@ typedef struct wasi__canon_call_context_t {
     uint32_t num_borrowed_handles;
     uint32_t borrowed_handles_capacity;
 } wasi__canon_call_context_t;
+
+static wasi_error_t wasi__lower_resource_handle_value(wasi_engine_t* engine,
+                                                      uint32_t expected_type_index,
+                                                      const wasi_value_t* value,
+                                                      int require_own,
+                                                      const wasi__canon_runtime_options_t* options,
+                                                      uint32_t* out_handle);
 
 static void wasi__value_clear(wasi_value_t* value) {
     size_t i;
@@ -5312,16 +5333,153 @@ static void wasi__release_call_borrows(wasi__canon_call_context_t* call_context)
     call_context->borrowed_handles_capacity = 0u;
 }
 
-static void wasi__release_handle_slot(wasi_engine_t* engine, wasi__handle_slot_t* slot) {
-    const wasi__resource_type_info_t* type_info;
-
-    if (!slot || !slot->allocated) return;
-
-    type_info = wasi__resource_type_info(engine, slot->resource_type);
-    if (type_info && type_info->destructor)
-        type_info->destructor(slot->representation, type_info->userdata);
-
+static void wasi__clear_handle_slot(wasi__handle_slot_t* slot) {
+    if (!slot) return;
     memset(slot, 0, sizeof(*slot));
+}
+
+static wasi_error_t wasi__resolve_lift_runtime_options(wasi_engine_t* engine,
+                                                       const wasi_component_canon_t* canon,
+                                                       wasi__canon_runtime_options_t* out);
+static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* component,
+                                                uint32_t func_type_index,
+                                                wasm_module_t* core_module,
+                                                uint32_t func_index,
+                                                const char* func_label,
+                                                const wasi__canon_runtime_options_t* options,
+                                                const wasi_value_t* args,
+                                                uint32_t num_args,
+                                                wasi_value_t* results,
+                                                uint32_t num_results);
+static const wasi_component_canon_t* wasi__find_defined_canon(const wasi_component_t* component,
+                                                              uint32_t defined_func_index);
+static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine,
+                                                           uint8_t result_opcode,
+                                                           uint32_t representation,
+                                                           wasi_value_t* out_value);
+
+static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* instance,
+                                                             uint32_t component_type_index,
+                                                             void* representation) {
+    const wasi_component_t* component;
+    const wasi_component_type_t* type;
+    const wasi_component_canon_t* canon;
+    wasi_engine_t* engine;
+    wasi__canon_runtime_options_t options;
+    wasi__canon_call_context_t call_context;
+    wasi_value_t arg;
+    uint32_t raw_representation = 0u;
+    uint8_t param_opcode;
+    wasi_error_t err;
+
+    if (!instance || !instance->component || !instance->component->engine)
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    component = instance->component;
+    engine = component->engine;
+    if (component_type_index >= component->num_types) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_TYPE_MISMATCH,
+                                "resource handle references unknown component resource type %u",
+                                (unsigned)component_type_index);
+    }
+
+    type = &component->types[component_type_index];
+    if (type->kind != WASI_COMPONENT_TYPE_KIND_RESOURCE) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_TYPE_MISMATCH,
+                                "component type %u is not a resource type",
+                                (unsigned)component_type_index);
+    }
+    if (!type->has_primary_index) return WASI_OK;
+
+    canon = wasi__find_defined_canon(component, type->primary_index);
+    if (!canon) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "resource destructor func %u is not backed by a supported canonical function",
+                                (unsigned)type->primary_index);
+    }
+    if (canon->kind != WASI_COMPONENT_CANON_KIND_LIFT) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "resource destructor func %u is not backed by a canonical lift",
+                                (unsigned)type->primary_index);
+    }
+    if (!wasi__component_type_is_func(component, canon->type_index)) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_TYPE_MISMATCH,
+                                       "resource destructor does not resolve to a function type");
+    }
+    if (wasi_component_func_type_param_count(component, canon->type_index) != 1u ||
+        wasi_component_func_type_result_count(component, canon->type_index) != 0u) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_TYPE_MISMATCH,
+                                       "resource destructor signature mismatch");
+    }
+
+    param_opcode = wasi_component_func_type_param_code(component, canon->type_index, 0u);
+    if (param_opcode != 0x79u && param_opcode != 0x7Au) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_TYPE_MISMATCH,
+                                       "resource destructor signature mismatch");
+    }
+
+    if ((uintptr_t)representation > UINT32_MAX) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_RUNTIME,
+                                       "resource representation does not fit in i32");
+    }
+    raw_representation = (uint32_t)(uintptr_t)representation;
+
+    memset(&arg, 0, sizeof(arg));
+    err = wasi__resource_representation_to_value(engine, param_opcode, raw_representation, &arg);
+    if (err != WASI_OK) return err;
+
+    err = wasi__resolve_lift_runtime_options(engine, canon, &options);
+    if (err != WASI_OK) return err;
+
+    memset(&call_context, 0, sizeof(call_context));
+    call_context.instance = instance;
+    options.call_context = &call_context;
+
+    err = wasi__canon_call_func_index(component,
+                                      canon->type_index,
+                                      instance->core_module,
+                                      canon->core_func_index,
+                                      "<resource destructor>",
+                                      &options,
+                                      &arg,
+                                      1u,
+                                      NULL,
+                                      0u);
+    wasi__release_call_borrows(&call_context);
+    return err;
+}
+
+static wasi_error_t wasi__release_handle_slot(wasi_engine_t* engine,
+                                              wasi_instance_t* instance,
+                                              wasi__handle_slot_t* slot) {
+    wasi__handle_slot_t released;
+    const wasi__resource_type_info_t* type_info;
+    wasi_error_t err = WASI_OK;
+
+    if (!slot || !slot->allocated) return WASI_OK;
+
+    released = *slot;
+    wasi__clear_handle_slot(slot);
+
+    if (instance && instance->component && instance->component->engine) {
+        err = wasi__call_component_resource_destructor(instance,
+                                                       released.component_type_index,
+                                                       released.representation);
+    }
+
+    type_info = wasi__resource_type_info(engine, released.resource_type);
+    if (type_info && type_info->destructor)
+        type_info->destructor(released.representation, type_info->userdata);
+
+    return err;
 }
 
 static int wasi__resolve_component_func_type_index(const wasi_component_t* component,
@@ -5347,6 +5505,290 @@ static int wasi__resolve_component_func_type_index(const wasi_component_t* compo
     }
 
     return 0;
+}
+
+static const wasi_component_canon_t* wasi__find_defined_canon(const wasi_component_t* component,
+                                                              uint32_t defined_func_index) {
+    uint32_t i;
+
+    if (!component) return NULL;
+    for (i = 0; i < component->num_canons; i++) {
+        if (component->canons[i].defined_func_index == defined_func_index)
+            return &component->canons[i];
+    }
+    return NULL;
+}
+
+static wasi_error_t wasi__resource_representation_from_value(wasi_engine_t* engine,
+                                                             const wasi_value_t* value,
+                                                             uint32_t* out_representation) {
+    if (out_representation) *out_representation = 0u;
+    if (!engine || !value || !out_representation)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid resource representation value");
+
+    switch (value->kind) {
+        case WASI_VALUE_KIND_U32:
+            *out_representation = value->of.u32;
+            return WASI_OK;
+        case WASI_VALUE_KIND_S32:
+            *out_representation = (uint32_t)value->of.s32;
+            return WASI_OK;
+        default:
+            return wasi__set_error_literal(engine,
+                                           WASI_ERR_TYPE_MISMATCH,
+                                           "resource representation argument must be s32 or u32");
+    }
+}
+
+static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine,
+                                                           uint8_t result_opcode,
+                                                           uint32_t representation,
+                                                           wasi_value_t* out_value) {
+    if (!engine || !out_value)
+        return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid resource representation result");
+
+    wasi_value_init(out_value);
+    switch (result_opcode) {
+        case 0x7Au:
+            out_value->kind = WASI_VALUE_KIND_S32;
+            out_value->of.s32 = (int32_t)representation;
+            return WASI_OK;
+        case 0x79u:
+        default:
+            out_value->kind = WASI_VALUE_KIND_U32;
+            out_value->of.u32 = representation;
+            return WASI_OK;
+    }
+}
+
+static wasi_error_t wasi__call_resource_canon(wasi_instance_t* instance,
+                                              const wasi_component_canon_t* canon,
+                                              int has_func_type,
+                                              uint32_t func_type_index,
+                                              const wasi__canon_runtime_options_t* options,
+                                              const wasi_value_t* args,
+                                              uint32_t num_args,
+                                              wasi_value_t* results,
+                                              uint32_t num_results) {
+    const wasi_component_t* component;
+    wasi_engine_t* engine;
+    uint8_t param_opcode = 0x00u;
+    uint8_t result_opcode = 0x79u;
+    int require_own = 1;
+    uint32_t handle = 0u;
+    wasi__handle_slot_t* slot;
+    wasi_error_t err;
+
+    if (!instance || !instance->component || !canon || !options)
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    component = instance->component;
+    engine = component->engine;
+    if (!engine)
+        return WASI_ERR_INVALID_ARGUMENT;
+    if (!wasi__component_type_is_resource(component, canon->type_index)) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_TYPE_MISMATCH,
+                                "canon %s type %u is not a resource type",
+                                wasi_component_canon_kind_string(canon->kind),
+                                (unsigned)canon->type_index);
+    }
+
+    if (has_func_type) {
+        if (!wasi__component_type_is_func(component, func_type_index)) {
+            return wasi__set_error_literal(engine,
+                                           WASI_ERR_TYPE_MISMATCH,
+                                           "resource canonical function export does not resolve to a function type");
+        }
+
+        switch (canon->kind) {
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_NEW:
+                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(component, func_type_index) != 1u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.new export signature mismatch");
+                }
+                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
+                result_opcode = wasi_component_func_type_result_code(component, func_type_index, 0u);
+                if ((param_opcode != 0x79u && param_opcode != 0x7Au) || result_opcode != 0x69u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.new export signature mismatch");
+                }
+                if (!wasi_component_func_type_result_type(component, func_type_index, 0u) ||
+                    wasi_component_func_type_result_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.new export result type mismatch");
+                }
+                break;
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_REP:
+                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(component, func_type_index) != 1u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.rep export signature mismatch");
+                }
+                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
+                result_opcode = wasi_component_func_type_result_code(component, func_type_index, 0u);
+                if ((param_opcode != 0x68u && param_opcode != 0x69u) ||
+                    (result_opcode != 0x79u && result_opcode != 0x7Au)) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.rep export signature mismatch");
+                }
+                if (!wasi_component_func_type_param_type(component, func_type_index, 0u) ||
+                    wasi_component_func_type_param_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.rep export parameter type mismatch");
+                }
+                require_own = param_opcode == 0x69u;
+                break;
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_DROP:
+                if (wasi_component_func_type_param_count(component, func_type_index) != 1u ||
+                    wasi_component_func_type_result_count(component, func_type_index) != 0u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.drop export signature mismatch");
+                }
+                param_opcode = wasi_component_func_type_param_code(component, func_type_index, 0u);
+                if (param_opcode != 0x69u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.drop export signature mismatch");
+                }
+                if (!wasi_component_func_type_param_type(component, func_type_index, 0u) ||
+                    wasi_component_func_type_param_type(component, func_type_index, 0u)->data.index.type_index != canon->type_index) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.drop export parameter type mismatch");
+                }
+                break;
+            default:
+                return wasi__set_error_literal(engine,
+                                               WASI_ERR_NOT_IMPLEMENTED,
+                                               "unsupported direct canonical resource builtin");
+        }
+    } else {
+        switch (canon->kind) {
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_NEW:
+                if (num_args != 1u || num_results != 1u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "resource.new call arity mismatch");
+                }
+                break;
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_REP:
+                if (num_args != 1u || num_results != 1u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "resource.rep call arity mismatch");
+                }
+                require_own = args[0].kind == WASI_VALUE_KIND_OWN;
+                if (!require_own && args[0].kind != WASI_VALUE_KIND_BORROW) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_TYPE_MISMATCH,
+                                                   "resource.rep argument must be own or borrow");
+                }
+                break;
+            case WASI_COMPONENT_CANON_KIND_RESOURCE_DROP:
+                if (num_args != 1u || num_results != 0u) {
+                    return wasi__set_error_literal(engine,
+                                                   WASI_ERR_INVALID_ARGUMENT,
+                                                   "resource.drop call arity mismatch");
+                }
+                break;
+            default:
+                return wasi__set_error_literal(engine,
+                                               WASI_ERR_NOT_IMPLEMENTED,
+                                               "unsupported direct canonical resource builtin");
+        }
+    }
+
+    switch (canon->kind) {
+        case WASI_COMPONENT_CANON_KIND_RESOURCE_NEW: {
+            uint32_t representation = 0u;
+            err = wasi__resource_representation_from_value(engine, &args[0], &representation);
+            if (err != WASI_OK) return err;
+            err = wasi_resource_new(instance,
+                                    canon->type_index,
+                                    (void*)(uintptr_t)representation,
+                                    &handle);
+            if (err != WASI_OK) return err;
+            wasi_value_init(&results[0]);
+            results[0].kind = WASI_VALUE_KIND_OWN;
+            results[0].of.resource.type_index = canon->type_index;
+            results[0].of.resource.handle = handle;
+            return WASI_OK;
+        }
+
+        case WASI_COMPONENT_CANON_KIND_RESOURCE_REP: {
+            uintptr_t raw_representation;
+
+            err = wasi__lower_resource_handle_value(engine,
+                                                    canon->type_index,
+                                                    &args[0],
+                                                    require_own,
+                                                    options,
+                                                    &handle);
+            if (err != WASI_OK) return err;
+
+            slot = wasi__find_handle_slot(instance, handle);
+            if (!slot) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "resource handle %u is not live",
+                                        (unsigned)handle);
+            }
+
+            raw_representation = (uintptr_t)slot->representation;
+            if (raw_representation > UINT32_MAX) {
+                if (require_own) slot->host_owned = 1u;
+                return wasi__set_error_literal(engine,
+                                               WASI_ERR_RUNTIME,
+                                               "resource representation does not fit in i32");
+            }
+
+            err = wasi__resource_representation_to_value(engine,
+                                                         result_opcode,
+                                                         (uint32_t)raw_representation,
+                                                         &results[0]);
+            if (err != WASI_OK) {
+                if (require_own) slot->host_owned = 1u;
+                return err;
+            }
+
+            if (require_own) wasi__clear_handle_slot(slot);
+            return WASI_OK;
+        }
+
+        case WASI_COMPONENT_CANON_KIND_RESOURCE_DROP:
+            err = wasi__lower_resource_handle_value(engine,
+                                                    canon->type_index,
+                                                    &args[0],
+                                                    1,
+                                                    options,
+                                                    &handle);
+            if (err != WASI_OK) return err;
+
+            slot = wasi__find_handle_slot(instance, handle);
+            if (!slot) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "resource handle %u is not live",
+                                        (unsigned)handle);
+            }
+            err = wasi__release_handle_slot(engine, instance, slot);
+            if (err != WASI_OK) return err;
+            return WASI_OK;
+
+        default:
+            return wasi__set_error_literal(engine,
+                                           WASI_ERR_NOT_IMPLEMENTED,
+                                           "unsupported direct canonical resource builtin");
+    }
 }
 
 typedef enum wasi__canon_result_abi_t {
@@ -8506,19 +8948,6 @@ static int wasi__find_component_export(const wasi_component_t* component,
     return 0;
 }
 
-static const wasi_component_canon_t* wasi__find_lift_for_defined_func(const wasi_component_t* component,
-                                                                      uint32_t defined_func_index) {
-    uint32_t i;
-
-    if (!component) return NULL;
-    for (i = 0; i < component->num_canons; i++) {
-        if (component->canons[i].kind == WASI_COMPONENT_CANON_KIND_LIFT &&
-            component->canons[i].defined_func_index == defined_func_index)
-            return &component->canons[i];
-    }
-    return NULL;
-}
-
 wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
     wasi_instance_t* instance;
     wasi_engine_t* engine;
@@ -8562,7 +8991,7 @@ void wasi_free_instance(wasi_instance_t* instance) {
     if (engine) {
         for (i = 0; i < instance->num_handles; i++) {
             if (instance->handles[i].allocated)
-                wasi__release_handle_slot(engine, &instance->handles[i]);
+                wasi__release_handle_slot(engine, instance, &instance->handles[i]);
         }
     }
     WASM_FREE(instance->handles);
@@ -8580,6 +9009,7 @@ wasi_error_t wasi_call(wasi_instance_t* instance,
     wasi_engine_t* engine;
     uint32_t export_index = 0;
     uint32_t type_index = 0;
+    int has_type_index = 0;
     const wasi_component_export_t* export_;
     const wasi_component_canon_t* canon;
     wasi__canon_runtime_options_t options;
@@ -8599,33 +9029,62 @@ wasi_error_t wasi_call(wasi_instance_t* instance,
     export_ = &component->exports[export_index];
     if (export_->kind != WASI_COMPONENT_EXTERN_KIND_FUNC)
         return wasi__set_errorf(engine, WASI_ERR_TYPE_MISMATCH, "component export %s is not a function", export_name);
-    if (!wasi_component_export_func_type_index(component, export_index, &type_index))
-        return wasi__set_errorf(engine, WASI_ERR_TYPE_MISMATCH, "component export %s does not resolve to a function type", export_name);
 
-    canon = wasi__find_lift_for_defined_func(component, export_->index);
+    canon = wasi__find_defined_canon(component, export_->index);
     if (!canon)
         return wasi__set_errorf(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
-                                "component export %s is not backed by a supported canon lift",
+                                "component export %s is not backed by a supported canonical function",
                                 export_name);
 
-    err = wasi__resolve_lift_runtime_options(engine, canon, &options);
-    if (err != WASI_OK) return err;
+    has_type_index = wasi_component_export_func_type_index(component, export_index, &type_index);
 
     memset(&call_context, 0, sizeof(call_context));
     call_context.instance = instance;
-    options.call_context = &call_context;
 
-    err = wasi__canon_call_func_index(component,
-                                      type_index,
-                                      instance->core_module,
-                                      canon->core_func_index,
-                                      export_name,
-                                      &options,
-                                      args,
-                                      num_args,
-                                      results,
-                                      num_results);
+    if (canon->kind == WASI_COMPONENT_CANON_KIND_LIFT) {
+        if (!has_type_index) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_TYPE_MISMATCH,
+                                    "component export %s does not resolve to a function type",
+                                    export_name);
+        }
+
+        err = wasi__resolve_lift_runtime_options(engine, canon, &options);
+        if (err != WASI_OK) return err;
+        options.call_context = &call_context;
+
+        err = wasi__canon_call_func_index(component,
+                                          type_index,
+                                          instance->core_module,
+                                          canon->core_func_index,
+                                          export_name,
+                                          &options,
+                                          args,
+                                          num_args,
+                                          results,
+                                          num_results);
+    } else if (canon->kind == WASI_COMPONENT_CANON_KIND_RESOURCE_NEW ||
+               canon->kind == WASI_COMPONENT_CANON_KIND_RESOURCE_DROP ||
+               canon->kind == WASI_COMPONENT_CANON_KIND_RESOURCE_REP) {
+        memset(&options, 0, sizeof(options));
+        options.call_context = &call_context;
+        err = wasi__call_resource_canon(instance,
+                                        canon,
+                                        has_type_index,
+                                        type_index,
+                                        &options,
+                                        args,
+                                        num_args,
+                                        results,
+                                        num_results);
+    } else {
+        err = wasi__set_errorf(engine,
+                               WASI_ERR_NOT_IMPLEMENTED,
+                               "component export %s is not backed by a supported canonical function",
+                               export_name);
+    }
+
     wasi__release_call_borrows(&call_context);
     return err;
 }
@@ -8850,6 +9309,12 @@ wasi_error_t wasi_resource_rep(wasi_instance_t* instance,
     slot = wasi__find_handle_slot_const(instance, handle);
     if (!slot)
         return wasi__set_errorf(engine, WASI_ERR_INVALID_ARGUMENT, "resource handle %u is not live", (unsigned)handle);
+    if (!slot->host_owned) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "resource handle %u is not currently owned by the host",
+                                (unsigned)handle);
+    }
     if (slot->resource_type != binding->resource_type || slot->component_type_index != component_type_index) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_TYPE_MISMATCH,
@@ -8882,6 +9347,12 @@ wasi_error_t wasi_resource_drop(wasi_instance_t* instance,
     slot = wasi__find_handle_slot(instance, handle);
     if (!slot)
         return wasi__set_errorf(engine, WASI_ERR_INVALID_ARGUMENT, "resource handle %u is not live", (unsigned)handle);
+    if (!slot->host_owned) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "resource handle %u is not currently owned by the host",
+                                (unsigned)handle);
+    }
     if (slot->resource_type != binding->resource_type || slot->component_type_index != component_type_index) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_TYPE_MISMATCH,
@@ -8897,8 +9368,7 @@ wasi_error_t wasi_resource_drop(wasi_instance_t* instance,
                                 (unsigned)slot->num_borrows);
     }
 
-    wasi__release_handle_slot(engine, slot);
-    return WASI_OK;
+    return wasi__release_handle_slot(engine, instance, slot);
 }
 
 wasi_binary_kind_t wasi_detect_binary_kind(const uint8_t* bytes, size_t len) {
