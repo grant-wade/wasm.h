@@ -4985,6 +4985,7 @@ typedef struct wasi__canon_runtime_options_t {
 
 struct wasi_instance_t {
     const wasi_component_t* component;
+    struct wasi_instance_t* parent_instance;
     wasm_module_t* core_module;
     uint32_t core_module_index;
     wasi__component_import_runtime_t* imports;
@@ -6017,6 +6018,10 @@ static int wasi__component_alias_defines_func(const wasi_component_alias_t* alia
     return alias && !alias->sort_is_core && alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_FUNC;
 }
 
+static int wasi__component_alias_defines_instance(const wasi_component_alias_t* alias) {
+    return alias && !alias->sort_is_core && alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_INSTANCE;
+}
+
 static int wasi__component_func_entry_at(const wasi_component_t* component,
                                          uint32_t func_index,
                                          uint32_t* out_local_func_index,
@@ -6085,33 +6090,50 @@ static int wasi__component_import_for_local_func(const wasi_component_t* compone
 static int wasi__component_instance_entry_at(const wasi_component_t* component,
                                              uint32_t instance_index,
                                              uint32_t* out_local_instance_index,
-                                             uint32_t* out_import_index) {
+                                             uint32_t* out_import_index,
+                                             const wasi_component_alias_t** out_alias) {
     uint32_t next_instance = 0u;
     uint32_t next_import = 0u;
+    uint32_t next_alias = 0u;
     uint32_t current_index = 0u;
 
     if (out_local_instance_index) *out_local_instance_index = UINT32_MAX;
     if (out_import_index) *out_import_index = UINT32_MAX;
+    if (out_alias) *out_alias = NULL;
     if (!component) return 0;
 
-    while (next_instance < component->num_instances || next_import < component->num_imports) {
+    while (next_instance < component->num_instances || next_import < component->num_imports || next_alias < component->num_aliases) {
         const wasi_component_import_t* import = NULL;
+        const wasi_component_alias_t* alias = NULL;
         int choose_import = 0;
+        int choose_alias = 0;
 
         while (next_import < component->num_imports &&
                component->imports[next_import].kind != WASI_COMPONENT_EXTERN_KIND_INSTANCE) {
             next_import++;
         }
+        while (next_alias < component->num_aliases &&
+               !wasi__component_alias_defines_instance(&component->aliases[next_alias])) {
+            next_alias++;
+        }
 
         if (next_import < component->num_imports) import = &component->imports[next_import];
+        if (next_alias < component->num_aliases) alias = &component->aliases[next_alias];
         if (import &&
-            (next_instance >= component->num_instances || import->offset < component->instances[next_instance].offset)) {
+            (next_instance >= component->num_instances || import->offset < component->instances[next_instance].offset) &&
+            (!alias || import->offset < alias->offset)) {
             choose_import = 1;
+        }
+        if (!choose_import && alias &&
+            (next_instance >= component->num_instances || alias->offset < component->instances[next_instance].offset)) {
+            choose_alias = 1;
         }
 
         if (current_index == instance_index) {
             if (choose_import) {
                 if (out_import_index) *out_import_index = next_import;
+            } else if (choose_alias) {
+                if (out_alias) *out_alias = alias;
             } else if (next_instance < component->num_instances && out_local_instance_index) {
                 *out_local_instance_index = next_instance;
             }
@@ -6120,6 +6142,8 @@ static int wasi__component_instance_entry_at(const wasi_component_t* component,
 
         if (choose_import) {
             next_import++;
+        } else if (choose_alias) {
+            next_alias++;
         } else if (next_instance < component->num_instances) {
             next_instance++;
         } else {
@@ -6129,6 +6153,49 @@ static int wasi__component_instance_entry_at(const wasi_component_t* component,
     }
 
     return 0;
+}
+
+static wasi_error_t wasi__resolve_component_instance_ref_depth(wasi_engine_t* engine,
+                                                               wasi_instance_t* instance,
+                                                               uint32_t instance_index,
+                                                               const char* label,
+                                                               wasi__component_namespace_ref_t* out_ref,
+                                                               uint32_t depth);
+
+static wasi_error_t wasi__resolve_component_namespace_export_instance_depth(wasi_engine_t* engine,
+                                                                            const wasi__component_namespace_ref_t* ref,
+                                                                            const char* export_name,
+                                                                            const char* label,
+                                                                            wasi__component_namespace_ref_t* out_ref,
+                                                                            uint32_t depth);
+
+static wasi_error_t wasi__resolve_outer_component_instance(wasi_engine_t* engine,
+                                                           wasi_instance_t* instance,
+                                                           uint32_t outer_count,
+                                                           const char* label,
+                                                           wasi_instance_t** out_instance) {
+    uint32_t i;
+
+    if (out_instance) *out_instance = NULL;
+    if (!engine || !instance || !out_instance) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid outer component resolution request");
+    }
+
+    *out_instance = instance;
+    for (i = 0; i < outer_count; i++) {
+        if (!(*out_instance)->parent_instance) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_UNDEFINED_EXPORT,
+                                    "component alias %s references missing outer scope %u",
+                                    label ? label : "",
+                                    (unsigned)(i + 1u));
+        }
+        *out_instance = (*out_instance)->parent_instance;
+    }
+
+    return WASI_OK;
 }
 
 static int wasi__component_component_entry_at(const wasi_component_t* component,
@@ -6266,13 +6333,15 @@ static const wasi__bound_import_component_t* wasi__find_bound_import_component(c
     return NULL;
 }
 
-static wasi_error_t wasi__resolve_component_instance_ref(wasi_engine_t* engine,
-                                                         wasi_instance_t* instance,
-                                                         uint32_t instance_index,
-                                                         const char* label,
-                                                         wasi__component_namespace_ref_t* out_ref) {
+static wasi_error_t wasi__resolve_component_instance_ref_depth(wasi_engine_t* engine,
+                                                               wasi_instance_t* instance,
+                                                               uint32_t instance_index,
+                                                               const char* label,
+                                                               wasi__component_namespace_ref_t* out_ref,
+                                                               uint32_t depth) {
     uint32_t local_instance_index = UINT32_MAX;
     uint32_t import_index = UINT32_MAX;
+    const wasi_component_alias_t* alias = NULL;
 
     if (out_ref) memset(out_ref, 0, sizeof(*out_ref));
     if (!engine || !instance || !instance->component || !out_ref) {
@@ -6280,11 +6349,18 @@ static wasi_error_t wasi__resolve_component_instance_ref(wasi_engine_t* engine,
                                        WASI_ERR_INVALID_ARGUMENT,
                                        "invalid component instance resolution request");
     }
+    if (depth >= 32u) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "component instance %s alias resolution exceeded recursion limit",
+                                label ? label : "");
+    }
 
     if (!wasi__component_instance_entry_at(instance->component,
                                            instance_index,
                                            &local_instance_index,
-                                           &import_index)) {
+                                           &import_index,
+                                           &alias)) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_UNDEFINED_EXPORT,
                                 "component instance %s references missing instance index %u",
@@ -6316,6 +6392,61 @@ static wasi_error_t wasi__resolve_component_instance_ref(wasi_engine_t* engine,
         return WASI_OK;
     }
 
+    if (alias) {
+        if (alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT) {
+            wasi__component_namespace_ref_t source_ref;
+            wasi_error_t err;
+
+            err = wasi__resolve_component_instance_ref_depth(engine,
+                                                             instance,
+                                                             alias->instance_index,
+                                                             label,
+                                                             &source_ref,
+                                                             depth + 1u);
+            if (err != WASI_OK) return err;
+
+            return wasi__resolve_component_namespace_export_instance_depth(engine,
+                                                                           &source_ref,
+                                                                           alias->name ? alias->name : "",
+                                                                           label,
+                                                                           out_ref,
+                                                                           depth + 1u);
+        }
+
+        if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+            wasi_instance_t* outer_instance = NULL;
+            wasi_error_t err;
+
+            if (alias->sort_is_core || alias->extern_kind != WASI_COMPONENT_EXTERN_KIND_INSTANCE) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_NOT_IMPLEMENTED,
+                                        "component instance %s uses unsupported outer alias sort %s",
+                                        label ? label : "",
+                                        wasi__alias_sort_string(alias->sort_is_core, alias->sort_code));
+            }
+
+            err = wasi__resolve_outer_component_instance(engine,
+                                                         instance,
+                                                         alias->outer_count,
+                                                         label,
+                                                         &outer_instance);
+            if (err != WASI_OK) return err;
+
+            return wasi__resolve_component_instance_ref_depth(engine,
+                                                              outer_instance,
+                                                              alias->outer_index,
+                                                              label,
+                                                              out_ref,
+                                                              depth + 1u);
+        }
+
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "component instance %s uses unsupported alias kind %s",
+                                label ? label : "",
+                                wasi_component_alias_kind_string(alias->kind));
+    }
+
     if (local_instance_index >= instance->num_component_instances) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_INVALID_ARGUMENT,
@@ -6333,6 +6464,92 @@ static wasi_error_t wasi__resolve_component_instance_ref(wasi_engine_t* engine,
 
     *out_ref = instance->component_instances[local_instance_index].ref;
     return WASI_OK;
+}
+
+static wasi_error_t wasi__resolve_component_instance_ref(wasi_engine_t* engine,
+                                                         wasi_instance_t* instance,
+                                                         uint32_t instance_index,
+                                                         const char* label,
+                                                         wasi__component_namespace_ref_t* out_ref) {
+    return wasi__resolve_component_instance_ref_depth(engine,
+                                                      instance,
+                                                      instance_index,
+                                                      label,
+                                                      out_ref,
+                                                      0u);
+}
+
+static wasi_error_t wasi__resolve_component_namespace_export_instance_depth(wasi_engine_t* engine,
+                                                                            const wasi__component_namespace_ref_t* ref,
+                                                                            const char* export_name,
+                                                                            const char* label,
+                                                                            wasi__component_namespace_ref_t* out_ref,
+                                                                            uint32_t depth) {
+    if (out_ref) memset(out_ref, 0, sizeof(*out_ref));
+    if (!engine || !ref || !export_name || !out_ref) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid component namespace instance resolution request");
+    }
+
+    if (ref->kind == WASI__COMPONENT_NAMESPACE_STATIC_EXPORTS) {
+        const wasi_component_instance_t* local_instance;
+        wasi_instance_t* owner_instance;
+        uint32_t i;
+
+        owner_instance = ref->owner_instance;
+        if (!owner_instance || !owner_instance->component || ref->local_instance_index >= owner_instance->component->num_instances) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_INVALID_ARGUMENT,
+                                    "component namespace %s references invalid static instance",
+                                    label ? label : "");
+        }
+
+        local_instance = &owner_instance->component->instances[ref->local_instance_index];
+        for (i = 0; i < local_instance->num_exports; i++) {
+            const wasi_component_instance_export_t* export_ = &local_instance->exports[i];
+
+            if (export_->kind != WASI_COMPONENT_EXTERN_KIND_INSTANCE) continue;
+            if (!export_->name || strcmp(export_->name, export_name) != 0) continue;
+            return wasi__resolve_component_instance_ref_depth(engine,
+                                                              owner_instance,
+                                                              export_->index,
+                                                              label,
+                                                              out_ref,
+                                                              depth + 1u);
+        }
+    } else if (ref->kind == WASI__COMPONENT_NAMESPACE_INSTANCE) {
+        wasi_instance_t* target_instance = ref->instance;
+        const wasi_component_t* component;
+        uint32_t i;
+
+        if (!target_instance || !target_instance->component) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_INVALID_ARGUMENT,
+                                    "component namespace %s references an unresolved instance",
+                                    label ? label : "");
+        }
+
+        component = target_instance->component;
+        for (i = 0; i < component->num_exports; i++) {
+            const wasi_component_export_t* export_ = &component->exports[i];
+
+            if (export_->kind != WASI_COMPONENT_EXTERN_KIND_INSTANCE) continue;
+            if (!export_->name || strcmp(export_->name, export_name) != 0) continue;
+            return wasi__resolve_component_instance_ref_depth(engine,
+                                                              target_instance,
+                                                              export_->index,
+                                                              label,
+                                                              out_ref,
+                                                              depth + 1u);
+        }
+    }
+
+    return wasi__set_errorf(engine,
+                            WASI_ERR_UNDEFINED_EXPORT,
+                            "component instance %s missing aliased instance export %s",
+                            label ? label : "",
+                            export_name);
 }
 
 static wasi_error_t wasi__resolve_component_namespace_export_func(wasi_engine_t* engine,
@@ -6503,10 +6720,28 @@ static wasi_error_t wasi__resolve_component_func_ref(wasi_engine_t* engine,
         }
 
         if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
-            return wasi__set_errorf(engine,
-                                    WASI_ERR_NOT_IMPLEMENTED,
-                                    "component function %s requires outer alias resolution",
-                                    func_label ? func_label : "");
+            wasi_instance_t* outer_instance = NULL;
+            wasi_error_t err;
+
+            if (alias->sort_is_core || alias->extern_kind != WASI_COMPONENT_EXTERN_KIND_FUNC) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_NOT_IMPLEMENTED,
+                                        "component function %s uses unsupported outer alias sort %s",
+                                        func_label ? func_label : "",
+                                        wasi__alias_sort_string(alias->sort_is_core, alias->sort_code));
+            }
+
+            err = wasi__resolve_outer_component_instance(engine,
+                                                         current_instance,
+                                                         alias->outer_count,
+                                                         func_label,
+                                                         &outer_instance);
+            if (err != WASI_OK) return err;
+
+            current_instance = outer_instance;
+            current_index = alias->outer_index;
+            depth++;
+            continue;
         }
 
         return wasi__set_errorf(engine,
@@ -10992,7 +11227,8 @@ static int wasi__find_component_import(const wasi_component_t* component,
 
 static wasi_instance_t* wasi__instantiate_component_internal(const wasi_component_t* component,
                                                              const wasi__component_import_runtime_t* import_overrides,
-                                                             uint32_t num_import_overrides) {
+                                                             uint32_t num_import_overrides,
+                                                             wasi_instance_t* parent_instance) {
     wasi_instance_t* instance;
     wasi_engine_t* engine;
     uint32_t core_module_index = 0u;
@@ -11023,9 +11259,15 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
             continue;
         }
         if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+            if (!alias->sort_is_core &&
+                (alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_FUNC ||
+                 alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_INSTANCE)) {
+                continue;
+            }
+
             wasi__set_error_literal(engine,
                                     WASI_ERR_NOT_IMPLEMENTED,
-                                    "wasi_instantiate does not yet support outer component aliases on the current linking path");
+                                    "wasi_instantiate does not yet support this outer component alias sort on the current linking path");
             return NULL;
         }
 
@@ -11042,6 +11284,7 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
         return NULL;
     }
     instance->component = component;
+    instance->parent_instance = parent_instance;
 
     if (component->num_imports) {
         instance->imports = (wasi__component_import_runtime_t*)WASM_CALLOC(component->num_imports,
@@ -11316,7 +11559,8 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
 
                 child_instance = wasi__instantiate_component_internal(child_component,
                                                                       child_overrides,
-                                                                      child_component->num_imports);
+                                                                      child_component->num_imports,
+                                                                      instance);
                 WASM_FREE(child_overrides);
                 if (!child_instance) {
                     wasi_free_instance(instance);
@@ -11455,7 +11699,7 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
 wasi_instance_t* wasi_instantiate(const wasi_component_t* component) {
     if (!component || !component->engine) return NULL;
     wasi__clear_error(component->engine);
-    return wasi__instantiate_component_internal(component, NULL, 0u);
+    return wasi__instantiate_component_internal(component, NULL, 0u, NULL);
 }
 
 void wasi_free_instance(wasi_instance_t* instance) {
