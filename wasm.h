@@ -929,6 +929,7 @@ const char* wasm_error_string(wasm_error_t err);
 #include <sys/types.h>
 #include <windows.h>
 #elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sched.h>
@@ -937,7 +938,6 @@ const char* wasm_error_string(wasm_error_t err);
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/uio.h>
-#include <dirent.h>
 #include <unistd.h>
 #endif
 
@@ -22822,10 +22822,10 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
     err = wasm__wasi_state_ensure(rt);
     if (err != WASM_OK) return err;
 
-#define WASM__BIND_WASI(name, sig, callback, data)                                      \
-    do {                                                                                 \
+#define WASM__BIND_WASI(name, sig, callback, data)                                        \
+    do {                                                                                  \
         err = wasm_bind_host_func(rt, WASM__WASI_MODULE_NAME, name, sig, callback, data); \
-        if (err != WASM_OK) return err;                                                  \
+        if (err != WASM_OK) return err;                                                   \
     } while (0)
 
     WASM__BIND_WASI("args_get", "ii(i)", wasm__wasi_args_get, NULL);

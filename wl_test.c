@@ -41,7 +41,7 @@ typedef struct assert_capture {
 static log_capture g_log_capture;
 static assert_capture g_assert_capture;
 
-static void copy_text(char *dst, usize dst_size, const char *src) {
+static void copy_text(char* dst, usize dst_size, const char* src) {
     if (dst == NULL || dst_size == 0u) {
         return;
     }
@@ -52,8 +52,8 @@ static void copy_text(char *dst, usize dst_size, const char *src) {
     (void)snprintf(dst, dst_size, "%s", src);
 }
 
-static void *test_alloc_alloc(void *ctx, u64 size) {
-    test_alloc *alloc = (test_alloc *)ctx;
+static void* test_alloc_alloc(void* ctx, u64 size) {
+    test_alloc* alloc = (test_alloc*)ctx;
     ++alloc->alloc_calls;
     if (size == 0u) {
         size = 1u;
@@ -61,8 +61,8 @@ static void *test_alloc_alloc(void *ctx, u64 size) {
     return malloc((size_t)size);
 }
 
-static void test_alloc_free(void *ctx, void *ptr) {
-    test_alloc *alloc = (test_alloc *)ctx;
+static void test_alloc_free(void* ctx, void* ptr) {
+    test_alloc* alloc = (test_alloc*)ctx;
     ++alloc->free_calls;
     free(ptr);
 }
@@ -77,7 +77,7 @@ static test_alloc test_alloc_make(void) {
     return alloc;
 }
 
-static void capture_log(wl_log_level level, const char *file, int line, const char *fmt, va_list args) {
+static void capture_log(wl_log_level level, const char* file, int line, const char* fmt, va_list args) {
     va_list copy;
     ++g_log_capture.calls;
     g_log_capture.level = level;
@@ -88,7 +88,7 @@ static void capture_log(wl_log_level level, const char *file, int line, const ch
     va_end(copy);
 }
 
-static void capture_assert(const char *expr, const char *file, int line, const char *msg) {
+static void capture_assert(const char* expr, const char* file, int line, const char* msg) {
     ++g_assert_capture.calls;
     g_assert_capture.line = line;
     copy_text(g_assert_capture.expr, sizeof(g_assert_capture.expr), expr);
@@ -96,31 +96,31 @@ static void capture_assert(const char *expr, const char *file, int line, const c
     copy_text(g_assert_capture.message, sizeof(g_assert_capture.message), msg);
 }
 
-static int cmp_int_asc(const void *a, const void *b, void *ctx) {
-    int lhs = *(const int *)a;
-    int rhs = *(const int *)b;
+static int cmp_int_asc(const void* a, const void* b, void* ctx) {
+    int lhs = *(const int*)a;
+    int rhs = *(const int*)b;
     WL_UNUSED(ctx);
     return (lhs > rhs) - (lhs < rhs);
 }
 
-static int cmp_int_dir(const void *a, const void *b, void *ctx) {
-    int dir = ctx != NULL ? *(const int *)ctx : 1;
+static int cmp_int_dir(const void* a, const void* b, void* ctx) {
+    int dir = ctx != NULL ? *(const int*)ctx : 1;
     return dir * cmp_int_asc(a, b, NULL);
 }
 
-static u64 collision_hash(const void *key, usize key_size) {
+static u64 collision_hash(const void* key, usize key_size) {
     WL_UNUSED(key);
     WL_UNUSED(key_size);
     return 1u;
 }
 
-static bool int_eq(const void *lhs, const void *rhs, usize key_size) {
+static bool int_eq(const void* lhs, const void* rhs, usize key_size) {
     WL_UNUSED(key_size);
-    return *(const int *)lhs == *(const int *)rhs;
+    return *(const int*)lhs == *(const int*)rhs;
 }
 
 #if WL_ENABLE_PLATFORM
-static void make_temp_name(char *buf, usize buf_size, const char *label) {
+static void make_temp_name(char* buf, usize buf_size, const char* label) {
     u64 salt = (u64)wl_time_wall().ns ^ ((u64)(unsigned int)wl_test_getpid() << 16u);
     (void)snprintf(buf, buf_size, ".wl_test_%s_%llu_%u", label, (unsigned long long)salt, (unsigned int)wl_test_getpid());
 }
@@ -128,8 +128,8 @@ static void make_temp_name(char *buf, usize buf_size, const char *label) {
 
 WL_TEST(test_status_and_alloc) {
     test_alloc alloc = test_alloc_make();
-    char *ptr;
-    char *grown;
+    char* ptr;
+    char* grown;
 
     WL_CHECK(t, strcmp(wl_status_str(WL_OK), "ok") == 0);
     WL_CHECK(t, strcmp(wl_status_str(WL_ERR_NOMEM), "out of memory") == 0);
@@ -157,10 +157,10 @@ WL_TEST(test_status_and_alloc) {
 WL_TEST(test_arena) {
     wl_arena arena;
     wl_arena_savepoint mark;
-    void *first;
-    void *scratch;
-    void *scratch_again;
-    void *aligned;
+    void* first;
+    void* scratch;
+    void* scratch_again;
+    void* aligned;
     uintptr_t aligned_value;
     wl_status status;
 
@@ -223,9 +223,9 @@ WL_TEST(test_logging_and_assert) {
 }
 
 WL_TEST(test_dynamic_array) {
-    int *arr = NULL;
+    int* arr = NULL;
     wl_arena arena;
-    int *arena_arr;
+    int* arena_arr;
     wl_status status;
     usize old_cap;
 
@@ -314,15 +314,15 @@ WL_TEST(test_owned_string) {
 }
 
 WL_TEST(test_utf8) {
-    static const u8 overlong[] = {0xc0u, 0xafu};
-    static const u8 surrogate[] = {0xedu, 0xa0u, 0x80u};
-    static const u8 truncated[] = {0xe2u, 0x82u};
-    static const u8 globe[] = {0xf0u, 0x9fu, 0x8cu, 0x8du};
+    static const u8 overlong[] = { 0xc0u, 0xafu };
+    static const u8 surrogate[] = { 0xedu, 0xa0u, 0x80u };
+    static const u8 truncated[] = { 0xe2u, 0x82u };
+    static const u8 globe[] = { 0xf0u, 0x9fu, 0x8cu, 0x8du };
     wl_str utf = wl_str_lit("héllo 🌍");
     usize off = 0u;
     u32 cps[8];
     usize count = 0u;
-    u8 encoded[4] = {0u, 0u, 0u, 0u};
+    u8 encoded[4] = { 0u, 0u, 0u, 0u };
 
     WL_CHECK(t, wl_utf8_valid(utf));
     WL_CHECK(t, wl_utf8_len(utf) == 7u);
@@ -338,9 +338,9 @@ WL_TEST(test_utf8) {
     WL_CHECK(t, wl_utf8_encode(encoded, 0x1f30du) == 4u);
     WL_CHECK(t, memcmp(encoded, globe, sizeof(globe)) == 0);
     WL_CHECK(t, wl_utf8_encode(encoded, 0x110000u) == 0u);
-    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)overlong, sizeof(overlong))));
-    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)surrogate, sizeof(surrogate))));
-    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char *)truncated, sizeof(truncated))));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char*)overlong, sizeof(overlong))));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char*)surrogate, sizeof(surrogate))));
+    WL_CHECK(t, !wl_utf8_valid(wl_str_make((const char*)truncated, sizeof(truncated))));
 }
 
 WL_TEST(test_hash_functions) {
@@ -361,8 +361,8 @@ WL_TEST(test_hash_functions) {
 WL_TEST(test_hashmap_basic) {
     wl_hashmap map;
     wl_hashmap_iter iter;
-    void *key_ptr;
-    void *val_ptr;
+    void* key_ptr;
+    void* val_ptr;
     long long sum = 0;
     usize seen = 0u;
 
@@ -373,7 +373,7 @@ WL_TEST(test_hashmap_basic) {
         WL_REQUIRE_MSG(t, wl_hashmap_put(&map, &i, &value) == WL_OK, "put failed at %d", i);
     }
     for (int i = 0; i < 128; ++i) {
-        int *value = wl_hashmap_get(&map, &i);
+        int* value = wl_hashmap_get(&map, &i);
         WL_REQUIRE_MSG(t, value != NULL, "missing key %d", i);
         WL_CHECK(t, *value == i * 11);
     }
@@ -381,7 +381,7 @@ WL_TEST(test_hashmap_basic) {
         int key = 7;
         int value = 999;
         WL_CHECK(t, wl_hashmap_put(&map, &key, &value) == WL_OK);
-        WL_CHECK(t, *(int *)wl_hashmap_get(&map, &key) == 999);
+        WL_CHECK(t, *(int*)wl_hashmap_get(&map, &key) == 999);
     }
     {
         int missing = 500;
@@ -391,8 +391,8 @@ WL_TEST(test_hashmap_basic) {
 
     iter = wl_hashmap_iter_new(&map);
     while (wl_hashmap_iter_next(&iter, &key_ptr, &val_ptr)) {
-        sum += *(int *)key_ptr;
-        sum += *(int *)val_ptr;
+        sum += *(int*)key_ptr;
+        sum += *(int*)val_ptr;
         ++seen;
     }
     WL_CHECK(t, seen == 128u);
@@ -419,7 +419,7 @@ WL_TEST(test_hashmap_collisions_and_removal) {
         WL_CHECK(t, wl_hashmap_remove(&map, &i));
     }
     for (int i = 0; i < 64; ++i) {
-        int *value = wl_hashmap_get(&map, &i);
+        int* value = wl_hashmap_get(&map, &i);
         if ((i & 1) == 0) {
             WL_CHECK(t, value == NULL);
         } else {
@@ -436,7 +436,7 @@ WL_TEST(test_hashmap_collisions_and_removal) {
 }
 
 WL_TEST(test_sort_and_search) {
-    int small_values[] = {9, 1, 8, 2, 7, 3, 6, 4, 5, 0};
+    int small_values[] = { 9, 1, 8, 2, 7, 3, 6, 4, 5, 0 };
     int large_values[64];
     int dir = -1;
     int key = 9;
@@ -494,7 +494,7 @@ WL_TEST(test_rng) {
 
 #if WL_ENABLE_PLATFORM
 WL_TEST(test_time) {
-    wl_time base = {1000ll};
+    wl_time base = { 1000ll };
     wl_duration delta = wl_ms(5);
     wl_time added = wl_time_add(base, delta);
     wl_duration diff = wl_time_diff(added, base);
@@ -521,7 +521,7 @@ WL_TEST(test_fs_and_paths) {
     char missing_path[224];
     char joined[64];
     test_alloc alloc = test_alloc_make();
-    u8 *buf = NULL;
+    u8* buf = NULL;
     usize len = 0u;
     wl_status status;
 

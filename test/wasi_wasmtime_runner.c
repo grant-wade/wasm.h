@@ -312,7 +312,7 @@ static int wasi_compare_serialize_value_basic(const wasi_value_t* value, char* o
             return snprintf(output, output_cap, "%.17g", value->of.f64) < (int)output_cap;
         case WASI_VALUE_KIND_CHAR:
             return value->of.char32 >= 0x20u && value->of.char32 <= 0x7Eu && value->of.char32 != '\'' &&
-                           snprintf(output, output_cap, "'%c'", (char)value->of.char32) < (int)output_cap;
+                   snprintf(output, output_cap, "'%c'", (char)value->of.char32) < (int)output_cap;
         case WASI_VALUE_KIND_STRING:
             if (!output || output_cap < 3u) return 0;
             output[out_len++] = '"';
@@ -418,10 +418,10 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
     }
 
     if (snprintf(wit_text,
-                        sizeof(wit_text),
-                        "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
-                        test_case->wit_type,
-                        test_case->wit_type) >= (int)sizeof(wit_text)) {
+                 sizeof(wit_text),
+                 "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
+                 test_case->wit_type,
+                 test_case->wit_type) >= (int)sizeof(wit_text)) {
         fprintf(stderr, "%s: failed to build WIT text\n", test_case->name);
         return 0;
     }

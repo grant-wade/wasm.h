@@ -861,8 +861,7 @@ int main(int argc, char** argv) {
             wasi_destroy(&engine);
             goto cleanup;
         }
-        exit_code = wasi_component_export_func_type_index(component, (uint32_t)index, &actual_type)
-            && actual_type == (uint32_t)expected ? 0 : 1;
+        exit_code = wasi_component_export_func_type_index(component, (uint32_t)index, &actual_type) && actual_type == (uint32_t)expected ? 0 : 1;
     } else if (strcmp(mode, "core-module-count") == 0) {
         unsigned long expected;
         char* end = NULL;

@@ -583,7 +583,7 @@ struct wasi_value_t {
         wasi_value_flags_t flags;
         wasi_value_variant_t variant;
     } of;
-    };
+};
 
 typedef struct wasi_canon_options_t {
     uint32_t memory_index;
@@ -2232,7 +2232,7 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
                 type->item_count = count;
                 if (count) {
                     type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
-                                                                                               sizeof(*type->data.aggregate.items));
+                                                                                              sizeof(*type->data.aggregate.items));
                     if (!type->data.aggregate.items) {
                         reader->malformed = 1;
                         goto fail;
@@ -2263,7 +2263,7 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
                 type->item_count = count;
                 if (count) {
                     type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
-                                                                                               sizeof(*type->data.aggregate.items));
+                                                                                              sizeof(*type->data.aggregate.items));
                     if (!type->data.aggregate.items) {
                         reader->malformed = 1;
                         goto fail;
@@ -2307,8 +2307,10 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
                                               NULL)) {
                 goto fail;
             }
-            if (type) type->data.fixed_list.length = wasi__read_leb128_u32(reader);
-            else (void)wasi__read_leb128_u32(reader);
+            if (type)
+                type->data.fixed_list.length = wasi__read_leb128_u32(reader);
+            else
+                (void)wasi__read_leb128_u32(reader);
             if (reader->malformed) goto fail;
             break;
         case 0x6F:
@@ -2318,7 +2320,7 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
                 type->item_count = count;
                 if (count) {
                     type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
-                                                                                               sizeof(*type->data.aggregate.items));
+                                                                                              sizeof(*type->data.aggregate.items));
                     if (!type->data.aggregate.items) {
                         reader->malformed = 1;
                         goto fail;
@@ -2342,7 +2344,7 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
                 type->item_count = count;
                 if (count) {
                     type->data.aggregate.items = (wasi__component_valtype_item_t*)WASM_CALLOC(count,
-                                                                                               sizeof(*type->data.aggregate.items));
+                                                                                              sizeof(*type->data.aggregate.items));
                     if (!type->data.aggregate.items) {
                         reader->malformed = 1;
                         goto fail;
@@ -2376,8 +2378,10 @@ static int wasi__read_component_valtype(wasi__reader_t* reader,
             break;
         case 0x69:
         case 0x68:
-            if (type) type->data.index.type_index = wasi__read_leb128_u32(reader);
-            else (void)wasi__read_leb128_u32(reader);
+            if (type)
+                type->data.index.type_index = wasi__read_leb128_u32(reader);
+            else
+                (void)wasi__read_leb128_u32(reader);
             if (reader->malformed) goto fail;
             break;
         case 0x66:
@@ -2828,7 +2832,7 @@ static int wasi__read_core_subtype_payload(wasi__reader_t* reader,
         type->data.rec_group.num_entries = count;
         if (count) {
             type->data.rec_group.entries = (wasi_component_core_type_t**)WASM_CALLOC(count,
-                                                                                      sizeof(*type->data.rec_group.entries));
+                                                                                     sizeof(*type->data.rec_group.entries));
             if (!type->data.rec_group.entries) {
                 reader->malformed = 1;
                 return 0;
@@ -3026,7 +3030,7 @@ static int wasi__read_component_core_type_entries(wasi__reader_t* reader,
         }
 
         memset(&type, 0, sizeof(type));
-    type.offset = entry_offset;
+        type.offset = entry_offset;
         branch_reader = *reader;
         if (wasi__read_core_subtype_payload(&branch_reader, opcode, &type)) {
             entries[index] = type;
@@ -3310,26 +3314,24 @@ static wasi_error_t wasi__read_component_type_entry(wasi_engine_t* engine,
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed nested type declaration");
                 }
                 switch (decl_opcode) {
-                    case 0x00:
-                        {
-                            wasi_component_type_decl_t decl;
-                            wasi_error_t err;
-                            memset(&decl, 0, sizeof(decl));
-                            decl.offset = decl_offset;
-                            decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE;
-                            err = wasi__read_nested_core_type_declaration(engine,
-                                                                          reader,
-                                                                          &decl.data.core_type);
-                            if (err != WASI_OK) return err;
-                            err = wasi__component_type_append_decl(type, &decl);
-                            if (err != WASI_OK) {
-                                return wasi__set_error_literal(engine,
-                                                               err,
-                                                               err == WASI_ERR_OOM ? "component type declaration alloc failed"
-                                                                                   : wasi_error_string(err));
-                            }
+                    case 0x00: {
+                        wasi_component_type_decl_t decl;
+                        wasi_error_t err;
+                        memset(&decl, 0, sizeof(decl));
+                        decl.offset = decl_offset;
+                        decl.kind = WASI_COMPONENT_TYPE_DECL_KIND_CORE_TYPE;
+                        err = wasi__read_nested_core_type_declaration(engine,
+                                                                      reader,
+                                                                      &decl.data.core_type);
+                        if (err != WASI_OK) return err;
+                        err = wasi__component_type_append_decl(type, &decl);
+                        if (err != WASI_OK) {
+                            return wasi__set_error_literal(engine,
+                                                           err,
+                                                           err == WASI_ERR_OOM ? "component type declaration alloc failed"
+                                                                               : wasi_error_string(err));
                         }
-                        break;
+                    } break;
                     case 0x01: {
                         wasi_component_type_decl_t decl;
                         wasi_error_t err;
@@ -3761,9 +3763,9 @@ static wasi_error_t wasi__parse_component_core_instances(wasi_engine_t* engine,
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed core instance export descriptor");
                 }
                 err = wasi__component_core_instance_append_export(&instance,
-                                                                 name,
-                                                                 (wasm_export_kind_t)kind_byte,
-                                                                 index);
+                                                                  name,
+                                                                  (wasm_export_kind_t)kind_byte,
+                                                                  index);
                 if (err != WASI_OK) {
                     wasi__component_core_instance_release(&instance);
                     return wasi__set_error_literal(engine,
@@ -3889,10 +3891,10 @@ static wasi_error_t wasi__parse_component_instances(wasi_engine_t* engine,
                     return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component instance export descriptor");
                 }
                 err = wasi__component_instance_append_export(&instance,
-                                                            name,
-                                                            name_kind,
-                                                            wasi__extern_kind_from_byte(kind_byte),
-                                                            index);
+                                                             name,
+                                                             name_kind,
+                                                             wasi__extern_kind_from_byte(kind_byte),
+                                                             index);
                 if (err != WASI_OK) {
                     wasi__component_instance_release(&instance);
                     return wasi__set_error_literal(engine,
@@ -4091,19 +4093,21 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
 
             canon.kind = opcode == 0x00u ? WASI_COMPONENT_CANON_KIND_LIFT : WASI_COMPONENT_CANON_KIND_LOWER;
             if (marker == 0x00u) {
-                if (opcode == 0x00u) canon.core_func_index = wasi__read_leb128_u32(&reader);
-                else canon.func_index = wasi__read_leb128_u32(&reader);
+                if (opcode == 0x00u)
+                    canon.core_func_index = wasi__read_leb128_u32(&reader);
+                else
+                    canon.func_index = wasi__read_leb128_u32(&reader);
                 if (reader.malformed) {
                     return wasi__set_error_literal(engine,
                                                    WASI_ERR_MALFORMED,
                                                    opcode == 0x00u ? "malformed canon lift header" : "malformed canon lower header");
                 }
                 err = wasi__read_canon_options(engine,
-                                              &reader,
-                                              &canon,
-                                              opcode == 0x00u ? "malformed canon lift option count" : "malformed canon lower option count",
-                                              opcode == 0x00u ? "malformed canon lift option" : "malformed canon lower option",
-                                              "canonical option");
+                                               &reader,
+                                               &canon,
+                                               opcode == 0x00u ? "malformed canon lift option count" : "malformed canon lower option count",
+                                               opcode == 0x00u ? "malformed canon lift option" : "malformed canon lower option",
+                                               "canonical option");
                 if (err != WASI_OK) {
                     WASM_FREE(canon.options);
                     return err;
@@ -4111,8 +4115,10 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
             } else {
                 uint32_t option_count;
                 canon.async_flag = marker;
-                if (opcode == 0x00u) canon.core_func_index = wasi__read_leb128_u32(&reader);
-                else canon.func_index = wasi__read_leb128_u32(&reader);
+                if (opcode == 0x00u)
+                    canon.core_func_index = wasi__read_leb128_u32(&reader);
+                else
+                    canon.func_index = wasi__read_leb128_u32(&reader);
                 option_count = wasi__read_leb128_u32(&reader);
                 if (reader.malformed) {
                     WASM_FREE(canon.options);
@@ -4121,11 +4127,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                                                    opcode == 0x00u ? "malformed canon lift header" : "malformed canon lower header");
                 }
                 err = wasi__read_canon_options_count(engine,
-                                                    &reader,
-                                                    &canon,
-                                                    option_count,
-                                                    opcode == 0x00u ? "malformed canon lift option" : "malformed canon lower option",
-                                                    "canonical option");
+                                                     &reader,
+                                                     &canon,
+                                                     option_count,
+                                                     opcode == 0x00u ? "malformed canon lift option" : "malformed canon lower option",
+                                                     "canonical option");
                 if (err != WASI_OK) {
                     WASM_FREE(canon.options);
                     return err;
@@ -4183,11 +4189,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                         return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed canon task.return result list");
                     }
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon task.return option count",
-                                                  "malformed canon task.return option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon task.return option count",
+                                                   "malformed canon task.return option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4222,11 +4228,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                     canon.has_type_index = 1;
                     canon.type_index = wasi__read_leb128_u32(&reader);
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon stream.read option count",
-                                                  "malformed canon stream.read option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon stream.read option count",
+                                                   "malformed canon stream.read option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4237,11 +4243,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                     canon.has_type_index = 1;
                     canon.type_index = wasi__read_leb128_u32(&reader);
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon stream.write option count",
-                                                  "malformed canon stream.write option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon stream.write option count",
+                                                   "malformed canon stream.write option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4279,11 +4285,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                     canon.has_type_index = 1;
                     canon.type_index = wasi__read_leb128_u32(&reader);
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon future.read option count",
-                                                  "malformed canon future.read option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon future.read option count",
+                                                   "malformed canon future.read option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4294,11 +4300,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                     canon.has_type_index = 1;
                     canon.type_index = wasi__read_leb128_u32(&reader);
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon future.write option count",
-                                                  "malformed canon future.write option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon future.write option count",
+                                                   "malformed canon future.write option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4329,11 +4335,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                 case 0x1Cu:
                     canon.kind = WASI_COMPONENT_CANON_KIND_ERROR_CONTEXT_NEW;
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon error-context.new option count",
-                                                  "malformed canon error-context.new option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon error-context.new option count",
+                                                   "malformed canon error-context.new option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4342,11 +4348,11 @@ static wasi_error_t wasi__parse_component_canon(wasi_engine_t* engine,
                 case 0x1Du:
                     canon.kind = WASI_COMPONENT_CANON_KIND_ERROR_CONTEXT_DEBUG_MESSAGE;
                     err = wasi__read_canon_options(engine,
-                                                  &reader,
-                                                  &canon,
-                                                  "malformed canon error-context.debug-message option count",
-                                                  "malformed canon error-context.debug-message option",
-                                                  "canonical option");
+                                                   &reader,
+                                                   &canon,
+                                                   "malformed canon error-context.debug-message option count",
+                                                   "malformed canon error-context.debug-message option",
+                                                   "canonical option");
                     if (err != WASI_OK) {
                         WASM_FREE(canon.options);
                         return err;
@@ -4461,13 +4467,13 @@ static wasi_error_t wasi__parse_component_exports(wasi_engine_t* engine,
         }
 
         err = wasi__component_append_export(component,
-                            entry_offset,
-                            name,
-                            name_kind,
-                            kind,
-                            index,
-                            has_type,
-                            type_index);
+                                            entry_offset,
+                                            name,
+                                            name_kind,
+                                            kind,
+                                            index,
+                                            has_type,
+                                            type_index);
         if (err != WASI_OK) {
             return wasi__set_error_literal(engine,
                                            err,
@@ -4551,8 +4557,8 @@ static wasi_error_t wasi__extract_core_modules(wasi_engine_t* engine, wasi_compo
                            section->payload_size);
         if (!module) {
             const char* load_error_msg = engine->runtime.error_msg[0]
-                ? engine->runtime.error_msg
-                : wasm_error_string(engine->runtime.last_error);
+                                             ? engine->runtime.error_msg
+                                             : wasm_error_string(engine->runtime.last_error);
 
             if (engine->runtime.last_error != WASM_ERR_UNKNOWN_IMPORT) {
                 return wasi__set_errorf(engine,
@@ -6961,11 +6967,11 @@ static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
                                                    "variant argument payload is missing");
                 }
                 err = wasi__variant_case_flat_types(engine,
-                                                   component,
-                                                   resolved,
-                                                   case_index,
-                                                   NULL,
-                                                   &case_flat_count);
+                                                    component,
+                                                    resolved,
+                                                    case_index,
+                                                    NULL,
+                                                    &case_flat_count);
                 if (err != WASI_OK) {
                     WASM_FREE(payload_types);
                     return err;
@@ -6980,11 +6986,11 @@ static wasi_error_t wasi__lower_value(wasi_engine_t* engine,
                         return wasi__set_error_literal(engine, WASI_ERR_OOM, "variant payload coercion alloc failed");
                     }
                     err = wasi__variant_case_flat_types(engine,
-                                                       component,
-                                                       resolved,
-                                                       case_index,
-                                                       case_types,
-                                                       &case_flat_count);
+                                                        component,
+                                                        resolved,
+                                                        case_index,
+                                                        case_types,
+                                                        &case_flat_count);
                     if (err != WASI_OK) {
                         WASM_FREE(case_values);
                         WASM_FREE(case_types);
@@ -7590,14 +7596,14 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
             for (i = 0; i < resolved->item_count; i++) {
                 uint32_t consumed = 0;
                 wasi_error_t err = wasi__lift_value(engine,
-                                                   component,
-                                                   resolved->data.aggregate.items[i].type,
-                                                   flat_values + cursor,
-                                                   flat_count - cursor,
-                                                   core_module,
-                                                   options,
-                                                   &out_value->of.seq.values[i],
-                                                   &consumed);
+                                                    component,
+                                                    resolved->data.aggregate.items[i].type,
+                                                    flat_values + cursor,
+                                                    flat_count - cursor,
+                                                    core_module,
+                                                    options,
+                                                    &out_value->of.seq.values[i],
+                                                    &consumed);
                 if (err != WASI_OK) return err;
                 cursor += consumed;
             }
@@ -7659,11 +7665,11 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
             }
 
             err = wasi__variant_case_flat_types(engine,
-                                               component,
-                                               resolved,
-                                               case_index,
-                                               NULL,
-                                               &case_flat_count);
+                                                component,
+                                                resolved,
+                                                case_index,
+                                                NULL,
+                                                &case_flat_count);
             if (err != WASI_OK) {
                 WASM_FREE(payload_types);
                 return err;
@@ -7679,11 +7685,11 @@ static wasi_error_t wasi__lift_value(wasi_engine_t* engine,
                     return wasi__set_error_literal(engine, WASI_ERR_OOM, "variant payload coercion alloc failed");
                 }
                 err = wasi__variant_case_flat_types(engine,
-                                                   component,
-                                                   resolved,
-                                                   case_index,
-                                                   case_types,
-                                                   &case_flat_count);
+                                                    component,
+                                                    resolved,
+                                                    case_index,
+                                                    case_types,
+                                                    &case_flat_count);
                 if (err != WASI_OK) {
                     WASM_FREE(case_values);
                     WASM_FREE(case_types);
@@ -7770,8 +7776,8 @@ static wasi_error_t wasi__layout_func_values(wasi_engine_t* engine,
 
     for (i = 0; i < count; i++) {
         const wasi_component_valtype_t* item_type = use_results
-            ? wasi_component_func_type_result_type(component, type_index, i)
-            : wasi_component_func_type_param_type(component, type_index, i);
+                                                        ? wasi_component_func_type_result_type(component, type_index, i)
+                                                        : wasi_component_func_type_param_type(component, type_index, i);
         uint32_t item_size;
         uint32_t item_align;
         wasi_error_t err = wasi__layout_valtype(engine, component, item_type, &item_size, &item_align);
@@ -7950,8 +7956,8 @@ static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* componen
         uint32_t post_index = 0;
         const char* post_label = options->api.post_return_name ? options->api.post_return_name : "<post-return>";
         const wasm_value_t* post_args = sig.results_spilled
-                            ? (sig.results_retptr_returned ? flat_results : flat_args + (sig.num_param_types - 1u))
-                            : flat_results;
+                                            ? (sig.results_retptr_returned ? flat_results : flat_args + (sig.num_param_types - 1u))
+                                            : flat_results;
 
         if (options->has_post_return_func_index) {
             post_index = options->post_return_func_index;
@@ -8012,7 +8018,6 @@ cleanup:
     wasi__canon_func_sig_release(&sig);
     return err;
 }
-
 
 wasi_error_t wasi_canon_call(const wasi_component_t* component,
                              uint32_t func_type_index,
@@ -9156,9 +9161,9 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                   buffer_size,
                   &offset,
                   "kind=%s layer=0x%02x status=%s sections=%u core-types=%u core-modules=%u\n",
-                  component->binary_kind == WASI_BINARY_KIND_COMPONENT ? "component"
+                  component->binary_kind == WASI_BINARY_KIND_COMPONENT     ? "component"
                   : component->binary_kind == WASI_BINARY_KIND_CORE_MODULE ? "core"
-                  : "unknown",
+                                                                           : "unknown",
                   (unsigned)wasi_component_layer(component),
                   wasi_component_status_string(component->status),
                   (unsigned)component->num_sections,
@@ -9398,11 +9403,12 @@ void wasi_dump_component(const wasi_component_t* component, char* buffer, size_t
                     break;
             }
         }
-            wasi__appendf(buffer, buffer_size, &offset, " offset=%llu", (unsigned long long)type->offset);
+        wasi__appendf(buffer, buffer_size, &offset, " offset=%llu", (unsigned long long)type->offset);
         wasi__appendf(buffer, buffer_size, &offset, "\n");
 
         if ((type->kind == WASI_COMPONENT_TYPE_KIND_COMPONENT ||
-             type->kind == WASI_COMPONENT_TYPE_KIND_INSTANCE) && type->num_decls) {
+             type->kind == WASI_COMPONENT_TYPE_KIND_INSTANCE) &&
+            type->num_decls) {
             uint32_t decl_index;
             for (decl_index = 0; decl_index < type->num_decls; decl_index++) {
                 const wasi_component_type_decl_t* decl = &type->decls[decl_index];
