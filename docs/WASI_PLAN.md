@@ -279,6 +279,8 @@ wasi_resource_type_t fd_type = wasi_define_resource(
 - `num_lends` guard: dropping an own handle while a borrow is outstanding traps the caller
 - Handle table growth and slot reuse after drops
 
+**Status:** In progress. `wasi.h` now has engine-defined host resource types, per-instance handle tables, explicit component-type bindings, `wasi_resource_new` / `wasi_resource_rep` / `wasi_resource_drop`, slot reuse after drops, and synchronous `own<T>` / `borrow<T>` lowering on the current `wasi_call` path for supported single-module canon lifts. Full canon builtin wiring, destructor-driven drops from component code, and cross-component transfer remain for the later M4/M5 work.
+
 ---
 
 ## Milestone 5: Component Instantiation & Linking
