@@ -47,6 +47,8 @@ typedef enum wasi_compare_case_shape_t {
     WASI_COMPARE_CASE_SCALAR = 0,
     WASI_COMPARE_CASE_STRING = 1,
     WASI_COMPARE_CASE_LIST = 2,
+    WASI_COMPARE_CASE_RECORD = 3,
+    WASI_COMPARE_CASE_VARIANT = 4,
 } wasi_compare_case_shape_t;
 
 typedef struct wasi_compare_case_t {
@@ -65,6 +67,16 @@ typedef struct wasi_compare_case_t {
     uint32_t list_item_size;
     size_t list_len;
     wasi_compare_scalar_t list_items[4];
+    size_t record_field_count;
+    const char* record_field_names[4];
+    uint32_t variant_case_index;
+    int variant_has_payload;
+    wasi_value_kind_t variant_payload_kind;
+    wasi_compare_scalar_t variant_payload;
+    const char* variant_payload_string;
+    size_t variant_payload_string_len;
+    size_t variant_case_count;
+    const char* variant_case_names[4];
 } wasi_compare_case_t;
 
 static void wasi_compare_set_scalar_value(wasi_value_t* value,
@@ -271,6 +283,59 @@ static void wasi_compare_set_arg(wasi_value_t* arg,
     memset(arg, 0, sizeof(*arg));
     arg->kind = test_case->value_kind;
 
+    if (test_case->shape == WASI_COMPARE_CASE_RECORD) {
+        if (!scratch || scratch_count < 3u + test_case->list_len) return;
+
+        wasi_compare_set_scalar_value(&scratch[0], WASI_VALUE_KIND_U32, &test_case->input);
+
+        scratch[1].kind = WASI_VALUE_KIND_STRING;
+        scratch[1].of.string.data = (char*)test_case->string_input;
+        scratch[1].of.string.len = test_case->string_len;
+        scratch[1].of.string.owned = 0;
+
+        for (i = 0; i < test_case->list_len; i++) {
+            wasi_compare_set_scalar_value(&scratch[3u + i], test_case->list_item_kind, &test_case->list_items[i]);
+        }
+
+        scratch[2].kind = WASI_VALUE_KIND_LIST;
+        scratch[2].of.seq.values = scratch + 3u;
+        scratch[2].of.seq.len = test_case->list_len;
+        scratch[2].of.seq.owned = 0;
+
+        arg->kind = WASI_VALUE_KIND_RECORD;
+        arg->of.seq.values = scratch;
+        arg->of.seq.len = test_case->record_field_count;
+        arg->of.seq.owned = 0;
+        return;
+    }
+
+    if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+        arg->kind = WASI_VALUE_KIND_VARIANT;
+        arg->of.variant.case_index = test_case->variant_case_index;
+        arg->of.variant.has_payload = test_case->variant_has_payload ? 1u : 0u;
+        arg->of.variant.payload_owned = 0u;
+        arg->of.variant.payload = NULL;
+
+        if (!test_case->variant_has_payload) return;
+        if (!scratch || scratch_count < 1u) return;
+
+        memset(&scratch[0], 0, sizeof(scratch[0]));
+        scratch[0].kind = test_case->variant_payload_kind;
+        switch (test_case->variant_payload_kind) {
+            case WASI_VALUE_KIND_STRING:
+                scratch[0].of.string.data = (char*)test_case->variant_payload_string;
+                scratch[0].of.string.len = test_case->variant_payload_string_len;
+                scratch[0].of.string.owned = 0;
+                break;
+            default:
+                wasi_compare_set_scalar_value(&scratch[0], test_case->variant_payload_kind, &test_case->variant_payload);
+                break;
+        }
+
+        arg->of.variant.payload = &scratch[0];
+        return;
+    }
+
     if (test_case->shape == WASI_COMPARE_CASE_LIST) {
         if (!scratch || scratch_count < test_case->list_len) return;
         for (i = 0; i < test_case->list_len; i++) {
@@ -383,22 +448,81 @@ static int wasi_compare_serialize_value(const wasi_compare_case_t* test_case,
                                         const wasi_value_t* value,
                                         char* output,
                                         size_t output_cap) {
-    char field_a[64];
-    char field_b[128];
-    char field_c[128];
+    size_t i;
+    size_t cursor = 0u;
+    char item_text[256];
 
-    (void)test_case;
+    if (test_case->shape == WASI_COMPARE_CASE_RECORD) {
+        if (!output || output_cap < 3u) return 0;
+        if (value->kind != WASI_VALUE_KIND_RECORD || value->of.seq.len != test_case->record_field_count) return 0;
 
-    (void)field_a;
-    (void)field_b;
-    (void)field_c;
+        output[cursor++] = '{';
+        for (i = 0; i < test_case->record_field_count; i++) {
+            size_t name_len;
+            size_t item_len;
+
+            if (i > 0u) {
+                if (cursor + 2u >= output_cap) return 0;
+                output[cursor++] = ',';
+                output[cursor++] = ' ';
+            }
+
+            name_len = strlen(test_case->record_field_names[i]);
+            if (cursor + name_len + 2u >= output_cap) return 0;
+            memcpy(output + cursor, test_case->record_field_names[i], name_len);
+            cursor += name_len;
+            output[cursor++] = ':';
+            output[cursor++] = ' ';
+
+            if (!wasi_compare_serialize_value_basic(&value->of.seq.values[i], item_text, sizeof(item_text))) return 0;
+            item_len = strlen(item_text);
+            if (cursor + item_len + 1u >= output_cap) return 0;
+            memcpy(output + cursor, item_text, item_len);
+            cursor += item_len;
+        }
+        if (cursor + 2u > output_cap) return 0;
+        output[cursor++] = '}';
+        output[cursor] = '\0';
+        return 1;
+    }
+
+    if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+        const char* case_name;
+        size_t case_len;
+
+        if (!output || output_cap < 2u) return 0;
+        if (value->kind != WASI_VALUE_KIND_VARIANT) return 0;
+        if (value->of.variant.case_index >= test_case->variant_case_count) return 0;
+
+        case_name = test_case->variant_case_names[value->of.variant.case_index];
+        case_len = strlen(case_name);
+        if (case_len + 1u >= output_cap) return 0;
+        memcpy(output, case_name, case_len);
+        cursor = case_len;
+
+        if (!value->of.variant.has_payload) {
+            output[cursor] = '\0';
+            return 1;
+        }
+        if (!value->of.variant.payload) return 0;
+        if (!wasi_compare_serialize_value_basic(value->of.variant.payload, item_text, sizeof(item_text))) return 0;
+        if (cursor + strlen(item_text) + 3u > output_cap) return 0;
+        output[cursor++] = '(';
+        memcpy(output + cursor, item_text, strlen(item_text));
+        cursor += strlen(item_text);
+        output[cursor++] = ')';
+        output[cursor] = '\0';
+        return 1;
+    }
 
     return wasi_compare_serialize_value_basic(value, output, output_cap);
 }
 
 static int wasi_compare_case_uses_memory(const wasi_compare_case_t* test_case) {
     return test_case->shape == WASI_COMPARE_CASE_STRING ||
-           test_case->shape == WASI_COMPARE_CASE_LIST;
+           test_case->shape == WASI_COMPARE_CASE_LIST ||
+           test_case->shape == WASI_COMPARE_CASE_RECORD ||
+           test_case->shape == WASI_COMPARE_CASE_VARIANT;
 }
 
 static int wasi_compare_build_component(const char* wasm_tools_path,
@@ -433,11 +557,41 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
         return 0;
     }
 
-    if (snprintf(wit_text,
-                 sizeof(wit_text),
-                 "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
-                 test_case->wit_type,
-                 test_case->wit_type) >= (int)sizeof(wit_text)) {
+    if (test_case->shape == WASI_COMPARE_CASE_RECORD) {
+        if (snprintf(wit_text,
+                     sizeof(wit_text),
+                     "package local:compare;\n"
+                     "world compare {\n"
+                     "  record rec {\n"
+                     "    a: u32,\n"
+                     "    b: string,\n"
+                     "    c: list<u8>,\n"
+                     "  }\n"
+                     "  export echo: func(x: rec) -> rec;\n"
+                     "}\n") >= (int)sizeof(wit_text)) {
+            fprintf(stderr, "%s: failed to build record WIT text\n", test_case->name);
+            return 0;
+        }
+    } else if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+        if (snprintf(wit_text,
+                     sizeof(wit_text),
+                     "package local:compare;\n"
+                     "world compare {\n"
+                     "  variant choice {\n"
+                     "    none,\n"
+                     "    num(u32),\n"
+                     "    text(string),\n"
+                     "  }\n"
+                     "  export echo: func(x: choice) -> choice;\n"
+                     "}\n") >= (int)sizeof(wit_text)) {
+            fprintf(stderr, "%s: failed to build variant WIT text\n", test_case->name);
+            return 0;
+        }
+    } else if (snprintf(wit_text,
+                        sizeof(wit_text),
+                        "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
+                        test_case->wit_type,
+                        test_case->wit_type) >= (int)sizeof(wit_text)) {
         fprintf(stderr, "%s: failed to build WIT text\n", test_case->name);
         return 0;
     }
@@ -726,6 +880,132 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
             fprintf(stderr, "%s: failed to build list-result WAT text\n", test_case->name);
             return 0;
         }
+    } else if (test_case->shape == WASI_COMPARE_CASE_RECORD) {
+        if (snprintf(wat_text,
+                     sizeof(wat_text),
+                     "(module\n"
+                     "  (memory (export \"cm32p2_memory\") 1)\n"
+                     "  (global $heap (mut i32) (i32.const 16))\n"
+                     "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                     "    (local $ptr i32)\n"
+                     "    global.get $heap\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.add\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.const -1\n"
+                     "    i32.xor\n"
+                     "    i32.and\n"
+                     "    local.tee $ptr\n"
+                     "    local.get $new_size\n"
+                     "    i32.add\n"
+                     "    global.set $heap\n"
+                     "    local.get $ptr)\n"
+                     "  (func (export \"cm32p2||echo\") (param $a i32) (param $b_ptr i32) (param $b_len i32) (param $c_ptr i32) (param $c_len i32) (result i32)\n"
+                     "    (local $ret i32)\n"
+                     "    i32.const 0\n"
+                     "    i32.const 0\n"
+                     "    i32.const 4\n"
+                     "    i32.const 20\n"
+                     "    call $realloc_impl\n"
+                     "    local.set $ret\n"
+                     "    local.get $ret\n"
+                     "    local.get $a\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 4\n"
+                     "    i32.add\n"
+                     "    local.get $b_ptr\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 8\n"
+                     "    i32.add\n"
+                     "    local.get $b_len\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 12\n"
+                     "    i32.add\n"
+                     "    local.get $c_ptr\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 16\n"
+                     "    i32.add\n"
+                     "    local.get $c_len\n"
+                     "    i32.store\n"
+                     "    local.get $ret)\n"
+                     "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                     "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                     "    local.get 0\n"
+                     "    local.get 1\n"
+                     "    local.get 2\n"
+                     "    local.get 3\n"
+                     "    call $realloc_impl)\n"
+                     "  (func (export \"cm32p2_initialize\"))\n"
+                     ")\n") >= (int)sizeof(wat_text)) {
+            fprintf(stderr, "%s: failed to build record-result WAT text\n", test_case->name);
+            return 0;
+        }
+    } else if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+        if (snprintf(wat_text,
+                     sizeof(wat_text),
+                     "(module\n"
+                     "  (memory (export \"cm32p2_memory\") 1)\n"
+                     "  (global $heap (mut i32) (i32.const 16))\n"
+                     "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                     "    (local $ptr i32)\n"
+                     "    global.get $heap\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.add\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.const -1\n"
+                     "    i32.xor\n"
+                     "    i32.and\n"
+                     "    local.tee $ptr\n"
+                     "    local.get $new_size\n"
+                     "    i32.add\n"
+                     "    global.set $heap\n"
+                     "    local.get $ptr)\n"
+                     "  (func (export \"cm32p2||echo\") (param $tag i32) (param $payload0 i32) (param $payload1 i32) (result i32)\n"
+                     "    (local $ret i32)\n"
+                     "    i32.const 0\n"
+                     "    i32.const 0\n"
+                     "    i32.const 4\n"
+                     "    i32.const 12\n"
+                     "    call $realloc_impl\n"
+                     "    local.set $ret\n"
+                     "    local.get $ret\n"
+                     "    local.get $tag\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 4\n"
+                     "    i32.add\n"
+                     "    local.get $payload0\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    i32.const 8\n"
+                     "    i32.add\n"
+                     "    local.get $payload1\n"
+                     "    i32.store\n"
+                     "    local.get $ret)\n"
+                     "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                     "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                     "    local.get 0\n"
+                     "    local.get 1\n"
+                     "    local.get 2\n"
+                     "    local.get 3\n"
+                     "    call $realloc_impl)\n"
+                     "  (func (export \"cm32p2_initialize\"))\n"
+                     ")\n") >= (int)sizeof(wat_text)) {
+            fprintf(stderr, "%s: failed to build variant-result WAT text\n", test_case->name);
+            return 0;
+        }
     } else if (snprintf(wat_text,
                         sizeof(wat_text),
                         "(module\n"
@@ -832,6 +1112,9 @@ static int wasi_compare_run_case(const char* wasmtime_path,
     wasi_value_t result;
     wasi_canon_options_t options;
     uint32_t func_type_index = 0u;
+    uint32_t export_index = UINT32_MAX;
+    uint32_t export_count;
+    uint32_t i;
     wasi_error_t err;
     int ok = 0;
 
@@ -868,7 +1151,21 @@ static int wasi_compare_run_case(const char* wasmtime_path,
         fprintf(stderr, "%s: missing primary core module\n", test_case->name);
         goto cleanup_component;
     }
-    if (!wasi_component_export_func_type_index(component, 0u, &func_type_index)) {
+
+    export_count = wasi_component_export_count(component);
+    for (i = 0u; i < export_count; i++) {
+        const char* export_name = wasi_component_export_name(component, i);
+
+        if (wasi_component_export_kind(component, i) != WASI_COMPONENT_EXTERN_KIND_FUNC) continue;
+        if (!export_name || strcmp(export_name, "echo") != 0) continue;
+        export_index = i;
+        break;
+    }
+    if (export_index == UINT32_MAX) {
+        fprintf(stderr, "%s: missing exported echo function\n", test_case->name);
+        goto cleanup_component;
+    }
+    if (!wasi_component_export_func_type_index(component, export_index, &func_type_index)) {
         fprintf(stderr, "%s: missing exported function type index\n", test_case->name);
         goto cleanup_component;
     }
@@ -945,26 +1242,77 @@ cleanup:
     return ok ? 0 : 1;
 }
 
+#define WASI_COMPARE_EMPTY_COMPOUND_CASE \
+    0u, { NULL, NULL, NULL, NULL }, 0u, 0, 0, { 0 }, NULL, 0u, 0u, { NULL, NULL, NULL, NULL }
+
 static const wasi_compare_case_t wasi_compare_cases[] = {
-    { "bool", "bool", "i32", "echo(true)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 }, 0, 0u, 0u, { { 0 } } },
-    { "s8", "s8", "i32", "echo(-8)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 }, 0, 0u, 0u, { { 0 } } },
-    { "u8", "u8", "i32", "echo(255)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u }, 0, 0u, 0u, { { 0 } } },
-    { "s16", "s16", "i32", "echo(-1234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 }, 0, 0u, 0u, { { 0 } } },
-    { "u16", "u16", "i32", "echo(54321)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u }, 0, 0u, 0u, { { 0 } } },
-    { "s32", "s32", "i32", "echo(-12345678)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 }, 0, 0u, 0u, { { 0 } } },
-    { "u32", "u32", "i32", "echo(3456789012)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u }, 0, 0u, 0u, { { 0 } } },
-    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) }, 0, 0u, 0u, { { 0 } } },
-    { "u64", "u64", "i64", "echo(12345678901234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) }, 0, 0u, 0u, { { 0 } } },
-    { "f32", "f32", "f32", "echo(1.5)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f }, 0, 0u, 0u, { { 0 } } },
-    { "f64", "f64", "f64", "echo(-2.25)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 }, 0, 0u, 0u, { { 0 } } },
-    { "char", "char", "i32", "echo('A')", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' }, 0, 0u, 0u, { { 0 } } },
-    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
-    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
-    { "string-empty", "string", "i32", "echo(\"\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
-    { "string-utf16", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, "utf16", WASI_STRING_ENCODING_UTF16, { 0 }, 0, 0u, 0u, { { 0 } } },
-    { "list-u8", "list<u8>", NULL, "echo([1, 2, 3])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U8, 1u, 3u, { { .u8 = 1u }, { .u8 = 2u }, { .u8 = 3u }, { 0 } } },
-    { "list-u32", "list<u32>", NULL, "echo([10, 20, 30])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U32, 4u, 3u, { { .u32 = 10u }, { .u32 = 20u }, { .u32 = 30u }, { 0 } } },
+    { "bool", "bool", "i32", "echo(true)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "s8", "s8", "i32", "echo(-8)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "u8", "u8", "i32", "echo(255)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "s16", "s16", "i32", "echo(-1234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "u16", "u16", "i32", "echo(54321)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "s32", "s32", "i32", "echo(-12345678)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "u32", "u32", "i32", "echo(3456789012)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "u64", "u64", "i64", "echo(12345678901234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "f32", "f32", "f32", "echo(1.5)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "f64", "f64", "f64", "echo(-2.25)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "char", "char", "i32", "echo('A')", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "string-empty", "string", "i32", "echo(\"\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "string-utf16", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, "utf16", WASI_STRING_ENCODING_UTF16, { 0 }, 0, 0u, 0u, { { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "list-u8", "list<u8>", NULL, "echo([1, 2, 3])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U8, 1u, 3u, { { .u8 = 1u }, { .u8 = 2u }, { .u8 = 3u }, { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    { "list-u32", "list<u32>", NULL, "echo([10, 20, 30])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U32, 4u, 3u, { { .u32 = 10u }, { .u32 = 20u }, { .u32 = 30u }, { 0 } }, WASI_COMPARE_EMPTY_COMPOUND_CASE },
+    {
+        .name = "record-u32-string-list-u8",
+        .wit_type = "rec",
+        .invoke_expr = "echo({a: 123, b: \"hi\", c: [1, 2, 3]})",
+        .shape = WASI_COMPARE_CASE_RECORD,
+        .value_kind = WASI_VALUE_KIND_RECORD,
+        .string_input = "hi",
+        .string_len = 2u,
+        .string_encoding = WASI_STRING_ENCODING_UTF8,
+        .input = { .u32 = 123u },
+        .list_item_kind = WASI_VALUE_KIND_U8,
+        .list_item_size = 1u,
+        .list_len = 3u,
+        .list_items = { { .u8 = 1u }, { .u8 = 2u }, { .u8 = 3u }, { 0 } },
+        .record_field_count = 3u,
+        .record_field_names = { "a", "b", "c", NULL },
+    },
+    {
+        .name = "variant-u32",
+        .wit_type = "choice",
+        .invoke_expr = "echo(num(99))",
+        .shape = WASI_COMPARE_CASE_VARIANT,
+        .value_kind = WASI_VALUE_KIND_VARIANT,
+        .string_encoding = WASI_STRING_ENCODING_UTF8,
+        .variant_case_index = 1u,
+        .variant_has_payload = 1,
+        .variant_payload_kind = WASI_VALUE_KIND_U32,
+        .variant_payload = { .u32 = 99u },
+        .variant_case_count = 3u,
+        .variant_case_names = { "none", "num", "text", NULL },
+    },
+    {
+        .name = "variant-string",
+        .wit_type = "choice",
+        .invoke_expr = "echo(text(\"yo\"))",
+        .shape = WASI_COMPARE_CASE_VARIANT,
+        .value_kind = WASI_VALUE_KIND_VARIANT,
+        .string_encoding = WASI_STRING_ENCODING_UTF8,
+        .variant_case_index = 2u,
+        .variant_has_payload = 1,
+        .variant_payload_kind = WASI_VALUE_KIND_STRING,
+        .variant_payload_string = "yo",
+        .variant_payload_string_len = 2u,
+        .variant_case_count = 3u,
+        .variant_case_names = { "none", "num", "text", NULL },
+    },
 };
+
+#undef WASI_COMPARE_EMPTY_COMPOUND_CASE
 
 static const wasi_compare_case_t* wasi_compare_find_case(const char* name) {
     size_t i;

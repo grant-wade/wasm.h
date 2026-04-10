@@ -2160,6 +2160,35 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
                                            err == WASI_ERR_OOM ? "component import alloc failed"
                                                                : wasi_error_string(err));
         }
+        if (desc.kind == WASI_COMPONENT_EXTERN_KIND_TYPE) {
+            wasi_component_type_t imported_type;
+
+            memset(&imported_type, 0, sizeof(imported_type));
+            imported_type.offset = entry_offset;
+            if (desc.has_type_index) {
+                imported_type.kind = WASI_COMPONENT_TYPE_KIND_DEFINED;
+                imported_type.opcode = 0x00u;
+                imported_type.detail_opcode = 0x00u;
+                imported_type.defined_type = (wasi_component_valtype_t*)WASM_CALLOC(1u, sizeof(*imported_type.defined_type));
+                if (!imported_type.defined_type) {
+                    wasi__component_externdesc_release(&desc);
+                    return wasi__set_error_literal(engine, WASI_ERR_OOM, "component imported type alloc failed");
+                }
+                imported_type.defined_type->opcode = 0x00u;
+                imported_type.defined_type->data.index.type_index = desc.type_index;
+            } else {
+                imported_type.kind = WASI_COMPONENT_TYPE_KIND_RESOURCE;
+            }
+            err = wasi__component_append_type(component, &imported_type);
+            if (err != WASI_OK) {
+                wasi__component_type_release(&imported_type);
+                wasi__component_externdesc_release(&desc);
+                return wasi__set_error_literal(engine,
+                                               err,
+                                               err == WASI_ERR_OOM ? "component imported type alloc failed"
+                                                                   : wasi_error_string(err));
+            }
+        }
         if (desc.kind == WASI_COMPONENT_EXTERN_KIND_FUNC && desc.has_type_index) {
             err = wasi__component_append_func(component, entry_offset, desc.type_index);
             if (err != WASI_OK) {
@@ -5105,6 +5134,31 @@ static wasi_error_t wasi__set_runtime_error_from_module(wasi_engine_t* engine,
 
 static int wasi__component_type_is_func(const wasi_component_t* component, uint32_t type_index) {
     return component && type_index < component->num_types && component->types[type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC;
+}
+
+static int wasi__resolve_component_func_type_index(const wasi_component_t* component,
+                                                   uint32_t type_index,
+                                                   uint32_t* out_type_index) {
+    uint32_t current = type_index;
+    uint32_t depth = 0u;
+
+    if (out_type_index) *out_type_index = 0u;
+    if (!component || !out_type_index) return 0;
+
+    while (current < component->num_types && depth < 32u) {
+        const wasi_component_type_t* type = &component->types[current];
+
+        if (type->kind == WASI_COMPONENT_TYPE_KIND_FUNC) {
+            *out_type_index = current;
+            return 1;
+        }
+        if (type->kind != WASI_COMPONENT_TYPE_KIND_DEFINED || !type->defined_type || type->defined_type->opcode != 0x00u)
+            return 0;
+        current = type->defined_type->data.index.type_index;
+        depth++;
+    }
+
+    return 0;
 }
 
 typedef enum wasi__canon_result_abi_t {
@@ -8737,22 +8791,21 @@ uint32_t wasi_component_export_type_index(const wasi_component_t* component, uin
 
 int wasi_component_export_func_type_index(const wasi_component_t* component, uint32_t index, uint32_t* out_type_index) {
     uint32_t func_index;
+    uint32_t resolved_type_index;
 
     if (out_type_index) *out_type_index = 0;
     if (!component || index >= component->num_exports || !out_type_index) return 0;
     if (component->exports[index].kind != WASI_COMPONENT_EXTERN_KIND_FUNC) return 0;
     if (component->exports[index].has_type) {
         uint32_t annotated_type_index = component->exports[index].type_index;
-        if (annotated_type_index < component->num_types &&
-            component->types[annotated_type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC) {
-            *out_type_index = annotated_type_index;
+        if (wasi__resolve_component_func_type_index(component, annotated_type_index, &resolved_type_index)) {
+            *out_type_index = resolved_type_index;
             return 1;
         }
     }
     func_index = component->exports[index].index;
     if (func_index >= component->num_funcs) return 0;
-    *out_type_index = component->funcs[func_index].type_index;
-    return 1;
+    return wasi__resolve_component_func_type_index(component, component->funcs[func_index].type_index, out_type_index);
 }
 
 uint32_t wasi_component_alias_count(const wasi_component_t* component) {
