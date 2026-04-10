@@ -243,7 +243,7 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 
 ---
 
-## Milestone 4: Resource Types & Handle Tables
+## [DONE] Milestone 4: Resource Types & Handle Tables
 
 **Goal:** Resource lifecycle — handle tables, own/borrow semantics, destructors.
 
@@ -279,7 +279,7 @@ wasi_resource_type_t fd_type = wasi_define_resource(
 - `num_lends` guard: dropping an own handle while a borrow is outstanding traps the caller
 - Handle table growth and slot reuse after drops
 
-**Status:** In progress. `wasi.h` now has engine-defined host resource types, per-instance handle tables, explicit component-type bindings, `wasi_resource_new` / `wasi_resource_rep` / `wasi_resource_drop`, slot reuse after drops, and synchronous `own<T>` / `borrow<T>` lowering on the current `wasi_call` path for supported single-module canon lifts. The current narrow single-module path also wires `canon resource.new` / `canon resource.rep` / `canon resource.drop` into exported calls and runs same-instance component-defined resource destructors on explicit drops and instance teardown. Cross-component handle transfer and broader destructor handling across future M5 instantiation/linking paths remain later work.
+**Status:** Completed on the current runtime surface. `wasi.h` now has engine-defined host resource types, per-instance handle tables, explicit component-type bindings, `wasi_resource_new` / `wasi_resource_rep` / `wasi_resource_drop`, slot reuse after drops, and synchronous `own<T>` / `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts. The runtime wires `canon resource.new` / `canon resource.rep` / `canon resource.drop` into exported calls, preserves origin-instance destructor ownership when a live resource is transferred between instances, and resolves component-defined resource destructors through the same supported alias paths as exported functions. Broader automatic use of that transfer machinery during general nested-component linking remains part of Milestone 5 rather than a blocker for closing the resource lifecycle work itself.
 
 ---
 

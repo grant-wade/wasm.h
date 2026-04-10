@@ -114,9 +114,9 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
 - parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
 - host-defined resource registration and per-instance handle tables through `wasi_define_resource`, `wasi_instance_bind_resource_type`, `wasi_resource_new`, `wasi_resource_rep`, and `wasi_resource_drop`
-- synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported single-module canon lifts, including outstanding-borrow guards and own-handle round-trips
+- synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts, including outstanding-borrow guards, own-handle round-trips, origin-preserving cross-instance resource transfer machinery, and alias-aware component destructor dispatch
 
-`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, resource-handle groundwork for Milestone 4, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, can route exported component functions through static `instance { export ... }` aliases, and whose exported functions ultimately resolve to direct synchronous canon lifts. Outer component aliases still remain outside the supported narrow path.
+`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, completed Milestone 4 resource lifecycle support, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, can route exported component functions through static `instance { export ... }` aliases, and whose exported functions ultimately resolve to direct synchronous canon lifts. Outer component aliases still remain outside the supported narrow path.
 
 ### Memory and globals
 

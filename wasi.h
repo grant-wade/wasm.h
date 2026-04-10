@@ -19,6 +19,12 @@
 extern "C" {
 #endif
 
+#if defined(__clang__) || defined(__GNUC__)
+#define WASI__MAYBE_UNUSED __attribute__((unused))
+#else
+#define WASI__MAYBE_UNUSED
+#endif
+
 typedef struct wasi_component_t wasi_component_t;
 typedef struct wasi_component_valtype_t wasi_component_valtype_t;
 typedef struct wasi_component_type_decl_t wasi_component_type_decl_t;
@@ -477,6 +483,8 @@ typedef struct wasi__handle_slot_t {
     void* representation;
     wasi_resource_type_t resource_type;
     uint32_t component_type_index;
+    struct wasi_instance_t* owner_instance;
+    uint32_t owner_component_type_index;
     uint32_t num_borrows;
     uint8_t allocated;
     uint8_t host_owned;
@@ -5656,6 +5664,11 @@ static wasi_error_t wasi__resolve_canon_lift_target(wasi_engine_t* engine,
                                                     const char* target_label,
                                                     wasm_module_t** out_module,
                                                     uint32_t* out_func_index);
+static wasi_error_t wasi__resolve_component_func_index(wasi_engine_t* engine,
+                                                       const wasi_component_t* component,
+                                                       uint32_t func_index,
+                                                       const char* func_label,
+                                                       uint32_t* out_local_func_index);
 static wasi_error_t wasi__resource_representation_to_value(wasi_engine_t* engine,
                                                            uint8_t result_opcode,
                                                            uint32_t representation,
@@ -5672,6 +5685,7 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     wasi__canon_call_context_t call_context;
     wasi_value_t arg;
     wasm_module_t* target_module = NULL;
+    uint32_t destructor_func_index = UINT32_MAX;
     uint32_t raw_representation = 0u;
     uint32_t target_func_index = UINT32_MAX;
     uint8_t param_opcode;
@@ -5698,7 +5712,14 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     }
     if (!type->has_primary_index) return WASI_OK;
 
-    canon = wasi__find_defined_canon(component, type->primary_index);
+    err = wasi__resolve_component_func_index(engine,
+                                             component,
+                                             type->primary_index,
+                                             "<resource destructor>",
+                                             &destructor_func_index);
+    if (err != WASI_OK) return err;
+
+    canon = wasi__find_defined_canon(component, destructor_func_index);
     if (!canon) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
@@ -5776,6 +5797,7 @@ static wasi_error_t wasi__release_handle_slot(wasi_engine_t* engine,
                                               wasi__handle_slot_t* slot) {
     wasi__handle_slot_t released;
     const wasi__resource_type_info_t* type_info;
+    wasi_instance_t* owner_instance;
     wasi_error_t err = WASI_OK;
 
     if (!slot || !slot->allocated) return WASI_OK;
@@ -5783,9 +5805,11 @@ static wasi_error_t wasi__release_handle_slot(wasi_engine_t* engine,
     released = *slot;
     wasi__clear_handle_slot(slot);
 
-    if (instance && instance->component && instance->component->engine) {
-        err = wasi__call_component_resource_destructor(instance,
-                                                       released.component_type_index,
+    owner_instance = released.owner_instance ? released.owner_instance : instance;
+
+    if (owner_instance && owner_instance->component && owner_instance->component->engine) {
+        err = wasi__call_component_resource_destructor(owner_instance,
+                                                       released.owner_component_type_index,
                                                        released.representation);
     }
 
@@ -9945,27 +9969,21 @@ wasi_error_t wasi_instance_bind_resource_type(wasi_instance_t* instance,
     return WASI_OK;
 }
 
-wasi_error_t wasi_resource_new(wasi_instance_t* instance,
-                               uint32_t component_type_index,
-                               void* representation,
-                               uint32_t* out_handle) {
-    wasi_engine_t* engine;
-    wasi__bound_resource_type_t* binding;
+static wasi_error_t wasi__allocate_handle_slot(wasi_engine_t* engine,
+                                               wasi_instance_t* instance,
+                                               uint32_t* out_handle,
+                                               wasi__handle_slot_t** out_slot) {
     uint32_t handle;
-    wasi__handle_slot_t* slot;
     wasi__handle_slot_t* grown;
     size_t next_capacity;
-    wasi_error_t err;
 
-    if (out_handle) *out_handle = 0u;
-    if (!instance || !instance->component || !instance->component->engine || !out_handle)
-        return WASI_ERR_INVALID_ARGUMENT;
-
-    engine = instance->component->engine;
-    wasi__clear_error(engine);
-
-    err = wasi__resolve_instance_resource_binding(engine, instance, component_type_index, &binding);
-    if (err != WASI_OK) return err;
+    if (out_handle) *out_handle = UINT32_MAX;
+    if (out_slot) *out_slot = NULL;
+    if (!engine || !instance || !out_handle || !out_slot) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid handle slot allocation request");
+    }
 
     for (handle = 0u; handle < instance->num_handles; handle++) {
         if (!instance->handles[handle].allocated) break;
@@ -9984,11 +10002,132 @@ wasi_error_t wasi_resource_new(wasi_instance_t* instance,
         handle = instance->num_handles++;
     }
 
-    slot = &instance->handles[handle];
+    *out_handle = handle;
+    *out_slot = &instance->handles[handle];
+    return WASI_OK;
+}
+
+static WASI__MAYBE_UNUSED wasi_error_t wasi__transfer_resource_handle(wasi_engine_t* engine,
+                                                   wasi_instance_t* source_instance,
+                                                   uint32_t source_component_type_index,
+                                                   uint32_t handle,
+                                                   wasi_instance_t* dest_instance,
+                                                   uint32_t dest_component_type_index,
+                                                   uint32_t* out_handle) {
+    wasi__bound_resource_type_t* source_binding;
+    wasi__bound_resource_type_t* dest_binding;
+    wasi__handle_slot_t* source_slot;
+    wasi__handle_slot_t* dest_slot;
+    wasi__handle_slot_t transferred;
+    uint32_t dest_handle = UINT32_MAX;
+    wasi_error_t err;
+
+    if (out_handle) *out_handle = UINT32_MAX;
+    if (!engine || !source_instance || !dest_instance || !out_handle) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid resource transfer request");
+    }
+    if (!source_instance->component || !dest_instance->component ||
+        source_instance->component->engine != engine || dest_instance->component->engine != engine) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "resource transfer requires instances on the same engine");
+    }
+
+    err = wasi__resolve_instance_resource_binding(engine,
+                                                  source_instance,
+                                                  source_component_type_index,
+                                                  &source_binding);
+    if (err != WASI_OK) return err;
+    err = wasi__resolve_instance_resource_binding(engine,
+                                                  dest_instance,
+                                                  dest_component_type_index,
+                                                  &dest_binding);
+    if (err != WASI_OK) return err;
+    if (source_binding->resource_type != dest_binding->resource_type) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_TYPE_MISMATCH,
+                                       "resource transfer requires matching bound host resource types");
+    }
+
+    source_slot = wasi__find_handle_slot(source_instance, handle);
+    if (!source_slot) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_INVALID_ARGUMENT,
+                                "resource handle %u is not live",
+                                (unsigned)handle);
+    }
+    if (!source_slot->host_owned) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "resource handle %u is not currently owned by the host",
+                                (unsigned)handle);
+    }
+    if (source_slot->resource_type != source_binding->resource_type ||
+        source_slot->component_type_index != source_component_type_index) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_TYPE_MISMATCH,
+                                "resource handle %u does not match component resource type %u",
+                                (unsigned)handle,
+                                (unsigned)source_component_type_index);
+    }
+    if (source_slot->num_borrows != 0u) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "cannot transfer resource handle %u with %u outstanding borrow(s)",
+                                (unsigned)handle,
+                                (unsigned)source_slot->num_borrows);
+    }
+
+    err = wasi__allocate_handle_slot(engine, dest_instance, &dest_handle, &dest_slot);
+    if (err != WASI_OK) return err;
+
+    transferred = *source_slot;
+    transferred.component_type_index = dest_component_type_index;
+    transferred.resource_type = dest_binding->resource_type;
+    transferred.allocated = 1u;
+    transferred.host_owned = 1u;
+    if (!source_slot->owner_instance) {
+        transferred.owner_instance = source_instance;
+        transferred.owner_component_type_index = source_component_type_index;
+    }
+
+    *dest_slot = transferred;
+    wasi__clear_handle_slot(source_slot);
+    *out_handle = dest_handle;
+    return WASI_OK;
+}
+
+wasi_error_t wasi_resource_new(wasi_instance_t* instance,
+                               uint32_t component_type_index,
+                               void* representation,
+                               uint32_t* out_handle) {
+    wasi_engine_t* engine;
+    wasi__bound_resource_type_t* binding;
+    uint32_t handle;
+    wasi__handle_slot_t* slot;
+    wasi_error_t err;
+
+    if (out_handle) *out_handle = 0u;
+    if (!instance || !instance->component || !instance->component->engine || !out_handle)
+        return WASI_ERR_INVALID_ARGUMENT;
+
+    engine = instance->component->engine;
+    wasi__clear_error(engine);
+
+    err = wasi__resolve_instance_resource_binding(engine, instance, component_type_index, &binding);
+    if (err != WASI_OK) return err;
+
+    err = wasi__allocate_handle_slot(engine, instance, &handle, &slot);
+    if (err != WASI_OK) return err;
+
     memset(slot, 0, sizeof(*slot));
     slot->representation = representation;
     slot->resource_type = binding->resource_type;
     slot->component_type_index = component_type_index;
+    slot->owner_instance = instance;
+    slot->owner_component_type_index = component_type_index;
     slot->allocated = 1u;
     slot->host_owned = 1u;
     *out_handle = handle;
