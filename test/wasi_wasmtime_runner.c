@@ -46,7 +46,7 @@ typedef union wasi_compare_scalar_t {
 typedef enum wasi_compare_case_shape_t {
     WASI_COMPARE_CASE_SCALAR = 0,
     WASI_COMPARE_CASE_STRING = 1,
-    WASI_COMPARE_CASE_LIST_U8 = 2,
+    WASI_COMPARE_CASE_LIST = 2,
 } wasi_compare_case_shape_t;
 
 typedef struct wasi_compare_case_t {
@@ -61,7 +61,60 @@ typedef struct wasi_compare_case_t {
     const char* wasm_tools_encoding;
     wasi_string_encoding_t string_encoding;
     wasi_compare_scalar_t input;
+    wasi_value_kind_t list_item_kind;
+    uint32_t list_item_size;
+    size_t list_len;
+    wasi_compare_scalar_t list_items[4];
 } wasi_compare_case_t;
+
+static void wasi_compare_set_scalar_value(wasi_value_t* value,
+                                          wasi_value_kind_t kind,
+                                          const wasi_compare_scalar_t* input) {
+    if (!value || !input) return;
+    memset(value, 0, sizeof(*value));
+    value->kind = kind;
+
+    switch (kind) {
+        case WASI_VALUE_KIND_BOOL:
+            value->of.boolean = (uint8_t)input->boolean;
+            break;
+        case WASI_VALUE_KIND_S8:
+            value->of.s8 = input->s8;
+            break;
+        case WASI_VALUE_KIND_U8:
+            value->of.u8 = input->u8;
+            break;
+        case WASI_VALUE_KIND_S16:
+            value->of.s16 = input->s16;
+            break;
+        case WASI_VALUE_KIND_U16:
+            value->of.u16 = input->u16;
+            break;
+        case WASI_VALUE_KIND_S32:
+            value->of.s32 = input->s32;
+            break;
+        case WASI_VALUE_KIND_U32:
+            value->of.u32 = input->u32;
+            break;
+        case WASI_VALUE_KIND_S64:
+            value->of.s64 = input->s64;
+            break;
+        case WASI_VALUE_KIND_U64:
+            value->of.u64 = input->u64;
+            break;
+        case WASI_VALUE_KIND_F32:
+            value->of.f32 = input->f32;
+            break;
+        case WASI_VALUE_KIND_F64:
+            value->of.f64 = input->f64;
+            break;
+        case WASI_VALUE_KIND_CHAR:
+            value->of.char32 = input->char32;
+            break;
+        default:
+            break;
+    }
+}
 
 static void wasi_compare_usage(const char* argv0) {
     fprintf(stderr, "usage: %s <wasmtime> <wasm-tools> <--list|--all|case-name>\n", argv0);
@@ -213,69 +266,32 @@ static void wasi_compare_set_arg(wasi_value_t* arg,
                                  wasi_value_t* scratch,
                                  size_t scratch_count,
                                  const wasi_compare_case_t* test_case) {
+    size_t i;
+
     memset(arg, 0, sizeof(*arg));
     arg->kind = test_case->value_kind;
 
-    if (test_case->shape == WASI_COMPARE_CASE_LIST_U8) {
-        if (!scratch || scratch_count < 3u) return;
-
-        scratch[0].kind = WASI_VALUE_KIND_U8;
-        scratch[0].of.u8 = 1u;
-        scratch[1].kind = WASI_VALUE_KIND_U8;
-        scratch[1].of.u8 = 2u;
-        scratch[2].kind = WASI_VALUE_KIND_U8;
-        scratch[2].of.u8 = 3u;
+    if (test_case->shape == WASI_COMPARE_CASE_LIST) {
+        if (!scratch || scratch_count < test_case->list_len) return;
+        for (i = 0; i < test_case->list_len; i++) {
+            wasi_compare_set_scalar_value(&scratch[i], test_case->list_item_kind, &test_case->list_items[i]);
+        }
 
         arg->kind = WASI_VALUE_KIND_LIST;
         arg->of.seq.values = scratch;
-        arg->of.seq.len = 3u;
+        arg->of.seq.len = test_case->list_len;
         arg->of.seq.owned = 0;
         return;
     }
 
     switch (test_case->value_kind) {
-        case WASI_VALUE_KIND_BOOL:
-            arg->of.boolean = (uint8_t)test_case->input.boolean;
-            break;
-        case WASI_VALUE_KIND_S8:
-            arg->of.s8 = test_case->input.s8;
-            break;
-        case WASI_VALUE_KIND_U8:
-            arg->of.u8 = test_case->input.u8;
-            break;
-        case WASI_VALUE_KIND_S16:
-            arg->of.s16 = test_case->input.s16;
-            break;
-        case WASI_VALUE_KIND_U16:
-            arg->of.u16 = test_case->input.u16;
-            break;
-        case WASI_VALUE_KIND_S32:
-            arg->of.s32 = test_case->input.s32;
-            break;
-        case WASI_VALUE_KIND_U32:
-            arg->of.u32 = test_case->input.u32;
-            break;
-        case WASI_VALUE_KIND_S64:
-            arg->of.s64 = test_case->input.s64;
-            break;
-        case WASI_VALUE_KIND_U64:
-            arg->of.u64 = test_case->input.u64;
-            break;
-        case WASI_VALUE_KIND_F32:
-            arg->of.f32 = test_case->input.f32;
-            break;
-        case WASI_VALUE_KIND_F64:
-            arg->of.f64 = test_case->input.f64;
-            break;
-        case WASI_VALUE_KIND_CHAR:
-            arg->of.char32 = test_case->input.char32;
-            break;
         case WASI_VALUE_KIND_STRING:
             arg->of.string.data = (char*)test_case->string_input;
             arg->of.string.len = test_case->string_len;
             arg->of.string.owned = 0;
             break;
         default:
+            wasi_compare_set_scalar_value(arg, test_case->value_kind, &test_case->input);
             break;
     }
 }
@@ -382,7 +398,7 @@ static int wasi_compare_serialize_value(const wasi_compare_case_t* test_case,
 
 static int wasi_compare_case_uses_memory(const wasi_compare_case_t* test_case) {
     return test_case->shape == WASI_COMPARE_CASE_STRING ||
-           test_case->shape == WASI_COMPARE_CASE_LIST_U8;
+           test_case->shape == WASI_COMPARE_CASE_LIST;
 }
 
 static int wasi_compare_build_component(const char* wasm_tools_path,
@@ -426,7 +442,220 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
         return 0;
     }
 
-    if (test_case->shape == WASI_COMPARE_CASE_STRING || test_case->shape == WASI_COMPARE_CASE_LIST_U8) {
+    if (test_case->shape == WASI_COMPARE_CASE_STRING) {
+        if (test_case->string_encoding == WASI_STRING_ENCODING_UTF8) {
+            if (snprintf(wat_text,
+                         sizeof(wat_text),
+                         "(module\n"
+                         "  (memory (export \"cm32p2_memory\") 1)\n"
+                         "  (global $heap (mut i32) (i32.const 16))\n"
+                         "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                         "    (local $ptr i32)\n"
+                         "    global.get $heap\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.add\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.const -1\n"
+                         "    i32.xor\n"
+                         "    i32.and\n"
+                         "    local.tee $ptr\n"
+                         "    local.get $new_size\n"
+                         "    i32.add\n"
+                         "    global.set $heap\n"
+                         "    local.get $ptr)\n"
+                         "  (func (export \"cm32p2||echo\") (param $ptr i32) (param $len i32) (result i32)\n"
+                         "    (local $dst i32)\n"
+                         "    (local $ret i32)\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 1\n"
+                         "    local.get $len\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $dst\n"
+                         "    local.get $dst\n"
+                         "    local.get $ptr\n"
+                         "    local.get $len\n"
+                         "    memory.copy\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 4\n"
+                         "    i32.const 8\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $ret\n"
+                         "    local.get $ret\n"
+                         "    local.get $dst\n"
+                         "    i32.store\n"
+                         "    local.get $ret\n"
+                         "    i32.const 4\n"
+                         "    i32.add\n"
+                         "    local.get $len\n"
+                         "    i32.store\n"
+                         "    local.get $ret)\n"
+                         "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                         "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                         "    local.get 0\n"
+                         "    local.get 1\n"
+                         "    local.get 2\n"
+                         "    local.get 3\n"
+                         "    call $realloc_impl)\n"
+                         "  (func (export \"cm32p2_initialize\"))\n"
+                         ")\n") >= (int)sizeof(wat_text)) {
+                fprintf(stderr, "%s: failed to build pair-result WAT text\n", test_case->name);
+                return 0;
+            }
+        } else if (test_case->string_encoding == WASI_STRING_ENCODING_UTF16) {
+            if (snprintf(wat_text,
+                         sizeof(wat_text),
+                         "(module\n"
+                         "  (memory (export \"cm32p2_memory\") 1)\n"
+                         "  (global $heap (mut i32) (i32.const 16))\n"
+                         "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                         "    (local $ptr i32)\n"
+                         "    global.get $heap\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.add\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.const -1\n"
+                         "    i32.xor\n"
+                         "    i32.and\n"
+                         "    local.tee $ptr\n"
+                         "    local.get $new_size\n"
+                         "    i32.add\n"
+                         "    global.set $heap\n"
+                         "    local.get $ptr)\n"
+                         "  (func (export \"cm32p2||echo\") (param $ptr i32) (param $len i32) (result i32)\n"
+                         "    (local $dst i32)\n"
+                         "    (local $ret i32)\n"
+                         "    (local $size i32)\n"
+                         "    local.get $len\n"
+                         "    i32.const 2\n"
+                         "    i32.mul\n"
+                         "    local.set $size\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 2\n"
+                         "    local.get $size\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $dst\n"
+                         "    local.get $dst\n"
+                         "    local.get $ptr\n"
+                         "    local.get $size\n"
+                         "    memory.copy\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 4\n"
+                         "    i32.const 8\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $ret\n"
+                         "    local.get $ret\n"
+                         "    local.get $dst\n"
+                         "    i32.store\n"
+                         "    local.get $ret\n"
+                         "    i32.const 4\n"
+                         "    i32.add\n"
+                         "    local.get $len\n"
+                         "    i32.store\n"
+                         "    local.get $ret)\n"
+                         "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                         "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                         "    local.get 0\n"
+                         "    local.get 1\n"
+                         "    local.get 2\n"
+                         "    local.get 3\n"
+                         "    call $realloc_impl)\n"
+                         "  (func (export \"cm32p2_initialize\"))\n"
+                         ")\n") >= (int)sizeof(wat_text)) {
+                fprintf(stderr, "%s: failed to build utf16 pair-result WAT text\n", test_case->name);
+                return 0;
+            }
+        } else {
+            if (snprintf(wat_text,
+                         sizeof(wat_text),
+                         "(module\n"
+                         "  (memory (export \"cm32p2_memory\") 1)\n"
+                         "  (global $heap (mut i32) (i32.const 16))\n"
+                         "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                         "    (local $ptr i32)\n"
+                         "    global.get $heap\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.add\n"
+                         "    local.get $align\n"
+                         "    i32.const 1\n"
+                         "    i32.sub\n"
+                         "    i32.const -1\n"
+                         "    i32.xor\n"
+                         "    i32.and\n"
+                         "    local.tee $ptr\n"
+                         "    local.get $new_size\n"
+                         "    i32.add\n"
+                         "    global.set $heap\n"
+                         "    local.get $ptr)\n"
+                         "  (func (export \"cm32p2||echo\") (param $ptr i32) (param $len i32) (result i32)\n"
+                         "    (local $dst i32)\n"
+                         "    (local $ret i32)\n"
+                         "    (local $size i32)\n"
+                         "    local.get $len\n"
+                         "    i32.const -2147483648\n"
+                         "    i32.and\n"
+                         "    if (result i32)\n"
+                         "      local.get $len\n"
+                         "      i32.const 2147483647\n"
+                         "      i32.and\n"
+                         "      i32.const 2\n"
+                         "      i32.mul\n"
+                         "    else\n"
+                         "      local.get $len\n"
+                         "    end\n"
+                         "    local.set $size\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 2\n"
+                         "    local.get $size\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $dst\n"
+                         "    local.get $dst\n"
+                         "    local.get $ptr\n"
+                         "    local.get $size\n"
+                         "    memory.copy\n"
+                         "    i32.const 0\n"
+                         "    i32.const 0\n"
+                         "    i32.const 4\n"
+                         "    i32.const 8\n"
+                         "    call $realloc_impl\n"
+                         "    local.set $ret\n"
+                         "    local.get $ret\n"
+                         "    local.get $dst\n"
+                         "    i32.store\n"
+                         "    local.get $ret\n"
+                         "    i32.const 4\n"
+                         "    i32.add\n"
+                         "    local.get $len\n"
+                         "    i32.store\n"
+                         "    local.get $ret)\n"
+                         "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                         "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                         "    local.get 0\n"
+                         "    local.get 1\n"
+                         "    local.get 2\n"
+                         "    local.get 3\n"
+                         "    call $realloc_impl)\n"
+                         "  (func (export \"cm32p2_initialize\"))\n"
+                         ")\n") >= (int)sizeof(wat_text)) {
+                fprintf(stderr, "%s: failed to build compact-utf16 pair-result WAT text\n", test_case->name);
+                return 0;
+            }
+        }
+    } else if (test_case->shape == WASI_COMPARE_CASE_LIST) {
         if (snprintf(wat_text,
                      sizeof(wat_text),
                      "(module\n"
@@ -453,15 +682,20 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
                      "  (func (export \"cm32p2||echo\") (param $ptr i32) (param $len i32) (result i32)\n"
                      "    (local $dst i32)\n"
                      "    (local $ret i32)\n"
-                     "    i32.const 0\n"
-                     "    i32.const 0\n"
-                     "    i32.const 1\n"
+                     "    (local $size i32)\n"
                      "    local.get $len\n"
+                     "    i32.const %u\n"
+                     "    i32.mul\n"
+                     "    local.set $size\n"
+                     "    i32.const 0\n"
+                     "    i32.const 0\n"
+                     "    i32.const %u\n"
+                     "    local.get $size\n"
                      "    call $realloc_impl\n"
                      "    local.set $dst\n"
                      "    local.get $dst\n"
                      "    local.get $ptr\n"
-                     "    local.get $len\n"
+                     "    local.get $size\n"
                      "    memory.copy\n"
                      "    i32.const 0\n"
                      "    i32.const 0\n"
@@ -486,8 +720,10 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
                      "    local.get 3\n"
                      "    call $realloc_impl)\n"
                      "  (func (export \"cm32p2_initialize\"))\n"
-                     ")\n") >= (int)sizeof(wat_text)) {
-            fprintf(stderr, "%s: failed to build pair-result WAT text\n", test_case->name);
+                     ")\n",
+                     (unsigned)test_case->list_item_size,
+                     (unsigned)test_case->list_item_size) >= (int)sizeof(wat_text)) {
+            fprintf(stderr, "%s: failed to build list-result WAT text\n", test_case->name);
             return 0;
         }
     } else if (snprintf(wat_text,
@@ -710,22 +946,24 @@ cleanup:
 }
 
 static const wasi_compare_case_t wasi_compare_cases[] = {
-    { "bool", "bool", "i32", "echo(true)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 } },
-    { "s8", "s8", "i32", "echo(-8)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 } },
-    { "u8", "u8", "i32", "echo(255)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u } },
-    { "s16", "s16", "i32", "echo(-1234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 } },
-    { "u16", "u16", "i32", "echo(54321)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u } },
-    { "s32", "s32", "i32", "echo(-12345678)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 } },
-    { "u32", "u32", "i32", "echo(3456789012)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u } },
-    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) } },
-    { "u64", "u64", "i64", "echo(12345678901234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) } },
-    { "f32", "f32", "f32", "echo(1.5)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f } },
-    { "f64", "f64", "f64", "echo(-2.25)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 } },
-    { "char", "char", "i32", "echo('A')", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' } },
-    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
-    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
-    { "string-empty", "string", "i32", "echo(\"\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
-    { "list-u8", "list<u8>", NULL, "echo([1, 2, 3])", WASI_COMPARE_CASE_LIST_U8, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
+    { "bool", "bool", "i32", "echo(true)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 }, 0, 0u, 0u, { { 0 } } },
+    { "s8", "s8", "i32", "echo(-8)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 }, 0, 0u, 0u, { { 0 } } },
+    { "u8", "u8", "i32", "echo(255)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u }, 0, 0u, 0u, { { 0 } } },
+    { "s16", "s16", "i32", "echo(-1234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 }, 0, 0u, 0u, { { 0 } } },
+    { "u16", "u16", "i32", "echo(54321)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u }, 0, 0u, 0u, { { 0 } } },
+    { "s32", "s32", "i32", "echo(-12345678)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 }, 0, 0u, 0u, { { 0 } } },
+    { "u32", "u32", "i32", "echo(3456789012)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u }, 0, 0u, 0u, { { 0 } } },
+    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) }, 0, 0u, 0u, { { 0 } } },
+    { "u64", "u64", "i64", "echo(12345678901234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) }, 0, 0u, 0u, { { 0 } } },
+    { "f32", "f32", "f32", "echo(1.5)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f }, 0, 0u, 0u, { { 0 } } },
+    { "f64", "f64", "f64", "echo(-2.25)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 }, 0, 0u, 0u, { { 0 } } },
+    { "char", "char", "i32", "echo('A')", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' }, 0, 0u, 0u, { { 0 } } },
+    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
+    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
+    { "string-empty", "string", "i32", "echo(\"\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, 0, 0u, 0u, { { 0 } } },
+    { "string-utf16", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, "utf16", WASI_STRING_ENCODING_UTF16, { 0 }, 0, 0u, 0u, { { 0 } } },
+    { "list-u8", "list<u8>", NULL, "echo([1, 2, 3])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U8, 1u, 3u, { { .u8 = 1u }, { .u8 = 2u }, { .u8 = 3u }, { 0 } } },
+    { "list-u32", "list<u32>", NULL, "echo([10, 20, 30])", WASI_COMPARE_CASE_LIST, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 }, WASI_VALUE_KIND_U32, 4u, 3u, { { .u32 = 10u }, { .u32 = 20u }, { .u32 = 30u }, { 0 } } },
 };
 
 static const wasi_compare_case_t* wasi_compare_find_case(const char* name) {

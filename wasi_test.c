@@ -885,6 +885,7 @@ enum {
     WASI_TEST_COMPOUND_TYPE_VARIANT_JOIN = 6u,
     WASI_TEST_COMPOUND_TYPE_FIXED_LIST_FLAT = 7u,
     WASI_TEST_COMPOUND_TYPE_FIXED_LIST_SPILL = 8u,
+    WASI_TEST_COMPOUND_TYPE_TUPLE = 9u,
 };
 
 enum {
@@ -1224,6 +1225,15 @@ static void wasi_test_emit_fixed_list_u32_valtype(wasi_test_builder_t* b, uint32
     wasi_test_emit_leb128_u32(b, length);
 }
 
+static void wasi_test_emit_tuple_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x6Fu);
+    wasi_test_emit_leb128_u32(b, 3u);
+    wasi_test_emit(b, 0x79u);
+    wasi_test_emit(b, 0x73u);
+    wasi_test_emit(b, 0x70u);
+    wasi_test_emit(b, 0x7Du);
+}
+
 static void wasi_test_emit_option_string_valtype(wasi_test_builder_t* b) {
     wasi_test_emit(b, 0x6Bu);
     wasi_test_emit(b, 0x73u);
@@ -1299,7 +1309,7 @@ static void wasi_test_build_compound_types_component(wasi_test_builder_t* compon
     wasi_test_emit_component_header(component);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 9u);
+    wasi_test_emit_leb128_u32(&sec, 10u);
 
     wasi_test_emit(&sec, 0x40u);
     wasi_test_emit_leb128_u32(&sec, 1u);
@@ -1368,6 +1378,13 @@ static void wasi_test_build_compound_types_component(wasi_test_builder_t* compon
     wasi_test_emit_fixed_list_u32_valtype(&sec, 17u);
     wasi_test_emit(&sec, 0x00u);
     wasi_test_emit_fixed_list_u32_valtype(&sec, 17u);
+
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_plain_name(&sec, "t");
+    wasi_test_emit_tuple_valtype(&sec);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_tuple_valtype(&sec);
 
     wasi_test_emit_section(component, 7u, sec.buf, sec.len);
 }
@@ -1776,10 +1793,11 @@ static void wasi_test_build_compound_core_module(wasi_test_builder_t* mod) {
     wasi_test_emit_section(mod, 6u, sec.buf, sec.len);
 
     memset(&sec, 0, sizeof(sec));
-    wasi_test_emit_leb128_u32(&sec, 15u);
+    wasi_test_emit_leb128_u32(&sec, 16u);
     wasi_test_emit_export(&sec, "memory", 0x02u, 0u);
     wasi_test_emit_export(&sec, "cabi_realloc", 0x00u, 0u);
     wasi_test_emit_export(&sec, "record_echo", 0x00u, 1u);
+    wasi_test_emit_export(&sec, "tuple_echo", 0x00u, 1u);
     wasi_test_emit_export(&sec, "flags_echo", 0x00u, 2u);
     wasi_test_emit_export(&sec, "spill_sum", 0x00u, 3u);
     wasi_test_emit_export(&sec, "option_echo", 0x00u, 4u);
@@ -3824,6 +3842,89 @@ WL_TEST(test_wasi_canon_call_roundtrips_record_and_list) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_canon_call_roundtrips_tuple) {
+    wasi_engine_t engine;
+    wasi_component_t* component;
+    wasm_module_t* core_module;
+    wasi_test_builder_t component_bytes;
+    wasi_test_builder_t module_bytes;
+    wasi_value_t arg;
+    wasi_value_t result;
+    wasi_value_t tuple_fields[3];
+    wasi_value_t list_items[3];
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_compound_types_component(&component_bytes);
+    component = wasi_load(&engine, component_bytes.buf, component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_test_build_compound_core_module(&module_bytes);
+    core_module = wasm_load(&engine.runtime, module_bytes.buf, module_bytes.len);
+    WL_REQUIRE_MSG(t, core_module != NULL,
+                   "wasm_load failed: %s",
+                   engine.runtime.error_msg[0] ? engine.runtime.error_msg : wasm_error_string(engine.runtime.last_error));
+
+    memset(&arg, 0, sizeof(arg));
+    memset(&result, 0, sizeof(result));
+    memset(tuple_fields, 0, sizeof(tuple_fields));
+    memset(list_items, 0, sizeof(list_items));
+
+    list_items[0].kind = WASI_VALUE_KIND_U8;
+    list_items[0].of.u8 = 4u;
+    list_items[1].kind = WASI_VALUE_KIND_U8;
+    list_items[1].of.u8 = 5u;
+    list_items[2].kind = WASI_VALUE_KIND_U8;
+    list_items[2].of.u8 = 6u;
+
+    tuple_fields[0].kind = WASI_VALUE_KIND_U32;
+    tuple_fields[0].of.u32 = 321u;
+    tuple_fields[1].kind = WASI_VALUE_KIND_STRING;
+    tuple_fields[1].of.string.data = (char*)"yo";
+    tuple_fields[1].of.string.len = 2u;
+    tuple_fields[1].of.string.owned = 0;
+    tuple_fields[2].kind = WASI_VALUE_KIND_LIST;
+    tuple_fields[2].of.seq.values = list_items;
+    tuple_fields[2].of.seq.len = 3u;
+    tuple_fields[2].of.seq.owned = 0;
+
+    arg.kind = WASI_VALUE_KIND_TUPLE;
+    arg.of.seq.values = tuple_fields;
+    arg.of.seq.len = 3u;
+    arg.of.seq.owned = 0;
+
+    err = wasi_canon_call(component,
+                          WASI_TEST_COMPOUND_TYPE_TUPLE,
+                          core_module,
+                          "tuple_echo",
+                          NULL,
+                          &arg,
+                          1u,
+                          &result,
+                          1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_canon_call tuple failed: %s", engine.error_msg);
+    wasi_test_expect_realloc_args(t, core_module, 0, 0, 4, 20);
+    WL_CHECK(t, result.kind == WASI_VALUE_KIND_TUPLE);
+    WL_CHECK(t, result.of.seq.len == 3u);
+    WL_CHECK(t, result.of.seq.values[0].kind == WASI_VALUE_KIND_U32);
+    WL_CHECK(t, result.of.seq.values[0].of.u32 == 321u);
+    WL_CHECK(t, result.of.seq.values[1].kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, result.of.seq.values[1].of.string.len == 2u);
+    WL_CHECK(t, memcmp(result.of.seq.values[1].of.string.data, "yo", 2u) == 0);
+    WL_CHECK(t, result.of.seq.values[2].kind == WASI_VALUE_KIND_LIST);
+    WL_CHECK(t, result.of.seq.values[2].of.seq.len == 3u);
+    WL_CHECK(t, result.of.seq.values[2].of.seq.values[0].of.u8 == 4u);
+    WL_CHECK(t, result.of.seq.values[2].of.seq.values[1].of.u8 == 5u);
+    WL_CHECK(t, result.of.seq.values[2].of.seq.values[2].of.u8 == 6u);
+
+    wasi_value_destroy(&result);
+    wasm_free_module(core_module);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_canon_call_roundtrips_flags) {
     wasi_engine_t engine;
     wasi_component_t* component;
@@ -4493,6 +4594,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_latin1_utf16_strings),
         WL_TEST_CASE(test_wasi_canon_call_rejects_invalid_scalar_values),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_record_and_list),
+        WL_TEST_CASE(test_wasi_canon_call_roundtrips_tuple),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_flags),
         WL_TEST_CASE(test_wasi_canon_call_spills_large_param_lists),
         WL_TEST_CASE(test_wasi_canon_call_roundtrips_option),
