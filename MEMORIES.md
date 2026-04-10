@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 13
+Memory Version: 14
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -55,6 +55,7 @@ This file is the canonical checked-in snapshot of repo memory.
 - The default validator label budget is `WASM_MAX_LABELS = 4096`, which is high enough for large real-world modules like the official sqlite3 Wasm build without custom runtime config.
 - Float min/max intentionally avoid `fmin[f]` and `fmax[f]` and use signed-zero-aware comparisons to preserve Wasm semantics.
 - Regression coverage lives primarily in `wasm_test.c`, with additional spectest and emcc coverage under `test/`.
+- `wasi.h`'s current M5 slice now accepts top-level core-instance `from exports` records on the narrow instance path and can register their function exports as either direct forwards or synchronous `canon lower` bridges, so later embedded core modules can call back into supported local component funcs and resource builtins through real lower/lift dispatch.
 
 ## wasm2api.md
 
