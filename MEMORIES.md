@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 11
+Memory Version: 12
 
 Current curated contents of `/memories/repo/` as of 2026-04-09.
 
@@ -81,3 +81,9 @@ This file is the canonical checked-in snapshot of repo memory.
 - The harness intentionally targets the low-level canonical ABI path instead of `wasi_instantiate()`, because `wasm-tools component new` emits multi-core-module/start-shim components that exceed the current narrow instance path.
 - Standard embedded components require post-return signatures to match the lowered core result type (`i32` for bool/u8/u16/u32/s8/s16/s32, `i64` for s64/u64); hardcoding `i32` makes `wasm-tools component new` reject 64-bit cases.
 - CTest label `wasi-wasmtime` is enabled only when both `wasmtime` and `wasm-tools` provide `component embed` and `component new`.
+
+## wasi-standard-type-space.md
+
+- Standard `wasm-tools component new` output can introduce top-level type imports for named WIT types; those imports occupy slots in the component type index space even when `wasi.h` stores only defined types in `component->types`.
+- `wasi__parse_component_imports()` must use `wasi__read_component_externdesc()` rather than assuming `kind-byte + type-index`, or standard function import descriptors with bound tags leave trailing bytes.
+- The new `wasi-wasmtime` `list<u8>` case avoids the remaining named-type-import resolution gap; adding standard named `record`/`variant` harness cases will require full type-index-space resolution across both defined types and imported types.

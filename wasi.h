@@ -2109,6 +2109,8 @@ static wasi_error_t wasi__parse_component_sections(wasi_engine_t* engine, wasi_c
     return WASI_OK;
 }
 
+static int wasi__read_component_externdesc(wasi__reader_t* reader, wasi_component_externdesc_t* desc);
+
 static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
                                                   wasi_component_t* component,
                                                   const wasi_component_section_t* section) {
@@ -2129,39 +2131,46 @@ static wasi_error_t wasi__parse_component_imports(wasi_engine_t* engine,
         size_t entry_offset = wasi__reader_offset(&reader);
         char* name = NULL;
         uint8_t name_kind = 0;
-        uint8_t kind_byte;
-        wasi_component_extern_kind_t kind;
-        uint32_t type_index;
+        wasi_component_externdesc_t desc;
         wasi_error_t err;
+
+        memset(&desc, 0, sizeof(desc));
+        desc.kind = WASI_COMPONENT_EXTERN_KIND_UNKNOWN;
+        desc.type_index = UINT32_MAX;
 
         if (!wasi__read_component_name(&reader, &name_kind, &name)) {
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component import name");
         }
 
-        kind_byte = wasi__read_u8(&reader);
-        kind = wasi__extern_kind_from_byte(kind_byte);
-        type_index = wasi__read_leb128_u32(&reader);
-        if (reader.malformed) {
+        if (!wasi__read_component_externdesc(&reader, &desc)) {
             WASM_FREE(name);
             return wasi__set_error_literal(engine, WASI_ERR_MALFORMED, "malformed component import descriptor");
         }
 
-        err = wasi__component_append_import(component, entry_offset, name, name_kind, kind, type_index);
+        err = wasi__component_append_import(component,
+                                            entry_offset,
+                                            name,
+                                            name_kind,
+                                            desc.kind,
+                                            desc.has_type_index ? desc.type_index : UINT32_MAX);
         if (err != WASI_OK) {
+            wasi__component_externdesc_release(&desc);
             return wasi__set_error_literal(engine,
                                            err,
                                            err == WASI_ERR_OOM ? "component import alloc failed"
                                                                : wasi_error_string(err));
         }
-        if (kind == WASI_COMPONENT_EXTERN_KIND_FUNC) {
-            err = wasi__component_append_func(component, entry_offset, type_index);
+        if (desc.kind == WASI_COMPONENT_EXTERN_KIND_FUNC && desc.has_type_index) {
+            err = wasi__component_append_func(component, entry_offset, desc.type_index);
             if (err != WASI_OK) {
+                wasi__component_externdesc_release(&desc);
                 return wasi__set_error_literal(engine,
                                                err,
                                                err == WASI_ERR_OOM ? "component func alloc failed"
                                                                    : wasi_error_string(err));
             }
         }
+        wasi__component_externdesc_release(&desc);
     }
 
     if (reader.ptr != reader.end) {
@@ -8728,8 +8737,12 @@ int wasi_component_export_func_type_index(const wasi_component_t* component, uin
     if (!component || index >= component->num_exports || !out_type_index) return 0;
     if (component->exports[index].kind != WASI_COMPONENT_EXTERN_KIND_FUNC) return 0;
     if (component->exports[index].has_type) {
-        *out_type_index = component->exports[index].type_index;
-        return 1;
+        uint32_t annotated_type_index = component->exports[index].type_index;
+        if (annotated_type_index < component->num_types &&
+            component->types[annotated_type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC) {
+            *out_type_index = annotated_type_index;
+            return 1;
+        }
     }
     func_index = component->exports[index].index;
     if (func_index >= component->num_funcs) return 0;

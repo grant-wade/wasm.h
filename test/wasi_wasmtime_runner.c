@@ -43,11 +43,18 @@ typedef union wasi_compare_scalar_t {
     uint32_t char32;
 } wasi_compare_scalar_t;
 
+typedef enum wasi_compare_case_shape_t {
+    WASI_COMPARE_CASE_SCALAR = 0,
+    WASI_COMPARE_CASE_STRING = 1,
+    WASI_COMPARE_CASE_LIST_U8 = 2,
+} wasi_compare_case_shape_t;
+
 typedef struct wasi_compare_case_t {
     const char* name;
     const char* wit_type;
     const char* core_type;
     const char* invoke_expr;
+    wasi_compare_case_shape_t shape;
     wasi_value_kind_t value_kind;
     const char* string_input;
     size_t string_len;
@@ -202,9 +209,29 @@ static unsigned char* wasi_compare_read_file_bytes(const char* path, size_t* out
     return bytes;
 }
 
-static void wasi_compare_set_arg(wasi_value_t* arg, const wasi_compare_case_t* test_case) {
+static void wasi_compare_set_arg(wasi_value_t* arg,
+                                 wasi_value_t* scratch,
+                                 size_t scratch_count,
+                                 const wasi_compare_case_t* test_case) {
     memset(arg, 0, sizeof(*arg));
     arg->kind = test_case->value_kind;
+
+    if (test_case->shape == WASI_COMPARE_CASE_LIST_U8) {
+        if (!scratch || scratch_count < 3u) return;
+
+        scratch[0].kind = WASI_VALUE_KIND_U8;
+        scratch[0].of.u8 = 1u;
+        scratch[1].kind = WASI_VALUE_KIND_U8;
+        scratch[1].of.u8 = 2u;
+        scratch[2].kind = WASI_VALUE_KIND_U8;
+        scratch[2].of.u8 = 3u;
+
+        arg->kind = WASI_VALUE_KIND_LIST;
+        arg->of.seq.values = scratch;
+        arg->of.seq.len = 3u;
+        arg->of.seq.owned = 0;
+        return;
+    }
 
     switch (test_case->value_kind) {
         case WASI_VALUE_KIND_BOOL:
@@ -253,10 +280,12 @@ static void wasi_compare_set_arg(wasi_value_t* arg, const wasi_compare_case_t* t
     }
 }
 
-static int wasi_compare_serialize_value(const wasi_value_t* value, char* output, size_t output_cap) {
+static int wasi_compare_serialize_value_basic(const wasi_value_t* value, char* output, size_t output_cap) {
     size_t in_len;
     size_t out_len = 0u;
     size_t i;
+    size_t cursor = 0u;
+    char item_text[128];
 
     switch (value->kind) {
         case WASI_VALUE_KIND_BOOL:
@@ -309,9 +338,51 @@ static int wasi_compare_serialize_value(const wasi_value_t* value, char* output,
             output[out_len++] = '"';
             output[out_len] = '\0';
             return 1;
+        case WASI_VALUE_KIND_LIST:
+        case WASI_VALUE_KIND_FIXED_LIST:
+            if (!output || output_cap < 3u) return 0;
+            output[cursor++] = '[';
+            for (i = 0; i < value->of.seq.len; i++) {
+                if (i > 0u) {
+                    if (cursor + 2u >= output_cap) return 0;
+                    output[cursor++] = ',';
+                    output[cursor++] = ' ';
+                }
+                if (!wasi_compare_serialize_value_basic(&value->of.seq.values[i], item_text, sizeof(item_text))) return 0;
+                in_len = strlen(item_text);
+                if (cursor + in_len + 1u >= output_cap) return 0;
+                memcpy(output + cursor, item_text, in_len);
+                cursor += in_len;
+            }
+            if (cursor + 2u > output_cap) return 0;
+            output[cursor++] = ']';
+            output[cursor] = '\0';
+            return 1;
         default:
             return 0;
     }
+}
+
+static int wasi_compare_serialize_value(const wasi_compare_case_t* test_case,
+                                        const wasi_value_t* value,
+                                        char* output,
+                                        size_t output_cap) {
+    char field_a[64];
+    char field_b[128];
+    char field_c[128];
+
+    (void)test_case;
+
+    (void)field_a;
+    (void)field_b;
+    (void)field_c;
+
+    return wasi_compare_serialize_value_basic(value, output, output_cap);
+}
+
+static int wasi_compare_case_uses_memory(const wasi_compare_case_t* test_case) {
+    return test_case->shape == WASI_COMPARE_CASE_STRING ||
+           test_case->shape == WASI_COMPARE_CASE_LIST_U8;
 }
 
 static int wasi_compare_build_component(const char* wasm_tools_path,
@@ -330,8 +401,8 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
     char encoding_arg[128];
     char command[8192];
     char output[4096];
-    char wit_text[256];
-    char wat_text[2048];
+    char wit_text[512];
+    char wat_text[4096];
     int ok = 0;
 
     if (!wasi_compare_make_temp_base(test_case->name, base, sizeof(base))) {
@@ -347,15 +418,15 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
     }
 
     if (snprintf(wit_text,
-                 sizeof(wit_text),
-                 "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
-                 test_case->wit_type,
-                 test_case->wit_type) >= (int)sizeof(wit_text)) {
+                        sizeof(wit_text),
+                        "package local:compare;\nworld compare {\n  export echo: func(x: %s) -> %s;\n}\n",
+                        test_case->wit_type,
+                        test_case->wit_type) >= (int)sizeof(wit_text)) {
         fprintf(stderr, "%s: failed to build WIT text\n", test_case->name);
         return 0;
     }
 
-    if (test_case->value_kind == WASI_VALUE_KIND_STRING) {
+    if (test_case->shape == WASI_COMPARE_CASE_STRING || test_case->shape == WASI_COMPARE_CASE_LIST_U8) {
         if (snprintf(wat_text,
                      sizeof(wat_text),
                      "(module\n"
@@ -416,7 +487,7 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
                      "    call $realloc_impl)\n"
                      "  (func (export \"cm32p2_initialize\"))\n"
                      ")\n") >= (int)sizeof(wat_text)) {
-            fprintf(stderr, "%s: failed to build string WAT text\n", test_case->name);
+            fprintf(stderr, "%s: failed to build pair-result WAT text\n", test_case->name);
             return 0;
         }
     } else if (snprintf(wat_text,
@@ -514,13 +585,14 @@ static int wasi_compare_run_case(const char* wasmtime_path,
     char invoke_arg[1024];
     char command[8192];
     char wasmtime_output[4096];
-    char runtime_output[128];
+    char runtime_output[512];
     unsigned char* component_bytes = NULL;
     size_t component_size = 0u;
     wasi_engine_t engine;
     wasi_component_t* component = NULL;
     wasm_module_t* core_module = NULL;
     wasi_value_t arg;
+    wasi_value_t arg_scratch[6];
     wasi_value_t result;
     wasi_canon_options_t options;
     uint32_t func_type_index = 0u;
@@ -528,6 +600,7 @@ static int wasi_compare_run_case(const char* wasmtime_path,
     int ok = 0;
 
     memset(&arg, 0, sizeof(arg));
+    memset(arg_scratch, 0, sizeof(arg_scratch));
     memset(&result, 0, sizeof(result));
     memset(component_path, 0, sizeof(component_path));
     memset(&options, 0, sizeof(options));
@@ -564,15 +637,17 @@ static int wasi_compare_run_case(const char* wasmtime_path,
         goto cleanup_component;
     }
 
-    wasi_compare_set_arg(&arg, test_case);
+    wasi_compare_set_arg(&arg, arg_scratch, sizeof(arg_scratch) / sizeof(arg_scratch[0]), test_case);
     err = wasi_canon_options_default(&options);
     if (err != WASI_OK) {
         fprintf(stderr, "%s: wasi_canon_options_default failed: %s\n", test_case->name, engine.error_msg);
         goto cleanup_component;
     }
-    if (test_case->value_kind == WASI_VALUE_KIND_STRING) {
+    if (wasi_compare_case_uses_memory(test_case)) {
         options.post_return_name = "cm32p2||echo_post";
         options.cabi_realloc_name = "cm32p2_realloc";
+    }
+    if (test_case->shape == WASI_COMPARE_CASE_STRING) {
         options.string_encoding = test_case->string_encoding;
     }
     err = wasi_canon_call(component,
@@ -588,7 +663,7 @@ static int wasi_compare_run_case(const char* wasmtime_path,
         fprintf(stderr, "%s: wasi_canon_call failed: %s\n", test_case->name, engine.error_msg);
         goto cleanup_component;
     }
-    if (!wasi_compare_serialize_value(&result, runtime_output, sizeof(runtime_output))) {
+    if (!wasi_compare_serialize_value(test_case, &result, runtime_output, sizeof(runtime_output))) {
         fprintf(stderr, "%s: failed to serialize runtime result kind 0x%02X\n", test_case->name, (unsigned)result.kind);
         goto cleanup_component;
     }
@@ -635,21 +710,22 @@ cleanup:
 }
 
 static const wasi_compare_case_t wasi_compare_cases[] = {
-    { "bool", "bool", "i32", "echo(true)", WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 } },
-    { "s8", "s8", "i32", "echo(-8)", WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 } },
-    { "u8", "u8", "i32", "echo(255)", WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u } },
-    { "s16", "s16", "i32", "echo(-1234)", WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 } },
-    { "u16", "u16", "i32", "echo(54321)", WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u } },
-    { "s32", "s32", "i32", "echo(-12345678)", WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 } },
-    { "u32", "u32", "i32", "echo(3456789012)", WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u } },
-    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) } },
-    { "u64", "u64", "i64", "echo(12345678901234)", WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) } },
-    { "f32", "f32", "f32", "echo(1.5)", WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f } },
-    { "f64", "f64", "f64", "echo(-2.25)", WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 } },
-    { "char", "char", "i32", "echo('A')", WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' } },
-    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
-    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
-    { "string-empty", "string", "i32", "echo(\"\")", WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
+    { "bool", "bool", "i32", "echo(true)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_BOOL, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .boolean = 1 } },
+    { "s8", "s8", "i32", "echo(-8)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s8 = -8 } },
+    { "u8", "u8", "i32", "echo(255)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U8, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u8 = 255u } },
+    { "s16", "s16", "i32", "echo(-1234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s16 = -1234 } },
+    { "u16", "u16", "i32", "echo(54321)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U16, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u16 = 54321u } },
+    { "s32", "s32", "i32", "echo(-12345678)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s32 = -12345678 } },
+    { "u32", "u32", "i32", "echo(3456789012)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u32 = 3456789012u } },
+    { "s64", "s64", "i64", "echo(-1234567890123)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_S64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .s64 = INT64_C(-1234567890123) } },
+    { "u64", "u64", "i64", "echo(12345678901234)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_U64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .u64 = UINT64_C(12345678901234) } },
+    { "f32", "f32", "f32", "echo(1.5)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F32, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f32 = 1.5f } },
+    { "f64", "f64", "f64", "echo(-2.25)", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_F64, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .f64 = -2.25 } },
+    { "char", "char", "i32", "echo('A')", WASI_COMPARE_CASE_SCALAR, WASI_VALUE_KIND_CHAR, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { .char32 = (uint32_t)'A' } },
+    { "string-hello", "string", "i32", "echo(\"hello\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "hello", 5u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
+    { "string-unicode", "string", "i32", "echo(\"🙂\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "🙂", sizeof("🙂") - 1u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
+    { "string-empty", "string", "i32", "echo(\"\")", WASI_COMPARE_CASE_STRING, WASI_VALUE_KIND_STRING, "", 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
+    { "list-u8", "list<u8>", NULL, "echo([1, 2, 3])", WASI_COMPARE_CASE_LIST_U8, WASI_VALUE_KIND_LIST, NULL, 0u, NULL, WASI_STRING_ENCODING_UTF8, { 0 } },
 };
 
 static const wasi_compare_case_t* wasi_compare_find_case(const char* name) {
