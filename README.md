@@ -116,7 +116,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - host-defined resource registration and per-instance handle tables through `wasi_define_resource`, `wasi_instance_bind_resource_type`, `wasi_resource_new`, `wasi_resource_rep`, and `wasi_resource_drop`
 - synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported single-module canon lifts, including outstanding-borrow guards and own-handle round-trips
 
-`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, resource-handle groundwork for Milestone 4, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, and whose exported functions are direct synchronous canon lifts.
+`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, resource-handle groundwork for Milestone 4, and a narrow instance path for simple components whose core instances can be instantiated sequentially, can import from earlier dynamic core instances, can expose top-level core-instance export aliases, can route exported component functions through static `instance { export ... }` aliases, and whose exported functions ultimately resolve to direct synchronous canon lifts. Outer component aliases still remain outside the supported narrow path.
 
 ### Memory and globals
 
