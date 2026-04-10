@@ -769,7 +769,7 @@ typedef struct wasm__control_target_t {
     uint32_t aux_offset;
 } wasm__control_target_t;
 
-typedef struct wasm_func_t {
+struct wasm_func_t {
     uint32_t type_idx;
     uint32_t num_locals;
     wasm_valtype_t* locals;
@@ -783,24 +783,24 @@ typedef struct wasm_func_t {
     int is_import;
     wasm_host_func_t host_func;
     void* host_userdata;
-} wasm_func_t;
+};
 
-typedef struct wasm_func_ref_t {
+struct wasm_func_ref_t {
     struct wasm_module_t* module;
     uint32_t func_idx;
-} wasm_func_ref_t;
+};
 
-typedef struct wasm__exception_object_t {
+struct wasm__exception_object_t {
     uint32_t tag_index;
     uint64_t tag_identity;
     wasm_value_t* values;
     uint32_t num_values;
     struct wasm__exception_object_t* next;
-} wasm__exception_object_t;
+};
 
-typedef struct wasm__emscripten_state_t {
+struct wasm__emscripten_state_t {
     wasm_memory_t memory;
-} wasm__emscripten_state_t;
+};
 
 struct wasm__externref_box_t {
     wasm_value_t value;
