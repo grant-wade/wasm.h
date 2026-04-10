@@ -49,6 +49,7 @@ typedef enum wasi_compare_case_shape_t {
     WASI_COMPARE_CASE_LIST = 2,
     WASI_COMPARE_CASE_RECORD = 3,
     WASI_COMPARE_CASE_VARIANT = 4,
+    WASI_COMPARE_CASE_VARIANT_JOIN = 5,
 } wasi_compare_case_shape_t;
 
 typedef struct wasi_compare_case_t {
@@ -309,7 +310,8 @@ static void wasi_compare_set_arg(wasi_value_t* arg,
         return;
     }
 
-    if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+    if (test_case->shape == WASI_COMPARE_CASE_VARIANT ||
+        test_case->shape == WASI_COMPARE_CASE_VARIANT_JOIN) {
         arg->kind = WASI_VALUE_KIND_VARIANT;
         arg->of.variant.case_index = test_case->variant_case_index;
         arg->of.variant.has_payload = test_case->variant_has_payload ? 1u : 0u;
@@ -486,7 +488,8 @@ static int wasi_compare_serialize_value(const wasi_compare_case_t* test_case,
         return 1;
     }
 
-    if (test_case->shape == WASI_COMPARE_CASE_VARIANT) {
+    if (test_case->shape == WASI_COMPARE_CASE_VARIANT ||
+        test_case->shape == WASI_COMPARE_CASE_VARIANT_JOIN) {
         const char* case_name;
         size_t case_len;
 
@@ -522,7 +525,8 @@ static int wasi_compare_case_uses_memory(const wasi_compare_case_t* test_case) {
     return test_case->shape == WASI_COMPARE_CASE_STRING ||
            test_case->shape == WASI_COMPARE_CASE_LIST ||
            test_case->shape == WASI_COMPARE_CASE_RECORD ||
-           test_case->shape == WASI_COMPARE_CASE_VARIANT;
+           test_case->shape == WASI_COMPARE_CASE_VARIANT ||
+           test_case->shape == WASI_COMPARE_CASE_VARIANT_JOIN;
 }
 
 static int wasi_compare_build_component(const char* wasm_tools_path,
@@ -585,6 +589,21 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
                      "  export echo: func(x: choice) -> choice;\n"
                      "}\n") >= (int)sizeof(wit_text)) {
             fprintf(stderr, "%s: failed to build variant WIT text\n", test_case->name);
+            return 0;
+        }
+    } else if (test_case->shape == WASI_COMPARE_CASE_VARIANT_JOIN) {
+        if (snprintf(wit_text,
+                     sizeof(wit_text),
+                     "package local:compare;\n"
+                     "world compare {\n"
+                     "  variant choice {\n"
+                     "    none,\n"
+                     "    num(u32),\n"
+                     "    big(u64),\n"
+                     "  }\n"
+                     "  export echo: func(x: choice) -> choice;\n"
+                     "}\n") >= (int)sizeof(wit_text)) {
+            fprintf(stderr, "%s: failed to build joined variant WIT text\n", test_case->name);
             return 0;
         }
     } else if (snprintf(wit_text,
@@ -1006,6 +1025,57 @@ static int wasi_compare_build_component(const char* wasm_tools_path,
             fprintf(stderr, "%s: failed to build variant-result WAT text\n", test_case->name);
             return 0;
         }
+    } else if (test_case->shape == WASI_COMPARE_CASE_VARIANT_JOIN) {
+        if (snprintf(wat_text,
+                     sizeof(wat_text),
+                     "(module\n"
+                     "  (memory (export \"cm32p2_memory\") 1)\n"
+                     "  (global $heap (mut i32) (i32.const 16))\n"
+                     "  (func $realloc_impl (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)\n"
+                     "    (local $ptr i32)\n"
+                     "    global.get $heap\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.add\n"
+                     "    local.get $align\n"
+                     "    i32.const 1\n"
+                     "    i32.sub\n"
+                     "    i32.const -1\n"
+                     "    i32.xor\n"
+                     "    i32.and\n"
+                     "    local.tee $ptr\n"
+                     "    local.get $new_size\n"
+                     "    i32.add\n"
+                     "    global.set $heap\n"
+                     "    local.get $ptr)\n"
+                     "  (func (export \"cm32p2||echo\") (param $tag i32) (param $payload i64) (result i32)\n"
+                     "    (local $ret i32)\n"
+                     "    i32.const 0\n"
+                     "    i32.const 0\n"
+                     "    i32.const 8\n"
+                     "    i32.const 16\n"
+                     "    call $realloc_impl\n"
+                     "    local.set $ret\n"
+                     "    local.get $ret\n"
+                     "    local.get $tag\n"
+                     "    i32.store\n"
+                     "    local.get $ret\n"
+                     "    local.get $payload\n"
+                     "    i64.store offset=8\n"
+                     "    local.get $ret)\n"
+                     "  (func (export \"cm32p2||echo_post\") (param i32))\n"
+                     "  (func (export \"cm32p2_realloc\") (param i32 i32 i32 i32) (result i32)\n"
+                     "    local.get 0\n"
+                     "    local.get 1\n"
+                     "    local.get 2\n"
+                     "    local.get 3\n"
+                     "    call $realloc_impl)\n"
+                     "  (func (export \"cm32p2_initialize\"))\n"
+                     ")\n") >= (int)sizeof(wat_text)) {
+            fprintf(stderr, "%s: failed to build joined-variant-result WAT text\n", test_case->name);
+            return 0;
+        }
     } else if (snprintf(wat_text,
                         sizeof(wat_text),
                         "(module\n"
@@ -1309,6 +1379,34 @@ static const wasi_compare_case_t wasi_compare_cases[] = {
         .variant_payload_string_len = 2u,
         .variant_case_count = 3u,
         .variant_case_names = { "none", "num", "text", NULL },
+    },
+    {
+        .name = "variant-join-u32",
+        .wit_type = "choice",
+        .invoke_expr = "echo(num(99))",
+        .shape = WASI_COMPARE_CASE_VARIANT_JOIN,
+        .value_kind = WASI_VALUE_KIND_VARIANT,
+        .string_encoding = WASI_STRING_ENCODING_UTF8,
+        .variant_case_index = 1u,
+        .variant_has_payload = 1,
+        .variant_payload_kind = WASI_VALUE_KIND_U32,
+        .variant_payload = { .u32 = 99u },
+        .variant_case_count = 3u,
+        .variant_case_names = { "none", "num", "big", NULL },
+    },
+    {
+        .name = "variant-join-u64",
+        .wit_type = "choice",
+        .invoke_expr = "echo(big(81985529216486895))",
+        .shape = WASI_COMPARE_CASE_VARIANT_JOIN,
+        .value_kind = WASI_VALUE_KIND_VARIANT,
+        .string_encoding = WASI_STRING_ENCODING_UTF8,
+        .variant_case_index = 2u,
+        .variant_has_payload = 1,
+        .variant_payload_kind = WASI_VALUE_KIND_U64,
+        .variant_payload = { .u64 = UINT64_C(0x0123456789ABCDEF) },
+        .variant_case_count = 3u,
+        .variant_case_names = { "none", "num", "big", NULL },
     },
 };
 

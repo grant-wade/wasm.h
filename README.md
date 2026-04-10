@@ -173,7 +173,7 @@ cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, the optional `wasmtime` comparison harness for representative `wasi.h` canonical ABI cases (`bool`, integer widths, `f32`, `f64`, `char`, UTF-8/UTF-16 string echoes, `list<u8>`/`list<u32>` round-trips, a nested `record { a: u32, b: string, c: list<u8> }` echo, and `variant { none, num(u32), text(string) }` payload round-trips), and the `emcc` fixture suite.
+`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, the optional `wasmtime` comparison harness for representative `wasi.h` canonical ABI cases (`bool`, integer widths, `f32`, `f64`, `char`, UTF-8/UTF-16 string echoes, `list<u8>`/`list<u32>` round-trips, a nested `record { a: u32, b: string, c: list<u8> }` echo, `variant { none, num(u32), text(string) }` payload round-trips, and a joined-payload `variant { none, num(u32), big(u64) }` echo), and the `emcc` fixture suite.
 
 - `wasm`
 - `wasm2api`
