@@ -1537,6 +1537,50 @@ static void wasi_test_build_core_instance_source_module(wasi_test_builder_t* mod
     wasi_test_emit_section(mod, 10u, sec.buf, sec.len);
 }
 
+static void wasi_test_build_start_state_module(wasi_test_builder_t* mod) {
+    wasi_test_builder_t sec = { 0 };
+    static const uint8_t empty[] = { 0 };
+    static const uint8_t i32_result[] = { 0x7F };
+    static const uint8_t mark_ops[] = { 0x41, 0x01, 0x24, 0x00, 0x0B };
+    static const uint8_t status_ops[] = { 0x23, 0x00, 0x0B };
+
+    memset(mod, 0, sizeof(*mod));
+    wasi_test_emit_header(mod);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_functype(&sec, NULL, 0u, NULL, 0u);
+    wasi_test_emit_functype(&sec, NULL, 0u, i32_result, 1u);
+    wasi_test_emit_section(mod, 1u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_section(mod, 3u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x7Fu);
+    wasi_test_emit(&sec, 0x01u);
+    wasi_test_emit(&sec, 0x41);
+    wasi_test_emit(&sec, 0x00);
+    wasi_test_emit(&sec, 0x0B);
+    wasi_test_emit_section(mod, 6u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_export(&sec, "mark", 0x00u, 0u);
+    wasi_test_emit_export(&sec, "status", 0x00u, 1u);
+    wasi_test_emit_section(mod, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_code_body(&sec, empty, 1u, mark_ops, (uint32_t)sizeof(mark_ops));
+    wasi_test_emit_code_body(&sec, empty, 1u, status_ops, (uint32_t)sizeof(status_ops));
+    wasi_test_emit_section(mod, 10u, sec.buf, sec.len);
+}
+
 static void wasi_test_build_core_instance_importing_module(wasi_test_builder_t* mod) {
     wasi_test_builder_t sec = { 0 };
     static const uint8_t i32_param[] = { 0x7F };
@@ -1991,6 +2035,48 @@ static void wasi_test_build_core_instance_u32_component(wasi_test_builder_t* com
     memset(&sec, 0, sizeof(sec));
     wasi_test_emit_leb128_u32(&sec, 1u);
     wasi_test_emit_component_export(&sec, "echo", 0x01u, 0u);
+    wasi_test_emit_section(component, 11u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_start_state_component(wasi_test_builder_t* component,
+                                                  const wasi_test_builder_t* core_module) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    wasi_test_emit_section(component, 1u, core_module->buf, core_module->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x01u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit(&sec, 0x79u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_section(component, 8u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_export(&sec, "run", 0x01u, 0u);
+    wasi_test_emit_component_export(&sec, "status", 0x01u, 1u);
     wasi_test_emit_section(component, 11u, sec.buf, sec.len);
 }
 
@@ -6018,6 +6104,53 @@ WL_TEST(test_wasi_instantiate_links_canon_lower_resource_roundtrip) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_instantiate_executes_zero_arg_component_start) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_module_bytes;
+    wasi_test_builder_t source_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* importing_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* importing_instance;
+    wasi_value_t result;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_start_state_module(&source_module_bytes);
+    wasi_test_build_start_state_component(&source_component_bytes, &source_module_bytes);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    err = wasi_bind_import_func(&engine, "run", source_instance, "run");
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_func failed: %s", engine.error_msg);
+
+    importing_component = wasi_load(&engine,
+                                    wasi_test_component_with_start,
+                                    sizeof(wasi_test_component_with_start));
+    WL_REQUIRE_MSG(t, importing_component != NULL, "wasi_load importing failed: %s", engine.error_msg);
+
+    importing_instance = wasi_instantiate(importing_component);
+    WL_REQUIRE_MSG(t, importing_instance != NULL, "wasi_instantiate importing failed: %s", engine.error_msg);
+
+    memset(&result, 0, sizeof(result));
+    err = wasi_call(source_instance, "status", NULL, 0u, &result, 1u);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_call status failed: %s", engine.error_msg);
+    WL_CHECK(t, result.kind == WASI_VALUE_KIND_U32);
+    WL_CHECK(t, result.of.u32 == 1u);
+
+    wasi_value_destroy(&result);
+    wasi_free_instance(importing_instance);
+    wasi_free_component(importing_component);
+    wasi_free_instance(source_instance);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instance_surfaces_lift_validation_failures) {
     wasi_engine_t engine;
     wasi_test_builder_t module_bytes;
@@ -6986,6 +7119,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_instantiate_resolves_bound_component_imports),
         WL_TEST_CASE(test_wasi_instantiate_links_canon_lower_from_nested_component_instance),
         WL_TEST_CASE(test_wasi_instantiate_links_canon_lower_resource_roundtrip),
+        WL_TEST_CASE(test_wasi_instantiate_executes_zero_arg_component_start),
         WL_TEST_CASE(test_wasi_instance_surfaces_lift_validation_failures),
         WL_TEST_CASE(test_wasi_parses_canon_builtins),
         WL_TEST_CASE(test_wasi_parses_current_canon_async_option),

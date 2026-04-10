@@ -10998,14 +10998,16 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
     uint32_t core_module_index = 0u;
     wasm_module_t* final_core_module = NULL;
     uint32_t i;
+    wasi_error_t err;
 
     if (!component || !component->engine) return NULL;
     engine = component->engine;
 
-    if (component->has_start) {
+    if (component->has_start &&
+        (component->start_arg_count != 0u || component->start_result_count != 0u)) {
         wasi__set_error_literal(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
-                                "wasi_instantiate does not yet support component start functions on the current linking path");
+                                "wasi_instantiate currently supports only zero-arg zero-result component start functions");
         return NULL;
     }
 
@@ -11430,6 +11432,23 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
 
     instance->core_module = final_core_module;
     instance->core_module_index = core_module_index;
+
+    if (component->has_start) {
+        err = wasi__call_component_func(instance,
+                                        component->start_func_index,
+                                        0,
+                                        0u,
+                                        "<component start>",
+                                        NULL,
+                                        0u,
+                                        NULL,
+                                        0u);
+        if (err != WASI_OK) {
+            wasi_free_instance(instance);
+            return NULL;
+        }
+    }
+
     return instance;
 }
 
