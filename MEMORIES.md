@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 15
+Memory Version: 16
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -48,8 +48,9 @@ This file is the canonical checked-in snapshot of repo memory.
 ## component-linker.md
 
 - `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func` and `instance` imports, and alias resolution through live child instances rather than only static `from exports` records.
-- Engine-level `wasi_bind_import_instance()` bindings now satisfy top-level component instance imports by fully qualified interface name/version; unresolved instance imports fail at instantiation time with named diagnostics.
-- The current linker still does not resolve outer aliases, imported components, direct component func imports from the engine, or start sections.
+- Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
+- Component instantiation args on the current M5 path now also accept `component` references in addition to `func` and `instance`.
+- The current linker still does not resolve outer aliases, broader core-instance arg sorts, or start sections.
 
 ## wasm-runtime.md
 
