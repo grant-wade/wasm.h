@@ -175,7 +175,7 @@ find_program(WL_WASMTIME_EXECUTABLE
 )
 
 if(WL_WASMTIME_EXECUTABLE AND WL_WASM_TOOLS_COMPONENT_EMBED_AVAILABLE AND WL_WASM_TOOLS_COMPONENT_NEW_AVAILABLE)
-    set(WL_WASI_WASMTIME_CASES bool s8 u8 s16 u16 s32 u32 s64 u64 f32 f64 char)
+    set(WL_WASI_WASMTIME_CASES bool s8 u8 s16 u16 s32 u32 s64 u64 f32 f64 char string-empty string-hello string-unicode)
     foreach(WL_WASI_WASMTIME_CASE IN LISTS WL_WASI_WASMTIME_CASES)
         add_test(
             NAME "wasi.wasmtime.${WL_WASI_WASMTIME_CASE}"

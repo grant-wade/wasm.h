@@ -5092,9 +5092,16 @@ static int wasi__component_type_is_func(const wasi_component_t* component, uint3
     return component && type_index < component->num_types && component->types[type_index].kind == WASI_COMPONENT_TYPE_KIND_FUNC;
 }
 
+typedef enum wasi__canon_result_abi_t {
+    WASI__CANON_RESULT_ABI_FLAT = 0,
+    WASI__CANON_RESULT_ABI_SPILL_PARAM = 1,
+    WASI__CANON_RESULT_ABI_SPILL_RETURN = 2,
+} wasi__canon_result_abi_t;
+
 typedef struct wasi__canon_func_sig_t {
     int params_spilled;
     int results_spilled;
+    int results_retptr_returned;
     wasm_valtype_t* param_types;
     uint32_t num_param_types;
     wasm_valtype_t* result_types;
@@ -5177,34 +5184,6 @@ static const wasi_component_valtype_t* wasi__variant_case_payload_type(const was
         default:
             return NULL;
     }
-}
-
-static int wasi__valtype_is_scalar_or_string(const wasi_component_valtype_t* type) {
-    if (!type) return 0;
-    switch (type->opcode) {
-        case 0x73u:
-        case 0x74u:
-        case 0x75u:
-        case 0x76u:
-        case 0x77u:
-        case 0x78u:
-        case 0x79u:
-        case 0x7Au:
-        case 0x7Bu:
-        case 0x7Cu:
-        case 0x7Du:
-        case 0x7Eu:
-        case 0x7Fu:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static int wasi__valtype_uses_compound_abi(const wasi_component_t* component,
-                                           const wasi_component_valtype_t* type) {
-    const wasi_component_valtype_t* resolved = wasi__resolve_valtype(component, type);
-    return resolved && !wasi__valtype_is_scalar_or_string(resolved);
 }
 
 static uint32_t wasi__canon_flags_word_count(uint32_t flag_count) {
@@ -5566,13 +5545,13 @@ static wasi_error_t wasi__flat_types_for_valtype(wasi_engine_t* engine,
 static wasi_error_t wasi__build_func_signature(wasi_engine_t* engine,
                                                const wasi_component_t* component,
                                                uint32_t type_index,
+                                               wasi__canon_result_abi_t result_abi,
                                                wasi__canon_func_sig_t* out_sig) {
     uint32_t param_count;
     uint32_t result_count;
     uint32_t flat_params = 0;
     uint32_t flat_results = 0;
     uint32_t i;
-    int has_compound_result = 0;
 
     if (!out_sig) return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "missing function signature output");
     memset(out_sig, 0, sizeof(*out_sig));
@@ -5599,16 +5578,17 @@ static wasi_error_t wasi__build_func_signature(wasi_engine_t* engine,
         wasi_error_t err = wasi__flat_types_for_valtype(engine, component, result_type, NULL, &added);
         if (err != WASI_OK) return err;
         flat_results += added;
-        if (wasi__valtype_uses_compound_abi(component, result_type)) has_compound_result = 1;
     }
 
     out_sig->params_spilled = flat_params > WASI__CANON_MAX_FLAT_PARAMS;
     out_sig->results_spilled = flat_results > WASI__CANON_MAX_FLAT_RESULTS &&
-                               (result_count > 1u || has_compound_result);
+                               result_abi != WASI__CANON_RESULT_ABI_FLAT;
+    out_sig->results_retptr_returned = out_sig->results_spilled &&
+                                       result_abi == WASI__CANON_RESULT_ABI_SPILL_RETURN;
 
     out_sig->num_param_types = out_sig->params_spilled ? 1u : flat_params;
-    if (out_sig->results_spilled) out_sig->num_param_types += 1u;
-    out_sig->num_result_types = out_sig->results_spilled ? 0u : flat_results;
+    if (out_sig->results_spilled && !out_sig->results_retptr_returned) out_sig->num_param_types += 1u;
+    out_sig->num_result_types = out_sig->results_spilled ? (out_sig->results_retptr_returned ? 1u : 0u) : flat_results;
     out_sig->num_post_return_types = out_sig->results_spilled ? 1u : flat_results;
 
     if (out_sig->num_param_types) {
@@ -5650,7 +5630,11 @@ static wasi_error_t wasi__build_func_signature(wasi_engine_t* engine,
     }
 
     if (out_sig->results_spilled) {
-        out_sig->param_types[out_sig->num_param_types - 1u] = WASM_TYPE_I32;
+        if (out_sig->results_retptr_returned) {
+            out_sig->result_types[0] = WASM_TYPE_I32;
+        } else {
+            out_sig->param_types[out_sig->num_param_types - 1u] = WASM_TYPE_I32;
+        }
         out_sig->post_return_types[0] = WASM_TYPE_I32;
     } else {
         uint32_t cursor = 0;
@@ -5673,6 +5657,25 @@ static wasi_error_t wasi__build_func_signature(wasi_engine_t* engine,
     return WASI_OK;
 }
 
+static int wasi__func_signature_matches(const wasi__canon_func_sig_t* sig,
+                                        wasm_module_t* core_module,
+                                        uint32_t func_index) {
+    uint32_t i;
+
+    if (!sig || !core_module) return 0;
+    if (wasm_func_param_count(core_module, func_index) != sig->num_param_types ||
+        wasm_func_result_count(core_module, func_index) != sig->num_result_types)
+        return 0;
+
+    for (i = 0; i < sig->num_param_types; i++) {
+        if (wasm_func_param_type(core_module, func_index, i) != sig->param_types[i]) return 0;
+    }
+    for (i = 0; i < sig->num_result_types; i++) {
+        if (wasm_func_result_type(core_module, func_index, i) != sig->result_types[i]) return 0;
+    }
+    return 1;
+}
+
 static wasi_error_t wasi__validate_func_signature(wasi_engine_t* engine,
                                                   const wasi_component_t* component,
                                                   uint32_t type_index,
@@ -5686,7 +5689,7 @@ static wasi_error_t wasi__validate_func_signature(wasi_engine_t* engine,
     if (!engine || !component || !core_module || !func_label || !out_sig)
         return wasi__set_error_literal(engine, WASI_ERR_INVALID_ARGUMENT, "invalid canonical call signature inputs");
 
-    err = wasi__build_func_signature(engine, component, type_index, out_sig);
+    err = wasi__build_func_signature(engine, component, type_index, WASI__CANON_RESULT_ABI_FLAT, out_sig);
     if (err != WASI_OK) return err;
 
     if (func_index >= wasm_func_count(core_module)) {
@@ -5694,34 +5697,57 @@ static wasi_error_t wasi__validate_func_signature(wasi_engine_t* engine,
         return wasi__set_errorf(engine, WASI_ERR_UNDEFINED_EXPORT, "missing core function %s", func_label);
     }
 
-    if (wasm_func_param_count(core_module, func_index) != out_sig->num_param_types ||
-        wasm_func_result_count(core_module, func_index) != out_sig->num_result_types) {
+    if (!wasi__func_signature_matches(out_sig, core_module, func_index) &&
+        wasi_component_func_type_result_count(component, type_index) > 0u) {
+        wasi__canon_func_sig_release(out_sig);
+        err = wasi__build_func_signature(engine,
+                                         component,
+                                         type_index,
+                                         WASI__CANON_RESULT_ABI_SPILL_PARAM,
+                                         out_sig);
+        if (err != WASI_OK) return err;
+    }
+
+    if (!wasi__func_signature_matches(out_sig, core_module, func_index) && out_sig->results_spilled) {
+        wasi__canon_func_sig_release(out_sig);
+        err = wasi__build_func_signature(engine,
+                                         component,
+                                         type_index,
+                                         WASI__CANON_RESULT_ABI_SPILL_RETURN,
+                                         out_sig);
+        if (err != WASI_OK) return err;
+    }
+
+    if (!wasi__func_signature_matches(out_sig, core_module, func_index)) {
+        for (i = 0; i < out_sig->num_param_types; i++) {
+            if (i >= wasm_func_param_count(core_module, func_index) ||
+                wasm_func_param_type(core_module, func_index, i) != out_sig->param_types[i]) {
+                wasi__canon_func_sig_release(out_sig);
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core function %s %s %u type mismatch",
+                                        func_label,
+                                        i < wasm_func_param_count(core_module, func_index) ? "param" : "flat arity",
+                                        (unsigned)i);
+            }
+        }
+        for (i = 0; i < out_sig->num_result_types; i++) {
+            if (i >= wasm_func_result_count(core_module, func_index) ||
+                wasm_func_result_type(core_module, func_index, i) != out_sig->result_types[i]) {
+                wasi__canon_func_sig_release(out_sig);
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_TYPE_MISMATCH,
+                                        "core function %s %s %u type mismatch",
+                                        func_label,
+                                        i < wasm_func_result_count(core_module, func_index) ? "result" : "flat arity",
+                                        (unsigned)i);
+            }
+        }
         wasi__canon_func_sig_release(out_sig);
         return wasi__set_errorf(engine,
                                 WASI_ERR_TYPE_MISMATCH,
                                 "core function %s flat arity mismatch",
                                 func_label);
-    }
-
-    for (i = 0; i < out_sig->num_param_types; i++) {
-        if (wasm_func_param_type(core_module, func_index, i) != out_sig->param_types[i]) {
-            wasi__canon_func_sig_release(out_sig);
-            return wasi__set_errorf(engine,
-                                    WASI_ERR_TYPE_MISMATCH,
-                                    "core function %s param %u type mismatch",
-                                    func_label,
-                                    (unsigned)i);
-        }
-    }
-    for (i = 0; i < out_sig->num_result_types; i++) {
-        if (wasm_func_result_type(core_module, func_index, i) != out_sig->result_types[i]) {
-            wasi__canon_func_sig_release(out_sig);
-            return wasi__set_errorf(engine,
-                                    WASI_ERR_TYPE_MISMATCH,
-                                    "core function %s result %u type mismatch",
-                                    func_label,
-                                    (unsigned)i);
-        }
     }
 
     return WASI_OK;
@@ -7866,9 +7892,11 @@ static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* componen
         }
         err = wasi__layout_func_values(engine, component, func_type_index, 1, spill_offsets, &spill_size, &spill_align);
         if (err != WASI_OK) goto cleanup;
-        err = wasi__canon_alloc_guest(engine, core_module, options, spill_align, spill_size, &spill_ptr);
-        if (err != WASI_OK) goto cleanup;
-        flat_args[arg_cursor++] = wasm_i32((int32_t)spill_ptr);
+        if (!sig.results_retptr_returned) {
+            err = wasi__canon_alloc_guest(engine, core_module, options, spill_align, spill_size, &spill_ptr);
+            if (err != WASI_OK) goto cleanup;
+            flat_args[arg_cursor++] = wasm_i32((int32_t)spill_ptr);
+        }
     }
 
     wasm_err = wasm_call_index(core_module, func_index, flat_args, sig.num_param_types, flat_results, sig.num_result_types);
@@ -7878,6 +7906,7 @@ static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* componen
     }
 
     if (sig.results_spilled) {
+        if (sig.results_retptr_returned) spill_ptr = (uint32_t)flat_results[0].of.i32;
         for (i = 0; i < num_results; i++) {
             uint32_t item_ptr;
             err = wasi__guest_add_offset(engine, spill_ptr, spill_offsets[i], &item_ptr);
@@ -7911,7 +7940,9 @@ static wasi_error_t wasi__canon_call_func_index(const wasi_component_t* componen
     if (options->has_post_return_func_index || (options->api.post_return_name && options->api.post_return_name[0])) {
         uint32_t post_index = 0;
         const char* post_label = options->api.post_return_name ? options->api.post_return_name : "<post-return>";
-        const wasm_value_t* post_args = sig.results_spilled ? flat_args + (sig.num_param_types - 1u) : flat_results;
+        const wasm_value_t* post_args = sig.results_spilled
+                            ? (sig.results_retptr_returned ? flat_results : flat_args + (sig.num_param_types - 1u))
+                            : flat_results;
 
         if (options->has_post_return_func_index) {
             post_index = options->post_return_func_index;
