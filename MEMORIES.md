@@ -1,8 +1,8 @@
 # Repository Memories
 
-Memory Version: 12
+Memory Version: 13
 
-Current curated contents of `/memories/repo/` as of 2026-04-09.
+Current curated contents of `/memories/repo/` as of 2026-04-10.
 
 This file is the canonical checked-in snapshot of repo memory.
 
@@ -86,4 +86,4 @@ This file is the canonical checked-in snapshot of repo memory.
 
 - Standard `wasm-tools component new` output can introduce top-level type imports for named WIT types; those imports occupy slots in the component type index space even when `wasi.h` stores only defined types in `component->types`.
 - `wasi__parse_component_imports()` must use `wasi__read_component_externdesc()` rather than assuming `kind-byte + type-index`, or standard function import descriptors with bound tags leave trailing bytes.
-- The new `wasi-wasmtime` `list<u8>` case avoids the remaining named-type-import resolution gap; adding standard named `record`/`variant` harness cases will require full type-index-space resolution across both defined types and imported types.
+- `wasi.h` now resolves the current standard named-type compare cases across imported and defined component type slots, with `wasi-wasmtime` coverage for standard `list`, `record`, and `variant` round-trips.

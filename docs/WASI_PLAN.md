@@ -106,6 +106,8 @@ wasi_destroy(&engine);
 - Correctly identifies component vs. core module binaries
 - Test harness runs, reports "not yet implemented" for component loading
 
+**Status:** Completed. The `wasi.h` scaffold, lifecycle API, component/core binary detection, CMake integration, and component test harness are all in place and now underpin the later parser and canonical ABI milestones.
+
 
 ---
 
@@ -174,6 +176,8 @@ Design constraint for the retained AST:
 - Parse 0.3-format components from Wasmtime 37+ test suite (async canon opcodes present)
 - Compare parsed structure against `wasm-tools component wit` and `wasm-tools dump` output
 
+**Status:** Completed. `wasi.h` now retains the planned component AST and index spaces, exposes the parser/introspection APIs described above, and has smoke coverage for sections, modules, aliases, canons, instances, nested components, and start-section state.
+
 ---
 
 ## [DONE] Milestone 2: Canonical ABI — Scalar Types & Strings
@@ -208,9 +212,11 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Verify post-return functions fire after results are consumed
 - UTF-16 string round-trip with a component compiled using `string-encoding=utf16`
 
+**Status:** Completed on the current low-level canonical ABI path. Scalar and string lift/lower, `cabi_realloc`, post-return dispatch, and UTF-8/UTF-16/latin1+utf16 string handling are implemented and covered by `wasi_test` plus the Wasmtime comparison harness.
+
 ---
 
-## Milestone 3: Canonical ABI — Compound Types
+## [DONE] Milestone 3: Canonical ABI — Compound Types
 
 **Goal:** Complete canonical ABI for all synchronous WIT value types.
 
@@ -232,6 +238,8 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Single-result spill: function returning multi-field record uses `retptr`
 - Flags with >32 bits span multiple i32s
 - Fuzz: generate random WIT types via `wasm-tools`, compile Rust components, round-trip values and compare against Wasmtime output
+
+**Status:** Completed on the current low-level canonical ABI path. `wasi_test` now covers records, tuples, flags, variants, options, results, enums, and spill paths, and the Wasmtime comparison harness covers representative `list`, `record`, and `variant` round-trips. Broader random-WIT fuzzing remains part of ongoing hardening rather than a blocker for closing M3.
 
 ---
 
@@ -608,13 +616,13 @@ Per the WASI roadmap, these are planned as backwards-compatible point releases o
 
 | Milestone | Description |
 |-----------|-------------|
-| M0  | Scaffolding & infrastructure | 
-| M1  | Component binary parser | 
-| M2  | Canonical ABI — scalars & strings |
-| M3  | Canonical ABI — compound types |
+| M0  | [DONE] Scaffolding & infrastructure | 
+| M1  | [DONE] Component binary parser | 
+| M2  | [DONE] Canonical ABI — scalars & strings |
+| M3  | [DONE] Canonical ABI — compound types |
 | M4  | Resource types & handle tables |
 | M5  | Component instantiation & linking |
-| M6  | Async runtime foundation | 5–6 | 23–30 |
+| M6  | Async runtime foundation |
 | **M7**  | **wasi:cli — Hello World** 🎉 |
 | M8  | wasi:filesystem |
 | M9  | wasi:sockets & wasi:http |

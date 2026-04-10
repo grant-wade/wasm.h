@@ -90,7 +90,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 ## wasi.h Status
 
-Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface for Milestone 2:
+Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface through Milestone 3:
 
 - `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
 - core-vs-component detection through `wasi_detect_binary_kind`
@@ -110,7 +110,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
 - minimal single-module instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
 - scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
-- compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, and `result`, including flat param lowering and spill-based result lifting on the current low-level path
+- compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, `result`, and `enum`, including flat param lowering and spill-based result lifting on the current low-level path
 - UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
 - parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
 
