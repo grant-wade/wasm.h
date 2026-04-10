@@ -8,12 +8,11 @@ typedef struct sqlite_wasm_ctx_t sqlite_wasm_ctx_t;
 
 struct sqlite_wasm_ctx_t {
     wasm_runtime_t* rt;
-    wasm_runtime_t owned_rt;
+    wasm_runtime_t* owned_rt;
     wasm_module_t* mod;
     wasm_error_t last_error;
     char last_error_msg[256];
     int owns_runtime;
-    int runtime_initialized;
     uint32_t idx_sqlite3_status64;
     uint32_t idx_sqlite3_status;
     uint32_t idx_sqlite3_db_status64;
@@ -287,9 +286,7 @@ static void sqlite_wasm_set_error(sqlite_wasm_ctx_t* ctx, wasm_error_t err, cons
     snprintf(ctx->last_error_msg, sizeof(ctx->last_error_msg), "%s",
              message ? message : "");
     if (!ctx->rt) return;
-    ctx->rt->last_error = err;
-    snprintf(ctx->rt->error_msg, sizeof(ctx->rt->error_msg), "%s",
-             message ? message : "");
+    wasm_runtime_set_error(ctx->rt, err, message);
 }
 
 static void sqlite_wasm_clear_error(sqlite_wasm_ctx_t* ctx) {
@@ -298,14 +295,14 @@ static void sqlite_wasm_clear_error(sqlite_wasm_ctx_t* ctx) {
     ctx->last_error = WASM_OK;
     ctx->last_error_msg[0] = '\0';
     if (!ctx->rt) return;
-    ctx->rt->last_error = WASM_OK;
-    ctx->rt->error_msg[0] = '\0';
+    wasm_runtime_clear_error(ctx->rt);
 }
 
 static void sqlite_wasm_capture_runtime_error(sqlite_wasm_ctx_t* ctx, wasm_error_t err, const char* fallback) {
     const char* message = fallback;
 
-    if (ctx && ctx->rt && ctx->rt->error_msg[0]) message = ctx->rt->error_msg;
+    if (ctx && ctx->rt && wasm_runtime_last_error(ctx->rt) != WASM_OK)
+        message = wasm_runtime_error_message(ctx->rt);
     if (!message) message = wasm_error_string(err);
     sqlite_wasm_set_error(ctx, err, message);
 }
@@ -320,7 +317,7 @@ static wasm_error_t sqlite_wasm_configure_runtime(wasm_runtime_t* rt) {
     wasm_error_t err;
 
     if (!rt) return WASM_ERR_MALFORMED;
-    rt->enabled_features = sqlite_wasm_required_features_mask;
+    wasm_runtime_set_enabled_features(rt, sqlite_wasm_required_features_mask);
     err = wasm_bind_wasi_stubs(rt);
     if (err != WASM_OK) return err;
     err = wasm_bind_emscripten_stubs(rt);
@@ -349,14 +346,18 @@ static sqlite_wasm_ctx_t* sqlite_wasm__init_ctx(const uint8_t* wasm_bytes, size_
     if (rt) {
         ctx->rt = rt;
     } else {
-        ctx->rt = &ctx->owned_rt;
-        err = wasm_init(ctx->rt, runtime_config);
+        ctx->owned_rt = wasm_runtime_new(runtime_config);
+        ctx->rt = ctx->owned_rt;
+        if (!ctx->rt) {
+            sqlite_wasm_set_error(ctx, WASM_ERR_OOM, "runtime allocation failed");
+            return ctx;
+        }
+        err = wasm_runtime_last_error(ctx->rt);
         if (err != WASM_OK) {
             sqlite_wasm_capture_runtime_error(ctx, err, "runtime init failed");
             return ctx;
         }
         ctx->owns_runtime = 1;
-        ctx->runtime_initialized = 1;
     }
     rt = ctx->rt;
     err = sqlite_wasm_configure_runtime(ctx->rt);
@@ -366,7 +367,7 @@ static sqlite_wasm_ctx_t* sqlite_wasm__init_ctx(const uint8_t* wasm_bytes, size_
     }
     ctx->mod = wasm_load(ctx->rt, wasm_bytes, len);
     if (!ctx->mod) {
-        sqlite_wasm_capture_runtime_error(ctx, ctx->rt->last_error, "failed to load module");
+        sqlite_wasm_capture_runtime_error(ctx, wasm_runtime_last_error(ctx->rt), "failed to load module");
         return ctx;
     }
     wasm_module_set_userdata(ctx->mod, ctx);
@@ -1390,7 +1391,7 @@ fail_loaded_module:
 static void sqlite_wasm__free_ctx(sqlite_wasm_ctx_t* ctx) {
     if (!ctx) return;
     if (ctx->mod) wasm_free_module(ctx->mod);
-    if (ctx->owns_runtime && ctx->runtime_initialized) wasm_destroy(&ctx->owned_rt);
+    if (ctx->owns_runtime) wasm_runtime_free(ctx->owned_rt);
     free(ctx);
 }
 

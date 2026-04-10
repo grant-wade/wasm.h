@@ -4,7 +4,7 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, canonical records, and file-relative source offsets for the major retained AST nodes; instantiation and canonical ABI execution are not implemented yet.
+The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, executes a narrow but real component-instantiation/linking path, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, canonical records, and file-relative source offsets for the major retained AST nodes.
 
 ## Quick start
 
@@ -20,30 +20,36 @@ The repository also now includes an experimental `wasi.h` scaffold for component
 #include "wasm.h"
 
 int main(void) {
-	wasm_runtime_t rt;
+	wasm_runtime_t* rt;
 	wasm_module_t* mod;
 	int32_t result = 0;
 
-	if (wasm_init(&rt, NULL) != WASM_OK) return 1;
+	rt = wasm_runtime_new(NULL);
+	if (!rt) return 1;
+	if (wasm_runtime_last_error(rt) != WASM_OK) {
+		fprintf(stderr, "init: %s\n", wasm_runtime_error_message(rt));
+		wasm_runtime_free(rt);
+		return 1;
+	}
 
-	mod = wasm_load(&rt, wasm_bytes, wasm_len);
+	mod = wasm_load(rt, wasm_bytes, wasm_len);
 	if (!mod) {
-		fprintf(stderr, "load: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
-		wasm_destroy(&rt);
+		fprintf(stderr, "load: %s\n", wasm_runtime_error_message(rt));
+		wasm_runtime_free(rt);
 		return 1;
 	}
 
 	if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK) {
-		fprintf(stderr, "call: %s\n", rt.error_msg[0] ? rt.error_msg : wasm_error_string(rt.last_error));
+		fprintf(stderr, "call: %s\n", wasm_runtime_error_message(rt));
 		wasm_free_module(mod);
-		wasm_destroy(&rt);
+		wasm_runtime_free(rt);
 		return 1;
 	}
 
 	printf("result: %d\n", result);
 
 	wasm_free_module(mod);
-	wasm_destroy(&rt);
+	wasm_runtime_free(rt);
 	return 0;
 }
 ```
@@ -58,6 +64,8 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 | Function | Purpose |
 | --- | --- |
+| `wasm_runtime_new(config)` | Allocate and initialize a runtime. |
+| `wasm_runtime_free(rt)` | Destroy and free a runtime allocated by `wasm_runtime_new`. |
 | `wasm_init(rt, config)` | Initialize a runtime. Pass `NULL` for defaults. |
 | `wasm_destroy(rt)` | Free all runtime resources. |
 | `wasm_load(rt, bytes, len)` | Load, validate, and instantiate a module. |
@@ -82,7 +90,7 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 
 ## wasi.h Status
 
-Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface for Milestone 2:
+Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface through Milestone 3:
 
 - `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
 - core-vs-component detection through `wasi_detect_binary_kind`
@@ -100,13 +108,17 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 - file-relative source offsets for sections and major top-level AST records through the various `*_offset` accessors and `wasi_dump_component`
 - host-side canonical ABI values through `wasi_value_t` and `wasi_value_set_string_copy`
 - low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
-- minimal single-module instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
+- narrow component instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
+- engine-bound import resolution through `wasi_bind_import_instance`, `wasi_bind_import_func`, and `wasi_bind_import_component`
 - scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
-- compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, and `result`, including flat param lowering and spill-based result lifting on the current low-level path
+- compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, `result`, and `enum`, including flat param lowering and spill-based result lifting on the current low-level path
 - UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
 - parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
+- host-defined resource registration and per-instance handle tables through `wasi_define_resource`, `wasi_instance_bind_resource_type`, `wasi_resource_new`, `wasi_resource_rep`, and `wasi_resource_drop`
+- synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts, including outstanding-borrow guards, own-handle round-trips, origin-preserving cross-instance resource transfer machinery, and alias-aware component destructor dispatch
+- narrow `canon lower` import bridging on the current instance path, including core-instance `from exports` namespaces that can expose lowered component funcs to later embedded core modules and route resource handles through the same synchronous lift/lower machinery
 
-`wasi.h` still does not implement general component instantiation or linking. Today it provides parser/introspection, a low-level canonical ABI layer, and a narrow instance path for simple single-module components whose exported functions are direct synchronous canon lifts.
+`wasi.h` still does not implement the full general component linking program. Today it provides parser/introspection, a low-level canonical ABI layer, completed Milestone 4 resource lifecycle support, and a broader M5 slice that can instantiate nested component instances, bind their `func`/`instance`/`component` arg maps, resolve top-level component imports against engine-bound names and fully qualified interface versions, materialize top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks, and route exported component functions through live child-component instances rather than only static `instance { export ... }` records. Outer component aliases, broader core-instance sort coverage, and start sections still remain outside the supported path.
 
 ### Memory and globals
 
@@ -124,6 +136,7 @@ Current `wasi.h` capabilities cover binary introspection plus the completed low-
 | `wasm_enable_feature(rt, flag)` | Enable a proposal feature flag. |
 | `wasm_disable_feature(rt, flag)` | Disable a proposal feature flag. |
 | `wasm_enable_all_features(rt)` | Enable all implemented proposals. |
+| `wasm_runtime_error_message(rt)` | Most recent runtime error text. |
 | `wasm_set_fuel(mod, n)` | Set an instruction fuel limit. |
 | `wasm_get_fuel(mod)` | Read remaining fuel. |
 | `wasm_dump_backtrace(mod)` | Print a call-stack backtrace. |
@@ -146,6 +159,8 @@ wasm_init(&rt, &cfg);
 ```
 
 Set `lazy_validation` to defer per-function body validation until first execution. The default is `0`, which preserves eager whole-module validation.
+
+For interface-only users, `wasm_runtime_t` and `wasm_module_t` should be treated as opaque handles. Prefer `wasm_runtime_new()` and `wasm_runtime_free()` over relying on the concrete runtime layout.
 
 ### Custom allocators
 

@@ -1773,12 +1773,11 @@ static int wasm2api_write_source(const char* source_path,
 
     fprintf(out, "struct %s_ctx_t {\n", model->api_prefix);
     fputs("    wasm_runtime_t* rt;\n", out);
-    fputs("    wasm_runtime_t owned_rt;\n", out);
+    fputs("    wasm_runtime_t* owned_rt;\n", out);
     fputs("    wasm_module_t* mod;\n", out);
     fputs("    wasm_error_t last_error;\n", out);
     fputs("    char last_error_msg[256];\n", out);
     fputs("    int owns_runtime;\n", out);
-    fputs("    int runtime_initialized;\n", out);
     if (model->has_memory_export) {
         fprintf(out, "    uint32_t %s;\n", model->memory_index_field);
     }
@@ -1822,9 +1821,7 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    snprintf(ctx->last_error_msg, sizeof(ctx->last_error_msg), \"%s\",\n", out);
     fputs("             message ? message : \"\");\n", out);
     fputs("    if (!ctx->rt) return;\n", out);
-    fputs("    ctx->rt->last_error = err;\n", out);
-    fputs("    snprintf(ctx->rt->error_msg, sizeof(ctx->rt->error_msg), \"%s\",\n", out);
-    fputs("             message ? message : \"\");\n", out);
+    fputs("    wasm_runtime_set_error(ctx->rt, err, message);\n", out);
     fputs("}\n\n", out);
 
     fprintf(out, "static void %s_clear_error(%s_ctx_t* ctx) {\n", model->api_prefix,
@@ -1836,15 +1833,15 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    ctx->last_error = WASM_OK;\n", out);
     fputs("    ctx->last_error_msg[0] = '\\0';\n", out);
     fputs("    if (!ctx->rt) return;\n", out);
-    fputs("    ctx->rt->last_error = WASM_OK;\n", out);
-    fputs("    ctx->rt->error_msg[0] = '\\0';\n", out);
+    fputs("    wasm_runtime_clear_error(ctx->rt);\n", out);
     fputs("}\n\n", out);
 
     fprintf(out,
             "static void %s_capture_runtime_error(%s_ctx_t* ctx, wasm_error_t err, const char* fallback) {\n",
             model->api_prefix, model->api_prefix);
     fputs("    const char* message = fallback;\n\n", out);
-    fputs("    if (ctx && ctx->rt && ctx->rt->error_msg[0]) message = ctx->rt->error_msg;\n", out);
+    fputs("    if (ctx && ctx->rt && wasm_runtime_last_error(ctx->rt) != WASM_OK)\n", out);
+    fputs("        message = wasm_runtime_error_message(ctx->rt);\n", out);
     fputs("    if (!message) message = wasm_error_string(err);\n", out);
     fprintf(out, "    %s_set_error(ctx, err, message);\n", model->api_prefix);
     fputs("}\n\n", out);
@@ -1864,7 +1861,7 @@ static int wasm2api_write_source(const char* source_path,
         fputs("    wasm_error_t err;\n\n", out);
     }
     fputs("    if (!rt) return WASM_ERR_MALFORMED;\n", out);
-    fprintf(out, "    rt->enabled_features = %s_required_features_mask;\n", model->api_prefix);
+    fprintf(out, "    wasm_runtime_set_enabled_features(rt, %s_required_features_mask);\n", model->api_prefix);
     if (model->uses_builtin_wasi) {
         fputs("    err = wasm_bind_wasi_stubs(rt);\n", out);
         fputs("    if (err != WASM_OK) return err;\n", out);
@@ -1916,15 +1913,20 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    if (rt) {\n", out);
     fputs("        ctx->rt = rt;\n", out);
     fputs("    } else {\n", out);
-    fputs("        ctx->rt = &ctx->owned_rt;\n", out);
-    fputs("        err = wasm_init(ctx->rt, runtime_config);\n", out);
+    fputs("        ctx->owned_rt = wasm_runtime_new(runtime_config);\n", out);
+    fputs("        ctx->rt = ctx->owned_rt;\n", out);
+    fputs("        if (!ctx->rt) {\n", out);
+        fprintf(out, "            %s_set_error(ctx, WASM_ERR_OOM, \"runtime allocation failed\");\n",
+                model->api_prefix);
+    fputs("            return ctx;\n", out);
+    fputs("        }\n", out);
+    fputs("        err = wasm_runtime_last_error(ctx->rt);\n", out);
     fputs("        if (err != WASM_OK) {\n", out);
     fprintf(out, "            %s_capture_runtime_error(ctx, err, \"runtime init failed\");\n",
             model->api_prefix);
     fputs("            return ctx;\n", out);
     fputs("        }\n", out);
     fputs("        ctx->owns_runtime = 1;\n", out);
-    fputs("        ctx->runtime_initialized = 1;\n", out);
     fputs("    }\n", out);
     fputs("    rt = ctx->rt;\n", out);
     fprintf(out, "    err = %s_configure_runtime(ctx->rt);\n", model->api_prefix);
@@ -2023,7 +2025,7 @@ static int wasm2api_write_source(const char* source_path,
     }
     fputs("    ctx->mod = wasm_load(ctx->rt, wasm_bytes, len);\n", out);
     fputs("    if (!ctx->mod) {\n", out);
-    fprintf(out, "        %s_capture_runtime_error(ctx, ctx->rt->last_error, \"failed to load module\");\n",
+    fprintf(out, "        %s_capture_runtime_error(ctx, wasm_runtime_last_error(ctx->rt), \"failed to load module\");\n",
             model->api_prefix);
     fputs("        return ctx;\n", out);
     fputs("    }\n", out);
@@ -2088,8 +2090,7 @@ static int wasm2api_write_source(const char* source_path,
     }
     fputs("    if (!ctx) return;\n", out);
     fputs("    if (ctx->mod) wasm_free_module(ctx->mod);\n", out);
-    fputs("    if (ctx->owns_runtime && ctx->runtime_initialized) wasm_destroy(&ctx->owned_rt);\n",
-          out);
+    fputs("    if (ctx->owns_runtime) wasm_runtime_free(ctx->owned_rt);\n", out);
     fputs("    free(ctx);\n", out);
     fputs("}\n\n", out);
     if (model->singleton_mode) {

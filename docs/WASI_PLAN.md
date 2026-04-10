@@ -106,6 +106,8 @@ wasi_destroy(&engine);
 - Correctly identifies component vs. core module binaries
 - Test harness runs, reports "not yet implemented" for component loading
 
+**Status:** Completed. The `wasi.h` scaffold, lifecycle API, component/core binary detection, CMake integration, and component test harness are all in place and now underpin the later parser and canonical ABI milestones.
+
 
 ---
 
@@ -174,6 +176,8 @@ Design constraint for the retained AST:
 - Parse 0.3-format components from Wasmtime 37+ test suite (async canon opcodes present)
 - Compare parsed structure against `wasm-tools component wit` and `wasm-tools dump` output
 
+**Status:** Completed. `wasi.h` now retains the planned component AST and index spaces, exposes the parser/introspection APIs described above, and has smoke coverage for sections, modules, aliases, canons, instances, nested components, and start-section state.
+
 ---
 
 ## [DONE] Milestone 2: Canonical ABI — Scalar Types & Strings
@@ -208,9 +212,11 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Verify post-return functions fire after results are consumed
 - UTF-16 string round-trip with a component compiled using `string-encoding=utf16`
 
+**Status:** Completed on the current low-level canonical ABI path. Scalar and string lift/lower, `cabi_realloc`, post-return dispatch, and UTF-8/UTF-16/latin1+utf16 string handling are implemented and covered by `wasi_test` plus the Wasmtime comparison harness.
+
 ---
 
-## Milestone 3: Canonical ABI — Compound Types
+## [DONE] Milestone 3: Canonical ABI — Compound Types
 
 **Goal:** Complete canonical ABI for all synchronous WIT value types.
 
@@ -233,9 +239,11 @@ The Canonical ABI maps WIT types to core Wasm values and linear memory:
 - Flags with >32 bits span multiple i32s
 - Fuzz: generate random WIT types via `wasm-tools`, compile Rust components, round-trip values and compare against Wasmtime output
 
+**Status:** Completed on the current low-level canonical ABI path. `wasi_test` now covers records, tuples, flags, variants, options, results, enums, and spill paths, and the Wasmtime comparison harness covers representative `list`, `record`, and `variant` round-trips. Broader random-WIT fuzzing remains part of ongoing hardening rather than a blocker for closing M3.
+
 ---
 
-## Milestone 4: Resource Types & Handle Tables
+## [DONE] Milestone 4: Resource Types & Handle Tables
 
 **Goal:** Resource lifecycle — handle tables, own/borrow semantics, destructors.
 
@@ -271,6 +279,8 @@ wasi_resource_type_t fd_type = wasi_define_resource(
 - `num_lends` guard: dropping an own handle while a borrow is outstanding traps the caller
 - Handle table growth and slot reuse after drops
 
+**Status:** Completed on the current runtime surface. `wasi.h` now has engine-defined host resource types, per-instance handle tables, explicit component-type bindings, `wasi_resource_new` / `wasi_resource_rep` / `wasi_resource_drop`, slot reuse after drops, and synchronous `own<T>` / `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts. The runtime wires `canon resource.new` / `canon resource.rep` / `canon resource.drop` into exported calls, preserves origin-instance destructor ownership when a live resource is transferred between instances, and resolves component-defined resource destructors through the same supported alias paths as exported functions. Broader automatic use of that transfer machinery during general nested-component linking remains part of Milestone 5 rather than a blocker for closing the resource lifecycle work itself.
+
 ---
 
 ## Milestone 5: Component Instantiation & Linking
@@ -301,6 +311,8 @@ A component's instantiation section is procedural: it executes a sequence of ins
 - Missing import: clean error naming `wasi:filesystem/types@0.3.0` as unresolved
 - Nested components (component containing sub-components)
 - Canon lift/lower wiring verified by calling a simple exported function end-to-end
+
+**Status:** In progress. The runtime still does not execute the full general component linking program, but the current `wasi_instantiate` path now executes local `component instance` instantiate records, recursively instantiates nested child components, binds `func`/`instance`/`component` arg maps into child imports, and resolves component function aliases through live child instances rather than only through static `instance { export ... }` tables. The same path now resolves top-level component imports against engine-bound bindings by fully qualified name/version via `wasi_bind_import_instance`, `wasi_bind_import_func`, and `wasi_bind_import_component`, so unresolved imports fail at instantiation time with named diagnostics. The earlier narrow core-linking support remains in place as well: sequential core-instance instantiation, top-level core-instance export aliases for `canon lift`, and top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks. Outer component aliases, broader core-instance sort coverage, and start execution still remain later work.
 
 ---
 
@@ -608,13 +620,13 @@ Per the WASI roadmap, these are planned as backwards-compatible point releases o
 
 | Milestone | Description |
 |-----------|-------------|
-| M0  | Scaffolding & infrastructure | 
-| M1  | Component binary parser | 
-| M2  | Canonical ABI — scalars & strings |
-| M3  | Canonical ABI — compound types |
+| M0  | [DONE] Scaffolding & infrastructure | 
+| M1  | [DONE] Component binary parser | 
+| M2  | [DONE] Canonical ABI — scalars & strings |
+| M3  | [DONE] Canonical ABI — compound types |
 | M4  | Resource types & handle tables |
 | M5  | Component instantiation & linking |
-| M6  | Async runtime foundation | 5–6 | 23–30 |
+| M6  | Async runtime foundation |
 | **M7**  | **wasi:cli — Hello World** 🎉 |
 | M8  | wasi:filesystem |
 | M9  | wasi:sockets & wasi:http |

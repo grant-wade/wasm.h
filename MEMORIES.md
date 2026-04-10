@@ -1,8 +1,8 @@
 # Repository Memories
 
-Memory Version: 12
+Memory Version: 16
 
-Current curated contents of `/memories/repo/` as of 2026-04-09.
+Current curated contents of `/memories/repo/` as of 2026-04-10.
 
 This file is the canonical checked-in snapshot of repo memory.
 
@@ -45,6 +45,13 @@ This file is the canonical checked-in snapshot of repo memory.
 - Nested and top-level core module types in `wasi.h` now retain module declaration lists for core `type`, `import`, `alias`, and `export` entries, with regressions in `wasi_test.c` covering both nested type-space and top-level core-type fixtures.
 - Top-level `core-type` sections in `wasi.h` need backtracking for entry opcode `0x50`: it can mean either a core module type or a non-final subtype, so parse against the remaining entry count instead of deciding locally.
 
+## component-linker.md
+
+- `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func` and `instance` imports, and alias resolution through live child instances rather than only static `from exports` records.
+- Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
+- Component instantiation args on the current M5 path now also accept `component` references in addition to `func` and `instance`.
+- The current linker still does not resolve outer aliases, broader core-instance arg sorts, or start sections.
+
 ## wasm-runtime.md
 
 - `wasm.h` is the single-header runtime; `wasm_load()` performs load-time validation and feature gating via `wasm_runtime_t.enabled_features`, with helper APIs `wasm_enable_feature()`, `wasm_disable_feature()`, and `wasm_enable_all_features()`.
@@ -55,6 +62,7 @@ This file is the canonical checked-in snapshot of repo memory.
 - The default validator label budget is `WASM_MAX_LABELS = 4096`, which is high enough for large real-world modules like the official sqlite3 Wasm build without custom runtime config.
 - Float min/max intentionally avoid `fmin[f]` and `fmax[f]` and use signed-zero-aware comparisons to preserve Wasm semantics.
 - Regression coverage lives primarily in `wasm_test.c`, with additional spectest and emcc coverage under `test/`.
+- `wasi.h`'s current M5 slice now accepts top-level core-instance `from exports` records on the narrow instance path and can register their function exports as either direct forwards or synchronous `canon lower` bridges, so later embedded core modules can call back into supported local component funcs and resource builtins through real lower/lift dispatch.
 
 ## wasm2api.md
 
@@ -86,4 +94,4 @@ This file is the canonical checked-in snapshot of repo memory.
 
 - Standard `wasm-tools component new` output can introduce top-level type imports for named WIT types; those imports occupy slots in the component type index space even when `wasi.h` stores only defined types in `component->types`.
 - `wasi__parse_component_imports()` must use `wasi__read_component_externdesc()` rather than assuming `kind-byte + type-index`, or standard function import descriptors with bound tags leave trailing bytes.
-- The new `wasi-wasmtime` `list<u8>` case avoids the remaining named-type-import resolution gap; adding standard named `record`/`variant` harness cases will require full type-index-space resolution across both defined types and imported types.
+- `wasi.h` now resolves the current standard named-type compare cases across imported and defined component type slots, with `wasi-wasmtime` coverage for standard `list`, `record`, and `variant` round-trips.
