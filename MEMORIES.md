@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 16
+Memory Version: 18
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -44,6 +44,7 @@ This file is the canonical checked-in snapshot of repo memory.
 - Nested `core:type` declarations inside component/instance types in `wasi.h` are inline core module types: declaration opcode `0x00` is followed by module-type opcode `0x50`, not a core type index.
 - Nested and top-level core module types in `wasi.h` now retain module declaration lists for core `type`, `import`, `alias`, and `export` entries, with regressions in `wasi_test.c` covering both nested type-space and top-level core-type fixtures.
 - Top-level `core-type` sections in `wasi.h` need backtracking for entry opcode `0x50`: it can mean either a core module type or a non-final subtype, so parse against the remaining entry count instead of deciding locally.
+- Standard component type imports can reference existing defined types without consuming extra component type-space slots. In `wasi.h`, helpers that resolve raw component type indices must not interleave type imports into the local type index walk, or standard `wasm-tools component new` exports lose their canonical function type indices.
 
 ## component-linker.md
 
@@ -51,6 +52,12 @@ This file is the canonical checked-in snapshot of repo memory.
 - Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
 - Component instantiation args on the current M5 path now also accept `component` references in addition to `func` and `instance`.
 - The current linker still does not resolve outer aliases, broader core-instance arg sorts, or start sections.
+
+## outer-type-alias-runtime.md
+
+- Component type imports in `wasi.h` now need live runtime carriers when nested children resolve outer `type` aliases through instantiated parent scopes; the supported carrier stores the resolved source component plus local type index as `WASI__COMPONENT_IMPORT_RUNTIME_TYPE`.
+- `wasi_call()` and `wasi__resolve_component_func_call_type()` now resolve function type annotations through the live instance when needed, so typed child exports can inherit imported parent function types through outer aliases.
+- Regression coverage in `wasi_test.c` uses a grandparent -> parent(type import + func import) -> child(outer type alias + outer func alias) chain and calls the child export directly to prove the imported-type carrier path works.
 
 ## wasm-runtime.md
 
