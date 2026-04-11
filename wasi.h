@@ -6287,6 +6287,15 @@ static wasi_error_t wasi__resolve_component_namespace_export_instance_depth(wasi
                                                                             wasi__component_namespace_ref_t* out_ref,
                                                                             uint32_t depth);
 
+static wasi_error_t wasi__resolve_component_namespace_export_type_depth(wasi_engine_t* engine,
+                                                                        const wasi__component_namespace_ref_t* ref,
+                                                                        const char* export_name,
+                                                                        const char* label,
+                                                                        const wasi_component_t** out_component,
+                                                                        uint32_t* out_local_type_index,
+                                                                        const wasi_component_type_t** out_type,
+                                                                        uint32_t depth);
+
 static wasi_error_t wasi__resolve_outer_component_instance(wasi_engine_t* engine,
                                                            wasi_instance_t* instance,
                                                            uint32_t outer_count,
@@ -6367,17 +6376,31 @@ static wasi_error_t wasi__resolve_component_type_ref_depth(wasi_engine_t* engine
                                 "component type %s resolution reached an invalid alias state",
                                 label ? label : "");
     }
-    if (alias->kind != WASI_COMPONENT_ALIAS_KIND_OUTER ||
-        alias->sort_is_core ||
-        alias->extern_kind != WASI_COMPONENT_EXTERN_KIND_TYPE) {
-        return wasi__set_errorf(engine,
-                                WASI_ERR_NOT_IMPLEMENTED,
-                                "component type %s uses unsupported outer alias sort %s",
-                                label ? label : "",
-                                wasi__alias_sort_string(alias->sort_is_core, alias->sort_code));
+
+    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT) {
+        wasi__component_namespace_ref_t source_ref;
+        wasi_error_t err;
+
+        err = wasi__resolve_component_instance_ref_depth(engine,
+                                                         instance,
+                                                         alias->instance_index,
+                                                         label,
+                                                         &source_ref,
+                                                         depth + 1u);
+        if (err != WASI_OK) return err;
+
+        return wasi__resolve_component_namespace_export_type_depth(engine,
+                                                                   &source_ref,
+                                                                   alias->name ? alias->name : "",
+                                                                   label,
+                                                                   out_component,
+                                                                   out_local_type_index,
+                                                                   out_type,
+                                                                   depth + 1u);
     }
 
-    {
+    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER &&
+        (!alias->sort_is_core && alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_TYPE)) {
         wasi_instance_t* outer_instance = NULL;
         wasi_error_t err = wasi__resolve_outer_component_instance(engine,
                                                                   instance,
@@ -6395,6 +6418,20 @@ static wasi_error_t wasi__resolve_component_type_ref_depth(wasi_engine_t* engine
                                                       out_type,
                                                       depth + 1u);
     }
+
+    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "component type %s uses unsupported outer alias sort %s",
+                                label ? label : "",
+                                wasi__alias_sort_string(alias->sort_is_core, alias->sort_code));
+    }
+
+    return wasi__set_errorf(engine,
+                            WASI_ERR_NOT_IMPLEMENTED,
+                            "component type %s uses unsupported alias kind %s",
+                            label ? label : "",
+                            wasi_component_alias_kind_string(alias->kind));
 }
 
 static wasi_error_t wasi__resolve_component_type_ref(wasi_engine_t* engine,
@@ -6636,6 +6673,87 @@ static wasi_error_t wasi__resolve_component_ref(wasi_engine_t* engine,
                                              0u);
 }
 
+
+static wasi_error_t wasi__resolve_component_namespace_export_type_depth(wasi_engine_t* engine,
+                                                                        const wasi__component_namespace_ref_t* ref,
+                                                                        const char* export_name,
+                                                                        const char* label,
+                                                                        const wasi_component_t** out_component,
+                                                                        uint32_t* out_local_type_index,
+                                                                        const wasi_component_type_t** out_type,
+                                                                        uint32_t depth) {
+    if (out_component) *out_component = NULL;
+    if (out_local_type_index) *out_local_type_index = UINT32_MAX;
+    if (out_type) *out_type = NULL;
+    if (!engine || !ref || !export_name || !out_component || !out_local_type_index || !out_type) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid component namespace type resolution request");
+    }
+
+    if (ref->kind == WASI__COMPONENT_NAMESPACE_STATIC_EXPORTS) {
+        const wasi_component_instance_t* local_instance;
+        wasi_instance_t* owner_instance;
+        uint32_t i;
+
+        owner_instance = ref->owner_instance;
+        if (!owner_instance || !owner_instance->component || ref->local_instance_index >= owner_instance->component->num_instances) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_INVALID_ARGUMENT,
+                                    "component namespace %s references invalid static instance",
+                                    label ? label : "");
+        }
+
+        local_instance = &owner_instance->component->instances[ref->local_instance_index];
+        for (i = 0; i < local_instance->num_exports; i++) {
+            const wasi_component_instance_export_t* export_ = &local_instance->exports[i];
+
+            if (export_->kind != WASI_COMPONENT_EXTERN_KIND_TYPE) continue;
+            if (!export_->name || strcmp(export_->name, export_name) != 0) continue;
+            return wasi__resolve_component_type_ref_depth(engine,
+                                                          owner_instance,
+                                                          export_->index,
+                                                          label,
+                                                          out_component,
+                                                          out_local_type_index,
+                                                          out_type,
+                                                          depth + 1u);
+        }
+    } else if (ref->kind == WASI__COMPONENT_NAMESPACE_INSTANCE) {
+        wasi_instance_t* target_instance = ref->instance;
+        const wasi_component_t* component;
+        uint32_t i;
+
+        if (!target_instance || !target_instance->component) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_INVALID_ARGUMENT,
+                                    "component namespace %s references an unresolved instance",
+                                    label ? label : "");
+        }
+
+        component = target_instance->component;
+        for (i = 0; i < component->num_exports; i++) {
+            const wasi_component_export_t* export_ = &component->exports[i];
+
+            if (export_->kind != WASI_COMPONENT_EXTERN_KIND_TYPE) continue;
+            if (!export_->name || strcmp(export_->name, export_name) != 0) continue;
+            return wasi__resolve_component_type_ref_depth(engine,
+                                                          target_instance,
+                                                          export_->index,
+                                                          label,
+                                                          out_component,
+                                                          out_local_type_index,
+                                                          out_type,
+                                                          depth + 1u);
+        }
+    }
+
+    return wasi__set_errorf(engine,
+                            WASI_ERR_UNDEFINED_EXPORT,
+                            "component type %s missing aliased type export %s",
+                            label ? label : "",
+                            export_name);
+}
 static wasi_error_t wasi__resolve_component_namespace_export_component_depth(wasi_engine_t* engine,
                                                                              const wasi__component_namespace_ref_t* ref,
                                                                              const char* export_name,
@@ -11961,6 +12079,7 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
         }
         if (alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT && !alias->sort_is_core &&
             (alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_FUNC ||
+             alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_TYPE ||
              alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_INSTANCE ||
              alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_COMPONENT)) {
             continue;

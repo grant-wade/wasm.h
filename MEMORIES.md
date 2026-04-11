@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 18
+Memory Version: 19
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -48,10 +48,11 @@ This file is the canonical checked-in snapshot of repo memory.
 
 ## component-linker.md
 
-- `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func` and `instance` imports, and alias resolution through live child instances rather than only static `from exports` records.
+- `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func`, `instance`, `component`, and `type` imports, and alias resolution through live child instances rather than only static `from exports` records.
 - Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
-- Component instantiation args on the current M5 path now also accept `component` references in addition to `func` and `instance`.
-- The current linker still does not resolve outer aliases, broader core-instance arg sorts, or start sections.
+- Component instantiation args on the current M5 path accept `component` references in addition to `func`, `instance`, and `type`.
+- Component type resolution on the current M5 path must follow non-core `instance export` aliases as well as outer aliases, or child instantiations that source a `type` arg from another live component instance fail before the imported-type carrier is populated.
+- The current linker still does not resolve broader outer-alias sorts, broader core-instance arg sorts, or nontrivial start sections.
 
 ## outer-type-alias-runtime.md
 
