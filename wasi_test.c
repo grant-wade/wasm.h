@@ -1221,6 +1221,18 @@ static void wasi_test_emit_component_import_func(wasi_test_builder_t* b,
     wasi_test_emit_leb128_u32(b, type_index);
 }
 
+static void wasi_test_emit_component_import_value(wasi_test_builder_t* b,
+                                                  const char* name,
+                                                  uint32_t type_index) {
+    size_t len = strlen(name);
+    wasi_test_emit(b, 0x00u);
+    wasi_test_emit_leb128_u32(b, (uint32_t)len);
+    wasi_test_emit_bytes(b, (const uint8_t*)name, (uint32_t)len);
+    wasi_test_emit(b, 0x02u);
+    wasi_test_emit(b, 0x00u);
+    wasi_test_emit_leb128_u32(b, type_index);
+}
+
 static void wasi_test_emit_component_import_component(wasi_test_builder_t* b,
                                                       const char* name,
                                                       uint32_t type_index) {
@@ -1427,6 +1439,45 @@ static void wasi_test_emit_borrow_resource_valtype(wasi_test_builder_t* b, uint3
 static void wasi_test_emit_own_resource_valtype(wasi_test_builder_t* b, uint32_t type_index) {
     wasi_test_emit(b, 0x69u);
     wasi_test_emit_leb128_u32(b, type_index);
+}
+
+typedef void (*wasi_test_emit_component_valtype_fn)(wasi_test_builder_t* b);
+
+static void wasi_test_emit_top_level_borrow_resource_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit_borrow_resource_valtype(b, 0u);
+}
+
+static void wasi_test_emit_list_own_resource_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x70u);
+    wasi_test_emit_own_resource_valtype(b, 0u);
+}
+
+static void wasi_test_emit_list_borrow_resource_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x70u);
+    wasi_test_emit_borrow_resource_valtype(b, 0u);
+}
+
+static void wasi_test_emit_record_own_resource_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x72u);
+    wasi_test_emit_leb128_u32(b, 2u);
+    wasi_test_emit_component_plain_name(b, "tag");
+    wasi_test_emit(b, 0x79u);
+    wasi_test_emit_component_plain_name(b, "handle");
+    wasi_test_emit_own_resource_valtype(b, 0u);
+}
+
+static void wasi_test_emit_variant_own_resource_valtype(wasi_test_builder_t* b) {
+    wasi_test_emit(b, 0x71u);
+    wasi_test_emit_leb128_u32(b, 2u);
+
+    wasi_test_emit_component_plain_name(b, "none");
+    wasi_test_emit(b, 0x00u);
+    wasi_test_emit(b, 0x00u);
+
+    wasi_test_emit_component_plain_name(b, "handle");
+    wasi_test_emit(b, 0x01u);
+    wasi_test_emit_own_resource_valtype(b, 0u);
+    wasi_test_emit(b, 0x00u);
 }
 
 static void wasi_test_build_resource_core_module(wasi_test_builder_t* mod) {
@@ -2755,6 +2806,193 @@ static void wasi_test_build_type_only_child_component(wasi_test_builder_t* compo
     memset(&sec, 0, sizeof(sec));
     wasi_test_emit_leb128_u32(&sec, 1u);
     wasi_test_emit_component_import_type(&sec, "ty", 0x01u, 0u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_value_importing_child_component(wasi_test_builder_t* component,
+                                                            uint8_t type_opcode) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, type_opcode);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_import_value(&sec, "seed", 0u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_parent_value_arg_component(wasi_test_builder_t* component,
+                                                       const wasi_test_builder_t* nested_component,
+                                                       uint8_t type_opcode) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, type_opcode);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_import_value(&sec, "seed", 0u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+
+    wasi_test_emit_section(component, 4u, nested_component->buf, nested_component->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_plain_name(&sec, "seed");
+    wasi_test_emit(&sec, 0x02u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 5u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_imported_type_value_child_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x73u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_import_type(&sec, "ty", 0x00u, 0u);
+    wasi_test_emit_component_import_value(&sec, "seed", 1u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_imported_type_value_parent_component(wasi_test_builder_t* component,
+                                                                 const wasi_test_builder_t* nested_component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x73u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_import_type(&sec, "ty", 0x00u, 0u);
+    wasi_test_emit_component_import_value(&sec, "seed", 1u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+
+    wasi_test_emit_section(component, 4u, nested_component->buf, nested_component->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_plain_name(&sec, "ty");
+    wasi_test_emit(&sec, 0x03u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_component_plain_name(&sec, "seed");
+    wasi_test_emit(&sec, 0x02u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 5u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_grandparent_imported_type_value_component(wasi_test_builder_t* component,
+                                                                      const wasi_test_builder_t* nested_component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x73u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_import_value(&sec, "seed", 0u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+
+    wasi_test_emit_section(component, 4u, nested_component->buf, nested_component->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_component_plain_name(&sec, "ty");
+    wasi_test_emit(&sec, 0x03u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_component_plain_name(&sec, "seed");
+    wasi_test_emit(&sec, 0x02u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 5u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_resource_type_only_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_resource_type(&sec);
+    wasi_test_emit_own_resource_valtype(&sec, 0u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_imported_resource_value_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_resource_type(&sec);
+    wasi_test_emit_own_resource_valtype(&sec, 0u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_import_value(&sec, "seed", 1u);
+    wasi_test_emit_section(component, 10u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_resource_typed_value_component(wasi_test_builder_t* component,
+                                                           wasi_test_emit_component_valtype_fn emit_value_type,
+                                                           int import_value) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 2u);
+    wasi_test_emit_resource_type(&sec);
+    emit_value_type(&sec);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    if (!import_value) return;
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_import_value(&sec, "seed", 1u);
     wasi_test_emit_section(component, 10u, sec.buf, sec.len);
 }
 
@@ -7262,6 +7500,728 @@ WL_TEST(test_wasi_instantiate_resolves_instance_exported_type_args) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_instantiate_accepts_component_value_args) {
+    wasi_engine_t engine;
+    wasi_test_builder_t child_component_bytes;
+    wasi_test_builder_t parent_component_bytes;
+    wasi_component_t* component;
+    wasi_instance_t* instance;
+    wasi_instance_t* child_instance;
+    wasi__component_import_runtime_t overrides[1];
+    const wasi_value_t* parent_value;
+    const wasi_value_t* child_value;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_value_importing_child_component(&child_component_bytes, 0x73u);
+    wasi_test_build_parent_value_arg_component(&parent_component_bytes, &child_component_bytes, 0x73u);
+
+    component = wasi_load(&engine, parent_component_bytes.buf, parent_component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+    WL_CHECK(t, wasi_component_import_count(component) == 1u);
+    WL_CHECK(t, wasi_component_import_kind(component, 0u) == WASI_COMPONENT_EXTERN_KIND_VALUE);
+    WL_CHECK(t, wasi_component_instance_count(component) == 1u);
+    WL_CHECK(t, wasi_component_instance_arg_kind(component, 0u, 0u) == WASI_COMPONENT_EXTERN_KIND_VALUE);
+
+    memset(overrides, 0, sizeof(overrides));
+    overrides[0].kind = WASI__COMPONENT_IMPORT_RUNTIME_VALUE;
+    overrides[0].of.value.type_ref.component = component;
+    overrides[0].of.value.type_ref.type_index = 0u;
+    overrides[0].of.value.value = (wasi_value_t*)WASM_CALLOC(1u, sizeof(*overrides[0].of.value.value));
+    WL_REQUIRE(t, overrides[0].of.value.value != NULL);
+
+    err = wasi_value_set_string_copy(overrides[0].of.value.value, "linked", strlen("linked"));
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_value_set_string_copy failed: %s", engine.error_msg);
+
+    instance = wasi__instantiate_component_internal(component, overrides, 1u, NULL);
+    WL_REQUIRE_MSG(t, instance != NULL, "wasi__instantiate_component_internal failed: %s", engine.error_msg);
+    WL_REQUIRE(t, instance->num_imports == 1u);
+    WL_CHECK(t, instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+    WL_REQUIRE(t, instance->num_component_instances == 1u);
+
+    child_instance = instance->component_instances[0].ref.instance;
+    WL_REQUIRE(t, child_instance != NULL);
+    WL_REQUIRE(t, child_instance->num_imports == 1u);
+    WL_CHECK(t, child_instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+
+    parent_value = instance->imports[0].of.value.value;
+    child_value = child_instance->imports[0].of.value.value;
+    WL_REQUIRE(t, parent_value != NULL);
+    WL_REQUIRE(t, child_value != NULL);
+    WL_CHECK(t, parent_value != overrides[0].of.value.value);
+    WL_CHECK(t, child_value != parent_value);
+    WL_CHECK(t, parent_value->kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, child_value->kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, strcmp(parent_value->of.string.data, "linked") == 0);
+    WL_CHECK(t, strcmp(child_value->of.string.data, "linked") == 0);
+    WL_CHECK(t, parent_value->of.string.data != overrides[0].of.value.value->of.string.data);
+    WL_CHECK(t, child_value->of.string.data != parent_value->of.string.data);
+
+    wasi_free_instance(instance);
+    wasi__component_import_runtime_array_clear(overrides, 1u);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_instantiate_rejects_mismatched_component_value_args) {
+    wasi_engine_t engine;
+    wasi_test_builder_t child_component_bytes;
+    wasi_test_builder_t parent_component_bytes;
+    wasi_component_t* component;
+    wasi__component_import_runtime_t overrides[1];
+    wasi_instance_t* instance;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_value_importing_child_component(&child_component_bytes, 0x79u);
+    wasi_test_build_parent_value_arg_component(&parent_component_bytes, &child_component_bytes, 0x73u);
+
+    component = wasi_load(&engine, parent_component_bytes.buf, parent_component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    memset(overrides, 0, sizeof(overrides));
+    overrides[0].kind = WASI__COMPONENT_IMPORT_RUNTIME_VALUE;
+    overrides[0].of.value.type_ref.component = component;
+    overrides[0].of.value.type_ref.type_index = 0u;
+    overrides[0].of.value.value = (wasi_value_t*)WASM_CALLOC(1u, sizeof(*overrides[0].of.value.value));
+    WL_REQUIRE(t, overrides[0].of.value.value != NULL);
+
+    err = wasi_value_set_string_copy(overrides[0].of.value.value, "linked", strlen("linked"));
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_value_set_string_copy failed: %s", engine.error_msg);
+
+    instance = wasi__instantiate_component_internal(component, overrides, 1u, NULL);
+    WL_CHECK(t, instance == NULL);
+    WL_CHECK(t, engine.last_error == WASI_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, strstr(engine.error_msg, "type does not match") != NULL);
+
+    wasi__component_import_runtime_array_clear(overrides, 1u);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_resolves_top_level_string_imports) {
+    wasi_engine_t engine;
+    wasi_test_builder_t component_bytes;
+    wasi_component_t* component;
+    wasi_instance_t* instance;
+    wasi_value_t bound_value;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_value_importing_child_component(&component_bytes, 0x73u);
+    component = wasi_load(&engine, component_bytes.buf, component_bytes.len);
+    WL_REQUIRE_MSG(t, component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_value_init(&bound_value);
+    err = wasi_value_set_string_copy(&bound_value, "linked", strlen("linked"));
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_value_set_string_copy failed: %s", engine.error_msg);
+
+    err = wasi_bind_import_value(&engine, "seed", component, 0u, &bound_value, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+    wasi_value_destroy(&bound_value);
+
+    instance = wasi_instantiate(component);
+    WL_REQUIRE_MSG(t, instance != NULL, "wasi_instantiate failed: %s", engine.error_msg);
+    WL_REQUIRE(t, instance->num_imports == 1u);
+    WL_CHECK(t, instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+    WL_CHECK(t, instance->imports[0].of.value.type_ref.component == component);
+    WL_CHECK(t, instance->imports[0].of.value.type_ref.type_index == 0u);
+    WL_CHECK(t, instance->imports[0].of.value.owner_instance == instance);
+    WL_REQUIRE(t, instance->imports[0].of.value.value != NULL);
+    WL_CHECK(t, instance->imports[0].of.value.value->kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, strcmp(instance->imports[0].of.value.value->of.string.data, "linked") == 0);
+
+    wasi_free_instance(instance);
+    wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_instantiate_resolves_imported_type_backed_value_args) {
+    wasi_engine_t engine;
+    wasi_test_builder_t child_component_bytes;
+    wasi_test_builder_t parent_component_bytes;
+    wasi_test_builder_t grandparent_component_bytes;
+    wasi_component_t* grandparent_component;
+    wasi_instance_t* grandparent_instance;
+    wasi_instance_t* parent_instance;
+    wasi_instance_t* child_instance;
+    wasi_value_t bound_value;
+    const wasi_value_t* parent_value;
+    const wasi_value_t* child_value;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_imported_type_value_child_component(&child_component_bytes);
+    wasi_test_build_imported_type_value_parent_component(&parent_component_bytes, &child_component_bytes);
+    wasi_test_build_grandparent_imported_type_value_component(&grandparent_component_bytes, &parent_component_bytes);
+
+    grandparent_component = wasi_load(&engine, grandparent_component_bytes.buf, grandparent_component_bytes.len);
+    WL_REQUIRE_MSG(t, grandparent_component != NULL, "wasi_load failed: %s", engine.error_msg);
+
+    wasi_value_init(&bound_value);
+    err = wasi_value_set_string_copy(&bound_value, "linked", strlen("linked"));
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_value_set_string_copy failed: %s", engine.error_msg);
+
+    err = wasi_bind_import_value(&engine, "seed", grandparent_component, 0u, &bound_value, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+    wasi_value_destroy(&bound_value);
+
+    grandparent_instance = wasi_instantiate(grandparent_component);
+    WL_REQUIRE_MSG(t, grandparent_instance != NULL, "wasi_instantiate failed: %s", engine.error_msg);
+    WL_REQUIRE(t, grandparent_instance->num_component_instances == 1u);
+
+    parent_instance = grandparent_instance->component_instances[0].ref.instance;
+    WL_REQUIRE(t, parent_instance != NULL);
+    WL_REQUIRE(t, parent_instance->num_imports == 2u);
+    WL_CHECK(t, parent_instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_TYPE);
+    WL_CHECK(t, parent_instance->imports[1].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+    WL_CHECK(t, parent_instance->imports[1].of.value.type_ref.component != NULL);
+    WL_CHECK(t, parent_instance->imports[1].of.value.type_ref.type_index != UINT32_MAX);
+    WL_CHECK(t, parent_instance->imports[1].of.value.owner_instance == parent_instance);
+
+    parent_value = parent_instance->imports[1].of.value.value;
+    WL_REQUIRE(t, parent_value != NULL);
+    WL_CHECK(t, parent_value->kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, strcmp(parent_value->of.string.data, "linked") == 0);
+
+    WL_REQUIRE(t, parent_instance->num_component_instances == 1u);
+    child_instance = parent_instance->component_instances[0].ref.instance;
+    WL_REQUIRE(t, child_instance != NULL);
+    WL_REQUIRE(t, child_instance->num_imports == 2u);
+    WL_CHECK(t, child_instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_TYPE);
+    WL_CHECK(t, child_instance->imports[1].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+    WL_CHECK(t, child_instance->imports[1].of.value.type_ref.component != NULL);
+    WL_CHECK(t, child_instance->imports[1].of.value.type_ref.type_index != UINT32_MAX);
+    WL_CHECK(t, child_instance->imports[1].of.value.owner_instance == child_instance);
+
+    child_value = child_instance->imports[1].of.value.value;
+    WL_REQUIRE(t, child_value != NULL);
+    WL_CHECK(t, child_value->kind == WASI_VALUE_KIND_STRING);
+    WL_CHECK(t, strcmp(child_value->of.string.data, "linked") == 0);
+
+    wasi_free_instance(grandparent_instance);
+    wasi_free_component(grandparent_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_transfers_top_level_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 17;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_type_only_component(&source_component_bytes);
+    wasi_test_build_imported_resource_value_component(&dest_component_bytes);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    bound_value.kind = WASI_VALUE_KIND_OWN;
+    bound_value.of.resource.type_index = 0u;
+    bound_value.of.resource.handle = handle;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_REQUIRE_MSG(t, dest_instance != NULL, "wasi_instantiate dest failed: %s", engine.error_msg);
+    WL_REQUIRE(t, dest_instance->num_imports == 1u);
+    WL_CHECK(t, dest_instance->imports[0].kind == WASI__COMPONENT_IMPORT_RUNTIME_VALUE);
+    WL_CHECK(t, dest_instance->imports[0].of.value.owner_instance == dest_instance);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->kind == WASI_VALUE_KIND_OWN);
+    WL_CHECK(t, dest_instance->num_resource_types == 1u);
+
+    err = wasi_resource_rep(dest_instance,
+                            0u,
+                            dest_instance->imports[0].of.value.value->of.resource.handle,
+                            &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep dest failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_CHECK(t, err == WASI_ERR_INVALID_ARGUMENT);
+
+    wasi_free_instance(dest_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_transfers_list_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    wasi_value_t list_items[1];
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 23;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_typed_value_component(&source_component_bytes,
+                                                   wasi_test_emit_list_own_resource_valtype,
+                                                   0);
+    wasi_test_build_resource_typed_value_component(&dest_component_bytes,
+                                                   wasi_test_emit_list_own_resource_valtype,
+                                                   1);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    memset(list_items, 0, sizeof(list_items));
+    list_items[0].kind = WASI_VALUE_KIND_OWN;
+    list_items[0].of.resource.type_index = 0u;
+    list_items[0].of.resource.handle = handle;
+    bound_value.kind = WASI_VALUE_KIND_LIST;
+    bound_value.of.seq.values = list_items;
+    bound_value.of.seq.len = 1u;
+    bound_value.of.seq.owned = 0;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_REQUIRE_MSG(t, dest_instance != NULL, "wasi_instantiate dest failed: %s", engine.error_msg);
+    WL_REQUIRE(t, dest_instance->num_imports == 1u);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->kind == WASI_VALUE_KIND_LIST);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.len == 1u);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value->of.seq.values != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.values[0].kind == WASI_VALUE_KIND_OWN);
+
+    err = wasi_resource_rep(dest_instance,
+                            0u,
+                            dest_instance->imports[0].of.value.value->of.seq.values[0].of.resource.handle,
+                            &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep dest failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_CHECK(t, err == WASI_ERR_INVALID_ARGUMENT);
+
+    wasi_free_instance(dest_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_transfers_record_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    wasi_value_t record_fields[2];
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 29;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_typed_value_component(&source_component_bytes,
+                                                   wasi_test_emit_record_own_resource_valtype,
+                                                   0);
+    wasi_test_build_resource_typed_value_component(&dest_component_bytes,
+                                                   wasi_test_emit_record_own_resource_valtype,
+                                                   1);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    memset(record_fields, 0, sizeof(record_fields));
+    record_fields[0].kind = WASI_VALUE_KIND_U32;
+    record_fields[0].of.u32 = 7u;
+    record_fields[1].kind = WASI_VALUE_KIND_OWN;
+    record_fields[1].of.resource.type_index = 0u;
+    record_fields[1].of.resource.handle = handle;
+    bound_value.kind = WASI_VALUE_KIND_RECORD;
+    bound_value.of.seq.values = record_fields;
+    bound_value.of.seq.len = 2u;
+    bound_value.of.seq.owned = 0;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_REQUIRE_MSG(t, dest_instance != NULL, "wasi_instantiate dest failed: %s", engine.error_msg);
+    WL_REQUIRE(t, dest_instance->num_imports == 1u);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->kind == WASI_VALUE_KIND_RECORD);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.len == 2u);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value->of.seq.values != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.values[0].kind == WASI_VALUE_KIND_U32);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.values[0].of.u32 == 7u);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.seq.values[1].kind == WASI_VALUE_KIND_OWN);
+
+    err = wasi_resource_rep(dest_instance,
+                            0u,
+                            dest_instance->imports[0].of.value.value->of.seq.values[1].of.resource.handle,
+                            &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep dest failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_CHECK(t, err == WASI_ERR_INVALID_ARGUMENT);
+
+    wasi_free_instance(dest_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_transfers_variant_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    wasi_value_t payload;
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 31;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_typed_value_component(&source_component_bytes,
+                                                   wasi_test_emit_variant_own_resource_valtype,
+                                                   0);
+    wasi_test_build_resource_typed_value_component(&dest_component_bytes,
+                                                   wasi_test_emit_variant_own_resource_valtype,
+                                                   1);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    memset(&payload, 0, sizeof(payload));
+    payload.kind = WASI_VALUE_KIND_OWN;
+    payload.of.resource.type_index = 0u;
+    payload.of.resource.handle = handle;
+    bound_value.kind = WASI_VALUE_KIND_VARIANT;
+    bound_value.of.variant.case_index = 1u;
+    bound_value.of.variant.has_payload = 1;
+    bound_value.of.variant.payload = &payload;
+    bound_value.of.variant.payload_owned = 0;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_REQUIRE_MSG(t, dest_instance != NULL, "wasi_instantiate dest failed: %s", engine.error_msg);
+    WL_REQUIRE(t, dest_instance->num_imports == 1u);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->kind == WASI_VALUE_KIND_VARIANT);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.variant.case_index == 1u);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.variant.has_payload);
+    WL_REQUIRE(t, dest_instance->imports[0].of.value.value->of.variant.payload != NULL);
+    WL_CHECK(t, dest_instance->imports[0].of.value.value->of.variant.payload->kind == WASI_VALUE_KIND_OWN);
+
+    err = wasi_resource_rep(dest_instance,
+                            0u,
+                            dest_instance->imports[0].of.value.value->of.variant.payload->of.resource.handle,
+                            &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep dest failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_CHECK(t, err == WASI_ERR_INVALID_ARGUMENT);
+
+    wasi_free_instance(dest_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_rejects_top_level_borrow_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 37;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_typed_value_component(&source_component_bytes,
+                                                   wasi_test_emit_top_level_borrow_resource_valtype,
+                                                   0);
+    wasi_test_build_resource_typed_value_component(&dest_component_bytes,
+                                                   wasi_test_emit_top_level_borrow_resource_valtype,
+                                                   1);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    bound_value.kind = WASI_VALUE_KIND_BORROW;
+    bound_value.of.resource.type_index = 0u;
+    bound_value.of.resource.handle = handle;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_CHECK(t, dest_instance == NULL);
+    WL_CHECK(t, engine.last_error == WASI_ERR_NOT_IMPLEMENTED);
+    WL_CHECK(t, strstr(engine.error_msg, "uses borrow resources") != NULL);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep source failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_bind_import_value_rejects_list_borrow_resource_values) {
+    wasi_engine_t engine;
+    wasi_test_builder_t source_component_bytes;
+    wasi_test_builder_t dest_component_bytes;
+    wasi_component_t* source_component;
+    wasi_component_t* dest_component;
+    wasi_instance_t* source_instance;
+    wasi_instance_t* dest_instance;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    wasi_value_t bound_value;
+    wasi_value_t list_items[1];
+    uint32_t handle = UINT32_MAX;
+    int representation_value = 41;
+    void* representation = NULL;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_typed_value_component(&source_component_bytes,
+                                                   wasi_test_emit_list_borrow_resource_valtype,
+                                                   0);
+    wasi_test_build_resource_typed_value_component(&dest_component_bytes,
+                                                   wasi_test_emit_list_borrow_resource_valtype,
+                                                   1);
+
+    source_component = wasi_load(&engine, source_component_bytes.buf, source_component_bytes.len);
+    WL_REQUIRE_MSG(t, source_component != NULL, "wasi_load source failed: %s", engine.error_msg);
+    dest_component = wasi_load(&engine, dest_component_bytes.buf, dest_component_bytes.len);
+    WL_REQUIRE_MSG(t, dest_component != NULL, "wasi_load dest failed: %s", engine.error_msg);
+
+    source_instance = wasi_instantiate(source_component);
+    WL_REQUIRE_MSG(t, source_instance != NULL, "wasi_instantiate source failed: %s", engine.error_msg);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    err = wasi_instance_bind_resource_type(source_instance, 0u, resource_type);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_instance_bind_resource_type failed: %s", engine.error_msg);
+    err = wasi_resource_new(source_instance, 0u, &representation_value, &handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_new failed: %s", engine.error_msg);
+
+    memset(&bound_value, 0, sizeof(bound_value));
+    memset(list_items, 0, sizeof(list_items));
+    list_items[0].kind = WASI_VALUE_KIND_BORROW;
+    list_items[0].of.resource.type_index = 0u;
+    list_items[0].of.resource.handle = handle;
+    bound_value.kind = WASI_VALUE_KIND_LIST;
+    bound_value.of.seq.values = list_items;
+    bound_value.of.seq.len = 1u;
+    bound_value.of.seq.owned = 0;
+
+    err = wasi_bind_import_value(&engine, "seed", source_component, 1u, &bound_value, source_instance);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_bind_import_value failed: %s", engine.error_msg);
+
+    dest_instance = wasi_instantiate(dest_component);
+    WL_CHECK(t, dest_instance == NULL);
+    WL_CHECK(t, engine.last_error == WASI_ERR_NOT_IMPLEMENTED);
+    WL_CHECK(t, strstr(engine.error_msg, "uses borrow resources") != NULL);
+
+    err = wasi_resource_rep(source_instance, 0u, handle, &representation);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_rep source failed: %s", engine.error_msg);
+    WL_CHECK(t, representation == &representation_value);
+
+    wasi_free_instance(source_instance);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == &representation_value);
+
+    wasi_free_component(dest_component);
+    wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instantiate_resolves_outer_func_aliases) {
     wasi_engine_t engine;
     wasi_test_builder_t source_module_bytes;
@@ -8876,6 +9836,16 @@ int main(void) {
         WL_TEST_CASE(test_wasi_instantiate_executes_nested_component_instances),
         WL_TEST_CASE(test_wasi_instantiate_accepts_component_type_args),
         WL_TEST_CASE(test_wasi_instantiate_resolves_instance_exported_type_args),
+        WL_TEST_CASE(test_wasi_instantiate_accepts_component_value_args),
+        WL_TEST_CASE(test_wasi_instantiate_rejects_mismatched_component_value_args),
+        WL_TEST_CASE(test_wasi_bind_import_value_resolves_top_level_string_imports),
+        WL_TEST_CASE(test_wasi_instantiate_resolves_imported_type_backed_value_args),
+        WL_TEST_CASE(test_wasi_bind_import_value_transfers_top_level_resource_values),
+        WL_TEST_CASE(test_wasi_bind_import_value_transfers_list_resource_values),
+        WL_TEST_CASE(test_wasi_bind_import_value_transfers_record_resource_values),
+        WL_TEST_CASE(test_wasi_bind_import_value_transfers_variant_resource_values),
+        WL_TEST_CASE(test_wasi_bind_import_value_rejects_top_level_borrow_resource_values),
+        WL_TEST_CASE(test_wasi_bind_import_value_rejects_list_borrow_resource_values),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_func_aliases),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_type_aliases_for_export_types),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_type_aliases_through_imported_type_args),

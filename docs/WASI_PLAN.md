@@ -312,22 +312,34 @@ A component's instantiation section is procedural: it executes a sequence of ins
 - Nested components (component containing sub-components)
 - Canon lift/lower wiring verified by calling a simple exported function end-to-end
 
-**Status:** In progress. The runtime still does not execute the full general component linking program, but the current `wasi_instantiate` path now has two active M5 slices. The current component-instance linking slice executes local `component instance` instantiate records, recursively instantiates nested child components, binds `func`/`instance`/`component`/`type` arg maps into child imports, resolves component function aliases through live child instances rather than only through static `instance { export ... }` tables, resolves component-exported `type` args through live child instances on the supported path, resolves non-core outer aliases for `func`, `instance`, and `component` against ancestor component instances on the supported path, carries non-core outer `type` aliases far enough to improve nested export type introspection and the current type-directed canon-lower bridge metadata, resolves top-level component imports against engine-bound bindings by fully qualified name/version via `wasi_bind_import_instance`, `wasi_bind_import_func`, and `wasi_bind_import_component`, and executes zero-arg/zero-result component start functions on the supported path. The current core-instance linking slice remains active as well: sequential core-instance instantiation, top-level core-instance export aliases for `canon lift`, and top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks so later embedded core modules can import those namespaces on the supported path. Broader outer-alias sorts and broader core-instance sort coverage still remain later work.
+**Status:** In progress. The runtime still does not execute the full general component linking program, but the current `wasi_instantiate` path now has an active supported `value`-linking slice in addition to the earlier `func`/`instance`/`component`/`type` work. The current component-instance linking slice executes local `component instance` instantiate records, recursively instantiates nested child components, binds `func`/`instance`/`component`/`type`/`value` arg maps into child imports, resolves component function and value aliases through live child instances rather than only through static `instance { export ... }` tables, resolves component-exported `type` args through live child instances on the supported path, resolves non-core outer aliases for `func`, `instance`, `component`, `type`, and `value` on the supported path, resolves top-level component imports against engine-bound bindings by fully qualified name/version via `wasi_bind_import_instance`, `wasi_bind_import_func`, `wasi_bind_import_component`, and `wasi_bind_import_value`, structurally checks linked component values against dynamically resolved expected types, transfers `own<T>` resource handles into destination instances with automatic destination resource binding, and executes zero-arg/zero-result component start functions on the supported path. The current core-instance linking slice remains active as well: sequential core-instance instantiation, top-level core-instance export aliases for `canon lift`, and top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks so later embedded core modules can import those namespaces on the supported path. Broader outer-alias sorts, broader core-instance sort coverage, and `borrow<T>`-containing linked values still remain later work.
 
-### Remaining M5 Work For `value` Args
+### M5 `value` Args Status
 
-The main missing component-side arg sort is still `value`. This should be treated as its own sub-slice of M5 rather than folded into a quick alias-resolution patch, because the current runtime does not yet have a complete retained/runtime model for component values during instantiation.
+The narrow M5 `value` path is now implemented for top-level and nested component imports. The remaining gaps are mostly around broadening the regression matrix and deciding what a safe long-lived linker story for `borrow<T>` should look like.
 
-#### What is missing today
+#### Landed work
 
-- **No runtime import carrier for values.** The current `wasi__component_import_runtime_t` can carry `func`, `instance`, `type`, and `component`, but not a linked component value. There is no `WASI__COMPONENT_IMPORT_RUNTIME_VALUE` equivalent yet.
-- **No retained runtime ownership model for linked values.** Even though `wasi_value_t` exists for canonical calls, M5 does not yet define how an instantiated component owns, copies, transfers, and destroys imported/exported component values during linking.
-- **No component value index-space walker/resolver.** The current narrow linker has index-space resolution helpers for component `func`, `instance`, `type`, and `component`, but not for `value`. That means `component instance` arg maps cannot currently resolve `value` indices from imports, aliases, or local definitions on the supported path.
-- **No namespace export resolution for values.** There is support for resolving `func`, `instance`, `type`, and `component` exports from both static `instance { export ... }` namespaces and live child instances. There is no parallel resolver for `value` exports yet.
-- **No `value` binding in child-instantiation arg maps.** The current `wasi_instantiate` execution path still rejects component-instantiation args whose sort is `value`.
-- **No top-level host binding story for component values.** There are engine-bound APIs for top-level component imports of `instance`, `func`, and `component`, but not for `value`. M5 needs an explicit decision here rather than implicit behavior.
-- **No value-type-directed compatibility checks on the linking path.** The narrow linker does not yet compare source and target component value types for linked `value` args. For this slice, type matching cannot be left to raw index equality.
-- **No regression coverage for linked component values.** There are currently no M5 tests for `value` imports/exports/aliases on the `wasi_instantiate` path.
+- **[DONE] Runtime import carrier for values.** `wasi__component_import_runtime_t` now carries resolved component values, including owned payload copies, resolved value-type metadata, and the owning instance for resource-backed values.
+- **[DONE] Value resolution and namespace export lookup.** The current linker now has value index-space walkers plus namespace export resolution for value exports from static `component instance` export records and live child instances.
+- **[DONE] `value` binding in child-instantiation arg maps.** `wasi_instantiate` now accepts `value` args in `component instance` instantiate records and propagates them through nested instantiations.
+- **[DONE] Top-level host value imports.** Engine-bound host value imports are now supported via `wasi_bind_import_value`, with deep-copy behavior for heap-backed payloads at the API boundary.
+- **[DONE] Structural type checking on the linking path.** Linked values are now checked structurally against the destination import type, and expected-type resolution follows imported type carriers instead of requiring a statically viewable local type.
+- **[DONE] Own-resource-containing value support.** Linked values containing `own<T>` now transfer handles with the existing resource-transfer machinery, including automatic destination resource binding when the destination instance has not bound that resource type yet.
+- **[DONE] Regression coverage for the supported path.** `wasi_test` now covers direct top-level host value imports, imported-type-backed nested value args, top-level own-resource value imports, list/record/variant values with embedded `own<T>`, and explicit rejection cases for `borrow<T>`-containing linked values in addition to the earlier string/mismatch coverage.
+
+#### Remaining gaps
+
+- **`borrow<T>` in linked values is still deferred.** The current handle model does not yet provide a safe long-lived borrow story for stored linker values, so borrow-containing linked values still fail explicitly on the current path.
+- **The regression matrix is still narrower than the end-state M5 plan.** There is now focused coverage for strings, dynamic expected types, own-resource values, and explicit borrow failures, but broader alias combinations and more end-to-end export-routing combinations still need dedicated tests.
+
+#### What `wasi.h` still needs before M5 can be called complete
+
+- **Finish the remaining linking-program coverage in `wasi_instantiate`.** The current runtime still has explicit `WASI_ERR_NOT_IMPLEMENTED` exits for unsupported outer-alias sorts, unsupported alias kinds, unsupported component-instance forms, and unsupported component import/arg kinds on the general linking path. M5 is not complete until the component linking interpreter can execute the remaining forms that are still called out as “not supported on the current linking path”.
+- **Broaden the core-instance wiring beyond the current narrow supported slice.** Today `wasi.h` supports sequential core-instance instantiation plus top-level core-instance export aliases and top-level `from exports` namespaces on the supported path. The milestone is only complete once the remaining core-instance sorts and arg-resolution cases needed by real composed components are handled instead of failing with the current core-instance `not implemented` diagnostics.
+- **Close the `borrow<T>` retained-value gap.** `wasi.h` can already lower synchronous borrows during `wasi_call`, but linked component values still reject `borrow<T>` because there is no safe long-lived retained-borrow model for stored linker values. Under the current M5 scope, either that ownership model needs to land or the milestone definition needs to be narrowed explicitly.
+- **Prove the broader supported path with end-to-end validation.** The current tests cover the narrow value path well, but M5 still needs broader alias/export-routing coverage, more multi-module/core-sharing coverage from composed components, and validation that the remaining supported linking forms behave correctly in end-to-end instantiation rather than just in unit-sized slices.
+- **Keep the error surface consistent across the remaining paths.** The plan already calls out unresolved-import diagnostics and type-mismatch details as M5 deliverables. As the remaining linking cases land in `wasi.h`, they need to produce the same class of named, actionable diagnostics instead of dropping into generic `not implemented` errors or shape-specific traps.
 
 #### Why this is a bigger slice than `type`
 
@@ -335,40 +347,39 @@ The main missing component-side arg sort is still `value`. This should be treate
 
 #### Recommended phased plan
 
-**Phase M5.value.1 — Minimal retained/runtime carrier**
+**[DONE] Phase M5.value.1 — Minimal retained/runtime carrier**
 
 - Add a dedicated runtime carrier for imported/exported component values on instantiated components.
 - Define instance ownership rules for linked values stored in that carrier.
 - Keep the first carrier shape simple and explicit: owned `wasi_value_t` plus the source component/value-type metadata needed for validation.
 
-**Phase M5.value.2 — Resolution plumbing**
+**[DONE] Phase M5.value.2 — Resolution plumbing**
 
 - Add a component value index-space walker and runtime resolver analogous to the existing `func`/`instance`/`type`/`component` helpers.
 - Add namespace export resolution for `value` through both static `component instance` export records and live child instances.
 - Extend the current alias support matrix so non-core `instance export` and supported `outer` aliases can feed `value` resolution on the narrow path.
 
-**Phase M5.value.3 — Narrow arg-map execution**
+**[DONE] Phase M5.value.3 — Narrow arg-map execution**
 
 - Teach `wasi_instantiate` to accept `value` args in `component instance` instantiate records.
 - Populate child import overrides with resolved runtime values.
 - Start with a deliberately narrow supported subset if needed: scalar, `char`, `string`, and other non-resource synchronous value shapes.
 
-**Phase M5.value.4 — Type checking and ownership rules**
+**[DONE] Phase M5.value.4 — Type checking and ownership rules**
 
 - Validate source and target value compatibility structurally rather than by raw index alone.
 - Specify copy/transfer behavior for heap-owning values.
-- Decide the initial M5 policy for resource-containing values: either support them with the existing resource-transfer machinery or reject them explicitly until a follow-up slice lands.
+- The current path supports `own<T>`-containing values with the existing resource-transfer machinery. `borrow<T>` remains explicitly deferred.
 
-**Phase M5.value.5 — Top-level host value imports**
+**[DONE] Phase M5.value.5 — Top-level host value imports**
 
-- Decide whether M5 should include a host API such as `wasi_bind_import_value`, or whether the first landing only supports values flowing between linked component instances.
-- If top-level host value imports are included, define deep-copy and lifetime behavior at the API boundary up front.
+- Landed as `wasi_bind_import_value` with deep-copy behavior for heap-backed payloads and explicit owner-instance requirements for resource-backed values.
 
-**Phase M5.value.6 — Regression matrix**
+**[IN PROGRESS] Phase M5.value.6 — Regression matrix**
 
 - Positive coverage: scalar values, strings, lists/records/variants, value exports from live child instances, `instance export` aliases, supported `outer` aliases, and nested child-instantiation arg maps.
 - Negative coverage: missing value export names, type mismatches, unsupported value shapes, and ownership/lifetime misuse.
-- If resource-containing values are deferred, add explicit tests that they fail with named `not implemented` diagnostics rather than accidental traps.
+- Keep explicit failure coverage for `borrow<T>`-containing linked values until a safe long-lived borrow story exists, including nested aggregate cases.
 
 #### Recommended landing order
 
