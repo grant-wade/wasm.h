@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 19
+Memory Version: 20
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -53,6 +53,12 @@ This file is the canonical checked-in snapshot of repo memory.
 - Component instantiation args on the current M5 path accept `component` references in addition to `func`, `instance`, and `type`.
 - Component type resolution on the current M5 path must follow non-core `instance export` aliases as well as outer aliases, or child instantiations that source a `type` arg from another live component instance fail before the imported-type carrier is populated.
 - The current linker still does not resolve broader outer-alias sorts, broader core-instance arg sorts, or nontrivial start sections.
+
+## component-module-linking.md
+
+- Component `module` import descriptors in `wasi.h` use the core-module bound tag `0x11` after extern kind byte `0x00`; omitting that tag makes otherwise small hand-built fixtures fail as malformed imports.
+- The current `wasi_instantiate` path now supports host-bound component `module` imports via `wasi_bind_import_module()`, nested `module` args in `component instance` instantiation records, and outer core-module aliases by treating them as entries in the component module index space.
+- Temporary child-override carriers for linked modules must transfer ownership into the child instance runtime when they materialize dynamically loaded embedded core modules; otherwise nested module args either leak or free borrowed modules too early.
 
 ## outer-type-alias-runtime.md
 
