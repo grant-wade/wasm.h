@@ -9041,7 +9041,7 @@ static wasi_error_t wasi__resolve_core_export(wasi_engine_t* engine,
                                          label,
                                          out_export);
     }
-    if (!alias->name || !alias->name[0]) {
+    if (!alias->name) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_MALFORMED,
                                 "core %s %s references a malformed core export alias",
@@ -9099,7 +9099,7 @@ static wasi_error_t wasi__resolve_core_func(wasi_engine_t* engine,
                                            func_label,
                                            out_func);
         }
-        if (!alias->name || !alias->name[0]) {
+        if (!alias->name) {
             return wasi__set_errorf(engine,
                                     WASI_ERR_MALFORMED,
                                     "core function %s references a malformed core export alias",
@@ -9183,7 +9183,7 @@ static wasi_error_t wasi__resolve_core_func_export_name_depth(wasi_engine_t* eng
                                                              out_name,
                                                              depth + 1u);
         }
-        if (!alias->name || !alias->name[0]) {
+        if (!alias->name) {
             return wasi__set_errorf(engine,
                                     WASI_ERR_MALFORMED,
                                     "core function %s references a malformed core export alias",
@@ -14152,6 +14152,7 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
                     wasi__resolved_core_func_t resolved_func;
                     const char* export_name = NULL;
                     char* derived_export_name = NULL;
+                    int needs_derived_export_name = 0;
                     wasi_error_t arg_err = wasi__resolve_core_func(engine,
                                                                    component,
                                                                    instance,
@@ -14169,7 +14170,13 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
                                                                   arg->index,
                                                                   arg->name ? arg->name : "",
                                                                   &export_name);
-                    if (arg_err == WASI_ERR_NOT_IMPLEMENTED && resolved_func.kind == WASI__RESOLVED_CORE_FUNC_CANON_LOWER) {
+                    if (arg_err == WASI_OK) {
+                        needs_derived_export_name = (!export_name || !export_name[0]);
+                    } else if (arg_err == WASI_ERR_NOT_IMPLEMENTED && resolved_func.kind == WASI__RESOLVED_CORE_FUNC_CANON_LOWER) {
+                        needs_derived_export_name = 1;
+                        arg_err = WASI_OK;
+                    }
+                    if (needs_derived_export_name) {
                         arg_err = wasi__resolve_core_singleton_import_name(engine,
                                                                           instance,
                                                                           core_instance->module_index,
