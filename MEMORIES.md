@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 23
+Memory Version: 24
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -65,6 +65,10 @@ This file is the canonical checked-in snapshot of repo memory.
 ## core-namespace-export-names.md
 
 - When a whole core-instance namespace is linked through a `from exports` record, `wasi.h` should also derive names for unnamed singleton exports from the destination core module's unique import in that namespace/kind instead of registering an empty import field; this applies to both direct forwards and `canon lower` bridges.
+
+## core-empty-import-fields.md
+
+- The current M5 core-instance path in `wasi.h` should treat an empty string import field as a valid unique singleton destination name, not as an automatic `WASI_ERR_NOT_IMPLEMENTED` failure, so unnamed `from exports` singletons and direct core singleton args can still link into core modules whose matching import field is empty.
 
 ## component-module-linking.md
 
