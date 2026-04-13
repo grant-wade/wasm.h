@@ -3940,6 +3940,23 @@ static void wasi_test_build_outer_func_alias_child_component(wasi_test_builder_t
     wasi_test_emit_section(component, 11u, sec.buf, sec.len);
 }
 
+static void wasi_test_build_outer_resource_destructor_child_component(wasi_test_builder_t* component) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_outer_alias(&sec, 0x01u, 1u, 0u);
+    wasi_test_emit_section(component, 6u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_resource_type_with_destructor(&sec, 0u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+}
+
 static void wasi_test_build_outer_core_module_alias_child_component(wasi_test_builder_t* component) {
     wasi_test_builder_t sec = { 0 };
 
@@ -4059,6 +4076,45 @@ static void wasi_test_build_parent_outer_func_alias_component(wasi_test_builder_
     wasi_test_emit_leb128_u32(&sec, 1u);
     wasi_test_emit_component_export(&sec, "echo", 0x01u, 0u);
     wasi_test_emit_section(component, 11u, sec.buf, sec.len);
+}
+
+static void wasi_test_build_parent_outer_resource_destructor_component(wasi_test_builder_t* component,
+                                                                       const wasi_test_builder_t* nested_component,
+                                                                       const wasi_test_builder_t* core_module) {
+    wasi_test_builder_t sec = { 0 };
+
+    memset(component, 0, sizeof(*component));
+    wasi_test_emit_component_header(component);
+
+    wasi_test_emit_section(component, 1u, core_module->buf, core_module->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x40u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_component_plain_name(&sec, "rep");
+    wasi_test_emit(&sec, 0x79u);
+    wasi_test_emit(&sec, 0x01u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 7u, sec.buf, sec.len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 8u, sec.buf, sec.len);
+
+    wasi_test_emit_section(component, 4u, nested_component->buf, nested_component->len);
+
+    memset(&sec, 0, sizeof(sec));
+    wasi_test_emit_leb128_u32(&sec, 1u);
+    wasi_test_emit(&sec, 0x00u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_leb128_u32(&sec, 0u);
+    wasi_test_emit_section(component, 5u, sec.buf, sec.len);
 }
 
 static void wasi_test_build_parent_outer_core_module_alias_component(wasi_test_builder_t* component,
@@ -7355,6 +7411,69 @@ WL_TEST(test_wasi_resource_destructor_resolves_component_alias) {
 
     wasi_free_instance(instance);
     wasi_free_component(component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_resource_destructor_resolves_outer_func_alias) {
+    wasi_engine_t engine;
+    wasi_test_builder_t module_bytes;
+    wasi_test_builder_t child_component_bytes;
+    wasi_test_builder_t parent_component_bytes;
+    wasi_component_t* parent_component;
+    wasi_instance_t* parent_instance;
+    wasi_instance_t* child_instance;
+    wasm_module_t* core_module;
+    wasi_resource_type_t resource_type;
+    wasi_test_resource_drop_state_t drop_state;
+    uint32_t handle = UINT32_MAX;
+    uint32_t representation_value = 144u;
+    wasi_error_t err;
+
+    memset(&drop_state, 0, sizeof(drop_state));
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_resource_destructor_core_module(&module_bytes);
+    wasi_test_build_outer_resource_destructor_child_component(&child_component_bytes);
+    wasi_test_build_parent_outer_resource_destructor_component(&parent_component_bytes,
+                                                               &child_component_bytes,
+                                                               &module_bytes);
+
+    parent_component = wasi_load(&engine, parent_component_bytes.buf, parent_component_bytes.len);
+    WL_REQUIRE_MSG(t, parent_component != NULL, "wasi_load parent failed: %s", engine.error_msg);
+    parent_instance = wasi_instantiate(parent_component);
+    WL_REQUIRE_MSG(t, parent_instance != NULL, "wasi_instantiate parent failed: %s", engine.error_msg);
+    core_module = parent_instance->core_module;
+    WL_REQUIRE(t, core_module != NULL);
+    WL_REQUIRE(t, parent_instance->num_component_instances == 1u);
+    child_instance = parent_instance->component_instances[0].ref.instance;
+    WL_REQUIRE(t, child_instance != NULL);
+    WL_CHECK(t, child_instance->parent_instance == parent_instance);
+
+    resource_type = wasi_define_resource(&engine,
+                                         "wasi:test/resources@0.3.0",
+                                         "thing",
+                                         wasi_test_resource_destructor,
+                                         &drop_state);
+    WL_REQUIRE_MSG(t, resource_type != WASI_RESOURCE_TYPE_INVALID, "wasi_define_resource failed: %s", engine.error_msg);
+    WL_REQUIRE_MSG(t,
+                   wasi_instance_bind_resource_type(child_instance, 0u, resource_type) == WASI_OK,
+                   "wasi_instance_bind_resource_type failed: %s",
+                   engine.error_msg);
+    WL_REQUIRE_MSG(t,
+                   wasi_resource_new(child_instance, 0u, (void*)(uintptr_t)representation_value, &handle) == WASI_OK,
+                   "wasi_resource_new failed: %s",
+                   engine.error_msg);
+
+    err = wasi_resource_drop(child_instance, 0u, handle);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_resource_drop failed: %s", engine.error_msg);
+    wasi_test_expect_i32_global(t, core_module, "last_drop", (int32_t)representation_value);
+    wasi_test_expect_i32_global(t, core_module, "drop_count", 1);
+    WL_CHECK(t, drop_state.drops == 1u);
+    WL_CHECK(t, drop_state.last_representation == (void*)(uintptr_t)representation_value);
+
+    wasi_free_instance(parent_instance);
+    wasi_free_component(parent_component);
     wasi_destroy(&engine);
 }
 
@@ -11004,6 +11123,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_instance_runs_component_resource_destructor_on_teardown),
         WL_TEST_CASE(test_wasi_resource_transfer_preserves_origin_destructor),
         WL_TEST_CASE(test_wasi_resource_destructor_resolves_component_alias),
+        WL_TEST_CASE(test_wasi_resource_destructor_resolves_outer_func_alias),
         WL_TEST_CASE(test_wasi_instantiate_allows_trivial_core_instance),
         WL_TEST_CASE(test_wasi_instantiate_resolves_core_instance_function_args),
         WL_TEST_CASE(test_wasi_instantiate_resolves_core_instance_global_args),

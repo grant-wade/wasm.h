@@ -6004,6 +6004,13 @@ static wasi_error_t wasi__resolve_component_func_index(wasi_engine_t* engine,
                                                        uint32_t func_index,
                                                        const char* func_label,
                                                        uint32_t* out_local_func_index);
+static wasi_error_t wasi__resolve_component_type_ref(wasi_engine_t* engine,
+                                                     wasi_instance_t* instance,
+                                                     uint32_t type_index,
+                                                     const char* label,
+                                                     const wasi_component_t** out_component,
+                                                     uint32_t* out_local_type_index,
+                                                     const wasi_component_type_t** out_type);
 typedef struct wasi__resolved_component_func_t {
     wasi_instance_t* instance;
     const wasi_component_t* component;
@@ -6034,14 +6041,20 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
                                                              uint32_t component_type_index,
                                                              void* representation) {
     const wasi_component_t* component;
+    const wasi_component_t* resolved_component = NULL;
+    const wasi_component_t* type_component = NULL;
     const wasi_component_type_t* type;
+    const wasi_component_type_t* resolved_type = NULL;
     const wasi_component_canon_t* canon;
+    wasi_instance_t* resolved_instance = NULL;
     wasi_engine_t* engine;
     wasi__canon_runtime_options_t options;
     wasi__canon_call_context_t call_context;
+    wasi__resolved_component_func_t resolved_func;
     wasi__resolved_core_func_t target_func;
     wasi_value_t arg;
-    uint32_t destructor_func_index = UINT32_MAX;
+    uint32_t local_func_index = UINT32_MAX;
+    uint32_t effective_type_index = UINT32_MAX;
     uint32_t raw_representation = 0u;
     uint8_t param_opcode;
     wasi_error_t err;
@@ -6067,14 +6080,24 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     }
     if (!type->has_primary_index) return WASI_OK;
 
-    err = wasi__resolve_component_func_index(engine,
-                                             component,
-                                             type->primary_index,
-                                             "<resource destructor>",
-                                             &destructor_func_index);
+    err = wasi__resolve_component_func_ref(engine,
+                                           instance,
+                                           type->primary_index,
+                                           "<resource destructor>",
+                                           &resolved_func);
     if (err != WASI_OK) return err;
+    resolved_component = resolved_func.component;
+    resolved_instance = resolved_func.instance ? resolved_func.instance : instance;
+    local_func_index = resolved_func.local_func_index;
+    if (!resolved_component || !resolved_instance || local_func_index >= resolved_component->num_funcs) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "resource destructor func %u resolved to invalid local function %u",
+                                (unsigned)type->primary_index,
+                                (unsigned)local_func_index);
+    }
 
-    canon = wasi__find_defined_canon(component, destructor_func_index);
+    canon = wasi__find_defined_canon(resolved_component, local_func_index);
     if (!canon) {
         return wasi__set_errorf(engine,
                                 WASI_ERR_NOT_IMPLEMENTED,
@@ -6087,19 +6110,27 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
                                 "resource destructor func %u is not backed by a canonical lift",
                                 (unsigned)type->primary_index);
     }
-    if (!wasi__component_type_is_func(component, canon->type_index)) {
+    err = wasi__resolve_component_type_ref(engine,
+                                           resolved_instance,
+                                           resolved_component->funcs[local_func_index].type_index,
+                                           "<resource destructor>",
+                                           &type_component,
+                                           &effective_type_index,
+                                           &resolved_type);
+    if (err != WASI_OK) return err;
+    if (!resolved_type || resolved_type->kind != WASI_COMPONENT_TYPE_KIND_FUNC) {
         return wasi__set_error_literal(engine,
                                        WASI_ERR_TYPE_MISMATCH,
                                        "resource destructor does not resolve to a function type");
     }
-    if (wasi_component_func_type_param_count(component, canon->type_index) != 1u ||
-        wasi_component_func_type_result_count(component, canon->type_index) != 0u) {
+    if (wasi_component_func_type_param_count(type_component, effective_type_index) != 1u ||
+        wasi_component_func_type_result_count(type_component, effective_type_index) != 0u) {
         return wasi__set_error_literal(engine,
                                        WASI_ERR_TYPE_MISMATCH,
                                        "resource destructor signature mismatch");
     }
 
-    param_opcode = wasi_component_func_type_param_code(component, canon->type_index, 0u);
+    param_opcode = wasi_component_func_type_param_code(type_component, effective_type_index, 0u);
     if (param_opcode != 0x79u && param_opcode != 0x7Au) {
         return wasi__set_error_literal(engine,
                                        WASI_ERR_TYPE_MISMATCH,
@@ -6121,19 +6152,19 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
     if (err != WASI_OK) return err;
 
     err = wasi__resolve_canon_lift_target(engine,
-                                          component,
-                                          instance,
+                                          resolved_component,
+                                          resolved_instance,
                                           canon,
                                           "<resource destructor>",
                                           &target_func);
     if (err != WASI_OK) return err;
 
     memset(&call_context, 0, sizeof(call_context));
-    call_context.instance = instance;
+    call_context.instance = resolved_instance;
     if (target_func.kind == WASI__RESOLVED_CORE_FUNC_MODULE) {
         options.call_context = &call_context;
-        err = wasi__canon_call_func_index(component,
-                                          canon->type_index,
+        err = wasi__canon_call_func_index(type_component,
+                                          effective_type_index,
                                           target_func.module,
                                           target_func.func_index,
                                           "<resource destructor>",
@@ -6143,7 +6174,7 @@ static wasi_error_t wasi__call_component_resource_destructor(wasi_instance_t* in
                                           NULL,
                                           0u);
     } else if (target_func.kind == WASI__RESOLVED_CORE_FUNC_CANON_LOWER) {
-        err = wasi__call_component_func(target_func.instance ? target_func.instance : instance,
+        err = wasi__call_component_func(target_func.instance ? target_func.instance : resolved_instance,
                                         target_func.func_index,
                                         1,
                                         target_func.func_type_index,
