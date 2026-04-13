@@ -7617,6 +7617,72 @@ WL_TEST(test_wasi_call_resolves_component_export_alias_lifts) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_component_export_func_type_index_handles_preceding_type_imports) {
+    wasi_engine_t engine;
+    wasi_component_t component;
+    wasi_component_import_t import_;
+    wasi_component_type_t types[4];
+    wasi_component_func_t func;
+    wasi_component_export_t export_;
+    uint32_t resolved_type_index = UINT32_MAX;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    memset(&component, 0, sizeof(component));
+    memset(&import_, 0, sizeof(import_));
+    memset(types, 0, sizeof(types));
+    memset(&func, 0, sizeof(func));
+    memset(&export_, 0, sizeof(export_));
+
+    component.engine = &engine;
+    component.imports = &import_;
+    component.num_imports = 1u;
+    component.types = types;
+    component.num_types = 4u;
+    component.funcs = &func;
+    component.num_funcs = 1u;
+    component.exports = &export_;
+    component.num_exports = 1u;
+
+    import_.kind = WASI_COMPONENT_EXTERN_KIND_TYPE;
+    import_.name = (char*)"rec";
+    import_.offset = 30u;
+    import_.type_index = 1u;
+
+    types[0].kind = WASI_COMPONENT_TYPE_KIND_DEFINED;
+    types[0].offset = 10u;
+    types[1].kind = WASI_COMPONENT_TYPE_KIND_DEFINED;
+    types[1].offset = 20u;
+    types[2].kind = WASI_COMPONENT_TYPE_KIND_DEFINED;
+    types[2].offset = 30u;
+    types[3].kind = WASI_COMPONENT_TYPE_KIND_FUNC;
+    types[3].offset = 40u;
+    types[3].func.num_params = 1u;
+    types[3].func.num_results = 1u;
+
+    func.offset = 50u;
+    func.type_index = 3u;
+
+    export_.kind = WASI_COMPONENT_EXTERN_KIND_FUNC;
+    export_.name = (char*)"echo";
+    export_.index = 0u;
+
+    WL_CHECK(t, wasi_component_import_count(&component) == 1u);
+    WL_CHECK(t, wasi_component_type_count(&component) == 4u);
+    WL_CHECK(t, wasi_component_type_kind(&component, 0u) == WASI_COMPONENT_TYPE_KIND_DEFINED);
+    WL_CHECK(t, wasi_component_type_kind(&component, 1u) == WASI_COMPONENT_TYPE_KIND_DEFINED);
+    WL_CHECK(t, wasi_component_type_kind(&component, 2u) == WASI_COMPONENT_TYPE_KIND_DEFINED);
+    WL_CHECK(t, wasi_component_type_kind(&component, 3u) == WASI_COMPONENT_TYPE_KIND_FUNC);
+    WL_REQUIRE(t, wasi_component_export_func_type_index(&component, 0u, &resolved_type_index));
+    WL_CHECK(t, resolved_type_index == 3u);
+    WL_CHECK(t, wasi_component_func_type_param_count(&component, resolved_type_index) == 1u);
+    WL_CHECK(t, wasi_component_func_type_result_count(&component, resolved_type_index) == 1u);
+
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instantiate_executes_nested_component_instances) {
     wasi_engine_t engine;
     wasi_test_builder_t source_module_bytes;
@@ -10290,6 +10356,7 @@ int main(void) {
         WL_TEST_CASE(test_wasi_instantiate_links_core_from_exports_tags),
         WL_TEST_CASE(test_wasi_call_resolves_core_export_alias_lifts),
         WL_TEST_CASE(test_wasi_call_resolves_component_export_alias_lifts),
+        WL_TEST_CASE(test_wasi_component_export_func_type_index_handles_preceding_type_imports),
         WL_TEST_CASE(test_wasi_instantiate_executes_nested_component_instances),
         WL_TEST_CASE(test_wasi_instantiate_accepts_component_type_args),
         WL_TEST_CASE(test_wasi_instantiate_resolves_instance_exported_type_args),

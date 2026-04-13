@@ -6193,12 +6193,31 @@ static uint32_t wasi__component_type_alias_count(const wasi_component_t* compone
     return count;
 }
 
+static int wasi__component_import_for_local_type(const wasi_component_t* component,
+                                                 uint32_t local_type_index,
+                                                 uint32_t* out_import_index) {
+    size_t type_offset;
+    uint32_t i;
+
+    if (out_import_index) *out_import_index = UINT32_MAX;
+    if (!component || local_type_index >= component->num_types) return 0;
+
+    type_offset = component->types[local_type_index].offset;
+    for (i = 0; i < component->num_imports; i++) {
+        if (component->imports[i].kind != WASI_COMPONENT_EXTERN_KIND_TYPE) continue;
+        if (component->imports[i].offset != type_offset) continue;
+        if (out_import_index) *out_import_index = i;
+        return 1;
+    }
+
+    return 0;
+}
+
 static int wasi__component_type_entry_at(const wasi_component_t* component,
                                          uint32_t type_index,
                                          uint32_t* out_import_index,
                                          uint32_t* out_local_type_index,
                                          const wasi_component_alias_t** out_alias) {
-    uint32_t next_import = 0u;
     uint32_t next_type = 0u;
     uint32_t next_alias = 0u;
     uint32_t current_index = 0u;
@@ -6208,48 +6227,36 @@ static int wasi__component_type_entry_at(const wasi_component_t* component,
     if (out_alias) *out_alias = NULL;
     if (!component) return 0;
 
-    while (next_import < component->num_imports || next_type < component->num_types || next_alias < component->num_aliases) {
-        const wasi_component_import_t* import = NULL;
+    while (next_type < component->num_types || next_alias < component->num_aliases) {
         const wasi_component_alias_t* alias = NULL;
-        int choose_import = 0;
         int choose_alias = 0;
-
-        while (next_import < component->num_imports &&
-               component->imports[next_import].kind != WASI_COMPONENT_EXTERN_KIND_TYPE) {
-            next_import++;
-        }
 
         while (next_alias < component->num_aliases &&
                !wasi__component_alias_defines_type(&component->aliases[next_alias])) {
             next_alias++;
         }
 
-        if (next_import < component->num_imports) import = &component->imports[next_import];
         if (next_alias < component->num_aliases) alias = &component->aliases[next_alias];
-        if (import &&
-            (next_type >= component->num_types || import->offset < component->types[next_type].offset) &&
-            (!alias || import->offset < alias->offset)) {
-            choose_import = 1;
-        }
-        if (!choose_import && alias &&
+        if (alias &&
             (next_type >= component->num_types || alias->offset < component->types[next_type].offset)) {
             choose_alias = 1;
         }
 
         if (current_index == type_index) {
-            if (choose_import) {
-                if (out_import_index) *out_import_index = next_import;
-            } else if (choose_alias) {
+            if (choose_alias) {
                 if (out_alias) *out_alias = alias;
             } else if (next_type < component->num_types && out_local_type_index) {
                 *out_local_type_index = next_type;
+                if (out_import_index) {
+                    uint32_t import_index = UINT32_MAX;
+                    if (wasi__component_import_for_local_type(component, next_type, &import_index))
+                        *out_import_index = import_index;
+                }
             }
             return 1;
         }
 
-        if (choose_import) {
-            next_import++;
-        } else if (choose_alias) {
+        if (choose_alias) {
             next_alias++;
         } else if (next_type < component->num_types) {
             next_type++;

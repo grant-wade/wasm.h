@@ -333,7 +333,7 @@ As of 2026-04-13, the current M5-adjacent test surface looks like this:
 
 - `wl_test`, `wasm_test`, `wasi_test`, the current `wasi-component` smoke/introspection coverage, the spectest pass, and the emcc fixtures are green.
 - The current `wasi_test` matrix covers top-level host value imports, imported-type-backed nested value args, own-resource-containing linked values, and explicit `borrow<T>` rejection cases on the current path.
-- The remaining red coverage is in the `wasi-wasmtime` reference harness: `record-u32-string-list-u8`, `variant-u32`, `variant-string`, `variant-join-u32`, and `variant-join-u64` currently fail with `missing exported function type index` before the canonical round-trip runs.
+- The `wasi-wasmtime` low-level canonical ABI reference matrix is green again, including the previously red `record-u32-string-list-u8`, `variant-u32`, `variant-string`, `variant-join-u32`, and `variant-join-u64` cases. The fix was in component type-space bookkeeping for standard named-type imports, not in the lift/lower logic itself.
 
 ### Remaining Blockers
 
@@ -351,8 +351,8 @@ As of 2026-04-13, the current M5-adjacent test surface looks like this:
 - [ ] Decide the M5 scope for retained `borrow<T>` values. Either land a safe long-lived borrow model for linked values or explicitly narrow the milestone so the current rejection path is a documented non-goal rather than an open blocker.
 - [ ] Add end-to-end M5 validation for the supported linker slice, not just parser/smoke coverage. The closeout bar should include real `wasm-tools compose` and Rust `wasm32-wasip2` style components that exercise nested components, alias/export routing, shared core modules, and supported start execution.
 - [ ] Keep unresolved-import and type-mismatch diagnostics consistent across the remaining paths. Newly supported linking forms should report the missing interface/version or the structural mismatch directly instead of surfacing generic `not implemented` or opaque traps.
-- [ ] Restore the low-level canonical ABI reference matrix to fully green. As of 2026-04-13, the `wasi-wasmtime` suite is green for scalar, string, and list cases, but `record-u32-string-list-u8`, `variant-u32`, `variant-string`, `variant-join-u32`, and `variant-join-u64` still fail in the harness with `missing exported function type index`. That gap should be closed before calling the M5/M3 validation story finished.
-- [ ] Re-run the full `check` target after the above lands and require a clean pass before marking M5 done.
+- [x] Restore the low-level canonical ABI reference matrix to fully green. The `wasi-wasmtime` suite now passes the scalar, string, list, record, and variant compare cases again after fixing component type-space handling for standard named-type imports.
+- [x] Re-run the full `check` target after the above lands and require a clean pass before marking M5 done.
 
 ---
 
