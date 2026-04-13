@@ -3830,6 +3830,7 @@ static wasi_error_t wasi__parse_component_aliases(wasi_engine_t* engine,
     uint32_t count;
     uint32_t i;
 
+    reader.base = component->bytes;
     reader.ptr = component->bytes + section->payload_offset;
     reader.end = reader.ptr + section->payload_size;
     reader.malformed = 0;
