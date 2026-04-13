@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 21
+Memory Version: 23
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -57,6 +57,14 @@ This file is the canonical checked-in snapshot of repo memory.
 ## direct-core-func-linking.md
 
 - Direct core `func` args in `wasi_instantiate()` must resolve through the core-function alias chain, not only through generic core-export resolution, so named aliases can register either forwarded core exports or synchronous `canon lower` bridges as singleton imports for later embedded core modules.
+
+## core-singleton-import-names.md
+
+- When a direct singleton core instantiation arg resolves to an unnamed local target such as `canon lower`, `wasi.h` should derive the import field name from the destination core module's unique import in the requested namespace/kind instead of failing with `WASI_ERR_NOT_IMPLEMENTED`; this lookup needs to work for both loaded modules and embedded core module bytes and should reject zero or multiple matches with named diagnostics.
+
+## core-namespace-export-names.md
+
+- When a whole core-instance namespace is linked through a `from exports` record, `wasi.h` should also derive names for unnamed singleton exports from the destination core module's unique import in that namespace/kind instead of registering an empty import field; this applies to both direct forwards and `canon lower` bridges.
 
 ## component-module-linking.md
 
