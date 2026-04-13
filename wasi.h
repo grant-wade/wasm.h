@@ -9560,39 +9560,83 @@ static wasi_error_t wasi__resolve_core_singleton_import_name_depth(wasi_engine_t
                                 module_name);
     }
 
-    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT) {
+    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT &&
+        !alias->sort_is_core &&
+        alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_MODULE) {
         wasi__component_namespace_ref_t source_ref;
-        wasm_module_t* target_module = NULL;
-        int owns_module = 0;
-        wasi_error_t err;
-
-        err = wasi__resolve_component_instance_ref_depth(engine,
-                                                         instance,
-                                                         alias->instance_index,
-                                                         module_name,
-                                                         &source_ref,
-                                                         depth + 1u);
+        wasi_error_t err = wasi__resolve_component_instance_ref_depth(engine,
+                                                                      instance,
+                                                                      alias->instance_index,
+                                                                      module_name,
+                                                                      &source_ref,
+                                                                      depth + 1u);
         if (err != WASI_OK) return err;
 
-        err = wasi__resolve_component_namespace_export_module_depth(engine,
-                                                                    &source_ref,
-                                                                    alias->name ? alias->name : "",
-                                                                    module_name,
-                                                                    &target_module,
-                                                                    &owns_module,
-                                                                    depth + 1u);
-        if (err != WASI_OK) return err;
+        if (source_ref.kind == WASI__COMPONENT_NAMESPACE_STATIC_EXPORTS) {
+            wasi_instance_t* owner_instance = source_ref.owner_instance;
+            const wasi_component_instance_t* local_instance;
+            uint32_t i;
 
-        err = wasi__find_unique_core_import_name_in_loaded_module(engine,
-                                                                  target_module,
-                                                                  module_name,
-                                                                  expected_kind,
-                                                                  out_name);
-        if (owns_module && target_module) wasm_free_module(target_module);
-        return err;
+            if (!owner_instance || !owner_instance->component ||
+                source_ref.local_instance_index >= owner_instance->component->num_instances) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "component module %s references invalid static instance",
+                                        module_name);
+            }
+
+            local_instance = &owner_instance->component->instances[source_ref.local_instance_index];
+            for (i = 0; i < local_instance->num_exports; i++) {
+                const wasi_component_instance_export_t* export_ = &local_instance->exports[i];
+
+                if (export_->kind != WASI_COMPONENT_EXTERN_KIND_MODULE) continue;
+                if (!export_->name || strcmp(export_->name, alias->name ? alias->name : "") != 0) continue;
+                return wasi__resolve_core_singleton_import_name_depth(engine,
+                                                                      owner_instance,
+                                                                      export_->index,
+                                                                      module_name,
+                                                                      expected_kind,
+                                                                      out_name,
+                                                                      depth + 1u);
+            }
+        } else if (source_ref.kind == WASI__COMPONENT_NAMESPACE_INSTANCE) {
+            wasi_instance_t* target_instance = source_ref.instance;
+            const wasi_component_t* target_component;
+            uint32_t i;
+
+            if (!target_instance || !target_instance->component) {
+                return wasi__set_errorf(engine,
+                                        WASI_ERR_INVALID_ARGUMENT,
+                                        "component module %s references an unresolved instance",
+                                        module_name);
+            }
+
+            target_component = target_instance->component;
+            for (i = 0; i < target_component->num_exports; i++) {
+                const wasi_component_export_t* export_ = &target_component->exports[i];
+
+                if (export_->kind != WASI_COMPONENT_EXTERN_KIND_MODULE) continue;
+                if (!export_->name || strcmp(export_->name, alias->name ? alias->name : "") != 0) continue;
+                return wasi__resolve_core_singleton_import_name_depth(engine,
+                                                                      target_instance,
+                                                                      export_->index,
+                                                                      module_name,
+                                                                      expected_kind,
+                                                                      out_name,
+                                                                      depth + 1u);
+            }
+        }
+
+        return wasi__set_errorf(engine,
+                                WASI_ERR_UNDEFINED_EXPORT,
+                                "component module %s missing aliased module export %s",
+                                module_name,
+                                alias->name ? alias->name : "");
     }
 
-    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER && alias->sort_is_core && alias->sort_code == 0x11u) {
+    if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER &&
+        ((alias->sort_is_core && alias->sort_code == 0x11u) ||
+         (!alias->sort_is_core && alias->extern_kind == WASI_COMPONENT_EXTERN_KIND_MODULE))) {
         wasi_instance_t* outer_instance = NULL;
         wasi_error_t err = wasi__resolve_outer_component_instance(engine,
                                                                   instance,

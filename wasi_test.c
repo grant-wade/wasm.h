@@ -9610,6 +9610,65 @@ WL_TEST(test_wasi_instantiate_resolves_outer_core_module_aliases) {
     wasi_destroy(&engine);
 }
 
+WL_TEST(test_wasi_resolves_singleton_core_import_names_through_outer_module_aliases) {
+    wasi_engine_t engine;
+    wasi_test_builder_t caller_module_bytes;
+    wasi_component_core_module_t parent_core_module;
+    wasi_component_alias_t child_alias;
+    wasi_component_t parent_component;
+    wasi_component_t child_component;
+    wasi_instance_t parent_instance;
+    wasi_instance_t child_instance;
+    char* import_name = NULL;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_core_instance_importing_module_named_field(&caller_module_bytes, "dep", "");
+
+    memset(&parent_core_module, 0, sizeof(parent_core_module));
+    parent_core_module.payload_offset = 0u;
+    parent_core_module.payload_size = caller_module_bytes.len;
+    memset(&parent_component, 0, sizeof(parent_component));
+    parent_component.engine = &engine;
+    parent_component.bytes = caller_module_bytes.buf;
+    parent_component.core_modules = &parent_core_module;
+    parent_component.num_core_modules = 1u;
+
+    memset(&parent_instance, 0, sizeof(parent_instance));
+    parent_instance.component = &parent_component;
+
+    memset(&child_alias, 0, sizeof(child_alias));
+    child_alias.kind = WASI_COMPONENT_ALIAS_KIND_OUTER;
+    child_alias.sort_code = 0x00u;
+    child_alias.extern_kind = WASI_COMPONENT_EXTERN_KIND_MODULE;
+    child_alias.outer_count = 1u;
+    child_alias.outer_index = 0u;
+
+    memset(&child_component, 0, sizeof(child_component));
+    child_component.engine = &engine;
+    child_component.aliases = &child_alias;
+    child_component.num_aliases = 1u;
+
+    memset(&child_instance, 0, sizeof(child_instance));
+    child_instance.component = &child_component;
+    child_instance.parent_instance = &parent_instance;
+
+    err = wasi__resolve_core_singleton_import_name(&engine,
+                                                   &child_instance,
+                                                   0u,
+                                                   "dep",
+                                                   WASM_EXPORT_FUNC,
+                                                   &import_name);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi__resolve_core_singleton_import_name failed: %s", engine.error_msg);
+    WL_REQUIRE(t, import_name != NULL);
+    WL_CHECK(t, strcmp(import_name, "") == 0);
+
+    WASM_FREE(import_name);
+    wasi_destroy(&engine);
+}
+
 WL_TEST(test_wasi_instantiate_links_canon_lower_from_nested_component_instance) {
     wasi_engine_t engine;
     wasi_test_builder_t source_module_bytes;
@@ -9965,6 +10024,92 @@ WL_TEST(test_wasi_instantiate_links_direct_func_args_to_empty_import_field) {
     wasi_free_component(component);
     wasi_free_instance(source_instance);
     wasi_free_component(source_component);
+    wasi_destroy(&engine);
+}
+
+WL_TEST(test_wasi_resolves_singleton_core_import_names_through_instance_export_module_aliases) {
+    wasi_engine_t engine;
+    wasi_test_builder_t caller_module_bytes;
+    wasi_component_core_module_t provider_core_module;
+    wasi_component_instance_export_t provider_export;
+    wasi_component_instance_t provider_local_instance;
+    wasi_component_import_t child_import;
+    wasi_component_alias_t child_alias;
+    wasi__component_import_runtime_t child_runtime_import;
+    wasi_component_t provider_component;
+    wasi_component_t child_component;
+    wasi_instance_t provider_instance;
+    wasi_instance_t child_instance;
+    char* import_name = NULL;
+    wasi_error_t err;
+
+    err = wasi_init(&engine, NULL);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi_init failed: %s", engine.error_msg);
+
+    wasi_test_build_core_instance_importing_module(&caller_module_bytes);
+
+    memset(&provider_core_module, 0, sizeof(provider_core_module));
+    provider_core_module.payload_offset = 0u;
+    provider_core_module.payload_size = caller_module_bytes.len;
+    memset(&provider_export, 0, sizeof(provider_export));
+    provider_export.name = (char*)"dep";
+    provider_export.kind = WASI_COMPONENT_EXTERN_KIND_MODULE;
+    provider_export.index = 0u;
+    memset(&provider_local_instance, 0, sizeof(provider_local_instance));
+    provider_local_instance.kind = WASI_COMPONENT_INSTANCE_KIND_FROM_EXPORTS;
+    provider_local_instance.exports = &provider_export;
+    provider_local_instance.num_exports = 1u;
+
+    memset(&provider_component, 0, sizeof(provider_component));
+    provider_component.engine = &engine;
+    provider_component.bytes = caller_module_bytes.buf;
+    provider_component.core_modules = &provider_core_module;
+    provider_component.num_core_modules = 1u;
+    provider_component.instances = &provider_local_instance;
+    provider_component.num_instances = 1u;
+
+    memset(&provider_instance, 0, sizeof(provider_instance));
+    provider_instance.component = &provider_component;
+
+    memset(&child_import, 0, sizeof(child_import));
+    child_import.kind = WASI_COMPONENT_EXTERN_KIND_INSTANCE;
+    child_import.offset = 0u;
+    memset(&child_alias, 0, sizeof(child_alias));
+    child_alias.kind = WASI_COMPONENT_ALIAS_KIND_INSTANCE_EXPORT;
+    child_alias.sort_code = 0x00u;
+    child_alias.extern_kind = WASI_COMPONENT_EXTERN_KIND_MODULE;
+    child_alias.instance_index = 0u;
+    child_alias.name = (char*)"dep";
+    child_alias.offset = 1u;
+    memset(&child_component, 0, sizeof(child_component));
+    child_component.engine = &engine;
+    child_component.imports = &child_import;
+    child_component.num_imports = 1u;
+    child_component.aliases = &child_alias;
+    child_component.num_aliases = 1u;
+
+    memset(&child_runtime_import, 0, sizeof(child_runtime_import));
+    child_runtime_import.kind = WASI__COMPONENT_IMPORT_RUNTIME_INSTANCE;
+    child_runtime_import.of.instance_ref.kind = WASI__COMPONENT_NAMESPACE_STATIC_EXPORTS;
+    child_runtime_import.of.instance_ref.owner_instance = &provider_instance;
+    child_runtime_import.of.instance_ref.local_instance_index = 0u;
+
+    memset(&child_instance, 0, sizeof(child_instance));
+    child_instance.component = &child_component;
+    child_instance.imports = &child_runtime_import;
+    child_instance.num_imports = 1u;
+
+    err = wasi__resolve_core_singleton_import_name(&engine,
+                                                   &child_instance,
+                                                   0u,
+                                                   "dep",
+                                                   WASM_EXPORT_FUNC,
+                                                   &import_name);
+    WL_REQUIRE_MSG(t, err == WASI_OK, "wasi__resolve_core_singleton_import_name failed: %s", engine.error_msg);
+    WL_REQUIRE(t, import_name != NULL);
+    WL_CHECK(t, strcmp(import_name, "inc") == 0);
+
+    WASM_FREE(import_name);
     wasi_destroy(&engine);
 }
 
@@ -11163,12 +11308,14 @@ int main(void) {
         WL_TEST_CASE(test_wasi_instantiate_resolves_bound_component_imports),
         WL_TEST_CASE(test_wasi_instantiate_accepts_component_module_args),
         WL_TEST_CASE(test_wasi_instantiate_resolves_outer_core_module_aliases),
+        WL_TEST_CASE(test_wasi_resolves_singleton_core_import_names_through_outer_module_aliases),
         WL_TEST_CASE(test_wasi_instantiate_links_canon_lower_from_nested_component_instance),
         WL_TEST_CASE(test_wasi_call_resolves_core_from_exports_canon_lower_lifts),
         WL_TEST_CASE(test_wasi_instantiate_links_canon_lower_resource_roundtrip),
         WL_TEST_CASE(test_wasi_instantiate_links_direct_func_args_to_canon_lower),
         WL_TEST_CASE(test_wasi_instantiate_links_direct_func_args_to_unnamed_canon_lower),
         WL_TEST_CASE(test_wasi_instantiate_links_direct_func_args_to_empty_import_field),
+        WL_TEST_CASE(test_wasi_resolves_singleton_core_import_names_through_instance_export_module_aliases),
         WL_TEST_CASE(test_wasi_instantiate_links_named_canon_lower_reexports_through_alias_chain),
         WL_TEST_CASE(test_wasi_instantiate_links_from_exports_namespace_with_empty_import_field),
         WL_TEST_CASE(test_wasi_instantiate_links_from_exports_namespace_with_unnamed_func_export),
