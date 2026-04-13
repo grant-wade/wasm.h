@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 20
+Memory Version: 21
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -52,7 +52,11 @@ This file is the canonical checked-in snapshot of repo memory.
 - Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
 - Component instantiation args on the current M5 path accept `component` references in addition to `func`, `instance`, and `type`.
 - Component type resolution on the current M5 path must follow non-core `instance export` aliases as well as outer aliases, or child instantiations that source a `type` arg from another live component instance fail before the imported-type carrier is populated.
-- The current linker still does not resolve broader outer-alias sorts, broader core-instance arg sorts, or nontrivial start sections.
+- The current linker still does not resolve broader outer-alias sorts, broader core-type alias coverage, or nontrivial start sections.
+
+## direct-core-func-linking.md
+
+- Direct core `func` args in `wasi_instantiate()` must resolve through the core-function alias chain, not only through generic core-export resolution, so named aliases can register either forwarded core exports or synchronous `canon lower` bridges as singleton imports for later embedded core modules.
 
 ## component-module-linking.md
 

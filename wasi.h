@@ -9082,6 +9082,92 @@ static wasi_error_t wasi__resolve_core_func(wasi_engine_t* engine,
                                                   &out_func->func_type_index);
 }
 
+static wasi_error_t wasi__resolve_core_func_export_name_depth(wasi_engine_t* engine,
+                                                              const wasi_component_t* component,
+                                                              const wasi_instance_t* instance,
+                                                              uint32_t core_func_index,
+                                                              const char* func_label,
+                                                              const char** out_name,
+                                                              uint32_t depth) {
+    const wasi_component_alias_t* alias = NULL;
+    const wasi_component_canon_t* canon = NULL;
+
+    if (out_name) *out_name = NULL;
+    if (!engine || !component || !instance || !out_name) {
+        return wasi__set_error_literal(engine,
+                                       WASI_ERR_INVALID_ARGUMENT,
+                                       "invalid core function export-name resolution request");
+    }
+    if (depth >= 32u) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_RUNTIME,
+                                "core function %s alias chain is too deep",
+                                func_label ? func_label : "");
+    }
+    if (!wasi__core_func_entry_at(component, core_func_index, &alias, &canon)) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_UNDEFINED_EXPORT,
+                                "core function %s references missing core function index %u",
+                                func_label ? func_label : "",
+                                (unsigned)core_func_index);
+    }
+
+    if (alias) {
+        if (alias->kind == WASI_COMPONENT_ALIAS_KIND_OUTER) {
+            wasi_instance_t* outer_instance = NULL;
+            wasi_error_t err = wasi__resolve_outer_component_instance(engine,
+                                                                      (wasi_instance_t*)instance,
+                                                                      alias->outer_count,
+                                                                      func_label,
+                                                                      &outer_instance);
+            if (err != WASI_OK) return err;
+
+            return wasi__resolve_core_func_export_name_depth(engine,
+                                                             outer_instance->component,
+                                                             outer_instance,
+                                                             alias->outer_index,
+                                                             func_label,
+                                                             out_name,
+                                                             depth + 1u);
+        }
+        if (!alias->name || !alias->name[0]) {
+            return wasi__set_errorf(engine,
+                                    WASI_ERR_MALFORMED,
+                                    "core function %s references a malformed core export alias",
+                                    func_label ? func_label : "");
+        }
+        *out_name = alias->name;
+        return WASI_OK;
+    }
+
+    if (canon) {
+        return wasi__set_errorf(engine,
+                                WASI_ERR_NOT_IMPLEMENTED,
+                                "core function %s needs a named alias on the current linking path",
+                                func_label ? func_label : "");
+    }
+
+    return wasi__set_errorf(engine,
+                            WASI_ERR_RUNTIME,
+                            "core function %s export-name resolution reached an invalid state",
+                            func_label ? func_label : "");
+}
+
+static wasi_error_t wasi__resolve_core_func_export_name(wasi_engine_t* engine,
+                                                        const wasi_component_t* component,
+                                                        const wasi_instance_t* instance,
+                                                        uint32_t core_func_index,
+                                                        const char* func_label,
+                                                        const char** out_name) {
+    return wasi__resolve_core_func_export_name_depth(engine,
+                                                     component,
+                                                     instance,
+                                                     core_func_index,
+                                                     func_label,
+                                                     out_name,
+                                                     0u);
+}
+
 static wasi_error_t wasi__register_core_lower_bridge_export(wasi_engine_t* engine,
                                                             const char* module_name,
                                                             const char* export_name,
@@ -13520,7 +13606,58 @@ static wasi_instance_t* wasi__instantiate_component_internal(const wasi_componen
                         wasi_free_instance(instance);
                         return NULL;
                     }
-                } else if (arg->kind == 0x00u || arg->kind == 0x01u || arg->kind == 0x02u ||
+                } else if (arg->kind == 0x00u) {
+                    wasi__resolved_core_func_t resolved_func;
+                    const char* export_name = NULL;
+                    wasi_error_t arg_err = wasi__resolve_core_func(engine,
+                                                                   component,
+                                                                   instance,
+                                                                   arg->index,
+                                                                   arg->name ? arg->name : "",
+                                                                   &resolved_func);
+                    if (arg_err != WASI_OK) {
+                        wasi_free_instance(instance);
+                        return NULL;
+                    }
+
+                    arg_err = wasi__resolve_core_func_export_name(engine,
+                                                                  component,
+                                                                  instance,
+                                                                  arg->index,
+                                                                  arg->name ? arg->name : "",
+                                                                  &export_name);
+                    if (arg_err != WASI_OK) {
+                        wasi_free_instance(instance);
+                        return NULL;
+                    }
+
+                    if (resolved_func.kind == WASI__RESOLVED_CORE_FUNC_MODULE) {
+                        arg_err = wasi__register_core_instance_export(engine,
+                                                                      arg->name ? arg->name : "",
+                                                                      export_name,
+                                                                      resolved_func.module,
+                                                                      WASM_EXPORT_FUNC,
+                                                                      resolved_func.func_index);
+                    } else if (resolved_func.kind == WASI__RESOLVED_CORE_FUNC_CANON_LOWER) {
+                        arg_err = wasi__register_core_lower_bridge_export(engine,
+                                                                          arg->name ? arg->name : "",
+                                                                          export_name,
+                                                                          instance,
+                                                                          resolved_func.func_type_component,
+                                                                          resolved_func.func_index,
+                                                                          resolved_func.func_type_index,
+                                                                          resolved_func.canon_index);
+                    } else {
+                        arg_err = wasi__set_errorf(engine,
+                                                   WASI_ERR_RUNTIME,
+                                                   "core instantiation arg %s resolved to an invalid function target",
+                                                   arg->name ? arg->name : "");
+                    }
+                    if (arg_err != WASI_OK) {
+                        wasi_free_instance(instance);
+                        return NULL;
+                    }
+                } else if (arg->kind == 0x01u || arg->kind == 0x02u ||
                            arg->kind == 0x03u || arg->kind == 0x04u) {
                     wasi__resolved_core_export_t resolved_export;
                     wasi_error_t arg_err = wasi__resolve_core_export(engine,
