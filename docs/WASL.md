@@ -177,6 +177,8 @@ wasl's primitive types map directly to WebAssembly value types:
 
 The narrower integer types (`u8`, `u16`, `s8`, `s16`) exist in wasl's type system for clarity and safety. They are represented as `i32` at the WebAssembly level. The compiler inserts range checks, masking, and sign-extension as needed at type boundaries. Within expressions, arithmetic on narrow types follows WebAssembly's `i32` semantics.
 
+**Overflow behavior for narrow types:** When a value is assigned to a narrow type and exceeds its range, the result is a WebAssembly trap — not silent wrapping. The compiler catches what it can statically (`let x: u8 = 300` is a compile error). For dynamic values, the compiler emits a bounds check at every narrowing boundary: assignment to a narrow-typed binding, passing a value to a narrow-typed parameter, or returning a value from a function with a narrow return type. If the check fails, the module traps. This is a deliberate choice: if a programmer declares `u8`, they are asserting the value fits in 0–255, and violating that assertion is a bug, not a wrapping opportunity. Programmers who want wrapping semantics should use `i32` directly and apply explicit masking.
+
 ### Strings
 
 Strings are GC-managed, UTF-8 encoded, and immutable by default. The runtime representation is a GC struct containing a GC byte array and a length. String operations (slicing, concatenation, iteration) are built-in and bounds-checked.
@@ -199,16 +201,16 @@ This design prevents accidental O(n²) loops from hidden linear scans. The itera
 **Records** compile to WebAssembly GC structs:
 
 ```
-type Point = { x: f64, y: f64 }
+type Point = #{ x: f64, y: f64 }
 ```
 
 **Algebraic types** (sum types) compile to a GC supertype with one GC subtype per variant. The discriminant is structural via `ref.test` / `br_on_cast`, not a stored tag field:
 
 ```
 type Shape =
-    | Circle { radius: f64 }
-    | Rect { width: f64, height: f64 }
-    | Triangle { a: Point, b: Point, c: Point }
+    | Circle #{ radius: f64 }
+    | Rect #{ width: f64, height: f64 }
+    | Triangle #{ a: Point, b: Point, c: Point }
 ```
 
 **Enums** (variants with no payload) compile to `i32` discriminants:
@@ -313,7 +315,7 @@ fn log_item(item: dyn Show) = {
 **Construction.** Any value whose type implements the trait can be coerced to `dyn Trait` implicitly at assignment or call sites. The compiler generates the vtable struct for each `(concrete type, trait)` pair at compile time and emits the wrapping code to construct the fat reference:
 
 ```
-let c: Circle = Circle { radius: 5.0 }
+let c: Circle = Circle #{ radius: 5.0 }
 let s: dyn Show = c  // compiler wraps: (ref c, ref $Circle_Show_vtable)
 ```
 
@@ -338,7 +340,7 @@ Downcasting compiles to `br_on_cast` against the data reference's concrete GC su
 - No method has generic type parameters (the vtable cannot represent unbounded specializations).
 - All methods take `self` as the first parameter.
 
-Traits with `Self` in argument position (like `Eq`) are object-safe — the vtable entry receives `(ref any)` and the implementation performs the appropriate cast. Traits that return `Self` or have generic methods are not object-safe; attempting to use them as `dyn Trait` is a compile error.
+Traits with `Self` in argument position (like `Eq`) are object-safe — the vtable entry receives `(ref any)` and the implementation performs the appropriate cast. When the cast fails (i.e., the two values have different concrete types), the method returns the natural "not equal" result (`false` for `eq`, a defined ordering for `cmp`) rather than trapping. Two values of different concrete types behind `dyn Eq` are simply not equal — this is the same behavior as Java, C#, and Haskell. Traits that return `Self` or have generic methods are not object-safe; attempting to use them as `dyn Trait` is a compile error.
 
 **WebAssembly representation.** For a trait `Show` with one method `fn show(self) -> string`, the compiler emits:
 
@@ -357,7 +359,7 @@ This maps cleanly to WebAssembly GC with no runtime shims. The vtable struct is 
 Function types are first-class and map to WebAssembly typed function references (`funcref`):
 
 ```
-let transform: fn(i32) -> i32 = |x| x * 2
+let transform: fn(i32) -> i32 = |x| = x * 2
 ```
 
 Closures that capture variables compile to a GC struct (the environment) plus a function that receives the struct as an implicit first parameter. The closure value is a pair of `(funcref, envref)`.
@@ -434,6 +436,19 @@ fn classify(n: i32) -> string =
     if n > 0 then "positive"
     else if n < 0 then "negative"
     else "zero"
+```
+
+Conditional expressions use `if`/`then`/`else` syntax. The `then` keyword is required — there is no brace-delimited `if` form. When the branches themselves need multiple statements, they use blocks:
+
+```
+fn classify_verbose(n: i32) -> string =
+    if n > 0 then {
+        let label = "positive"
+        label
+    } else if n < 0 then {
+        let label = "negative"
+        label
+    } else "zero"
 ```
 
 Multi-statement bodies use blocks. The last expression in a block is the block's value:
@@ -530,15 +545,15 @@ Pattern matching is the primary dispatch mechanism. It compiles to `br_on_cast` 
 ```
 fn describe(s: Shape) -> string =
     match s {
-        Circle { radius } if radius > 100.0 -> "big circle",
-        Circle { .. }                        -> "small circle",
-        Rect { width, height } if width == height -> "square",
-        Rect { .. }                          -> "rectangle",
-        Triangle { .. }                      -> "triangle",
+        Circle #{ radius } if radius > 100.0 -> "big circle",
+        Circle #{ .. }                        -> "small circle",
+        Rect #{ width, height } if width == height -> "square",
+        Rect #{ .. }                          -> "rectangle",
+        Triangle #{ .. }                      -> "triangle",
     }
 ```
 
-Exhaustiveness checking is enforced at compile time. A non-exhaustive match is a compile error, not a runtime trap.
+Match arms are separated by commas. The trailing comma on the last arm is optional. Exhaustiveness checking is enforced at compile time. A non-exhaustive match is a compile error, not a runtime trap.
 
 Guards (`if` clauses) are supported. Guarded arms do not count toward exhaustiveness; a catch-all or complete unguarded coverage is still required.
 
@@ -583,7 +598,7 @@ fn load_config(path: string) -> Result<Config, Error> = {
 ```
 // assumes: import "wasl:io"
 exception DivByZero
-exception OutOfBounds { index: i32, len: i32 }
+exception OutOfBounds #{ index: i32, len: i32 }
 
 fn safe_div(a: i32, b: i32) -> i32 =
     if b == 0 then throw DivByZero
@@ -595,7 +610,7 @@ fn main() =
         io.print(x)
     } catch {
         DivByZero -> io.print("division by zero"),
-        OutOfBounds { index, len } -> io.print("oob"),
+        OutOfBounds #{ index, len } -> io.print("oob"),
     }
 ```
 
@@ -883,7 +898,7 @@ Signature imports for foreign GC modules can include `type` declarations to give
 
 ```wasl
 import "kotlin_geo" from "geo.wasm" {
-    type ForeignPoint = { x: f64, y: f64 }
+    type ForeignPoint = #{ x: f64, y: f64 }
     fn distance(a: ForeignPoint, b: ForeignPoint) -> f64
 }
 
@@ -1072,7 +1087,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
 - Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `import`, `from`, `as`, `type`, `trait`, `impl`, `dyn`, `exception`, `throw`, `try`, `catch`, `memory`, `layout`, `data`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
-- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures / lambda expressions, import declarations (namespace, aliased, selective, and signature forms, with optional `from` clause), pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
+- Parser: recursive descent, producing a complete AST for type declarations (records with `#{ }` delimiters, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions (comma-separated arms, trailing comma optional), `if`/`then`/`else` conditional expressions (no brace-delimited `if` form), while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures (`|params| = expr` and `|params| = { block }` forms), import declarations (namespace, aliased, selective, and signature forms, with optional `from` clause), pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
 
@@ -1111,7 +1126,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 - Bidirectional type checking: propagate expected types downward, synthesize types upward
 - Type inference for let bindings: `let x = 42` infers `i32`
-- Type inference for closures: `|x| x + 1` infers `fn(i32) -> i32` from context
+- Type inference for closures: `|x| = x + 1` infers `fn(i32) -> i32` from context
 - Literal typing: integer literals default to `i32`, float literals default to `f64`, with contextual widening to `i64` / `f32` where expected
 - Record, algebraic type, and enum type checking
 - Tuple type checking
@@ -1144,7 +1159,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Trait resolution: for each monomorphized call site, resolve the concrete trait implementation
 - Monomorphization pass: for each concrete use of a generic type or function, generate a specialized version with all type parameters substituted, with resolved trait method calls inlined
 - Dead-specialization elimination: don't emit specializations that are never used
-- Recursive generic types: `type Tree<T> = | Leaf(T) | Node { left: Tree<T>, right: Tree<T> }`; the monomorphizer handles these without infinite expansion by detecting recursion through the same type parameters
+- Recursive generic types: `type Tree<T> = | Leaf(T) | Node #{ left: Tree<T>, right: Tree<T> }`; the monomorphizer handles these without infinite expansion by detecting recursion through the same type parameters
 - Error messages that refer to the original generic source, not the monomorphized output
 - Missing trait implementation errors: clear message when a type doesn't implement a required trait
 - `dyn Trait` type checking: verify object safety (no `Self` return types, no generic methods, all methods take `self`), type-check coercions from concrete types to `dyn Trait`, verify that method calls on `dyn Trait` values resolve to the trait's method signatures, type-check downcast patterns in match arms
@@ -1207,8 +1222,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **Validation:**
 
-- `type Point = { x: f64, y: f64 }` creates a GC struct, fields are accessible
-- `type Shape = | Circle { radius: f64 } | Rect { ... }` pattern matching works
+- `type Point = #{ x: f64, y: f64 }` creates a GC struct, fields are accessible
+- `type Shape = | Circle #{ radius: f64 } | Rect #{ ... }` pattern matching works
 - `Tree<i32>` recursive type with GC refs works (build tree, traverse, produce correct result)
 - String iterator and `.codepoint_at()` produce correct results for multi-byte UTF-8
 
@@ -1233,7 +1248,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **Validation:**
 
-- `let f: fn(i32) -> i32 = |x| x + 1` works
+- `let f: fn(i32) -> i32 = |x| = x + 1` works
 - Closures capturing outer variables work
 - `fn apply(f: fn(i32) -> i32, x: i32) -> i32 = f(x)` works
 - Closures capturing mutable state observe mutations correctly
