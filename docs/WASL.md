@@ -136,7 +136,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 
 2. **Two memory worlds, both first-class.** The GC heap is the default for structured data. Linear memory is available through typed memory declarations for structured byte access, with the GC heap as the default for all structured data. Neither is an afterthought.
 
-3. **Monomorphized generics over GC types.** Parametric polymorphism in the source, concrete GC struct types in the output. No boxing, no uniform representation, no runtime type dispatch. Code size is the tradeoff; predictable performance and clean interop are the payoff.
+3. **Monomorphized generics over GC types, with opt-in dynamic dispatch.** Parametric polymorphism in the source, concrete GC struct types in the output. Monomorphization is the default: no boxing, no uniform representation, no runtime type dispatch. Code size is the tradeoff; predictable performance and clean interop are the payoff. For cases that require runtime polymorphism — heterogeneous collections, plugin systems, type-erased callbacks — `dyn Trait` provides an explicit opt-in to vtable-based dispatch backed by WebAssembly GC structs.
 
 4. **Expression-oriented, ML-flavored.** Functions are expressions. Match arms are expressions. Blocks evaluate to their last expression. The syntax draws from the ML family, including algebraic data types, pattern matching, type inference, and `let` bindings, because that family maps cleanly to tagged GC structs with subtyping.
 
@@ -149,7 +149,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 ### What wasl is not
 
 - **Not a systems language.** wasl exposes linear memories and allocation strategies directly, but the default path is GC-managed. If you need `malloc`/`free` everywhere, write or import an allocator yourself, or write C and compile it to WebAssembly.
-- **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval or dynamic dispatch beyond WebAssembly's own `call_indirect`.
+- **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval. Dynamic dispatch is available through `dyn Trait` and WebAssembly's `call_indirect`, but is always explicit and opt-in.
 - **Not a WebAssembly assembler.** wasl is a high-level language with type inference, generics, and pattern matching. It is informed by WebAssembly's semantics, not a textual encoding of them.
 - **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces; it's the embedder's choice.
 - **Not dependent on the Component Model.** wasl supports the Component Model as an optional output mode for ecosystem interop (`waslc build --component --wit`), but does not require it. wasl-to-wasl composition is resolved at compile time through source imports. Direct foreign module interop uses explicit marshaling. The Component Model is available for broader ecosystem interop, not a requirement.
@@ -287,6 +287,70 @@ fn print_all<T: Show>(items: [T]) = { ... }
 Traits are resolved and monomorphized at compile time. There is no vtable, no dynamic dispatch, no runtime cost. A trait bound is a compile-time constraint that ensures the monomorphizer can find a concrete implementation for every instantiation.
 
 Primitive types have built-in trait implementations: all numeric types implement `Eq` and `Ord`, all types implement `Show` (with a default structural representation that can be overridden).
+
+### Dynamic Trait Objects
+
+Monomorphization is the default, but some patterns genuinely require runtime polymorphism: heterogeneous collections, plugin systems, type-erased callbacks, or any situation where the concrete type is not known until runtime. For these cases, wasl provides `dyn Trait`.
+
+A `dyn Trait` value is a fat reference: a pair of `(data: ref $trait_super, vtable: ref $trait_vtable)`, both GC structs. The vtable is a GC struct of typed function references, one field per trait method. The data reference uses the trait's GC supertype so that `br_on_cast` can recover the concrete type when needed.
+
+```
+// Heterogeneous collection
+let shapes: [dyn Show] = [circle, rect, triangle]
+
+for s in shapes {
+    io.print(s.show())  // dynamic dispatch via vtable
+}
+```
+
+```
+// Function accepting a trait object
+fn log_item(item: dyn Show) = {
+    io.print(item.show())
+}
+```
+
+**Construction.** Any value whose type implements the trait can be coerced to `dyn Trait` implicitly at assignment or call sites. The compiler generates the vtable struct for each `(concrete type, trait)` pair at compile time and emits the wrapping code to construct the fat reference:
+
+```
+let c: Circle = Circle { radius: 5.0 }
+let s: dyn Show = c  // compiler wraps: (ref c, ref $Circle_Show_vtable)
+```
+
+**Method dispatch.** Calling a method on a `dyn Trait` value compiles to a `struct.get` on the vtable struct to retrieve the function reference, followed by a `call_ref`. This is a constant number of instructions per call — no hash lookups, no linear scans.
+
+**Downcasting.** A `dyn Trait` can be downcast back to its concrete type using pattern matching:
+
+```
+fn area(s: dyn Shape) -> f64 =
+    match s {
+        circle: Circle -> PI * circle.radius * circle.radius,
+        rect: Rect -> rect.width * rect.height,
+        _ -> 0.0,
+    }
+```
+
+Downcasting compiles to `br_on_cast` against the data reference's concrete GC subtype. This is the same mechanism used for algebraic type matching, so the pattern syntax is consistent. A failed downcast in a non-exhaustive match is a compile error if no catch-all arm is present.
+
+**Trait object safety.** Not all traits can be used as `dyn Trait`. A trait is object-safe if:
+
+- No method has a `Self` return type (the concrete type is erased behind `dyn`).
+- No method has generic type parameters (the vtable cannot represent unbounded specializations).
+- All methods take `self` as the first parameter.
+
+Traits with `Self` in argument position (like `Eq`) are object-safe — the vtable entry receives `(ref any)` and the implementation performs the appropriate cast. Traits that return `Self` or have generic methods are not object-safe; attempting to use them as `dyn Trait` is a compile error.
+
+**WebAssembly representation.** For a trait `Show` with one method `fn show(self) -> string`, the compiler emits:
+
+- A GC struct type for the vtable: `(struct (field $show (ref $fn_show_type)))` where `$fn_show_type` is `(func (param (ref any)) (result (ref $string_struct)))`.
+- The fat reference is a GC struct: `(struct (field $data (ref $trait_super)) (field $vtable (ref $show_vtable)))`.
+- One vtable instance per concrete type that implements `Show`, stored as a module-level constant.
+
+This maps cleanly to WebAssembly GC with no runtime shims. The vtable struct is itself a GC-managed value — no linear memory, no manual lifetime management.
+
+**Relationship to monomorphization.** `dyn Trait` and monomorphized generics are complementary. Generic functions with trait bounds (`fn sort<T: Ord>`) remain monomorphized — the compiler generates specialized code for each concrete `T`. `dyn Trait` is only used when explicitly requested. This keeps the default path zero-cost while providing a well-defined escape hatch for runtime polymorphism.
+
+`dyn Trait` values cannot be exported directly from a wasl module because the vtable layout is an implementation detail. Exported APIs should use concrete types or algebraic types at the boundary, with `dyn Trait` reserved for internal polymorphism.
 
 ### Function types
 
@@ -1007,7 +1071,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
-- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `import`, `from`, `as`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `layout`, `data`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
+- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `import`, `from`, `as`, `type`, `trait`, `impl`, `dyn`, `exception`, `throw`, `try`, `catch`, `memory`, `layout`, `data`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
 - Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures / lambda expressions, import declarations (namespace, aliased, selective, and signature forms, with optional `from` clause), pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
@@ -1083,6 +1147,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Recursive generic types: `type Tree<T> = | Leaf(T) | Node { left: Tree<T>, right: Tree<T> }`; the monomorphizer handles these without infinite expansion by detecting recursion through the same type parameters
 - Error messages that refer to the original generic source, not the monomorphized output
 - Missing trait implementation errors: clear message when a type doesn't implement a required trait
+- `dyn Trait` type checking: verify object safety (no `Self` return types, no generic methods, all methods take `self`), type-check coercions from concrete types to `dyn Trait`, verify that method calls on `dyn Trait` values resolve to the trait's method signatures, type-check downcast patterns in match arms
+- `dyn Trait` vtable generation: for each `(concrete type, trait)` pair used as a `dyn Trait`, record the required vtable for codegen
 
 **Validation:**
 
@@ -1091,6 +1157,9 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Recursive types like `Tree<i32>` monomorphize correctly
 - Unused specializations are absent from the output
 - Missing `impl Ord for MyType` when calling `sort<MyType>` produces a clear error
+- `dyn Show` accepts any type implementing `Show`
+- Using a non-object-safe trait (e.g., a trait with `Self` return type) as `dyn Trait` produces a clear compile error
+- Downcast patterns in `match` on `dyn Trait` type-check correctly
 
 ### Milestone 4: WASM Codegen: Fundamentals
 
@@ -1145,9 +1214,9 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **This is the "wasl has real types" milestone.**
 
-### Milestone 6: WASM Codegen: Closures and Function References
+### Milestone 6: WASM Codegen: Closures, Function References, and Dynamic Trait Objects
 
-**Goal:** Emit typed function references and closure representations.
+**Goal:** Emit typed function references, closure representations, and `dyn Trait` vtable dispatch.
 
 **Deliverables:**
 
@@ -1156,6 +1225,11 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Higher-order function calls: passing and calling function references
 - `call_ref` for calling typed function references
 - Closure capture of mutable variables via GC ref cells
+- `dyn Trait` vtable codegen: emit a GC struct type for each trait's vtable (one `funcref` field per method), emit a module-level constant vtable instance for each `(concrete type, trait)` pair, emit wrapper functions that cast `(ref any)` to the concrete type before delegating to the real implementation
+- `dyn Trait` fat reference codegen: emit a GC struct type `(data: ref $trait_super, vtable: ref $trait_vtable)` for each trait used as `dyn`
+- `dyn Trait` coercion codegen: at assignment or call sites where a concrete type is coerced to `dyn Trait`, emit `struct.new` to construct the fat reference with the appropriate vtable constant
+- `dyn Trait` method dispatch codegen: emit `struct.get` on the vtable to retrieve the method's `funcref`, followed by `call_ref` with the data reference as the first argument
+- `dyn Trait` downcast codegen: emit `br_on_cast` against the data reference's concrete GC subtype in match arms
 
 **Validation:**
 
@@ -1163,6 +1237,10 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Closures capturing outer variables work
 - `fn apply(f: fn(i32) -> i32, x: i32) -> i32 = f(x)` works
 - Closures capturing mutable state observe mutations correctly
+- `dyn Show` values dispatch `.show()` correctly to the underlying concrete type's implementation
+- A heterogeneous `[dyn Show]` array containing different concrete types dispatches correctly for each element
+- Downcast from `dyn Show` to a concrete type via pattern matching works, and failed downcasts fall through to the next arm
+- Vtable constants are shared across all coercion sites for the same `(type, trait)` pair (no duplicate vtable allocations)
 
 ### Milestone 7: WASM Codegen: Tail Calls and Exception Handling
 
@@ -1306,7 +1384,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 | M3 | Type system: traits, generics, and monomorphization | M2 |
 | M4 | **WASM codegen: fundamentals ("wasl runs")** | M3 |
 | M5 | **WASM codegen: GC types ("wasl has real types")** | M4 |
-| M6 | WASM codegen: closures and function references | M5 |
+| M6 | WASM codegen: closures, function references, and dynamic trait objects | M5 |
 | M7 | WASM codegen: tail calls and exception handling | M5 |
 | M8 | WASM codegen: SIMD, linear memory, and typed memories | M5 |
 | M9 | Foreign module interop and Component Model | M5 |
