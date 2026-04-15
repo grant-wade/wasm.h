@@ -1,4 +1,4 @@
-# wasl — Language Design Document
+# wasl: Language Design Document
 
 **Version:** 0.2 (Draft)
 **Date:** April 2026
@@ -8,9 +8,9 @@
 
 ## Overview
 
-wasl is a programming language designed around WebAssembly. It is not a language that *targets* WebAssembly as a compilation backend — it is a language whose type system, memory model, and execution semantics are direct expressions of what WebAssembly provides. Where other languages fight WebAssembly's constraints or paper over them with runtime shims, wasl embraces them as the foundation of its design.
+wasl is a programming language designed around WebAssembly. It is not a language that *targets* WebAssembly as a compilation backend; it is a language whose type system, memory model, and execution semantics are direct expressions of what WebAssembly provides. Where other languages fight WebAssembly's constraints or paper over them with runtime shims, wasl embraces them as the foundation of its design.
 
-The language compiles to standard `.wasm` binaries. These binaries run on any compliant WebAssembly runtime — V8, Wasmtime, wasm-micro-runtime, or any other engine that supports the required proposals. wasl does not depend on a custom VM, a special loader, or a language-specific runtime library.
+The language compiles to standard `.wasm` binaries. These binaries run on any compliant WebAssembly runtime, including V8, Wasmtime, wasm-micro-runtime, or any other engine that supports the required proposals. wasl does not depend on a custom VM, a special loader, or a language-specific runtime library.
 
 wasl assumes a runtime that supports the following finalized proposals:
 
@@ -42,10 +42,10 @@ Every mainstream language targeting WebAssembly drags its own runtime model thro
 
 - **Rust** works well but requires an allocator shim and fights linear memory semantics for anything heap-allocated. The borrow checker is orthogonal to WebAssembly's actual guarantees.
 - **C/C++** treats linear memory as flat RAM and ignores the GC proposal, typed function references, and every post-MVP feature that doesn't look like a von Neumann machine.
-- **Go, Python, JavaScript** require massive runtime shims — garbage collectors, interpreters, or JITs compiled to WebAssembly running on top of WebAssembly.
+- **Go, Python, JavaScript** require massive runtime shims, including garbage collectors, interpreters, or JITs compiled to WebAssembly running on top of WebAssembly.
 - **AssemblyScript** is the closest to "designed for Wasm" but remains TypeScript-flavored and doesn't leverage the full modern proposal surface.
 
-None of these languages were designed with WebAssembly's actual type system in mind. The GC proposal gives WebAssembly real structs, arrays, reference types, and subtyping. Typed function references give it safe indirect calls. Exception handling gives it structured control flow for errors. SIMD gives it data parallelism. These aren't compilation targets to be lowered into — they're language features waiting for syntax.
+None of these languages were designed with WebAssembly's actual type system in mind. The GC proposal gives WebAssembly real structs, arrays, reference types, and subtyping. Typed function references give it safe indirect calls. Exception handling gives it structured control flow for errors. SIMD gives it data parallelism. These aren't compilation targets to be lowered into; they're language features waiting for syntax.
 
 ### The opportunity
 
@@ -56,8 +56,8 @@ This has concrete consequences:
 - **No custom allocator or GC runtime.** Memory management uses WebAssembly's built-in GC. The host runtime handles collection natively.
 - **No representation overhead.** A wasl record is a GC struct, not a C struct pretending to be in linear memory, not a JavaScript object serialized into bytes.
 - **Predictable codegen.** A wasl programmer who understands WebAssembly can predict what their code compiles to. There are no hidden costs.
-- **Full proposal surface.** SIMD, tail calls, exception handling, multiple memories, Memory64 — all have first-class syntax. You don't drop to inline assembly or compiler intrinsics to use them.
-- **Concrete exports for free.** Monomorphized generics mean every exported type is a concrete GC struct. Any consumer — JavaScript, Rust, C, another wasl module — sees plain types with no need to understand wasl's generics encoding.
+- **Full proposal surface.** SIMD, tail calls, exception handling, multiple memories, and Memory64 all have first-class syntax. You don't drop to inline assembly or compiler intrinsics to use them.
+- **Concrete exports for free.** Monomorphized generics mean every exported type is a concrete GC struct. Any consumer, whether JavaScript, Rust, C, or another wasl module, sees plain types with no need to understand wasl's generics encoding.
 - **No runtime lock-in.** wasl output is standard WebAssembly. Run it on V8 in a browser, Wasmtime on a server, a microcontroller runtime, or any compliant engine. The language doesn't care.
 
 ### Why now
@@ -76,20 +76,20 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 
 3. **Monomorphized generics over GC types.** Parametric polymorphism in the source, concrete GC struct types in the output. No boxing, no uniform representation, no runtime type dispatch. Code size is the tradeoff; predictable performance and clean interop are the payoff.
 
-4. **Expression-oriented, ML-flavored.** Functions are expressions. Match arms are expressions. Blocks evaluate to their last expression. The syntax draws from the ML family — algebraic data types, pattern matching, type inference, `let` bindings — because that family maps cleanly to tagged GC structs with subtyping.
+4. **Expression-oriented, ML-flavored.** Functions are expressions. Match arms are expressions. Blocks evaluate to their last expression. The syntax draws from the ML family, including algebraic data types, pattern matching, type inference, and `let` bindings, because that family maps cleanly to tagged GC structs with subtyping.
 
 5. **Errors are values and exceptions.** Expected failures return `Result<T, E>`. Unexpected failures throw typed exception tags. Both map directly to WebAssembly constructs (`br_on_cast` for result matching, `try_table`/`throw_ref` for exceptions). The language doesn't force one error model.
 
 6. **Explicit over implicit at boundaries.** Exports are marked `pub`. Imports are declared `extern`. Nothing is automatically visible across module boundaries.
 
-7. **Runtime-agnostic.** wasl output is standard WebAssembly. The language specification does not assume any particular runtime, embedding API, or host environment. A wasl module is a `.wasm` file — the embedder decides how to load and run it.
+7. **Runtime-agnostic.** wasl output is standard WebAssembly. The language specification does not assume any particular runtime, embedding API, or host environment. A wasl module is a `.wasm` file, and the embedder decides how to load and run it.
 
 ### What wasl is not
 
-- **Not a systems language.** wasl has an `unsafe fn` escape hatch to linear memory, but the default path is GC-managed. If you need `malloc`/`free` everywhere, write C and compile it to WebAssembly.
+- **Not a systems language.** wasl has an `unsafe fn` escape hatch to linear memory, but the default path is GC-managed. If you need `malloc`/`free` everywhere, write or import an allocator yourself, or write C and compile it to WebAssembly.
 - **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval or dynamic dispatch beyond WebAssembly's own `call_indirect`.
 - **Not a WebAssembly assembler.** wasl is a high-level language with type inference, generics, and pattern matching. It is informed by WebAssembly's semantics, not a textual encoding of them.
-- **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces — it's the embedder's choice.
+- **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces; it's the embedder's choice.
 - **Not tied to the component model.** wasl targets core WebAssembly modules. Component model support (WIT interfaces, canonical ABI, component packaging) is a potential future extension, not a dependency.
 
 ---
@@ -123,12 +123,12 @@ String interpolation is supported at the language level: `"hello {name}"` desuga
 
 **String access model:** Direct indexing (`s[n]`) is not supported on strings. Instead, strings expose:
 
-- `.byte_at(n)` — O(1) access to the nth byte. Returns `u8`.
-- `.codepoint_at(n)` — O(n) access to the nth Unicode codepoint. Returns `Result<char, Error>`. The name makes the cost visible.
-- `.codepoints()` — Returns an iterator over `char` values. This is the primary way to process string contents.
-- `.bytes()` — Returns an iterator over `u8` values.
-- `.len()` — Byte length (O(1)).
-- `.codepoint_len()` — Codepoint count (O(n)). Name signals the cost.
+- `.byte_at(n)`: O(1) access to the nth byte. Returns `u8`.
+- `.codepoint_at(n)`: O(n) access to the nth Unicode codepoint. Returns `Result<char, Error>`. The name makes the cost visible.
+- `.codepoints()`: Returns an iterator over `char` values. This is the primary way to process string contents.
+- `.bytes()`: Returns an iterator over `u8` values.
+- `.len()`: Byte length (O(1)).
+- `.codepoint_len()`: Codepoint count (O(n)). Name signals the cost.
 
 This design prevents accidental O(n²) loops from hidden linear scans. The iterator-based API is the idiomatic path.
 
@@ -186,7 +186,7 @@ type Result<T, E> =
 
 `Option<i32>` and `Option<string>` produce entirely separate GC struct families. There is no shared representation and no boxing. The compiler performs monomorphization as a pass between type checking and codegen.
 
-This is a deliberate interop advantage: every exported type is a concrete GC struct that any consumer can use without understanding wasl's generics. The code size cost is acceptable — runtimes like Go and C# already embed far larger runtime payloads in their WebAssembly output.
+This is a deliberate interop advantage: every exported type is a concrete GC struct that any consumer can use without understanding wasl's generics. The code size cost is acceptable because runtimes like Go and C# already embed far larger runtime payloads in their WebAssembly output.
 
 ### Traits
 
@@ -238,41 +238,43 @@ Closures that capture variables compile to a GC struct (the environment) plus a 
 
 ### SIMD types
 
-SIMD types provide lane-typed views over WebAssembly's `v128` type. The exact syntax is TBD — it must be visually distinct from fixed-length array syntax to avoid parser ambiguity and user confusion. Candidate syntaxes under consideration:
+SIMD types are built-in named types that map directly to WebAssembly's fixed-width `v128` lane shapes. wasl does not use parameterized syntax such as `simd<f32, 4>`, because that suggests a degree of variability that standard WebAssembly SIMD does not expose. The syntax should reflect the VM directly.
 
 ```
-// Option A: Named types
-type f32x4 = simd<f32, 4>
-type i16x8 = simd<i16, 8>
-
-// Option B: Built-in named types
-f32x4, i16x8, u8x16, f64x2   // first-class type names
+f32x4, f64x2, i8x16, i16x8, i32x4, i64x2
 ```
 
-SIMD operations are namespaced by lane type: `simd.f32x4.mul(a, b)`, `simd.i16x8.add(a, b)`. The compiler enforces lane-type consistency at call sites.
+These are primitive type names, not user-definable aliases. SIMD operations are namespaced by lane type: `simd.f32x4.mul(a, b)`, `simd.i16x8.add(a, b)`. The compiler enforces lane-type consistency at call sites.
 
 ### Linear memory types
 
-Within `unsafe fn` declarations, raw pointer types provide access to linear memory:
+Linear memory in wasl is deliberately Wasm-native. Core WebAssembly has no allocator, no `malloc`, no `free`, and no structured object model inside linear memory. It provides memories, page-based `memory.size` and `memory.grow`, typed `load` and `store` instructions with compile-time `offset` and `align` immediates, bulk memory operations, and data segments.
 
 ```
-type ptr32 = i32    // offset into a 32-bit memory
-type ptr64 = i64    // offset into a 64-bit memory (Memory64)
+memory default: mem32
+memory large: mem64
 ```
 
-Packed struct layouts can be declared for structured access to linear memory without GC involvement:
+Within `unsafe fn` declarations, linear-memory addresses are plain integers: `i32` for `mem32` and `i64` for `mem64`. There is no separate pointer abstraction beyond the index type the VM already uses.
+
+Layouts provide structured access to linear memory without implying allocation or hidden copies:
 
 ```
-#[packed]
-type Header = {
-    magic: u32,
-    version: u16,
-    flags: u16,
-    size: u64,
+layout Header {
+    magic: u32,    // offset: 0, align: 4
+    version: u16,  // offset: 4, align: 2
+    flags: u16,    // offset: 6, align: 2
+    size: u64,     // offset: 8, align: 8
 }
 ```
 
-Packed structs have compiler-determined, deterministic layouts with explicit size and alignment. They are read from and written to linear memory as byte sequences — they do not allocate on the GC heap.
+A `layout` is a compile-time description of field offsets and alignments. It does not allocate and it does not materialize a GC object. The compiler resolves expressions like `Header::version` to constants that feed ordinary `memory.load` and `memory.store` instructions.
+
+Static bytes for linear memory are declared as data segments:
+
+```
+data HELLO_WORLD = "Hello, World!\n"
+```
 
 ---
 
@@ -311,7 +313,7 @@ let mut counter = 0 // mutable
 counter = counter + 1
 ```
 
-This follows the ML tradition of immutable-by-default for safety. The `let mut` convention mirrors Rust's syntax, which is widely understood. At the WebAssembly level, all locals are mutable — the immutability constraint is enforced by the compiler.
+This follows the ML tradition of immutable-by-default for safety. The `let mut` convention mirrors Rust's syntax, which is widely understood. At the WebAssembly level, all locals are mutable; the immutability constraint is enforced by the compiler.
 
 ### Multi-value returns
 
@@ -335,7 +337,7 @@ fn gcd(a: i64, b: i64) -> i64 =
     }
 ```
 
-The `tail` keyword is required. The compiler verifies the call is in tail position and rejects `tail` on non-tail calls. This is not an optimization hint — it is a semantic guarantee that the call uses constant stack space.
+The `tail` keyword is required. The compiler verifies the call is in tail position and rejects `tail` on non-tail calls. This is not an optimization hint; it is a semantic guarantee that the call uses constant stack space.
 
 ### Pattern matching
 
@@ -354,7 +356,7 @@ fn describe(s: Shape) -> string =
 
 Exhaustiveness checking is enforced at compile time. A non-exhaustive match is a compile error, not a runtime trap.
 
-Guards (`if` clauses) are supported. Guarded arms do not count toward exhaustiveness — a catch-all or complete unguarded coverage is still required.
+Guards (`if` clauses) are supported. Guarded arms do not count toward exhaustiveness; a catch-all or complete unguarded coverage is still required.
 
 Nested patterns, literal patterns, and or-patterns are supported:
 
@@ -413,7 +415,7 @@ fn main() =
 
 Exception tags are nominal types declared at the module level. They map directly to WebAssembly tag declarations in the tag section.
 
-The two error mechanisms are fully independent. If a function returns `Result<T, E>` and an exception is thrown inside it, the exception propagates — it is not automatically caught and wrapped in `Err`. This keeps the semantics clean: `Result` is for expected failures you handle locally, exceptions are for unexpected failures that escape.
+The two error mechanisms are fully independent. If a function returns `Result<T, E>` and an exception is thrown inside it, the exception propagates; it is not automatically caught and wrapped in `Err`. This keeps the semantics clean: `Result` is for expected failures you handle locally, exceptions are for unexpected failures that escape.
 
 ### Unsafe functions and linear memory
 
@@ -426,29 +428,74 @@ memory default: mem32
 memory large: mem64
 ```
 
-Unsafe functions receive GC refs normally and can operate on linear memory:
+Because WebAssembly has no native allocator, wasl does not define built-in `mem.alloc` or `mem.free`. Programs that need space management in linear memory either implement it directly on top of `memory.grow` or import an allocator with `extern`.
 
+Unsafe functions receive GC refs normally and can operate on linear memory through the VM primitives directly.
+
+#### Page management
+
+```wasl
+unsafe fn request_more_memory(pages: i32) -> i32 = {
+    let old_size = memory.grow(default, pages)
+    old_size
+}
+
+unsafe fn current_size() -> i32 = {
+    memory.size(default)
+}
 ```
-unsafe fn write_header(mem: memory, offset: ptr32, data: Header) = {
-    mem.write_packed(offset, data)
+
+`memory.grow` returns the previous page count and `-1` on failure, matching WebAssembly exactly.
+
+#### Direct load and store
+
+```wasl
+unsafe fn write_pixel(base: i32, r: u8, g: u8, b: u8, a: u8) = {
+    memory.store8(default, base, r)
+    memory.store8<offset=1>(default, base, g)
+    memory.store8<offset=2>(default, base, b)
+    memory.store8<offset=3>(default, base, a)
 }
 
-unsafe fn read_header(mem: memory, offset: ptr32) -> Header = {
-    mem.read_packed(offset)
-}
-
-unsafe fn process_buffer(mem: memory, ptr: ptr32, len: i32) -> [u8] = {
-    let result = Array.new(len)
-    // read from linear memory, write to GC array
-    result
+unsafe fn read_magic(base: i32) -> i32 = {
+    memory.load32<offset=0, align=4>(default, base)
 }
 ```
 
-The `unsafe` annotation means: this function may read/write linear memory. The caller knows the boundary — calling an `unsafe fn` is an explicit acknowledgment.
+The `offset` and `align` parameters are compile-time values that lower directly into WebAssembly immediates.
+
+#### Layout-driven access
+
+```wasl
+unsafe fn check_version(ptr: i32) -> bool = {
+    let v = memory.load16_u<offset=Header::version>(default, ptr)
+    v == 2
+}
+```
+
+A layout acts as a lens over a memory index. It gives ergonomic field names while still compiling to exact `load` and `store` instructions with no hidden GC allocation.
+
+#### Bulk memory and data segments
+
+```wasl
+unsafe fn init_buffer(ptr: i32) = {
+    memory.init<HELLO_WORLD>(default, ptr, 0, HELLO_WORLD.len)
+}
+
+unsafe fn zero_buffer(ptr: i32, len: i32) = {
+    memory.fill(default, ptr, 0, len)
+}
+
+unsafe fn shift_buffer(src: i32, dest: i32, len: i32) = {
+    memory.copy(default, dest, src, len)
+}
+```
+
+The `unsafe` annotation means that this function may read or write linear memory. The caller knows the boundary; calling an `unsafe fn` is an explicit acknowledgment.
 
 #### GC reference pinning
 
-When a GC reference needs to persist beyond a single `unsafe fn` call — for example, registering a callback with a C-compiled module — the `gc.pin` / `gc.unpin` mechanism provides controlled escape:
+When a GC reference needs to persist beyond a single `unsafe fn` call, for example when registering a callback with a C-compiled module, the `gc.pin` / `gc.unpin` mechanism provides controlled escape:
 
 ```
 unsafe fn register_callback(cb: fn(i32) -> i32) -> i32 = {
@@ -470,26 +517,16 @@ unsafe fn invoke_callback(handle: i32, arg: i32) -> i32 = {
 
 Under the hood, `gc.pin` performs a `table.set` into a dedicated `funcref`/`externref` table, keeping the GC ref alive. `gc.unpin` clears the table slot. `gc.get` retrieves the ref via `table.get`. The handle is an `i32` table index.
 
-This is not an escape hatch from the type system — it's syntax for the only mechanism WebAssembly provides for holding GC refs outside the GC heap. There is no pointer casting, no raw memory storage of refs. Tables are it, and `gc.pin`/`gc.unpin` is the API.
+This is not an escape hatch from the type system. It is syntax for the only mechanism WebAssembly provides for holding GC refs outside the GC heap. There is no pointer casting and no raw memory storage of refs. Tables are it, and `gc.pin`/`gc.unpin` is the API.
 
 The programmer takes manual responsibility for the pinned ref's lifetime. An unpinned handle is a dangling reference. This is the correct tradeoff for `unsafe` code.
 
-#### Linear memory allocation
-
-`mem.alloc` and `mem.free` use a built-in bump allocator over linear memory by default. Embedders can supply a custom allocator via host imports:
-
-```
-unsafe fn allocate_buffer(mem: memory, size: i32) -> ptr32 = {
-    let p = mem.alloc(size)
-    mem.store_i32(p, 0, 42)
-    p
-}
-```
-
 #### Safety boundary rules
 
-- GC references cannot be stored in linear memory (WebAssembly's type system enforces this — it's not a compiler rule, it's a VM rule).
-- Raw pointers (`ptr32`/`ptr64`) exist only within `unsafe fn` bodies.
+- GC variables live in WebAssembly locals, the operand stack, and the GC heap.
+- Linear memory holds raw bytes only.
+- There is no implicit conversion between linear memory and GC values. Moving bytes into a GC array, string, or record requires an explicit loop or a library helper that performs the loop, making the O(n) copy cost visible.
+- GC references cannot be stored in linear memory. WebAssembly's type system enforces this; it is a VM rule, not a compiler convention.
 - `gc.pin` is the only mechanism for persisting GC refs across `unsafe fn` calls. It compiles to table operations, which is the only thing WebAssembly allows.
 
 ### Tables
@@ -523,7 +560,7 @@ fn helper() -> i32 = 42   // not exported
 
 ### Extern declarations
 
-All imports — host functions, other WebAssembly modules, WASI interfaces — are declared with `extern` blocks. The string is the WebAssembly import module name:
+All imports, whether host functions, other WebAssembly modules, or WASI interfaces, are declared with `extern` blocks. The string is the WebAssembly import module name:
 
 ```
 extern "host" {
@@ -538,9 +575,9 @@ extern "math" {
 }
 ```
 
-The compiler emits these as WebAssembly imports in the import section. At runtime, the embedder wires the imports to the appropriate module's exports — whether that's a host function, a C-compiled `.wasm` module, another wasl module, or a WASI implementation.
+The compiler emits these as WebAssembly imports in the import section. At runtime, the embedder wires the imports to the appropriate module's exports, whether that's a host function, a C-compiled `.wasm` module, another wasl module, or a WASI implementation.
 
-This is the only module system construct. wasl does not have a `use` or `import` statement that references filenames or paths, because a WebAssembly module cannot load other modules — that is always the embedder's responsibility.
+This is the only module system construct. wasl does not have a `use` or `import` statement that references filenames or paths, because a WebAssembly module cannot load other modules; that is always the embedder's responsibility.
 
 The *toolchain* (`wasl run`, a future build system, a manifest file) can maintain the mapping from import module names to `.wasm` files or host bindings. But that mapping is toolchain configuration, not language syntax.
 
@@ -569,7 +606,7 @@ wasl  (runner)       →  compile + execute (delegates to any wasm runtime)
 
 **`waslc`** is the compiler. It is a native binary written in C. It takes `.wasl` source files and produces standard `.wasm` binaries. It performs lexing, parsing, type checking, type inference, monomorphization, and WebAssembly codegen. It does not require an external toolchain, runtime, or code generation step.
 
-**`wasl`** is a convenience runner that compiles and executes in one step. It delegates execution to whatever WebAssembly runtime is available on the system. The runner is a thin wrapper — the compiler is the core tool.
+**`wasl`** is a convenience runner that compiles and executes in one step. It delegates execution to whatever WebAssembly runtime is available on the system. The runner is a thin wrapper; the compiler is the core tool.
 
 ### Compilation pipeline
 
@@ -603,8 +640,8 @@ wasl run app.wasl
 
 A wasl project can be distributed as:
 
-1. **Source** (`.wasl` files) — requires `waslc` to build.
-2. **WebAssembly** (`.wasm` file) — runs on any WebAssembly runtime that supports the required proposals. Portable, sandboxed, no native dependencies.
+1. **Source** (`.wasl` files): requires `waslc` to build.
+2. **WebAssembly** (`.wasm` file): runs on any WebAssembly runtime that supports the required proposals. Portable, sandboxed, no native dependencies.
 
 Because wasl output is standard WebAssembly, it benefits from the entire existing ecosystem: `wasm-opt` for optimization, `wasm-tools` for inspection and validation, native AOT compilation via Wasmtime's cranelift or V8's TurboFan, and embedding in any host that can load `.wasm` files.
 
@@ -631,8 +668,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
-- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `unsafe`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `simd`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
-- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, packed structs), trait declarations and implementations, function declarations (single-expression and block bodies, `unsafe fn`), exception declarations, pattern match expressions, if/then/else, let/let mut bindings, closures / lambda expressions, extern blocks, pub/unsafe/tail modifiers, SIMD and table declarations, memory declarations
+- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `unsafe`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `simd`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
+- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies, `unsafe fn`), exception declarations, pattern match expressions, if/then/else, let/let mut bindings, closures / lambda expressions, extern blocks, pub/unsafe/tail modifiers, SIMD expressions and type references, table declarations, memory declarations, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
 
@@ -662,7 +699,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Undefined variable errors point to the correct source location
 - Assignment to `let` (non-`mut`) binding produces a compile error
 
-### Milestone 2: Type System — Core
+### Milestone 2: Type System: Core
 
 **Goal:** Type check all expressions and declarations; infer types for let bindings and closures.
 
@@ -686,7 +723,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Linear memory operations outside `unsafe fn` produce compile errors
 - Type errors produce clear, actionable messages
 
-### Milestone 3: Type System — Traits, Generics, and Monomorphization
+### Milestone 3: Type System: Traits, Generics, and Monomorphization
 
 **Goal:** Support traits, generic type/function declarations, and monomorphize all generics before codegen.
 
@@ -701,7 +738,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Trait resolution: for each monomorphized call site, resolve the concrete trait implementation
 - Monomorphization pass: for each concrete use of a generic type or function, generate a specialized version with all type parameters substituted, with resolved trait method calls inlined
 - Dead-specialization elimination: don't emit specializations that are never used
-- Recursive generic types: `type Tree<T> = | Leaf(T) | Node { left: Tree<T>, right: Tree<T> }` — the monomorphizer handles these without infinite expansion by detecting recursion through the same type parameters
+- Recursive generic types: `type Tree<T> = | Leaf(T) | Node { left: Tree<T>, right: Tree<T> }`; the monomorphizer handles these without infinite expansion by detecting recursion through the same type parameters
 - Error messages that refer to the original generic source, not the monomorphized output
 - Missing trait implementation errors: clear message when a type doesn't implement a required trait
 
@@ -713,7 +750,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Unused specializations are absent from the output
 - Missing `impl Ord for MyType` when calling `sort<MyType>` produces a clear error
 
-### Milestone 4: WASM Codegen — Fundamentals
+### Milestone 4: WASM Codegen: Fundamentals
 
 **Goal:** Emit valid `.wasm` binaries for a core subset of wasl: functions, arithmetic, control flow, let bindings.
 
@@ -737,7 +774,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **This is the "wasl runs" milestone.**
 
-### Milestone 5: WASM Codegen — GC Types
+### Milestone 5: WASM Codegen: GC Types
 
 **Goal:** Emit WebAssembly GC types for wasl records, algebraic types, arrays, and strings.
 
@@ -751,7 +788,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Emit GC array types for `[T]` arrays
 - Emit `array.new`, `array.get`, `array.set`, `array.len` for array operations
 - String representation: GC struct wrapping a GC byte array
-- String operations: `.byte_at()`, `.codepoint_at()`, `.codepoints()`, `.bytes()`, `.len()`, `.codepoint_len()`, concatenation, interpolation — all bounds-checked
+- String operations: `.byte_at()`, `.codepoint_at()`, `.codepoints()`, `.bytes()`, `.len()`, `.codepoint_len()`, concatenation, and interpolation, all bounds-checked
 - Match guard codegen: conditional branches within match arms
 
 **Validation:**
@@ -763,7 +800,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **This is the "wasl has real types" milestone.**
 
-### Milestone 6: WASM Codegen — Closures and Function References
+### Milestone 6: WASM Codegen: Closures and Function References
 
 **Goal:** Emit typed function references and closure representations.
 
@@ -782,7 +819,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - `fn apply(f: fn(i32) -> i32, x: i32) -> i32 = f(x)` works
 - Closures capturing mutable state observe mutations correctly
 
-### Milestone 7: WASM Codegen — Tail Calls and Exception Handling
+### Milestone 7: WASM Codegen: Tail Calls and Exception Handling
 
 **Goal:** Emit `return_call` for tail calls and `try_table` / `throw_ref` for exception handling.
 
@@ -805,27 +842,30 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Uncaught exceptions propagate to the host
 - Exception inside a `Result`-returning function propagates past the function
 
-### Milestone 8: WASM Codegen — Unsafe, SIMD, and Linear Memory
+### Milestone 8: WASM Codegen: Unsafe, SIMD, and Linear Memory
 
-**Goal:** Emit linear memory access within `unsafe fn` declarations, SIMD instructions, and the `gc.pin`/`gc.unpin` mechanism.
+**Goal:** Emit linear memory access within `unsafe fn` declarations, SIMD instructions, bulk memory operations, data segments, and the `gc.pin`/`gc.unpin` mechanism.
 
 **Deliverables:**
 
 - Memory declarations: emit WebAssembly memory section entries (32-bit and 64-bit)
 - `unsafe fn` codegen: track unsafe context, allow linear memory operations within unsafe function bodies
-- Load/store operations: emit `i32.load`, `i32.store`, etc. for raw memory access
-- Packed struct codegen: compute layouts, emit sequential load/store for `mem.read_packed` / `mem.write_packed`
+- Memory sizing and growth: emit `memory.size` and `memory.grow` with WebAssembly-compatible results
+- Load/store operations: emit `i32.load`, `i32.store`, and related instructions with compile-time `offset` and `align` immediates
+- Layout codegen: compute field offsets and alignments for `layout` declarations and lower them into exact load/store immediates with no hidden allocations
+- Bulk memory and data segments: emit data segments plus `memory.copy`, `memory.fill`, and `memory.init`
 - `gc.pin` / `gc.unpin` / `gc.get`: emit `table.set` / `table.get` against a dedicated pinning table, manage slot allocation
 - SIMD codegen: emit `v128` operations for SIMD expressions, lane-type checking enforced at compile time, map `simd.f32x4.mul` etc. to the corresponding WebAssembly SIMD instructions
-- `mem.alloc` / `mem.free`: emit calls to a built-in allocator (a simple bump allocator over linear memory, exported for host override)
 - Table declarations: emit WebAssembly table section entries
 - `table.get` / `table.set`: emit corresponding instructions
 
 **Validation:**
 
 - `unsafe fn` reads and writes linear memory correctly
-- Packed struct round-trip: write a header, read it back, fields match
-- `gc.pin` a closure, retrieve it via `gc.get`, invoke it — correct result
+- `memory.size` and `memory.grow` match WebAssembly behavior, including `-1` on failed growth
+- Layout-based header access emits the expected loads and stores with no GC allocations
+- Data segment initialization and `memory.copy` produce the expected bytes
+- `gc.pin` a closure, retrieve it via `gc.get`, invoke it, and get the correct result
 - `gc.unpin` clears the table slot
 - SIMD dot product produces correct results
 - Memory64 addresses work for `mem64` memories
@@ -857,13 +897,13 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - `core.string`: string manipulation (split, join, trim, contains, starts_with, replace, codepoint iteration utilities)
-- `core.array`: array operations (map, filter, fold, sort, find, zip) — `sort` uses the `Ord` trait
+- `core.array`: array operations (map, filter, fold, sort, find, zip); `sort` uses the `Ord` trait
 - `core.math`: math functions implementable in pure WebAssembly (abs, min, max, clamp, floor, ceil, sqrt via `f64.sqrt`)
 - `core.option` / `core.result`: utility functions (map, and_then, unwrap_or, etc.)
 - `core.fmt`: string formatting and interpolation support
 - Built-in trait implementations: `Eq`, `Ord`, `Show` for all primitive types
 
-The standard library is written in wasl and compiled to `.wasm`. It is linked via the normal `extern` mechanism. It has no host imports — everything is pure WebAssembly. Embedders who don't need it don't pay for it.
+The standard library is written in wasl and compiled to `.wasm`. It is linked via the normal `extern` mechanism. It has no host imports; everything is pure WebAssembly. Embedders who don't need it don't pay for it.
 
 **Validation:**
 
@@ -897,15 +937,15 @@ The standard library is written in wasl and compiled to `.wasm`. It is linked vi
 
 | Milestone | Description | Depends on |
 |-----------|-------------|------------|
-| M0 | Lexer and parser | — |
+| M0 | Lexer and parser | none |
 | M1 | Name resolution and scope analysis | M0 |
-| M2 | Type system — core | M1 |
-| M3 | Type system — traits, generics, and monomorphization | M2 |
-| M4 | **WASM codegen — fundamentals ("wasl runs")** | M3 |
-| M5 | **WASM codegen — GC types ("wasl has real types")** | M4 |
-| M6 | WASM codegen — closures and function references | M5 |
-| M7 | WASM codegen — tail calls and exception handling | M5 |
-| M8 | WASM codegen — unsafe, SIMD, and linear memory | M5 |
+| M2 | Type system: core | M1 |
+| M3 | Type system: traits, generics, and monomorphization | M2 |
+| M4 | **WASM codegen: fundamentals ("wasl runs")** | M3 |
+| M5 | **WASM codegen: GC types ("wasl has real types")** | M4 |
+| M6 | WASM codegen: closures and function references | M5 |
+| M7 | WASM codegen: tail calls and exception handling | M5 |
+| M8 | WASM codegen: unsafe, SIMD, and linear memory | M5 |
 | M9 | Module linking | M4 |
 | M10 | Standard library | M6, M9 |
 | M11 | Polish, tooling, and documentation | all |
@@ -916,12 +956,10 @@ M6, M7, and M8 are independent of each other and can be developed in parallel af
 
 ## Open Questions
 
-1. **SIMD syntax.** The lane-typed SIMD syntax must be visually distinct from fixed-length array syntax. Candidates include `simd<f32, 4>`, built-in named types (`f32x4`), or another syntax. This should be resolved during M0 grammar work.
+1. **Concurrency.** WebAssembly has no built-in concurrency model yet. The `shared-everything-threads` proposal is in development. wasl should be ready for it but doesn't need to design around it until the proposal stabilizes. For now, wasl modules are single-threaded.
 
-2. **Concurrency.** WebAssembly has no built-in concurrency model yet. The `shared-everything-threads` proposal is in development. wasl should be ready for it but doesn't need to design around it until the proposal stabilizes. For now, wasl modules are single-threaded.
+2. **Package management.** wasl can distribute as `.wasm` files, but a real ecosystem needs dependency resolution. This is a post-1.0 concern. The initial distribution story is manual: copy `.wasm` files and declare interfaces via `extern`.
 
-3. **Package management.** wasl can distribute as `.wasm` files, but a real ecosystem needs dependency resolution. This is a post-1.0 concern. The initial distribution story is manual: copy `.wasm` files and declare interfaces via `extern`.
+3. **Debugging.** WebAssembly's DWARF support is improving but still immature. wasl should emit name sections and, eventually, DWARF-compatible debug info so that source-level debugging is possible in tools that support it. This is a post-1.0 concern but the codegen should preserve enough information to support it later.
 
-4. **Debugging.** WebAssembly's DWARF support is improving but still immature. wasl should emit name sections and, eventually, DWARF-compatible debug info so that source-level debugging is possible in tools that support it. This is a post-1.0 concern but the codegen should preserve enough information to support it later.
-
-5. **Component model integration timeline.** The component model and WASI 0.3 are stabilizing in parallel with wasl's development. The language should be ready to adopt component-level packaging when the ecosystem matures, but the core language and toolchain must not depend on it. The `extern` syntax is designed to extend naturally to WIT interfaces when the time comes.
+4. **Component model integration timeline.** The component model and WASI 0.3 are stabilizing in parallel with wasl's development. The language should be ready to adopt component-level packaging when the ecosystem matures, but the core language and toolchain must not depend on it. The `extern` syntax is designed to extend naturally to WIT interfaces when the time comes.
