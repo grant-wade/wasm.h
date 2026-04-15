@@ -80,7 +80,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 
 5. **Errors are values and exceptions.** Expected failures return `Result<T, E>`. Unexpected failures throw typed exception tags. Both map directly to WebAssembly constructs (`br_on_cast` for result matching, `try_table`/`throw_ref` for exceptions). The language doesn't force one error model.
 
-6. **Explicit over implicit at boundaries.** Exports are marked `pub`. Imports are declared `extern`. Nothing is automatically visible across module boundaries.
+6. **Explicit over implicit at boundaries.** Exports are marked `pub`. Imports are declared with `import` and accessed through namespace syntax. Nothing is automatically visible across module boundaries.
 
 7. **Runtime-agnostic.** wasl output is standard WebAssembly. The language specification does not assume any particular runtime, embedding API, or host environment. A wasl module is a `.wasm` file, and the embedder decides how to load and run it.
 
@@ -90,7 +90,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 - **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval or dynamic dispatch beyond WebAssembly's own `call_indirect`.
 - **Not a WebAssembly assembler.** wasl is a high-level language with type inference, generics, and pattern matching. It is informed by WebAssembly's semantics, not a textual encoding of them.
 - **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces; it's the embedder's choice.
-- **Not reliant on the Component Model.** The Component Model and Canonical ABI require serializing data to linear memory across module boundaries. wasl bypasses this entirely for wasl-to-wasl communication, using standard WebAssembly custom sections to achieve zero-copy, GC-to-GC native interop. Core WebAssembly *is* the component model.
+- **Not dependent on the Component Model.** wasl supports the Component Model as an optional output mode for ecosystem interop (`waslc build --component --wit`), but does not require it. wasl-to-wasl composition uses the `wasl.interfaces` custom section for zero-copy GC interop. Direct foreign module interop uses explicit marshaling. The Component Model is a third option, not the only option.
 
 ---
 
@@ -441,11 +441,12 @@ match parse_int(input) {
 }
 ```
 
-A `?` operator propagates errors:
+A `?` operator propagates errors. Using `?` in a function that does not return `Result<T, E>` is a compile error.
 
 ```
 fn load_config(path: string) -> Result<Config, Error> = {
-    let text = read_file(path)?
+    // assumes: import "wasl:io"
+    let text = io.read_file(path)?
     let parsed = parse_toml(text)?
     validate(parsed)
 }
@@ -454,6 +455,7 @@ fn load_config(path: string) -> Result<Config, Error> = {
 **Exception tags** for unexpected, non-local errors. These compile to WebAssembly exception handling (`try_table` / `throw_ref`):
 
 ```
+// assumes: import "wasl:io"
 exception DivByZero
 exception OutOfBounds { index: i32, len: i32 }
 
@@ -464,10 +466,10 @@ fn safe_div(a: i32, b: i32) -> i32 =
 fn main() =
     try {
         let x = safe_div(10, 0)
-        print(x)
+        io.print(x)
     } catch {
-        DivByZero -> print("division by zero"),
-        OutOfBounds { index, len } -> print("oob"),
+        DivByZero -> io.print("division by zero"),
+        OutOfBounds { index, len } -> io.print("oob"),
     }
 ```
 
@@ -639,30 +641,89 @@ pub global mut config_flags: i32 = 0x01
 
 Globals can be imported and exported. They map directly to the WebAssembly Global section. They are the idiomatic way to share single scalar values or GC references across a module without incurring linear memory load/store overhead.
 
-### Extern declarations
+### Imports
 
-All imports, whether host functions, other WebAssembly modules, or WASI interfaces, are declared with `extern` blocks. The string is the WebAssembly import module name:
+All external dependencies are declared with `import`. The string after `import` is the WebAssembly import module name. The last segment of the import path becomes the default namespace identifier used in source code.
 
-```
-extern "host" {
-    fn print(s: string)
-    fn timestamp() -> f64
-    fn random_bytes(len: i32) -> [u8]
+**Namespace imports** pull in an entire module. Functions are accessed via `namespace.func()` syntax:
+
+```wasl
+import "wasl:io"
+import "wasl:math"
+import "physics" from "physics.wasl"
+
+fn main() = {
+    let x = math.sqrt(2.0)
+    let vel = physics.integrate(body, dt)
+    io.print("result: {x}")
 }
+```
 
-extern "math" {
-    fn sqrt(x: f64) -> f64
-    fn pow(base: f64, exp: f64) -> f64
+**Aliased imports** override the default namespace name:
+
+```wasl
+import "wasl:io" as console
+import "wasl:math" as m
+import "network" from "net.wasl" as net
+
+fn main() = {
+    console.print(m.sqrt(2.0))
+    net.connect("localhost")
 }
 ```
 
-The compiler emits these as WebAssembly imports in the import section. At runtime, the embedder wires the imports to the appropriate module's exports, whether that's a host function, a C-compiled `.wasm` module, another wasl module, or a WASI implementation.
+**Selective imports** pull specific names into the local scope without a namespace prefix:
 
-This is the only module system construct. wasl does not have a `use` or `import` statement that references filenames or paths, because a WebAssembly module cannot load other modules; that is always the embedder's responsibility.
+```wasl
+import "wasl:math" { sqrt, PI }
 
-The *toolchain* (`wasl run`, a future build system, a manifest file) can maintain the mapping from import module names to `.wasm` files or host bindings. But that mapping is toolchain configuration, not language syntax.
+fn main() = {
+    let x = sqrt(PI)
+}
+```
 
-For wasl-to-wasl composition (both modules compiled by `waslc`), the compiler can verify type compatibility between one module's `extern` declarations and another's `pub` exports at build time. For wasl-to-foreign composition, the `extern` declaration is the contract and link-time checking is the enforcement.
+In all three forms above, the programmer does not write type signatures. The compiler resolves types from the appropriate source:
+
+- For `wasl:*` imports, the compiler uses built-in interface definitions that ship with `waslc` (see **Standard Library** below).
+- For `from` imports pointing to a `.wasl` file or a `.wasm` file with a `wasl.interfaces` custom section, the compiler reads the type signatures from that section.
+- For `from` imports pointing to a non-wasl `.wasm` file, the compiler reads the export section and performs structural type checking.
+
+**Signature imports** are the only form where the programmer provides explicit type declarations. They are used when the compiler has no source of truth — typically for custom host bindings or foreign GC modules. Signature import blocks can contain `fn` declarations, `type` declarations (to name foreign GC types for structural matching), and `memory` declarations (to import a foreign module's linear memory for marshaling):
+
+```wasl
+import "my_host" {
+    fn custom_callback(x: i32) -> i32
+    fn get_timestamp() -> f64
+}
+```
+
+These signatures are trusted by the compiler and embedded in the module's `wasl.interfaces` custom section as unverified expected imports. The host or runner satisfies them at instantiation time. When combined with a `from` clause pointing to a `.wasm` file, the compiler structurally verifies the declarations against the module's export section.
+
+**Summary of import forms:**
+
+| Form | Access style | Type source |
+|------|-------------|-------------|
+| `import "wasl:io"` | `io.print()` | Compiler built-in definitions |
+| `import "wasl:io" as console` | `console.print()` | Compiler built-in definitions |
+| `import "wasl:io" { print }` | `print()` | Compiler built-in definitions |
+| `import "foo" from "foo.wasl"` | `foo.func()` | `wasl.interfaces` custom section |
+| `import "foo" from "foo.wasm"` | `foo.func()` | Wasm export section (structural) |
+| `import "foo" from "foo.wasm" { type T..., fn sig... }` | `foo.func()` | Programmer-provided, structurally verified |
+| `import "my_host" { fn sig... }` | `func()` | Programmer-provided (unverified) |
+
+The `from` clause is a compile-time hint only. It tells `waslc` where to find signatures to verify against, but has no effect on the emitted WebAssembly binary — the import section always uses the module name string. The host linker decides what each module name resolves to at instantiation time.
+
+The `from` path is resolved by the toolchain relative to the importing file. Resolution order is: literal relative path, sibling directory, then any configured dependency directories. The compiler does not embed file paths in the output binary.
+
+Namespace and selective imports can be combined with `from`:
+
+```wasl
+import "physics" from "physics.wasl"           // physics.integrate()
+import "utils" from "utils.wasl" as u          // u.clamp()
+import "geo" from "geo.wasl" { distance, area } // distance(), area()
+```
+
+This is the only module system construct. wasl does not have a `use` statement that references filenames, because a WebAssembly module cannot load other modules — that is always the embedder's responsibility. The `import` statement bridges developer ergonomics with that constraint by giving the compiler enough information to verify types at build time while leaving runtime linking to the host.
 
 ### WASL Native Composition (Zero-Copy GC)
 
@@ -671,9 +732,139 @@ WebAssembly GC uses structural typing, meaning the VM will allow any two records
 When `waslc` compiles a module, it injects a custom section named `"wasl.interfaces"`. This section contains a lightweight binary manifest of the module's exact wasl-level type signatures (e.g., `Result<string, Error>`, trait implementations, exception tags).
 
 This enables a BEAM/JVM-like ecosystem:
-- **Zero-copy GC interop:** When WASL Module A calls WASL Module B, GC structs (like strings, arrays, or variants) are passed directly by reference (`ref $struct`). There is no linear memory copying, lifting, or lowering.
-- **Nominal link-time checking:** The embedder or runner reads the `"wasl.interfaces"` custom section from both modules before instantiation. It verifies that Module A's `extern` signatures perfectly match Module B's `pub` exports at the WASL type level. If they mismatch, linking fails securely before execution.
-- **Portable core modules:** Because unrecognised custom sections are ignored by the WebAssembly specification, WASL `.wasm` files remain 100% standard core modules. They can still be run natively in V8, Wasmtime, or IoT micro-runtimes, gracefully degrading to structural WebAssembly checks if the host doesn't understand the WASL interface section.
+- **Zero-copy GC interop:** When wasl Module A calls wasl Module B, GC structs are passed directly by reference. There is no linear memory copying, lifting, or lowering.
+- **Nominal link-time checking:** The embedder or runner reads the `wasl.interfaces` custom section from both modules before instantiation. It verifies that Module A's import signatures match Module B's export signatures at the wasl type level. Mismatches fail before execution.
+- **Portable core modules:** Unrecognized custom sections are ignored by the WebAssembly specification, so wasl `.wasm` files remain standard core modules runnable on any compliant engine.
+
+The `wasl.interfaces` section encodes both directions of a module's interface:
+- **Provided exports:** The nominal wasl type signatures of all `pub` declarations.
+- **Expected imports:** The nominal wasl type signatures of all `import` declarations, tagged with whether they were verified against a `from` source at compile time or are unverified host expectations.
+
+This makes every `.wasm` binary self-describing. The `wasl` runner reads the section and gets a complete dependency graph: which imports expect wasl modules (and what interface hash they were compiled against), and which imports expect host-provided functions. No external manifest or configuration file is required for simple projects.
+
+For host interface distribution, `waslc` supports emitting interface-only modules: `waslc emit-interface api.wasl -o api.wasm`. These contain an empty code section and a populated `wasl.interfaces` section. Consumers point `from` at this artifact to get full type checking against a host API definition without requiring an implementation.
+
+### Foreign Module Interop
+
+wasl modules interop with non-wasl WebAssembly modules at two levels, depending on whether the foreign module uses GC types.
+
+**GC-aware foreign modules** (e.g., Kotlin/Wasm, Dart/Wasm) emit GC structs and typed function references. The WebAssembly VM enforces structural type compatibility at the boundary. wasl can call these modules and receive GC references from them, but without a `wasl.interfaces` section, only structural checking is possible — there is no nominal type safety across the boundary.
+
+Signature imports for foreign GC modules can include `type` declarations to give wasl-level names to the foreign module's structural GC types:
+
+```wasl
+import "kotlin_geo" from "geo.wasm" {
+    type ForeignPoint = { x: f64, y: f64 }
+    fn distance(a: ForeignPoint, b: ForeignPoint) -> f64
+}
+
+// ForeignPoint is now usable as a wasl type, structurally matched
+// against the GC struct exported by the foreign module
+let p = kotlin_geo.distance(a, b)
+```
+
+The compiler reads the `.wasm` export section and verifies structural compatibility with the declared types.
+
+**Linear-memory-only foreign modules** (e.g., C, Rust, Go compiled to Wasm) export functions with scalar types (`i32`, `i64`, `f32`, `f64`) and use linear memory for all structured data. Interop requires explicit marshaling between the GC heap and the foreign module's linear memory.
+
+wasl provides two built-in operations for this:
+
+- `memory.copy_from_gc(mem, ptr, gc_array, offset, len)` — copies bytes from a GC byte array into a linear memory. Lowers to `array.get` + store loops.
+- `memory.copy_to_gc(mem, ptr, len) -> [u8]` — copies bytes from a linear memory into a new GC byte array. Lowers to load + `array.new`/`array.set` loops.
+
+Example of wrapping a C-compiled zlib module:
+
+```wasl
+import "zlib" from "zlib.wasm" {
+    memory heap: mem32
+
+    fn _compress(dest: i32, dest_len: i32,
+                 src: i32, src_len: i32, level: i32) -> i32
+}
+
+fn compress(data: [u8], level: i32) -> Result<[u8], Error> = {
+    let src_len = data.len()
+    let dest_len = src_len + 128
+    let src_ptr = zlib.heap.alloc(src_len)
+    let dest_ptr = zlib.heap.alloc(dest_len)
+
+    memory.copy_from_gc(zlib.heap, src_ptr, data, 0, src_len)
+
+    let result = zlib._compress(dest_ptr, dest_len, src_ptr, src_len, level)
+
+    if result != 0 then Err(Error("zlib failed"))
+    else {
+        let out = memory.copy_to_gc(zlib.heap, dest_ptr, dest_len)
+        Ok(out)
+    }
+}
+```
+
+The marshaling cost is explicit and visible. wasl does not hide it behind an abstraction layer.
+
+### Component Model Support
+
+wasl supports the WebAssembly Component Model as an optional output mode for ecosystem interop. It is not required for wasl-to-wasl composition or for direct foreign module interop.
+
+```sh
+# Default: core module with wasl.interfaces
+waslc build app.wasl -o app.wasm
+
+# Component Model wrapper with canonical ABI
+waslc build app.wasl -o app.wasm --component --wit app.wit
+```
+
+The `--component` flag wraps the core module in a component envelope with canonical ABI lifting and lowering shims generated from the provided WIT file. The core codegen is identical in both modes. The `wasl.interfaces` custom section is preserved inside the core module, so wasl-native linking continues to work even when the outer layer is a component.
+
+This gives wasl modules three linking tiers:
+
+1. **wasl-native:** Both sides are wasl. The runner checks `wasl.interfaces`, wires GC refs directly. Zero-copy, no canonical ABI.
+2. **Core Wasm interop:** Foreign module, no Component Model. Explicit marshaling with `memory.copy_from_gc`/`memory.copy_to_gc`.
+3. **Component Model:** Full WIT-based interop with the broader Wasm ecosystem. Canonical ABI handles lifting and lowering automatically.
+
+These tiers are not mutually exclusive. A single wasl module can link against another wasl module via tier 1, a C library via tier 2, and expose a WIT interface via tier 3.
+
+### Standard Library
+
+wasl ships a versioned standard library accessible through the `wasl:` import prefix. Standard library namespaces are a blend of pure wasl source (compiled alongside user code) and host-provided native functions. The split is an implementation detail invisible to the programmer.
+
+```wasl
+import "wasl:io"
+import "wasl:math"
+import "wasl:collections"
+
+fn main() = {
+    let items = collections.sort(my_list)
+    let mag = math.sqrt(2.0)
+    io.print("done: {mag}")
+}
+```
+
+**Built-in namespaces (initial set):**
+
+- `wasl:math` — math functions and constants implementable in pure WebAssembly (`abs`, `min`, `max`, `clamp`, `floor`, `ceil`, `sqrt` via `f64.sqrt`, `sin`, `cos`, `pow`, `PI`, `E`). Pure wasl, no host imports.
+- `wasl:io` — basic I/O (`print`, `read_line`, `read_file`, `write_file`). Host-provided by the runner.
+- `wasl:collections` — collection operations (`sort`, `map`, `filter`, `fold`, `find`, `zip`). Pure wasl operating on GC arrays. `sort` uses the `Ord` trait.
+- `wasl:option` / `wasl:result` — utility functions for `Option<T>` and `Result<T, E>` (`map`, `and_then`, `unwrap_or`, etc.). Pure wasl.
+- `wasl:fmt` — string formatting and interpolation support. Pure wasl.
+- `wasl:string` — string manipulation (`split`, `join`, `trim`, `contains`, `starts_with`, `replace`). Pure wasl.
+
+**Compile-time verification:** `waslc` ships with built-in interface definitions for every `wasl:*` namespace at its version. When the compiler encounters a `wasl:` import, it resolves function names and types from these definitions. If a function doesn't exist in the namespace, or is used with the wrong types, it is a compile error. No `from` clause is needed — the `wasl:` prefix is the signal.
+
+**Compilation model:** The standard library ships as `.wasl` source files bundled with `waslc`. When the compiler encounters a `wasl:*` import, it resolves the namespace to the corresponding source file in its stdlib directory, compiles it alongside the user's code, monomorphizes any generic functions at the user's call sites, and performs dead-code elimination. The result is a single `.wasm` binary containing only the stdlib functions actually used. There are no pre-compiled stdlib `.wasm` modules for the pure wasl portions.
+
+Host-provided portions of the standard library (e.g., `wasl:io`) are not compiled from source — the runner provides these as native bindings at instantiation time. The `wasl.interfaces` section in the output module records which host bindings are required.
+
+**Versioning:** Standard library namespaces are versioned with the wasl language version. A module compiled with `waslc` v0.2 records that it depends on `wasl:io` v0.2 in its `wasl.interfaces` section. The compiler bundles the stdlib source matching its version. Since pure wasl stdlib code is compiled into the user's binary, there is no runtime version mismatch for those portions. For host-provided bindings (`wasl:io`, etc.), the runner must support the version recorded in the module's `wasl.interfaces` section:
+
+- Old modules on new runners: always works. The runner supports all previous versions.
+- New modules on old runners: the runner detects the version mismatch and reports a clear error ("this module requires wasl:io v0.2 but this runner supports v0.1").
+
+Some namespaces may contain a mix of pure wasl and host functions. For example, a future `wasl:fs` might include `path_join` as pure wasl string manipulation compiled from source alongside the user's code, and `read_dir` as a host binding provided by the runner. The boundary can shift between versions — a function that was host-provided in v0.1 could become pure wasl in v0.2 — without breaking user code.
+
+Because the stdlib is source-distributed, developers can read the implementations, learn idiomatic wasl, and contribute improvements. The stdlib source serves as both a library and a reference codebase for the language.
+
+**Opt-in, not mandatory:** The standard library is not linked unless imported. Modules that import nothing from `wasl:*` have no standard library dependency. Embedders who provide their own host functions can ignore the standard library entirely.
 
 ---
 
@@ -697,11 +888,12 @@ wasl  (runner)       →  compile + execute (delegates to any wasm runtime)
     │
     ├── Lexer → Token stream
     ├── Parser → AST
-    ├── Name resolution → Scoped AST
+    ├── Name resolution → Scoped AST (resolves import namespaces, loads stdlib source)
     ├── Type checking / inference → Typed AST
     ├── Trait resolution → Resolved AST
-    ├── Monomorphization → Specialized AST (no generics)
-    └── WASM codegen → .wasm binary
+    ├── Monomorphization → Specialized AST (no generics, stdlib included)
+    ├── Dead-code elimination → Pruned AST
+    └── WASM codegen → .wasm binary (with wasl.interfaces custom section)
 ```
 
 ### Build and run
@@ -750,8 +942,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
-- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
-- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures / lambda expressions, extern blocks, pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
+- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `import`, `from`, `as`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `layout`, `data`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
+- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures / lambda expressions, import declarations (namespace, aliased, selective, and signature forms, with optional `from` clause), pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
 
@@ -767,7 +959,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **Deliverables:**
 
-- Module-level scope: type declarations, trait declarations, function declarations, extern imports, exception declarations, memory/table declarations
+- Module-level scope: type declarations, trait declarations, function declarations, import declarations, exception declarations, memory/table declarations
+- Import namespace resolution: resolve `import "wasl:math"` to namespace `math`, handle aliased imports (`as`), and resolve selective imports to local scope. Verify that namespace-qualified references (e.g., `math.sqrt`) resolve to valid names in the imported module.
 - Function-level scope: parameters, let bindings, match arm bindings, closure captures
 - Shadowing rules: inner let bindings shadow outer, with optional warnings
 - Capture analysis for closures: identify which variables a closure references from enclosing scopes
@@ -794,6 +987,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Record, algebraic type, and enum type checking
 - Tuple type checking
 - Function signature verification: argument types, return type, tail call position validity
+- Namespace-qualified call resolution: type-check `math.sqrt(x)` by resolving `sqrt` through the `math` namespace's known signatures (from built-in definitions, `wasl.interfaces`, or export section)
+- `?` operator checking: verify that `?` is only used inside functions returning `Result<T, E>`, and that the error types are compatible
 - Memory reference checking: verify that linear-memory operations reference declared memories
 - Pattern exhaustiveness checking
 - Basic type error messages: expected/got with source location
@@ -846,7 +1041,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Codegen for control flow: lower `while`, `for`, `break`, `continue`, and `return` into WebAssembly `block`, `loop`, `br`, and `br_if` instructions. Resolve labeled breaks by calculating the correct relative label depth for WebAssembly branch instructions.
 - Codegen for function calls: `call` instruction
 - Codegen for `pub` functions: WebAssembly exports
-- Codegen for `extern` imports: WebAssembly imports
+- Codegen for `import` declarations: WebAssembly imports
 - Codegen for multi-value returns: multiple result types on function signature
 - Codegen for `unreachable`: emit the WebAssembly `unreachable` opcode.
 - Output validation: produced `.wasm` files accepted by at least two independent runtimes and `wasm-tools validate`
@@ -855,9 +1050,36 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 - `fn add(a: i32, b: i32) -> i32 = a + b` compiles and executes correctly
 - `fn fib(n: i32) -> i32` compiles and produces correct results
-- Imported host functions (via `extern`) are called correctly
+- Imported host functions (via `import`) are called correctly
 
 **This is the "wasl runs" milestone.**
+
+### Milestone 4a: `wasl.interfaces` Custom Section Format
+
+**Goal:** Define and implement the binary format for the `wasl.interfaces` custom section, which is the foundation of the linking model, compile-time verification, and standard library versioning.
+
+**Deliverables:**
+
+- Formal specification of the `wasl.interfaces` binary format, covering:
+    - Provided exports: nominal wasl type signatures of all `pub` declarations, including function signatures, record types, algebraic types, enum types, exception tags, and trait implementations
+    - Expected imports: nominal wasl type signatures of all `import` declarations, tagged with their verification status (verified against `from` source, verified against compiler built-in, or unverified host expectation)
+    - Standard library version dependencies: which `wasl:*` namespaces and versions the module requires
+    - Generic type signatures in their pre-monomorphized form, so that downstream modules importing a wasl library can monomorphize at their own call sites
+    - Interface hashing: a deterministic hash of each exported and imported signature for fast link-time compatibility checking
+- `waslc` emits the custom section in all compiled `.wasm` output
+- `waslc` reads and validates the custom section when resolving `from` imports
+- `waslc emit-interface` produces interface-only `.wasm` modules (empty code section, populated `wasl.interfaces` section)
+- Section format is compact (suitable for embedding in small modules) and fast to parse (suitable for link-time checking by the runner)
+- Section is ignored by non-wasl tooling per the WebAssembly custom section specification
+
+**Validation:**
+
+- Round-trip: compile a module, read back its `wasl.interfaces` section, verify all exports and imports are faithfully represented
+- `waslc` successfully type-checks a `from` import by reading the target module's `wasl.interfaces` section
+- `waslc emit-interface` output is readable by `waslc` as a `from` target
+- Non-wasl tools (`wasm-tools`, `wasm-objdump`) accept modules with the section without errors
+- Interface hashes are deterministic: recompiling the same source produces the same hashes
+- Section size is reasonable relative to module size (benchmark against representative modules)
 
 ### Milestone 5: WASM Codegen: GC Types
 
@@ -961,43 +1183,59 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 ### Milestone 9: Module Linking
 
-**Goal:** Implement multi-module composition through `extern` declarations and toolchain-level linking.
+**Goal:** Implement multi-module composition through `import` declarations, `wasl.interfaces` custom sections, and toolchain-level linking across all three interop tiers. This milestone depends on the `wasl.interfaces` format defined in M4a.
 
 **Deliverables:**
 
-- `extern` declarations emit WebAssembly imports with the appropriate module/name pairs
-- Custom Section Emission: `waslc` embeds a `"wasl.interfaces"` custom section (ID 0) in the `.wasm` output, encoding the nominal type signatures of all `pub` exports and `extern` imports.
-- `waslc` cross-module checking: when compiling multiple `.wasl` files, verify compatibility using the injected custom sections.
-- `wasl run` micro-host linking: parse the `"wasl.interfaces"` sections at runtime. Wire imports to exports based on toolchain configuration only if the nominal types strictly match, rejecting structurally-similar but nominally-different bindings.
-- Zero-copy GC passing: ensure cross-module calls pass GC references natively without dropping to linear memory.
-- Foreign module linking: when linking against a non-wasl `.wasm` module, link-time validation checks the `extern` declaration against the module's actual exports
-- Mismatched interface produces a clear link-time error
+- `import` declarations emit WebAssembly imports with the appropriate module/name pairs
+- `from` clause resolution: `waslc` resolves `from` paths relative to the importing file, reads the target (`.wasl` source, `.wasm` with `wasl.interfaces`, or `.wasm` without), and performs the appropriate level of type checking
+- Custom section usage: M9 builds on the `wasl.interfaces` format defined in M4a. The runner and compiler use the section for all link-time verification, dependency resolution, and version checking described below.
+- `wasl run` micro-host linking: parse `wasl.interfaces` sections, wire wasl-to-wasl imports by interface hash with zero-copy GC passing, match host imports against configured providers, reject unresolved or mismatched imports with clear errors
+- GC-aware foreign module linking: structural type checking against the export section when linking against non-wasl GC modules
+- Linear-memory foreign module interop: `memory.copy_from_gc` and `memory.copy_to_gc` operations for marshaling data across the GC/linear-memory boundary
+- Component Model output mode: `--component --wit` flag wraps the core module in a component envelope with canonical ABI shims, preserving `wasl.interfaces` inside the core module
+- Mismatched interfaces produce clear link-time errors indicating the expected vs. actual signatures
 
 **Validation:**
 
-- wasl module declares `extern "math" { fn sqrt(x: f64) -> f64 }`, links against a C-compiled math module, calls it correctly
-- wasl module A exports `pub fn foo()`, wasl module B declares `extern "A" { fn foo() }`, types checked at compile time
-- Mismatched types between `extern` and actual export produce a clear error
+- wasl module A exports `pub fn foo()`, wasl module B declares `import "A" from "a.wasl"`, types checked at compile time, GC refs passed zero-copy at runtime
+- wasl module declares `import "my_host" { fn get_timestamp() -> f64 }`, runner identifies it as an unverified host import and wires it correctly
+- wasl module links against a C-compiled zlib `.wasm`, marshals data via `memory.copy_from_gc`, calls `compress`, unmarshals result via `memory.copy_to_gc`
+- `waslc emit-interface` produces a valid `.wasm` that other modules can reference via `from`
+- `waslc build --component --wit` produces a valid component that passes `wasm-tools validate --features component-model`
+- Mismatched types between `import` and actual export produce a clear error identifying the mismatch
 
 ### Milestone 10: Standard Library
 
-**Goal:** A minimal standard library providing common operations without requiring host imports.
+**Goal:** A versioned standard library providing common operations through the `wasl:` import namespace, blending pure wasl modules with runner-provided host bindings.
 
 **Deliverables:**
 
-- `core.string`: string manipulation (split, join, trim, contains, starts_with, replace, codepoint iteration utilities)
-- `core.array`: array operations (map, filter, fold, sort, find, zip); `sort` uses the `Ord` trait
-- `core.math`: math functions implementable in pure WebAssembly (abs, min, max, clamp, floor, ceil, sqrt via `f64.sqrt`)
-- `core.option` / `core.result`: utility functions (map, and_then, unwrap_or, etc.)
-- `core.fmt`: string formatting and interpolation support
+- Standard library source: `.wasl` source files for all pure wasl namespaces, bundled with `waslc`
+- `wasl:math`: `abs`, `min`, `max`, `clamp`, `floor`, `ceil`, `sqrt`, `sin`, `cos`, `pow`, `PI`, `E`
+- `wasl:string`: pure wasl module implementing `split`, `join`, `trim`, `contains`, `starts_with`, `replace`, codepoint iteration utilities
+- `wasl:collections`: pure wasl module implementing `map`, `filter`, `fold`, `sort`, `find`, `zip` over GC arrays; `sort` uses the `Ord` trait
+- `wasl:option` / `wasl:result`: pure wasl utility functions (`map`, `and_then`, `unwrap_or`, etc.)
+- `wasl:fmt`: pure wasl string formatting and interpolation support
+- `wasl:io`: runner-provided host bindings for `print`, `read_line`, `read_file`, `write_file`
 - Built-in trait implementations: `Eq`, `Ord`, `Show` for all primitive types
-
-The standard library is written in wasl and compiled to `.wasm`. It is linked via the normal `extern` mechanism. It has no host imports; everything is pure WebAssembly. Embedders who don't need it don't pay for it.
+- Compiler integration: `waslc` resolves `wasl:*` imports to bundled source files, compiles them alongside user code, monomorphizes generics at user call sites, and performs dead-code elimination to emit only the stdlib functions actually used
+- Built-in interface definitions: `waslc` ships with type definitions for all `wasl:*` namespaces, used for compile-time verification when the programmer uses namespace or selective import syntax without signatures
+- Version embedding: `waslc` records the `wasl:*` version dependencies in the module's `wasl.interfaces` custom section
+- Runner integration: `wasl run` provides native host bindings for `wasl:io` and any other host-backed namespaces, with version checking against the module's recorded dependencies
 
 **Validation:**
 
 - All standard library functions have test coverage
-- Standard library modules compile and link against user code
+- `import "wasl:math"` followed by `math.sqrt(2.0)` compiles and executes correctly without the programmer providing any signatures
+- Selective imports (`import "wasl:math" { sqrt, PI }`) resolve correctly
+- Aliased imports (`import "wasl:math" as m`) resolve correctly
+- Generic stdlib functions (`collections.sort<MyRecord>`) monomorphize correctly at the user's call site
+- Dead-code elimination: importing `wasl:collections` but only calling `sort` does not include `map`, `filter`, etc. in the output binary
+- `wasl:io` host bindings work through the runner
+- A module compiled with `waslc` v0.2 that requires `wasl:io` v0.2 host bindings fails with a clear error on a v0.1 runner
+- A module that imports no `wasl:*` namespaces has no standard library code or dependency in its output
+- Standard library source is readable and serves as idiomatic wasl reference code
 - `sort` works for any type implementing `Ord`
 
 ### Milestone 11: Polish, Tooling, and Documentation
@@ -1031,15 +1269,16 @@ The standard library is written in wasl and compiled to `.wasm`. It is linked vi
 | M2 | Type system: core | M1 |
 | M3 | Type system: traits, generics, and monomorphization | M2 |
 | M4 | **WASM codegen: fundamentals ("wasl runs")** | M3 |
+| M4a | **`wasl.interfaces` custom section format** | M4 |
 | M5 | **WASM codegen: GC types ("wasl has real types")** | M4 |
 | M6 | WASM codegen: closures and function references | M5 |
 | M7 | WASM codegen: tail calls and exception handling | M5 |
 | M8 | WASM codegen: SIMD, linear memory, and typed memories | M5 |
-| M9 | Module linking | M4 |
+| M9 | Module linking | M4a, M5 |
 | M10 | Standard library | M6, M9 |
 | M11 | Polish, tooling, and documentation | all |
 
-M6, M7, and M8 are independent of each other and can be developed in parallel after M5.
+M6, M7, and M8 are independent of each other and can be developed in parallel after M5. M4a can be developed in parallel with M5 after M4, and must be complete before M9.
 
 ---
 
@@ -1047,12 +1286,12 @@ M6, M7, and M8 are independent of each other and can be developed in parallel af
 
 1. **Concurrency.** WebAssembly has no built-in concurrency model yet. The `shared-everything-threads` proposal is in development. wasl should be ready for it but doesn't need to design around it until the proposal stabilizes. For now, wasl modules are single-threaded.
 
-2. **Package management.** wasl can distribute as `.wasm` files, but a real ecosystem needs dependency resolution. This is a post-1.0 concern. The initial distribution story is manual: copy `.wasm` files and declare interfaces via `extern`.
+2. **Package management.** wasl can distribute as `.wasm` files or `.wasl` source, but a real ecosystem needs dependency resolution. The `wasl:` prefix is resolved by the compiler and runner without a `from` clause. For third-party dependencies, a package manager would map package identifiers to local paths before the compiler sees them. A natural extension would be a registry prefix (e.g., `import "pkg:json"`) that the package manager resolves to a local `.wasm` with `wasl.interfaces`, at which point the compiler treats it identically to a `from` import — namespace access, no signatures needed. The compiler should remain unaware of package registries; resolution should be pluggable through toolchain configuration. This is a post-1.0 concern. The initial distribution story is manual: copy `.wasm` files and point `from` at them.
 
 3. **Debugging.** WebAssembly's DWARF support is improving but still immature. wasl should emit name sections and, eventually, DWARF-compatible debug info so that source-level debugging is possible in tools that support it. This is a post-1.0 concern but the codegen should preserve enough information to support it later.
 
 4. **Allocation strategies.** The `strategy = bump` mechanism is the initial built-in. Pool allocation and other strategies are natural extensions. The design should keep the strategy system open-ended so new strategies can be added without language changes, either as built-in compiler-known strategies or as a trait/interface that user-defined allocators can implement.
 
-5. **The `"wasl.interfaces"` Binary Format.** The layout of the custom interface section needs to be formally defined. It must be compact to avoid bloating the `.wasm` file, fast to parse by the micro-host, and expressive enough to encode generics, trait bounds, and exception tags.
+5. **`arena.reset()` and use-after-reset.** The `bump` strategy's `reset()` operation invalidates all previous allocations from that arena. Accessing memory from a prior allocation after a reset is a use-after-free analog in linear memory. The language does not currently prevent this statically. Documenting the hazard explicitly and exploring lightweight static or dynamic guards (e.g., generation counters) is a post-1.0 concern.
 
-6. **Standard Library Distribution.** With zero-copy WASL-to-WASL linking, the standard library (`core.string`, `core.math`) could be distributed as a standalone pre-compiled `stdlib.wasm` module that the `wasl` micro-host automatically links into user binaries at runtime. This would keep user binaries incredibly small, but requires finalizing the dynamic linking graph rules.
+6. **Standard library compilation strategy.** The stdlib ships as source and is compiled alongside user code. For large projects importing many stdlib namespaces, this adds compile time. A potential optimization is a cached pre-monomorphized form: `waslc` could cache the typed AST of stdlib modules after parsing and type-checking, skipping those phases on subsequent compilations and only re-running monomorphization and codegen for the user's specific instantiations. This is a toolchain performance optimization, not a language design concern.
