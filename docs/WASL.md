@@ -1,8 +1,8 @@
 # wasl: Language Design Document
 
-**Version:** 0.2 (Draft)
+**Version:** 0.1
 **Date:** April 2026
-**Author:** Grant
+**Author:** Grant Wade
 
 ---
 
@@ -90,7 +90,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 - **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval or dynamic dispatch beyond WebAssembly's own `call_indirect`.
 - **Not a WebAssembly assembler.** wasl is a high-level language with type inference, generics, and pattern matching. It is informed by WebAssembly's semantics, not a textual encoding of them.
 - **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces; it's the embedder's choice.
-- **Not tied to the component model.** wasl targets core WebAssembly modules. Component model support (WIT interfaces, canonical ABI, component packaging) is a potential future extension, not a dependency.
+- **Not reliant on the Component Model.** The Component Model and Canonical ABI require serializing data to linear memory across module boundaries. wasl bypasses this entirely for wasl-to-wasl communication, using standard WebAssembly custom sections to achieve zero-copy, GC-to-GC native interop. Core WebAssembly *is* the component model.
 
 ---
 
@@ -342,6 +342,47 @@ fn divmod(a: i32, b: i32) -> (i32, i32) = (a / b, a % b)
 let (q, r) = divmod(17, 5)
 ```
 
+### Control Flow
+
+wasl provides standard control flow that lowers predictably into WebAssembly's native structured control flow (`block`, `loop`, `br`, `br_if`) without requiring the developer to think about Wasm's label indices.
+
+**Early Return:**
+
+Functions can exit early using `return`. (This maps directly to WebAssembly's `return` instruction or a branch to the outermost function block).
+
+```wasl
+fn check(x: i32) -> i32 = {
+    if x < 0 then return -1
+    x * 2
+}
+```
+
+**While and For Loops:**
+
+Loops use familiar `while` and `for` syntax, supporting `break` and `continue`.
+
+```wasl
+let mut i = 0
+while i < 10 {
+    if arr[i] == 0 then break
+    i = i + 1
+}
+```
+
+Under the hood, the compiler lowers a `while` loop into WebAssembly's standard pattern: an outer `block` (to act as the target for `break`) containing a `loop` (to act as the target for `continue`).
+
+**Labeled Breaks:**
+
+To break out of nested loops, wasl supports label annotations rather than raw Wasm block manipulation. This behaves like JavaScript or Rust, but maps perfectly to WebAssembly's multi-level `br` instructions.
+
+```wasl
+'outer: for row in grid {
+    for cell in row {
+        if cell == TARGET then break 'outer
+    }
+}
+```
+
 ### Tail calls
 
 Explicit tail calls compile to WebAssembly `return_call`:
@@ -433,6 +474,19 @@ fn main() =
 Exception tags are nominal types declared at the module level. They map directly to WebAssembly tag declarations in the tag section.
 
 The two error mechanisms are fully independent. If a function returns `Result<T, E>` and an exception is thrown inside it, the exception propagates; it is not automatically caught and wrapped in `Err`. This keeps the semantics clean: `Result` is for expected failures you handle locally, exceptions are for unexpected failures that escape.
+
+### The Unreachable Trap
+
+WebAssembly's `unreachable` instruction is exposed as a first-class keyword. It acts as a bottom type (it can coerce to any expected type). It does not throw a catchable exception; it halts the VM with a trap.
+
+```wasl
+fn strict_math(x: i32) -> i32 =
+    match x {
+        0 -> 0,
+        1 -> 1,
+        _ -> unreachable, // VM trap if hit
+    }
+```
 
 ### Linear memories and GC interaction
 
@@ -545,6 +599,10 @@ WebAssembly tables are declared at the module level and accessible for indirect 
 ```
 table dispatch: [fn(i32) -> i32; 64]
 
+// Declarative initialization (maps to WebAssembly Elem section)
+elem dispatch[0] = [add, sub, mul, div]
+
+// Dynamic initialization (maps to table.set)
 fn register(idx: i32, f: fn(i32) -> i32) =
     table.set(dispatch, idx, f)
 
@@ -552,7 +610,9 @@ fn call_handler(idx: i32, arg: i32) -> i32 =
     table.get(dispatch, idx)(arg)
 ```
 
-This compiles to `table.set`, `table.get`, and `call_indirect`. Tables are primarily useful for plugin systems, vtable-style dispatch, and interop with C-compiled modules that use indirect calls.
+The `elem` declaration is evaluated at instantiation time. It maps directly to WebAssembly's Element section, avoiding the overhead of running `table.set` loops in a start function.
+
+This compiles to `table.set`, `table.get`, `call_indirect`, and WebAssembly element segments. Tables are primarily useful for plugin systems, vtable-style dispatch, and interop with C-compiled modules that use indirect calls.
 
 ---
 
@@ -566,6 +626,18 @@ Exports are marked with `pub`. Non-`pub` declarations are module-internal:
 pub fn add(a: i32, b: i32) -> i32 = a + b
 fn helper() -> i32 = 42   // not exported
 ```
+
+### Globals
+
+WebAssembly globals are a distinct index space, separate from linear memory and function locals. They are declared at the module level using the `global` keyword.
+
+```wasl
+global PI: f64 = 3.14159
+global mut counter: i32 = 0
+pub global mut config_flags: i32 = 0x01
+```
+
+Globals can be imported and exported. They map directly to the WebAssembly Global section. They are the idiomatic way to share single scalar values or GC references across a module without incurring linear memory load/store overhead.
 
 ### Extern declarations
 
@@ -592,15 +664,16 @@ The *toolchain* (`wasl run`, a future build system, a manifest file) can maintai
 
 For wasl-to-wasl composition (both modules compiled by `waslc`), the compiler can verify type compatibility between one module's `extern` declarations and another's `pub` exports at build time. For wasl-to-foreign composition, the `extern` declaration is the contract and link-time checking is the enforcement.
 
-### Future: component model integration
+### WASL Native Composition (Zero-Copy GC)
 
-wasl targets core WebAssembly modules. The WebAssembly component model (WIT interfaces, canonical ABI, component packaging) is a natural future extension:
+WebAssembly GC uses structural typing, meaning the VM will allow any two records with the same memory layout to be passed interchangeably. To provide safe, nominal type-checking across module boundaries without relying on external interface definitions like WIT, wasl leverages standard **WebAssembly Custom Sections**.
 
-- `extern` blocks could reference WIT interfaces instead of raw module names.
-- The compiler could emit component-model binaries instead of core modules.
-- Cross-language interop would get automatic marshaling through the canonical ABI.
+When `waslc` compiles a module, it injects a custom section named `"wasl.interfaces"`. This section contains a lightweight binary manifest of the module's exact wasl-level type signatures (e.g., `Result<string, Error>`, trait implementations, exception tags).
 
-This is an additive extension, not a redesign. The `extern` syntax already separates the logical interface (what functions exist with what types) from the physical binding (which module provides them). Component model support changes the binding mechanism without touching the interface declarations.
+This enables a BEAM/JVM-like ecosystem:
+- **Zero-copy GC interop:** When WASL Module A calls WASL Module B, GC structs (like strings, arrays, or variants) are passed directly by reference (`ref $struct`). There is no linear memory copying, lifting, or lowering.
+- **Nominal link-time checking:** The embedder or runner reads the `"wasl.interfaces"` custom section from both modules before instantiation. It verifies that Module A's `extern` signatures perfectly match Module B's `pub` exports at the WASL type level. If they mismatch, linking fails securely before execution.
+- **Portable core modules:** Because unrecognised custom sections are ignored by the WebAssembly specification, WASL `.wasm` files remain 100% standard core modules. They can still be run natively in V8, Wasmtime, or IoT micro-runtimes, gracefully degrading to structural WebAssembly checks if the host doesn't understand the WASL interface section.
 
 ---
 
@@ -615,7 +688,7 @@ wasl  (runner)       →  compile + execute (delegates to any wasm runtime)
 
 **`waslc`** is the compiler. It is a native binary written in C. It takes `.wasl` source files and produces standard `.wasm` binaries. It performs lexing, parsing, type checking, type inference, monomorphization, and WebAssembly codegen. It does not require an external toolchain, runtime, or code generation step.
 
-**`wasl`** is a convenience runner that compiles and executes in one step. It delegates execution to whatever WebAssembly runtime is available on the system. The runner is a thin wrapper; the compiler is the core tool.
+**`wasl`** is a convenience runner and micro-host. It delegates execution to an underlying WebAssembly runtime, but acts as a smart dynamic linker. When running multiple wasl modules, it parses their `"wasl.interfaces"` custom sections, enforces nominal type safety, wires their `funcref` tables together, and kicks off execution.
 
 ### Compilation pipeline
 
@@ -677,8 +750,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
-- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `simd`, `strategy`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
-- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, let/let mut bindings, closures / lambda expressions, extern blocks, pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
+- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `elem`, `global`, `while`, `for`, `in`, `break`, `continue`, `return`, `unreachable`, `simd`, `strategy`), label identifiers (e.g., `'label`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
+- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, while loops, for loops, break/continue with optional labels, early returns, let/let mut bindings, closures / lambda expressions, extern blocks, pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
 
@@ -768,11 +841,14 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - WASM binary encoder: produce valid `.wasm` files with type section, function section, code section, export section, import section
 - Codegen for primitive expressions: integer/float arithmetic, comparisons, boolean logic
 - Codegen for let bindings (mutable and immutable): WebAssembly locals
+- Codegen for module-level `global` and `global mut`: WebAssembly Global section and `global.get`/`global.set` instructions.
 - Codegen for if/then/else: `if` instruction or `br_if`
+- Codegen for control flow: lower `while`, `for`, `break`, `continue`, and `return` into WebAssembly `block`, `loop`, `br`, and `br_if` instructions. Resolve labeled breaks by calculating the correct relative label depth for WebAssembly branch instructions.
 - Codegen for function calls: `call` instruction
 - Codegen for `pub` functions: WebAssembly exports
 - Codegen for `extern` imports: WebAssembly imports
 - Codegen for multi-value returns: multiple result types on function signature
+- Codegen for `unreachable`: emit the WebAssembly `unreachable` opcode.
 - Output validation: produced `.wasm` files accepted by at least two independent runtimes and `wasm-tools validate`
 
 **Validation:**
@@ -866,6 +942,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - `gc.pin` / `gc.unpin` / `gc.get`: emit `table.set` / `table.get` against a dedicated pinning table, manage slot allocation
 - SIMD codegen: emit `v128` operations for SIMD expressions, lane-type checking enforced at compile time, map `simd.f32x4.mul` etc. to the corresponding WebAssembly SIMD instructions
 - Table declarations: emit WebAssembly table section entries
+- `elem` declarations: emit WebAssembly element section entries for static table initialization
 - `table.get` / `table.set`: emit corresponding instructions
 
 **Validation:**
@@ -889,8 +966,10 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - `extern` declarations emit WebAssembly imports with the appropriate module/name pairs
-- `waslc` cross-module checking: when compiling multiple `.wasl` files, verify that one module's `extern` declarations are compatible with another's `pub` exports
-- `wasl run` multi-module linking: instantiate multiple modules, wire imports to exports based on toolchain configuration (CLI flags, manifest file, or naming convention)
+- Custom Section Emission: `waslc` embeds a `"wasl.interfaces"` custom section (ID 0) in the `.wasm` output, encoding the nominal type signatures of all `pub` exports and `extern` imports.
+- `waslc` cross-module checking: when compiling multiple `.wasl` files, verify compatibility using the injected custom sections.
+- `wasl run` micro-host linking: parse the `"wasl.interfaces"` sections at runtime. Wire imports to exports based on toolchain configuration only if the nominal types strictly match, rejecting structurally-similar but nominally-different bindings.
+- Zero-copy GC passing: ensure cross-module calls pass GC references natively without dropping to linear memory.
 - Foreign module linking: when linking against a non-wasl `.wasm` module, link-time validation checks the `extern` declaration against the module's actual exports
 - Mismatched interface produces a clear link-time error
 
@@ -974,4 +1053,6 @@ M6, M7, and M8 are independent of each other and can be developed in parallel af
 
 4. **Allocation strategies.** The `strategy = bump` mechanism is the initial built-in. Pool allocation and other strategies are natural extensions. The design should keep the strategy system open-ended so new strategies can be added without language changes, either as built-in compiler-known strategies or as a trait/interface that user-defined allocators can implement.
 
-5. **Component model integration timeline.** The component model and WASI 0.3 are stabilizing in parallel with wasl's development. The language should be ready to adopt component-level packaging when the ecosystem matures, but the core language and toolchain must not depend on it. The `extern` syntax is designed to extend naturally to WIT interfaces when the time comes.
+5. **The `"wasl.interfaces"` Binary Format.** The layout of the custom interface section needs to be formally defined. It must be compact to avoid bloating the `.wasm` file, fast to parse by the micro-host, and expressive enough to encode generics, trait bounds, and exception tags.
+
+6. **Standard Library Distribution.** With zero-copy WASL-to-WASL linking, the standard library (`core.string`, `core.math`) could be distributed as a standalone pre-compiled `stdlib.wasm` module that the `wasl` micro-host automatically links into user binaries at runtime. This would keep user binaries incredibly small, but requires finalizing the dynamic linking graph rules.
