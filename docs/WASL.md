@@ -72,7 +72,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 
 1. **WebAssembly is the semantic model, not the compilation target.** Every language feature must have a direct, obvious mapping to WebAssembly constructs. If it can't be expressed cleanly in WebAssembly, it doesn't belong in wasl.
 
-2. **Two memory worlds, both first-class.** The GC heap is the default for structured data. Linear memory is available via `unsafe fn` declarations for raw byte manipulation, SIMD over flat buffers, FFI layouts, and performance-critical data processing. Neither is an afterthought.
+2. **Two memory worlds, both first-class.** The GC heap is the default for structured data. Linear memory is available through typed memory declarations for structured byte access, with the GC heap as the default for all structured data. Neither is an afterthought.
 
 3. **Monomorphized generics over GC types.** Parametric polymorphism in the source, concrete GC struct types in the output. No boxing, no uniform representation, no runtime type dispatch. Code size is the tradeoff; predictable performance and clean interop are the payoff.
 
@@ -86,7 +86,7 @@ WebAssembly GC reached Phase 4 (standardized) and shipped in major engines in la
 
 ### What wasl is not
 
-- **Not a systems language.** wasl has an `unsafe fn` escape hatch to linear memory, but the default path is GC-managed. If you need `malloc`/`free` everywhere, write or import an allocator yourself, or write C and compile it to WebAssembly.
+- **Not a systems language.** wasl exposes linear memories and allocation strategies directly, but the default path is GC-managed. If you need `malloc`/`free` everywhere, write or import an allocator yourself, or write C and compile it to WebAssembly.
 - **Not a scripting language.** wasl is statically typed, compiled ahead of time, and has no runtime eval or dynamic dispatch beyond WebAssembly's own `call_indirect`.
 - **Not a WebAssembly assembler.** wasl is a high-level language with type inference, generics, and pattern matching. It is informed by WebAssembly's semantics, not a textual encoding of them.
 - **Not tied to WASI.** wasl modules communicate with the host through explicit imports. WASI is one possible set of imports, not a requirement. A wasl module can import nothing, import custom host functions, or import full WASI interfaces; it's the embedder's choice.
@@ -168,7 +168,7 @@ type Buffer = [u8]
 type Points = [Point]
 ```
 
-Fixed-length arrays with known size at compile time can be optimized to GC structs or, in `unsafe fn` contexts, linear memory.
+Fixed-length arrays with known size at compile time can be optimized to GC structs or used as fixed layouts for typed memory declarations.
 
 ### Generics
 
@@ -246,20 +246,20 @@ f32x4, f64x2, i8x16, i16x8, i32x4, i64x2
 
 These are primitive type names, not user-definable aliases. SIMD operations are namespaced by lane type: `simd.f32x4.mul(a, b)`, `simd.i16x8.add(a, b)`. The compiler enforces lane-type consistency at call sites.
 
-### Linear memory types
+### Typed memories
 
-Linear memory in wasl is deliberately Wasm-native. Core WebAssembly has no allocator, no `malloc`, no `free`, and no structured object model inside linear memory. It provides memories, page-based `memory.size` and `memory.grow`, typed `load` and `store` instructions with compile-time `offset` and `align` immediates, bulk memory operations, and data segments.
+wasl exposes linear memory through explicit memory declarations. Each declaration emits a separate WebAssembly memory, so isolation is a VM guarantee provided by the multiple memories proposal, not compiler analysis.
 
-```
-memory default: mem32
-memory large: mem64
-```
-
-Within `unsafe fn` declarations, linear-memory addresses are plain integers: `i32` for `mem32` and `i64` for `mem64`. There is no separate pointer abstraction beyond the index type the VM already uses.
-
-Layouts provide structured access to linear memory without implying allocation or hidden copies:
+Layouts remain compile-time descriptions of byte offsets and alignments:
 
 ```
+layout RGBA {
+    r: u8,   // offset: 0, align: 1
+    g: u8,   // offset: 1, align: 1
+    b: u8,   // offset: 2, align: 1
+    a: u8,   // offset: 3, align: 1
+}
+
 layout Header {
     magic: u32,    // offset: 0, align: 4
     version: u16,  // offset: 4, align: 2
@@ -268,9 +268,26 @@ layout Header {
 }
 ```
 
-A `layout` is a compile-time description of field offsets and alignments. It does not allocate and it does not materialize a GC object. The compiler resolves expressions like `Header::version` to constants that feed ordinary `memory.load` and `memory.store` instructions.
+Memories can be fixed, layout-bound, strategy-backed, or raw:
 
-Static bytes for linear memory are declared as data segments:
+```wasl
+memory framebuffer: mem32 as [RGBA; 1920 * 1080]
+memory packet_buf:  mem32 as Header
+memory arena:       mem32, strategy = bump
+memory raw:         mem32
+```
+
+Fixed memories bind a memory to a compile-time layout or array shape. The compiler computes the required byte size and page count up front, then emits a dedicated memory sized for that declaration.
+
+Layout-bound memories expose typed access. `framebuffer[i]` knows the `RGBA` stride, and `packet_buf.version` knows the `Header` offset. These operations still lower to ordinary loads and stores; the layout only supplies compile-time structure.
+
+Strategy-backed memories pair a memory with an allocation strategy. `strategy = bump` is the built-in default. It inlines as a watermark global plus `memory.grow` when needed, and exposes `arena.alloc(Layout)` and `arena.reset()`.
+
+The strategy system is open-ended. `bump` is the initial built-in, but the surface is designed so other strategies can be added later without changing the memory model itself.
+
+Raw memories remain available for direct `memory.load` and `memory.store` access with plain `i32` or `i64` indices, depending on the memory kind.
+
+Static bytes for linear memory are declared as data segments, and bulk memory operations work against any declared memory:
 
 ```
 data HELLO_WORLD = "Hello, World!\n"
@@ -417,99 +434,92 @@ Exception tags are nominal types declared at the module level. They map directly
 
 The two error mechanisms are fully independent. If a function returns `Result<T, E>` and an exception is thrown inside it, the exception propagates; it is not automatically caught and wrapped in `Err`. This keeps the semantics clean: `Result` is for expected failures you handle locally, exceptions are for unexpected failures that escape.
 
-### Unsafe functions and linear memory
+### Linear memories and GC interaction
 
-The `unsafe` keyword is a function-level annotation, not a block scope. An `unsafe fn` declares a function that operates on linear memory. The function signature is the safety boundary: GC refs go in as parameters, the function does its linear memory work, and GC refs come out as return values.
+Linear memory access is a regular part of wasl. WebAssembly already enforces the hard boundary: memories are isolated, out-of-bounds accesses trap, GC references cannot be stored in linear memory, and byte memories do not turn into GC references by pointer tricks.
 
-Memories are declared at the module level and can be 32-bit or 64-bit:
-
-```
-memory default: mem32
-memory large: mem64
-```
-
-Because WebAssembly has no native allocator, wasl does not define built-in `mem.alloc` or `mem.free`. Programs that need space management in linear memory either implement it directly on top of `memory.grow` or import an allocator with `extern`.
-
-Unsafe functions receive GC refs normally and can operate on linear memory through the VM primitives directly.
-
-#### Page management
+#### Raw memory sizing
 
 ```wasl
-unsafe fn request_more_memory(pages: i32) -> i32 = {
-    let old_size = memory.grow(default, pages)
-    old_size
+fn request_more_memory(pages: i32) -> i32 = {
+    memory.grow(raw, pages)
 }
 
-unsafe fn current_size() -> i32 = {
-    memory.size(default)
+fn current_size() -> i32 = {
+    memory.size(raw)
 }
 ```
 
 `memory.grow` returns the previous page count and `-1` on failure, matching WebAssembly exactly.
 
-#### Direct load and store
+#### Typed memory access
 
 ```wasl
-unsafe fn write_pixel(base: i32, r: u8, g: u8, b: u8, a: u8) = {
-    memory.store8(default, base, r)
-    memory.store8<offset=1>(default, base, g)
-    memory.store8<offset=2>(default, base, b)
-    memory.store8<offset=3>(default, base, a)
+fn write_pixel(i: i32, r: u8, g: u8, b: u8, a: u8) = {
+    framebuffer[i].r = r
+    framebuffer[i].g = g
+    framebuffer[i].b = b
+    framebuffer[i].a = a
 }
 
-unsafe fn read_magic(base: i32) -> i32 = {
-    memory.load32<offset=0, align=4>(default, base)
+fn read_magic() -> u32 = {
+    packet_buf.magic
+}
+
+fn check_version() -> bool = {
+    packet_buf.version == 2
 }
 ```
 
-The `offset` and `align` parameters are compile-time values that lower directly into WebAssembly immediates.
+Typed memories compile to the same underlying loads and stores as raw memory operations. The difference is that the declaration supplies the compiler with stride, field offset, and bounds structure ahead of time.
 
-#### Layout-driven access
+#### Strategy-backed memories
 
 ```wasl
-unsafe fn check_version(ptr: i32) -> bool = {
-    let v = memory.load16_u<offset=Header::version>(default, ptr)
-    v == 2
+fn reserve_header() -> i32 = {
+    arena.alloc(Header)
+}
+
+fn reset_arena() = {
+    arena.reset()
 }
 ```
 
-A layout acts as a lens over a memory index. It gives ergonomic field names while still compiling to exact `load` and `store` instructions with no hidden GC allocation.
+`strategy = bump` lowers to a watermark global plus `memory.grow` when allocation crosses the current capacity.
 
 #### Bulk memory and data segments
 
 ```wasl
-unsafe fn init_buffer(ptr: i32) = {
-    memory.init<HELLO_WORLD>(default, ptr, 0, HELLO_WORLD.len)
+fn init_buffer(ptr: i32) = {
+    memory.init<HELLO_WORLD>(raw, ptr, 0, HELLO_WORLD.len)
 }
 
-unsafe fn zero_buffer(ptr: i32, len: i32) = {
-    memory.fill(default, ptr, 0, len)
+fn zero_buffer(ptr: i32, len: i32) = {
+    memory.fill(raw, ptr, 0, len)
 }
 
-unsafe fn shift_buffer(src: i32, dest: i32, len: i32) = {
-    memory.copy(default, dest, src, len)
+fn shift_buffer(src: i32, dest: i32, len: i32) = {
+    memory.copy(raw, dest, src, len)
 }
 ```
-
-The `unsafe` annotation means that this function may read or write linear memory. The caller knows the boundary; calling an `unsafe fn` is an explicit acknowledgment.
 
 #### GC reference pinning
 
-When a GC reference needs to persist beyond a single `unsafe fn` call, for example when registering a callback with a C-compiled module, the `gc.pin` / `gc.unpin` mechanism provides controlled escape:
+When a GC reference needs to persist across linear-memory interactions, for example when registering a callback with a C-compiled module, the `gc.pin` / `gc.unpin` mechanism provides controlled escape:
 
 ```
-unsafe fn register_callback(cb: fn(i32) -> i32) -> i32 = {
+fn register_callback(cb: fn(i32) -> i32) -> i32 = {
     let handle = gc.pin(cb)
     // handle is an i32 index into a runtime-managed table
     // store it in linear memory, pass to C module, etc.
     handle
 }
 
-unsafe fn release_callback(handle: i32) = {
+fn release_callback(handle: i32) = {
     gc.unpin(handle)
 }
 
-unsafe fn invoke_callback(handle: i32, arg: i32) -> i32 = {
+fn invoke_callback(handle: i32, arg: i32) -> i32 = {
     let cb = gc.get(handle)  // retrieve the pinned ref
     cb(arg)
 }
@@ -519,15 +529,14 @@ Under the hood, `gc.pin` performs a `table.set` into a dedicated `funcref`/`exte
 
 This is not an escape hatch from the type system. It is syntax for the only mechanism WebAssembly provides for holding GC refs outside the GC heap. There is no pointer casting and no raw memory storage of refs. Tables are it, and `gc.pin`/`gc.unpin` is the API.
 
-The programmer takes manual responsibility for the pinned ref's lifetime. An unpinned handle is a dangling reference. This is the correct tradeoff for `unsafe` code.
+The programmer takes manual responsibility for the pinned ref's lifetime. An unpinned handle is a dangling reference. That tradeoff is explicit.
 
 #### Safety boundary rules
 
-- GC variables live in WebAssembly locals, the operand stack, and the GC heap.
-- Linear memory holds raw bytes only.
-- There is no implicit conversion between linear memory and GC values. Moving bytes into a GC array, string, or record requires an explicit loop or a library helper that performs the loop, making the O(n) copy cost visible.
-- GC references cannot be stored in linear memory. WebAssembly's type system enforces this; it is a VM rule, not a compiler convention.
-- `gc.pin` is the only mechanism for persisting GC refs across `unsafe fn` calls. It compiles to table operations, which is the only thing WebAssembly allows.
+- GC refs live on the GC heap and in GC locals or tables.
+- Linear memories hold raw bytes.
+- There is no implicit conversion between GC refs and linear-memory bytes; the VM enforces this structurally.
+- `gc.pin` and `gc.unpin` remain the mechanism for holding GC refs across linear-memory interactions via table operations.
 
 ### Tables
 
@@ -668,8 +677,8 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 **Deliverables:**
 
 - Formal EBNF grammar resolving all syntactic ambiguities before parser implementation
-- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `unsafe`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `simd`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
-- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies, `unsafe fn`), exception declarations, pattern match expressions, if/then/else, let/let mut bindings, closures / lambda expressions, extern blocks, pub/unsafe/tail modifiers, SIMD expressions and type references, table declarations, memory declarations, and data declarations
+- Lexer: tokenize wasl source including keywords (`fn`, `let`, `mut`, `match`, `if`, `then`, `else`, `pub`, `tail`, `extern`, `type`, `trait`, `impl`, `exception`, `throw`, `try`, `catch`, `memory`, `table`, `simd`, `strategy`), built-in SIMD type names (`f32x4`, `f64x2`, `i8x16`, `i16x8`, `i32x4`, `i64x2`), operators, literals (integers, floats, strings with interpolation, chars), identifiers, and delimiters
+- Parser: recursive descent, producing a complete AST for type declarations (records, algebraic types, enums, tuples, layouts), trait declarations and implementations, function declarations (single-expression and block bodies), exception declarations, pattern match expressions, if/then/else, let/let mut bindings, closures / lambda expressions, extern blocks, pub/tail modifiers, SIMD expressions and type references, table declarations, memory declarations with optional layout or strategy bindings, and data declarations
 - Error reporting: source location tracking, clear error messages with line/column
 - Pretty-printer: AST → wasl source round-trip for debugging
 
@@ -712,7 +721,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Record, algebraic type, and enum type checking
 - Tuple type checking
 - Function signature verification: argument types, return type, tail call position validity
-- `unsafe fn` checking: verify linear memory operations only appear in unsafe functions
+- Memory reference checking: verify that linear-memory operations reference declared memories
 - Pattern exhaustiveness checking
 - Basic type error messages: expected/got with source location
 
@@ -720,7 +729,7 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 - All example programs from this document type-check successfully
 - Exhaustiveness checker rejects incomplete matches
-- Linear memory operations outside `unsafe fn` produce compile errors
+- Linear-memory operations that reference undeclared memories produce compile errors
 - Type errors produce clear, actionable messages
 
 ### Milestone 3: Type System: Traits, Generics, and Monomorphization
@@ -842,17 +851,17 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 - Uncaught exceptions propagate to the host
 - Exception inside a `Result`-returning function propagates past the function
 
-### Milestone 8: WASM Codegen: Unsafe, SIMD, and Linear Memory
+### Milestone 8: WASM Codegen: SIMD, Linear Memory, and Typed Memories
 
-**Goal:** Emit linear memory access within `unsafe fn` declarations, SIMD instructions, bulk memory operations, data segments, and the `gc.pin`/`gc.unpin` mechanism.
+**Goal:** Emit typed memory declarations, linear-memory access, SIMD instructions, bulk memory operations, data segments, and the `gc.pin`/`gc.unpin` mechanism.
 
 **Deliverables:**
 
-- Memory declarations: emit WebAssembly memory section entries (32-bit and 64-bit)
-- `unsafe fn` codegen: track unsafe context, allow linear memory operations within unsafe function bodies
-- Memory sizing and growth: emit `memory.size` and `memory.grow` with WebAssembly-compatible results
-- Load/store operations: emit `i32.load`, `i32.store`, and related instructions with compile-time `offset` and `align` immediates
-- Layout codegen: compute field offsets and alignments for `layout` declarations and lower them into exact load/store immediates with no hidden allocations
+- Memory declarations: emit separate WebAssembly memories for raw, fixed, layout-bound, and strategy-backed declarations (32-bit and 64-bit)
+- Fixed typed memories: compute compile-time byte sizes and page counts from array shapes and layouts
+- Layout-bound access codegen: lower indexed and field-based memory access into exact load/store sequences with known stride, offset, and alignment
+- Strategy-backed memories: emit the built-in `bump` strategy as a watermark global with inline `alloc`, `memory.grow` when needed, and `reset`
+- Raw memory sizing and growth: emit `memory.size` and `memory.grow` with WebAssembly-compatible results
 - Bulk memory and data segments: emit data segments plus `memory.copy`, `memory.fill`, and `memory.init`
 - `gc.pin` / `gc.unpin` / `gc.get`: emit `table.set` / `table.get` against a dedicated pinning table, manage slot allocation
 - SIMD codegen: emit `v128` operations for SIMD expressions, lane-type checking enforced at compile time, map `simd.f32x4.mul` etc. to the corresponding WebAssembly SIMD instructions
@@ -861,16 +870,17 @@ No wasl-specific runtime or binding library is required. The host loads a `.wasm
 
 **Validation:**
 
-- `unsafe fn` reads and writes linear memory correctly
+- Fixed memories compute the correct page counts from their bound layouts
+- Layout-bound header and framebuffer access emit the expected loads and stores with no GC allocations
+- The built-in `bump` strategy allocates correctly, resets correctly, and grows memory when capacity is exceeded
 - `memory.size` and `memory.grow` match WebAssembly behavior, including `-1` on failed growth
-- Layout-based header access emits the expected loads and stores with no GC allocations
-- Data segment initialization and `memory.copy` produce the expected bytes
+- Data segment initialization plus `memory.copy` and `memory.fill` produce the expected bytes
 - `gc.pin` a closure, retrieve it via `gc.get`, invoke it, and get the correct result
 - `gc.unpin` clears the table slot
 - SIMD dot product produces correct results
 - Memory64 addresses work for `mem64` memories
 - Table-based indirect dispatch works
-- Linear memory operations outside `unsafe fn` are rejected by the compiler
+- Linear-memory operations that reference undeclared memories are rejected by the compiler
 
 ### Milestone 9: Module Linking
 
@@ -945,7 +955,7 @@ The standard library is written in wasl and compiled to `.wasm`. It is linked vi
 | M5 | **WASM codegen: GC types ("wasl has real types")** | M4 |
 | M6 | WASM codegen: closures and function references | M5 |
 | M7 | WASM codegen: tail calls and exception handling | M5 |
-| M8 | WASM codegen: unsafe, SIMD, and linear memory | M5 |
+| M8 | WASM codegen: SIMD, linear memory, and typed memories | M5 |
 | M9 | Module linking | M4 |
 | M10 | Standard library | M6, M9 |
 | M11 | Polish, tooling, and documentation | all |
@@ -962,4 +972,6 @@ M6, M7, and M8 are independent of each other and can be developed in parallel af
 
 3. **Debugging.** WebAssembly's DWARF support is improving but still immature. wasl should emit name sections and, eventually, DWARF-compatible debug info so that source-level debugging is possible in tools that support it. This is a post-1.0 concern but the codegen should preserve enough information to support it later.
 
-4. **Component model integration timeline.** The component model and WASI 0.3 are stabilizing in parallel with wasl's development. The language should be ready to adopt component-level packaging when the ecosystem matures, but the core language and toolchain must not depend on it. The `extern` syntax is designed to extend naturally to WIT interfaces when the time comes.
+4. **Allocation strategies.** The `strategy = bump` mechanism is the initial built-in. Pool allocation and other strategies are natural extensions. The design should keep the strategy system open-ended so new strategies can be added without language changes, either as built-in compiler-known strategies or as a trait/interface that user-defined allocators can implement.
+
+5. **Component model integration timeline.** The component model and WASI 0.3 are stabilizing in parallel with wasl's development. The language should be ready to adopt component-level packaging when the ecosystem matures, but the core language and toolchain must not depend on it. The `extern` syntax is designed to extend naturally to WIT interfaces when the time comes.
