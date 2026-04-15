@@ -6,6 +6,68 @@
 
 ---
 
+## High-Level Map
+
+```text
+                               +----------------------+
+                               |    Host / Embedder   |
+                               | browser, Wasmtime,   |
+                               | V8, WAMR, custom app |
+                               +----------+-----------+
+                                          |
+                              provides imports / loads module
+                                          |
+                 +------------------------v------------------------+
+                 |          Standard WebAssembly Runtime           |
+                 | GC | typed funcref | exceptions | SIMD | tables |
+                 | multi-memory | Memory64 | bulk memory | globals |
+                 +------------------------+------------------------+
+                                          |
+                              executes standard output
+                                          |
+          +-------------------------------+-------------------------------+
+          |                                                               |
+ +--------v---------+                                           +---------v----------+
+ |  Core .wasm      |                                           | Optional Component |
+ | default output   |                                           | wrapper + WIT      |
+ +--------+---------+                                           +---------+----------+
+          ^                                                               ^
+          |                           emitted by                          |
+          +-------------------------------+-------------------------------+
+                                          |
+                                +---------v---------+
+                                |       waslc       |
+                                | parse -> type ->  |
+                                | traits -> mono -> |
+                                | DCE -> Wasm code  |
+                                +----+----+----+----+
+                                     |    |    |
+                 compile-time only --+    |    +-- optional metadata
+                                          |
+          +-------------------------------+-------------------------------+
+          |                               |                               |
+ +--------v---------+           +---------v---------+           +---------v---------+
+ | app.wasl         |           | imports resolved  |           | foreign bindings  |
+ | user program     |           | at compile time   |           | or host signatures|
+ +------------------+           +---------+---------+           +-------------------+
+                                          |
+           +------------------------------+------------------------------+
+           |                              |                              |
+ +---------v---------+          +---------v---------+          +---------v---------+
+ | wasl:* stdlib     |          | from "foo.wasl"   |          | from "foo.wasm"   |
+ | bundled source    |          | source import     |          | concrete exports  |
+ +-------------------+          +-------------------+          +-------------------+
+
+
+    Language model inside the emitted core module:
+
+    - Structured data lives on the GC heap by default.
+    - Raw bytes live in explicit linear memories.
+    - Functions, tables, globals, and exceptions map directly to Wasm spaces.
+    - Generics disappear during monomorphization; exports are concrete.
+    - wasl-to-wasl composition happens at compile time, not at runtime.
+```
+
 ## Overview
 
 wasl is a programming language designed around WebAssembly. It is not a language that *targets* WebAssembly as a compilation backend; it is a language whose type system, memory model, and execution semantics are direct expressions of what WebAssembly provides. Where other languages fight WebAssembly's constraints or paper over them with runtime shims, wasl embraces them as the foundation of its design.
