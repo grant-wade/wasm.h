@@ -68,7 +68,7 @@ int main(void) {
 Compile and run it:
 
 ```sh
-cc -std=c99 -D_POSIX_C_SOURCE=200809L -O2 quickstart.c -lm -o quickstart
+cc -O2 quickstart.c -lm -o quickstart
 ./quickstart
 # result: 43
 ```
