@@ -106,6 +106,14 @@
 #ifndef WASM_H
 #define WASM_H
 
+#if defined(_MSC_VER)
+/* Optimized intrinsic paths make the retained scalar SIMD fallbacks appear
+ * unreachable after MSVC inlining. Keep that optimizer diagnostic local to
+ * this header so consumers can continue to use /W4 /WX. */
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
+
 /* ── Platform detection & compat shims ────────────────────────────── */
 
 #if defined(_MSC_VER)
@@ -23534,6 +23542,7 @@ static wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
     int rc;
 
     (void)mod;
+    (void)args;
     (void)userdata;
 
     if (!results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -23579,6 +23588,7 @@ static wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
     int rc;
 
     (void)mod;
+    (void)args;
     (void)userdata;
 
     if (!results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -23598,6 +23608,7 @@ static wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
     int rc;
 
     (void)mod;
+    (void)args;
     (void)userdata;
 
     if (!results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -23668,6 +23679,7 @@ static wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
     int rc;
 
     (void)mod;
+    (void)args;
     (void)userdata;
 
     if (!results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -24795,4 +24807,9 @@ const char* wasm_error_string(wasm_error_t err) {
 }
 
 #endif /* WASM_IMPL */
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 #endif /* WASM_H */
