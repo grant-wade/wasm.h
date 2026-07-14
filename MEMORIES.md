@@ -1,6 +1,6 @@
 # Repository Memories
 
-Memory Version: 24
+Memory Version: 25
 
 Current curated contents of `/memories/repo/` as of 2026-04-10.
 
@@ -39,49 +39,6 @@ This file is the canonical checked-in snapshot of repo memory.
 - The runner parses wrapped signed integer spellings from JSON and intentionally normalizes only semantically equivalent diagnostics.
 - Spectest externref handles should be encoded away from the runtime's low-bit GC/i31 tags before `any.convert_extern`; otherwise host refs like `ref.extern 0` can be misclassified as `i31ref` in `br_on_cast`/`ref_cast` coverage.
 
-## component-type-parser.md
-
-- Nested `core:type` declarations inside component/instance types in `wasi.h` are inline core module types: declaration opcode `0x00` is followed by module-type opcode `0x50`, not a core type index.
-- Nested and top-level core module types in `wasi.h` now retain module declaration lists for core `type`, `import`, `alias`, and `export` entries, with regressions in `wasi_test.c` covering both nested type-space and top-level core-type fixtures.
-- Top-level `core-type` sections in `wasi.h` need backtracking for entry opcode `0x50`: it can mean either a core module type or a non-final subtype, so parse against the remaining entry count instead of deciding locally.
-- Standard component type imports can reference existing defined types without consuming extra component type-space slots. In `wasi.h`, helpers that resolve raw component type indices must not interleave type imports into the local type index walk, or standard `wasm-tools component new` exports lose their canonical function type indices.
-
-## component-linker.md
-
-- `wasi.h` now executes `component instance` instantiate records on the current M5 path, including nested component instantiation, arg-map binding for `func`, `instance`, `component`, and `type` imports, and alias resolution through live child instances rather than only static `from exports` records.
-- Engine-level `wasi_bind_import_instance()`, `wasi_bind_import_func()`, and `wasi_bind_import_component()` bindings now satisfy top-level component `instance`, `func`, and `component` imports by fully qualified interface name/version; unresolved imports fail at instantiation time with named diagnostics.
-- Component instantiation args on the current M5 path accept `component` references in addition to `func`, `instance`, and `type`.
-- Component type resolution on the current M5 path must follow non-core `instance export` aliases as well as outer aliases, or child instantiations that source a `type` arg from another live component instance fail before the imported-type carrier is populated.
-- The current linker still does not resolve broader outer-alias sorts, broader core-type alias coverage, or nontrivial start sections.
-
-## direct-core-func-linking.md
-
-- Direct core `func` args in `wasi_instantiate()` must resolve through the core-function alias chain, not only through generic core-export resolution, so named aliases can register either forwarded core exports or synchronous `canon lower` bridges as singleton imports for later embedded core modules.
-
-## core-singleton-import-names.md
-
-- When a direct singleton core instantiation arg resolves to an unnamed local target such as `canon lower`, `wasi.h` should derive the import field name from the destination core module's unique import in the requested namespace/kind instead of failing with `WASI_ERR_NOT_IMPLEMENTED`; this lookup needs to work for both loaded modules and embedded core module bytes and should reject zero or multiple matches with named diagnostics.
-
-## core-namespace-export-names.md
-
-- When a whole core-instance namespace is linked through a `from exports` record, `wasi.h` should also derive names for unnamed singleton exports from the destination core module's unique import in that namespace/kind instead of registering an empty import field; this applies to both direct forwards and `canon lower` bridges.
-
-## core-empty-import-fields.md
-
-- The current M5 core-instance path in `wasi.h` should treat an empty string import field as a valid unique singleton destination name, not as an automatic `WASI_ERR_NOT_IMPLEMENTED` failure, so unnamed `from exports` singletons and direct core singleton args can still link into core modules whose matching import field is empty.
-
-## component-module-linking.md
-
-- Component `module` import descriptors in `wasi.h` use the core-module bound tag `0x11` after extern kind byte `0x00`; omitting that tag makes otherwise small hand-built fixtures fail as malformed imports.
-- The current `wasi_instantiate` path now supports host-bound component `module` imports via `wasi_bind_import_module()`, nested `module` args in `component instance` instantiation records, and outer core-module aliases by treating them as entries in the component module index space.
-- Temporary child-override carriers for linked modules must transfer ownership into the child instance runtime when they materialize dynamically loaded embedded core modules; otherwise nested module args either leak or free borrowed modules too early.
-
-## outer-type-alias-runtime.md
-
-- Component type imports in `wasi.h` now need live runtime carriers when nested children resolve outer `type` aliases through instantiated parent scopes; the supported carrier stores the resolved source component plus local type index as `WASI__COMPONENT_IMPORT_RUNTIME_TYPE`.
-- `wasi_call()` and `wasi__resolve_component_func_call_type()` now resolve function type annotations through the live instance when needed, so typed child exports can inherit imported parent function types through outer aliases.
-- Regression coverage in `wasi_test.c` uses a grandparent -> parent(type import + func import) -> child(outer type alias + outer func alias) chain and calls the child export directly to prove the imported-type carrier path works.
-
 ## wasm-runtime.md
 
 - `wasm.h` is the single-header runtime; `wasm_load()` performs load-time validation and feature gating via `wasm_runtime_t.enabled_features`, with helper APIs `wasm_enable_feature()`, `wasm_disable_feature()`, and `wasm_enable_all_features()`.
@@ -92,7 +49,6 @@ This file is the canonical checked-in snapshot of repo memory.
 - The default validator label budget is `WASM_MAX_LABELS = 4096`, which is high enough for large real-world modules like the official sqlite3 Wasm build without custom runtime config.
 - Float min/max intentionally avoid `fmin[f]` and `fmax[f]` and use signed-zero-aware comparisons to preserve Wasm semantics.
 - Regression coverage lives primarily in `wasm_test.c`, with additional spectest and emcc coverage under `test/`.
-- `wasi.h`'s current M5 slice now accepts top-level core-instance `from exports` records on the narrow instance path and can register their function exports as either direct forwards or synchronous `canon lower` bridges, so later embedded core modules can call back into supported local component funcs and resource builtins through real lower/lift dispatch.
 
 ## wasm2api.md
 
@@ -112,16 +68,3 @@ This file is the canonical checked-in snapshot of repo memory.
 - In the CMake build, `WL_ENABLE_PLATFORM` is a top-level option that defaults ON and is propagated through `wl_project_options`; standalone `wl.h` consumers need to define the macro themselves before including the header.
 - `wl.h` contains both POSIX and Windows platform backends under the same flag.
 - `wl.h` uses `WL_INLINE` and avoids MSVC-hostile patterns in the portable core.
-
-## wasi-reference-harness.md
-
-- `test/wasi_wasmtime_runner.c` builds standard scalar/direct reference components at test time with `wasm-tools component embed --world compare` plus `wasm-tools component new`, then compares `wasi_canon_call()` against `wasmtime run --invoke` on the same generated component.
-- The harness intentionally targets the low-level canonical ABI path instead of `wasi_instantiate()`, because `wasm-tools component new` emits multi-core-module/start-shim components that exceed the current narrow instance path.
-- Standard embedded components require post-return signatures to match the lowered core result type (`i32` for bool/u8/u16/u32/s8/s16/s32, `i64` for s64/u64); hardcoding `i32` makes `wasm-tools component new` reject 64-bit cases.
-- CTest label `wasi-wasmtime` is enabled only when both `wasmtime` and `wasm-tools` provide `component embed` and `component new`.
-
-## wasi-standard-type-space.md
-
-- Standard `wasm-tools component new` output can introduce top-level type imports for named WIT types; those imports occupy slots in the component type index space even when `wasi.h` stores only defined types in `component->types`.
-- `wasi__parse_component_imports()` must use `wasi__read_component_externdesc()` rather than assuming `kind-byte + type-index`, or standard function import descriptors with bound tags leave trailing bytes.
-- `wasi.h` now resolves the current standard named-type compare cases across imported and defined component type slots, with `wasi-wasmtime` coverage for standard `list`, `record`, and `variant` round-trips.

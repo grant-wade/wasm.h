@@ -1,6 +1,5 @@
 wl_test
 wasm_test
-wasi_test
 basic_add_demo
 wasm2api
 wasm

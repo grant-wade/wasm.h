@@ -4,8 +4,6 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
-The repository also now includes an experimental `wasi.h` scaffold for component-model work. The current surface initializes a dedicated engine, distinguishes core modules from component binaries, parses component structure beyond section framing, extracts embedded core modules and nested components, executes a narrow but real component-instantiation/linking path, and exposes structured component imports, exports, interface versions, core-instance records, component-instance records, start-section state, retained component value-type ASTs, broader component type metadata, aliases, canonical records, and file-relative source offsets for the major retained AST nodes.
-
 ## Quick start
 
 ```c
@@ -88,38 +86,6 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 | `wasm_bind_emscripten_stubs(rt)` | Register built-in `env` shims for common Emscripten imports. |
 | `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs. |
 
-## wasi.h Status
-
-Current `wasi.h` capabilities cover binary introspection plus the completed low-level canonical ABI surface through Milestone 3:
-
-- `wasi_init`, `wasi_destroy`, `wasi_load`, `wasi_free_component`
-- core-vs-component detection through `wasi_detect_binary_kind`
-- section introspection through `wasi_component_section_*`
-- structured component imports/exports through `wasi_component_import_*` and `wasi_component_export_*`
-- structured core-instance records through `wasi_component_core_instance_*`
-- structured top-level and nested core-type records, including retained module declaration lists and composite subtype payloads, through `wasi_component_core_type_*`
-- structured component-instance records through `wasi_component_instance_*`
-- structured nested component records through `wasi_component_nested_component_*`
-- structured alias records now include instance-export and outer forms through `wasi_component_alias_*`
-- component start-section state through `wasi_component_has_start` and `wasi_component_start_func_index`
-- parsed component function types, retained value-type ASTs, and nested component/instance type declarations through `wasi_component_type_*`, `wasi_component_type_decl_*`, `wasi_component_func_type_*`, and `wasi_component_valtype_*`
-- structured alias and canonical-function records through `wasi_component_alias_*` and `wasi_component_canon_*`
-- extracted embedded core modules through `wasi_component_core_module_*`
-- file-relative source offsets for sections and major top-level AST records through the various `*_offset` accessors and `wasi_dump_component`
-- host-side canonical ABI values through `wasi_value_t` and `wasi_value_set_string_copy`
-- low-level scalar/string canonical calls through `wasi_canon_call` with `wasi_canon_options_t`
-- narrow component instantiation through `wasi_instantiate`, `wasi_free_instance`, and `wasi_call`
-- engine-bound import resolution through `wasi_bind_import_instance`, `wasi_bind_import_module`, `wasi_bind_import_func`, and `wasi_bind_import_component`
-- scalar lift/lower for `bool`, integer widths, floats, `char`, and `string`
-- compound canonical ABI support for `list`, `record`, `tuple`, `flags`, `variant`, `option`, `result`, and `enum`, including flat param lowering and spill-based result lifting on the current low-level path
-- UTF-8, UTF-16, and latin1+utf16 string lowering/lifting through linear memory with `cabi_realloc` and optional post-return dispatch
-- parsed canonical lift options for string encoding, memory selection, `realloc`, and post-return on the supported instance path
-- host-defined resource registration and per-instance handle tables through `wasi_define_resource`, `wasi_instance_bind_resource_type`, `wasi_resource_new`, `wasi_resource_rep`, and `wasi_resource_drop`
-- synchronous `own<T>` and `borrow<T>` lowering on the current `wasi_call` path for supported canon lifts, including outstanding-borrow guards, own-handle round-trips, origin-preserving cross-instance resource transfer machinery, and alias-aware component destructor dispatch
-- narrow `canon lower` import bridging on the current instance path, including core-instance `from exports` namespaces that can expose lowered component funcs to later embedded core modules and route resource handles through the same synchronous lift/lower machinery
-
-`wasi.h` still does not implement the full general component linking program. Today it provides parser/introspection, a low-level canonical ABI layer, completed Milestone 4 resource lifecycle support, and two active M5 slices. The current component-instance linking slice can instantiate nested component instances, bind their `module`/`func`/`instance`/`component`/`type` arg maps, resolve top-level component imports against engine-bound names and fully qualified interface versions including host-bound core modules, route exported component functions through live child-component instances rather than only static `instance { export ... }` records, resolve component-exported `type` args through live child-component instances as well as outer aliases on the supported path, execute zero-arg/zero-result component start functions on the current path, resolve non-core outer aliases for `func`, `instance`, and `component`, and resolve outer core-module aliases on the supported path for nested core-instance wiring. The current core-instance linking slice still materializes top-level core-instance `from exports` namespaces backed by direct forwards or synchronous `canon lower` thunks, can derive names for unnamed singleton exports in those namespaces when the destination core module makes the match unique, accepts direct core singleton args backed by the same forward-or-lower targets including unnamed local lowers when the destination core module exposes a unique matching import field, and still performs the sequential core-instance instantiation needed by later embedded core modules. Broader core-type alias coverage and more exotic core-instance forms still remain outside the supported path.
-
 ### Memory and globals
 
 | Function | Purpose |
@@ -188,11 +154,10 @@ cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the full test pass: unit tests (`wasm_test`, `wasi_test`, `wl_test`), the spectest harness, the optional `wasmtime` comparison harness for representative `wasi.h` canonical ABI cases (`bool`, integer widths, `f32`, `f64`, `char`, UTF-8/UTF-16 string echoes, `list<u8>`/`list<u32>` round-trips, a nested `record { a: u32, b: string, c: list<u8> }` echo, `variant { none, num(u32), text(string) }` payload round-trips, and a joined-payload `variant { none, num(u32), big(u64) }` echo), and the `emcc` fixture suite.
+`check` runs the full test pass: unit tests (`wasm_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
 
 - `wasm`
 - `wasm2api`
-- `wasi_test`
 - `sqlite_wasm_demo`
 - `wasm_test`
 - `wl_test`
@@ -203,8 +168,6 @@ Additional targets:
 ```sh
 cmake --build build --target wasm               # CLI runner
 cmake --build build --target wasm2api            # Wrapper generator
-cmake --build build --target wasi-component-run  # Component smoke harness (when wasm-tools component is available)
-cmake --build build --target wasi-wasmtime-run   # Wasmtime reference comparisons (when wasmtime + wasm-tools component support are available)
 cmake --build build --target wasm-spectest-run   # Spectest only
 cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 ```
