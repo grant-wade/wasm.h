@@ -33,7 +33,6 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 ## Agent Notes
 
-- When editing a file use smaller edits instead of large bulk ones when using your tools. This is to prevent a single mistake causing the whole block to be rejected. This will lower efficiency slightly, but will increase the chances of a successful edit.
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
 - For `wasm.h`, remember the single-header split: public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`.
 - `WL_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; standalone `wl.h` users may compile with it off.
