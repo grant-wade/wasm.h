@@ -73,6 +73,8 @@ cc -O2 quickstart.c -lm -o quickstart
 # result: 43
 ```
 
+This compiles the portable core only. Platform-backed WASI and Emscripten compatibility helpers are opt-in, as described below.
+
 `wasm_call_fmt` uses `args(results)` syntax: `"i(i)"` means one `i32` argument and one `i32` result.
 
 Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void result.
@@ -104,8 +106,8 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 | Function | Purpose |
 | --- | --- |
 | `wasm_bind_host_func(rt, module, name, fmt, cb, userdata)` | Bind a host function import using a format string. |
-| `wasm_bind_emscripten_stubs(rt)` | Register built-in `env` shims for common Emscripten imports. |
-| `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs. |
+| `wasm_bind_emscripten_stubs(rt)` | Register built-in `env` shims for common Emscripten imports (requires `WASM_ENABLE_PLATFORM`). |
+| `wasm_bind_wasi_stubs(rt)` | Register built-in `wasi_snapshot_preview1` stubs (requires `WASM_ENABLE_PLATFORM`). |
 
 ### Memory and globals
 
@@ -162,13 +164,25 @@ Define before including `wasm.h`:
 #define WASM_CALLOC(n, sz)   my_calloc(n, sz)
 ```
 
+### Platform bridges
+
+The core runtime does not compile OS-specific code by default. To include the built-in WASI and Emscripten bridges, define `WASM_ENABLE_PLATFORM` in the implementation translation unit:
+
+```c
+#define WASM_ENABLE_PLATFORM 1
+#define WASM_IMPL
+#include "wasm.h"
+```
+
+Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L` so libc exposes the required platform declarations. The repository's CMake targets configure this automatically.
+
 ### WASI stubs
 
-`wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_read`, `fd_close`, `fd_sync`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
+With platform bridges enabled, `wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_read`, `fd_close`, `fd_sync`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
 
 ### Emscripten stubs
 
-`wasm_bind_emscripten_stubs(rt)` registers the `env` imports commonly needed by Emscripten-targeted modules, including `emscripten_date_now`, `emscripten_get_now`, `emscripten_get_heap_max`, `emscripten_resize_heap`, `_tzset_js`, `_localtime_js`, `_mmap_js`, `_munmap_js`, and the `__syscall_*` shims used by the official sqlite3 Wasm build. When enabled, the runtime also lazily provides an imported `env.memory` that matches the module's declared memory limits.
+With platform bridges enabled, `wasm_bind_emscripten_stubs(rt)` registers the `env` imports commonly needed by Emscripten-targeted modules, including `emscripten_date_now`, `emscripten_get_now`, `emscripten_get_heap_max`, `emscripten_resize_heap`, `_tzset_js`, `_localtime_js`, `_mmap_js`, `_munmap_js`, and the `__syscall_*` shims used by the official sqlite3 Wasm build. When enabled, the runtime also lazily provides an imported `env.memory` that matches the module's declared memory limits.
 
 ## Build and test
 

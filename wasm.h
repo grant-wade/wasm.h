@@ -5,6 +5,10 @@
  *   #define WASM_IMPL
  *   #include "wasm.h"
  *
+ * PLATFORM BRIDGES:
+ *   Define WASM_ENABLE_PLATFORM to 1 before WASM_IMPL to compile the
+ *   platform-backed WASI and Emscripten compatibility helpers.
+ *
  * CUSTOM ALLOCATORS:
  *   #define WASM_MALLOC(sz)      my_malloc(sz)
  *   #define WASM_REALLOC(p, sz)  my_realloc(p, sz)
@@ -124,6 +128,10 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef WASM_ENABLE_PLATFORM
+#define WASM_ENABLE_PLATFORM 0
+#endif
 
 #ifndef UINT32_MAX
 #define UINT32_MAX 0xFFFFFFFFu
@@ -730,6 +738,7 @@ const char* wasm_error_string(wasm_error_t err);
 #include <xmmintrin.h>
 #endif
 
+#if WASM_ENABLE_PLATFORM
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -753,6 +762,7 @@ const char* wasm_error_string(wasm_error_t err);
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#endif
 #endif
 
 typedef enum wasm_gc_object_kind_t {
@@ -1115,7 +1125,8 @@ static __m128d wasm__sse_neg_pd(__m128d value) {
 
 #define WASM__ALIGNOF(type) offsetof(struct { char c; type value; }, value)
 
-/* ── WASI platform hooks (portable C99 defaults) ─────────────────── */
+#if WASM_ENABLE_PLATFORM
+/* ── WASI platform hooks ─────────────────────────────────────────── */
 
 #if defined(_WIN32)
 #define WASM__PLATFORM_WINDOWS 1
@@ -1151,6 +1162,7 @@ static __m128d wasm__sse_neg_pd(__m128d value) {
 #ifndef WASM_WASI_CLOCK_TIME_GET
 #define WASM__WASI_NEEDS_CLOCK_FALLBACK 1
 #endif
+#endif /* WASM_ENABLE_PLATFORM */
 
 /* ── Forward declarations ─────────────────────────────────────────── */
 static wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
@@ -1172,7 +1184,9 @@ static const struct wasm_table_t* wasm__table_actual_const(const struct wasm_tab
 static struct wasm_memory_t* wasm__memory_actual(struct wasm_memory_t* memory);
 static const struct wasm_memory_t* wasm__memory_actual_const(const struct wasm_memory_t* memory);
 
+#if WASM_ENABLE_PLATFORM
 static void wasm__wasi_state_destroy(wasm_runtime_t* rt);
+#endif
 
 WASM_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
     return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
@@ -1203,6 +1217,7 @@ WASM_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type) {
 static wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
                                                    const wasm_import_t* imp,
                                                    int zeroed_type_is_unspecified);
+#if WASM_ENABLE_PLATFORM
 static wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* rt,
                                                           uint64_t min_pages,
                                                           uint64_t max_pages,
@@ -1510,6 +1525,7 @@ static int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
 #undef WASM__WASI_NEEDS_CLOCK_FALLBACK
 #undef WASM__PLATFORM_WINDOWS
 #undef WASM__PLATFORM_POSIX
+#endif /* WASM_ENABLE_PLATFORM */
 
 /* ── Portable bit operations (pure C99, no builtins) ──────────────── */
 
@@ -8692,12 +8708,14 @@ void wasm_destroy(wasm_runtime_t* rt) {
     wasm__arena_destroy(rt);
     rt->gc_modules = NULL;
     wasm__gc_heap_destroy(rt);
+#if WASM_ENABLE_PLATFORM
     if (rt->wasi_state) wasm__wasi_state_destroy(rt);
     if (rt->emscripten_state) {
         WASM_FREE(rt->emscripten_state->memory.data);
         WASM_FREE(rt->emscripten_state);
         rt->emscripten_state = NULL;
     }
+#endif
     wasm__stack_destroy(rt);
     memset(rt, 0, sizeof(*rt));
 }
@@ -9204,6 +9222,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         err = wasm__validate_memory_limits(mod, memory_index, memory);
         if (err != WASM_OK) return err;
         mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
+#if WASM_ENABLE_PLATFORM
         if (!mimp && mod->rt && mod->rt->emscripten_stubs_enabled &&
             strcmp(info->module, "env") == 0 && strcmp(info->name, "memory") == 0) {
             err = wasm__ensure_emscripten_memory_import(mod->rt,
@@ -9213,6 +9232,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             if (err != WASM_OK) return err;
             mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
         }
+#endif
         if (!mimp) {
             if (wasm__has_import_named(mod->rt, info->module, info->name)) {
                 WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
@@ -19889,6 +19909,7 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
     return err;
 }
 
+#if WASM_ENABLE_PLATFORM
 #define WASM__WASI_MODULE_NAME "wasi_snapshot_preview1"
 #define WASM__WASI_FD_STDIN 0u
 #define WASM__WASI_FD_STDOUT 1u
@@ -23825,6 +23846,24 @@ wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
 
     return WASM_OK;
 }
+
+#else
+
+wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
+    if (!rt) return WASM_ERR_MALFORMED;
+    WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s",
+                  "WASI stubs require WASM_ENABLE_PLATFORM=1");
+    return WASM_ERR_MALFORMED;
+}
+
+wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
+    if (!rt) return WASM_ERR_MALFORMED;
+    WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s",
+                  "Emscripten stubs require WASM_ENABLE_PLATFORM=1");
+    return WASM_ERR_MALFORMED;
+}
+
+#endif /* WASM_ENABLE_PLATFORM */
 
 /* ── Memory helpers ───────────────────────────────────────────────── */
 

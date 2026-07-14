@@ -23,6 +23,7 @@ add_library(wl_project_options INTERFACE)
 target_include_directories(wl_project_options INTERFACE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(wl_project_options INTERFACE
     _POSIX_C_SOURCE=200809L
+    WASM_ENABLE_PLATFORM=1
     WL_ENABLE_PLATFORM=${WL_ENABLE_PLATFORM_VALUE}
 )
 
@@ -71,7 +72,7 @@ add_subdirectory(examples)
 if(BUILD_TESTING)
     add_subdirectory(test)
 
-    set(WL_CHECK_TARGET_DEPS wl_test wasm_test)
+    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_core_test)
     if(TARGET sqlite_wasm_demo)
         list(APPEND WL_CHECK_TARGET_DEPS sqlite_wasm_demo)
     endif()

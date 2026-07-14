@@ -139,14 +139,22 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Lower-level registration functions are available for functions, globals, tables, memories, and tags when format strings are insufficient. `wasm_module_set_userdata` associates instance-specific host state with a loaded module; callbacks can retrieve it with `wasm_module_get_userdata`.
 
-Optional compatibility helpers are available for common imports:
+Optional compatibility helpers are available for common imports. Their OS-specific code is excluded from the portable core by default; enable it in the implementation translation unit when needed:
+
+```c
+#define WASM_ENABLE_PLATFORM 1
+#define WASM_IMPL
+#include "wasm.h"
+```
+
+The helpers can then be bound before loading a module:
 
 ```c
 wasm_bind_wasi_stubs(rt);
 wasm_bind_emscripten_stubs(rt);
 ```
 
-These are convenience bindings, not complete implementations of either environment.
+These are convenience bindings, not complete implementations of either environment. Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L`; the repository's CMake build supplies it automatically.
 
 ## Linear memory and globals
 

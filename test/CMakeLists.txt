@@ -3,11 +3,33 @@ wl_add_native_executable(wasm_test wasm_test.c)
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
 
+# Keep this target free of the platform feature definitions carried by
+# wl_project_options so strict C99 compilation exercises the core alone.
+add_executable(wasm_core_test wasm_core_test.c)
+target_include_directories(wasm_core_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(wasm_core_test PRIVATE wl_math)
+if(MSVC)
+    target_compile_options(wasm_core_test PRIVATE
+        /std:c11
+        /W4
+        $<$<BOOL:${WL_ENABLE_WERROR}>:/WX>
+    )
+else()
+    target_compile_options(wasm_core_test PRIVATE
+        -Wall
+        -Wextra
+        $<$<BOOL:${WL_ENABLE_WERROR}>:-Werror>
+    )
+endif()
+
 add_test(NAME wl_test COMMAND wl_test)
 set_tests_properties(wl_test PROPERTIES LABELS "unit")
 
 add_test(NAME wasm_test COMMAND wasm_test)
 set_tests_properties(wasm_test PROPERTIES LABELS "unit")
+
+add_test(NAME wasm_core_test COMMAND wasm_core_test)
+set_tests_properties(wasm_core_test PROPERTIES LABELS "unit")
 
 find_program(WL_WASM_TOOLS_EXECUTABLE
     NAMES wasm-tools
