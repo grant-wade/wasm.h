@@ -10750,6 +10750,8 @@ static wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
                                                   wasm_reftype_t* out_ref_type) {
     wasm__val_frame_t* frame = wasm__validator_frame(v);
 
+    *out_type = WASM__TYPE_BOT;
+    wasm__clear_reftype(out_ref_type);
     if (v->sp == frame->height) {
         if (!frame->unreachable)
             return wasm__validator_error(v, at, "type mismatch: stack underflow");
@@ -11197,6 +11199,7 @@ static wasm_error_t wasm__validator_read_heap_reftype(wasm__validator_t* v,
                                                       wasm_reftype_t* out_reftype) {
     wasm_error_t err;
 
+    if (out_type) *out_type = WASM__TYPE_BOT;
     wasm__clear_reftype(out_reftype);
     out_reftype->nullable = nullable;
     err = wasm__read_heaptype(v->mod, &v->r, out_reftype);

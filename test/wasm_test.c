@@ -8512,7 +8512,7 @@ WL_TEST(test_public_wasi_stub_helpers) {
     wasm_module_t* m;
     wasm_error_t err;
     wasm_value_t result;
-    wasm_test_stream_capture capture;
+    wasm_test_stream_capture capture = { 0 };
     uint8_t nwritten_bytes[4];
     uint8_t seek_offset_bytes[8];
     uint32_t nwritten = 0;
