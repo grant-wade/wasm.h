@@ -4,6 +4,8 @@ A single-header WebAssembly runtime for C99. No external runtime dependency.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
+Release documentation lives in [`docs/`](docs/README.md), including the [embedding guide](docs/EMBEDDING.md) and [build and test guide](docs/BUILDING.md).
+
 ## Quick start
 
 ```c
@@ -103,25 +105,27 @@ Format specifiers: `i` i32, `I` i64, `f` f32, `F` f64, `r` externref, `v` void r
 | `wasm_disable_feature(rt, flag)` | Disable a proposal feature flag. |
 | `wasm_enable_all_features(rt)` | Enable all implemented proposals. |
 | `wasm_runtime_error_message(rt)` | Most recent runtime error text. |
-| `wasm_set_fuel(mod, n)` | Set an instruction fuel limit. |
-| `wasm_get_fuel(mod)` | Read remaining fuel. |
-| `wasm_dump_backtrace(mod)` | Print a call-stack backtrace. |
+| `wasm_set_fuel(rt, n)` | Set an instruction fuel limit. |
+| `wasm_get_fuel(rt)` | Read remaining fuel. |
+| `wasm_dump_backtrace(rt, buffer, size)` | Format the captured call stack into a caller-provided buffer. |
 | `wasm_error_string(err)` | Human-readable name for an error code. |
 
 ### Configuration
 
-Pass a `wasm_config_t` to `wasm_init` to override defaults:
+Pass a `wasm_config_t` to `wasm_runtime_new` (or `wasm_init` when using custom runtime storage) to override defaults:
 
 ```c
-wasm_config_t cfg = {
-	.max_stack_values  = 65536,
-	.max_call_depth    = 1024,
-	.max_labels        = 4096,
-	.initial_gc_heap_size = 1 << 20,
-	.frame_arena_size  = 1 << 16,
-	.lazy_validation   = 1,
-};
-wasm_init(&rt, &cfg);
+wasm_config_t cfg;
+wasm_runtime_t* rt;
+
+wasm_config_default(&cfg);
+cfg.max_stack_values = 65536;
+cfg.max_call_depth = 1024;
+cfg.max_labels = 4096;
+cfg.initial_gc_heap_size = 1 << 20;
+cfg.frame_arena_size = 1 << 16;
+cfg.lazy_validation = 1;
+rt = wasm_runtime_new(&cfg);
 ```
 
 Set `lazy_validation` to defer per-function body validation until first execution. The default is `0`, which preserves eager whole-module validation.
@@ -279,18 +283,6 @@ Checked-in example flow:
 - `cmake --build build --target session_math_generate` runs `wasm2api --singleton --embed --init-func init_state` against the built module and refreshes `examples/session_math.h` plus `examples/session_math.c`
 - `cmake --build build --target session_math_demo` builds and runs a native demo against the generated wrapper API
 
-## Repository layout
-
-- `wasm.h` — single-header runtime, validator, interpreter, and public C API
-- `wasm.c` — CLI runner and inspection tool built on top of `wasm.h`
-- `wasm2api.c` — typed wrapper generator for Wasm exports and imports
-- `wasm_test.c` — native regression coverage for the runtime
-- `wl.h` — local support library used by tests and development utilities
-- `wl_test.c` — tests for `wl.h`
-- `examples/` — native examples and demo code
-- `test/` — spectest harness, `emcc` fixtures, and Wasm fixture runner
-- `docs/` — design notes, plans, and historical compliance snapshots
-
 ## Proposal support
 
 | Proposal | Status |
@@ -333,4 +325,4 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `wl_test.c` | Tests for `wl.h`. |
 | `examples/` | Demo code. |
 | `test/` | Spectest harness, emcc fixtures, and fixture runner. |
-| `docs/` | Design notes and compliance snapshots. |
+| `docs/` | Release-facing embedding and build documentation. |

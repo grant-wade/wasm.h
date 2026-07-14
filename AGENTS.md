@@ -21,7 +21,7 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 - `test/fixture_runner.c`: runner for emcc-generated Wasm fixtures.
 - `test/spectest_runner.c`: spec JSON harness and diagnostic normalization layer.
 - `test/spec/`: WebAssembly testsuite submodule content.
-- `docs/`: plans and compliance notes. Useful for history, but check code before trusting them.
+- `docs/`: release-facing embedding and build documentation for the current runtime.
 
 ## Build And Test
 
