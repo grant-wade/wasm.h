@@ -29,7 +29,7 @@ Useful configuration options:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `BUILD_TESTING` | `ON` | Register CTest tests and the `check` target. |
-| `WL_ENABLE_PLATFORM` | `ON` | Enable platform-backed helpers in the local `wl.h` support library. |
+| `WL_ENABLE_PLATFORM` | `ON` | Enable platform-backed helpers in the test-only `test/wl.h` support library. |
 | `WL_ENABLE_WERROR` | `ON` | Treat compiler warnings as errors. |
 | `WL_ENABLE_EMCC_TESTS` | `ON` | Enable Emscripten fixtures when `emcc` is available. |
 

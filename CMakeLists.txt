@@ -9,7 +9,7 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-option(WL_ENABLE_PLATFORM "Enable platform-backed wl.h APIs." ON)
+option(WL_ENABLE_PLATFORM "Enable platform-backed test/wl.h APIs." ON)
 option(WL_ENABLE_WERROR "Treat warnings as errors." ON)
 option(WL_ENABLE_EMCC_TESTS "Enable emcc-based Wasm fixture tests when emcc is available." ON)
 
@@ -63,20 +63,12 @@ function(wl_add_native_executable target)
     target_link_libraries(${target} PRIVATE wl_project_options wl_math)
 endfunction()
 
-wl_add_native_executable(wl_test wl_test.c)
-wl_add_native_executable(wasm_test wasm_test.c)
 wl_add_native_executable(wasm2api wasm2api.c)
 wl_add_native_executable(wasm wasm.c)
 
 add_subdirectory(examples)
 
 if(BUILD_TESTING)
-    add_test(NAME wl_test COMMAND wl_test)
-    set_tests_properties(wl_test PROPERTIES LABELS "unit")
-
-    add_test(NAME wasm_test COMMAND wasm_test)
-    set_tests_properties(wasm_test PROPERTIES LABELS "unit")
-
     add_subdirectory(test)
 
     set(WL_CHECK_TARGET_DEPS wl_test wasm_test)

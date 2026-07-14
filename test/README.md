@@ -1,11 +1,14 @@
-# test/ Wasm emcc Harness
+# Test Suite
 
-This directory holds a small harness for compiling real C fixtures with `emcc` and running the emitted `.wasm` files through [../wasm.h](../wasm.h).
+This directory contains the native unit tests, WebAssembly spec harness, and a harness for compiling real C fixtures with `emcc` and running the emitted `.wasm` files through [../wasm.h](../wasm.h).
 
-The intent is not to require green results today. It is a regression and compatibility probe for the interpreter as feature support grows.
+The emcc harness is a regression and compatibility probe for the interpreter as feature support grows.
 
 ## Layout
 
+- `wasm_test.c` — primary native regression suite for `wasm.h`
+- `wl.h` — local support library used by native tests
+- `wl_test.c` — regression suite for `wl.h`
 - `fixtures/*.c` — source files compiled by `emcc`
 - `spec/` — git submodule mirror of the official WebAssembly testsuite
 - `fixture_runner.c` — native host runner that loads a `.wasm` file with `wasm.h`, prints exports, and optionally calls one export

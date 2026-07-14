@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssembly runtime. `wl.h` is a local support library used by tests and utilities, not the main product.
+This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssembly runtime. `test/wl.h` is a local support library used by native tests, not the main product.
 
 ## Source Of Truth
 
@@ -13,11 +13,11 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 ## Important Files
 
 - `wasm.h`: main runtime, validator, interpreter, public embedding API.
-- `wasm_test.c`: primary regression coverage for the runtime.
+- `test/wasm_test.c`: primary regression coverage for the runtime.
 - `wasm.c`: CLI runner and inspection tool built on top of `wasm.h`.
 - `wasm2api.c`: generator for typed C wrappers around Wasm exports and imports.
-- `wl.h`: local support/platform layer.
-- `wl_test.c`: tests for `wl.h`.
+- `test/wl.h`: local test support/platform layer.
+- `test/wl_test.c`: tests for `test/wl.h`.
 - `test/fixture_runner.c`: runner for emcc-generated Wasm fixtures.
 - `test/spectest_runner.c`: spec JSON harness and diagnostic normalization layer.
 - `test/spec/`: WebAssembly testsuite submodule content.
@@ -35,8 +35,8 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
 - For `wasm.h`, remember the single-header split: public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`.
-- `WL_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; standalone `wl.h` users may compile with it off.
-- If a change touches validation, init expressions, memarg decoding, or spectest failures, check `wasm_test.c` and `test/spectest_runner.c` together.
+- `WL_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; `test/wl.h` may be compiled with it off.
+- If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
 - The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64.
 - `wasm2api.c` currently generates wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported signatures are skipped with diagnostics.

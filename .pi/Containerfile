@@ -1,0 +1,25 @@
+FROM pi-base:latest
+
+ARG WASM_TOOLS_VERSION=1.253.0
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates cmake curl \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) wasm_tools_arch=x86_64 ;; \
+        arm64) wasm_tools_arch=aarch64 ;; \
+        riscv64) wasm_tools_arch=riscv64 ;; \
+        *) echo "unsupported architecture for wasm-tools: $arch" >&2; exit 1 ;; \
+    esac \
+    && archive="wasm-tools-${WASM_TOOLS_VERSION}-${wasm_tools_arch}-linux" \
+    && curl --fail --location --show-error \
+        "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${archive}.tar.gz" \
+        --output "/tmp/${archive}.tar.gz" \
+    && tar -xzf "/tmp/${archive}.tar.gz" -C /tmp \
+    && install -m 0755 "/tmp/${archive}/wasm-tools" /usr/local/bin/wasm-tools \
+    && wasm-tools parse --help >/dev/null \
+    && wasm-tools json-from-wast --help >/dev/null \
+    && rm -rf "/tmp/${archive}" "/tmp/${archive}.tar.gz" \
+    && rm -rf /var/lib/apt/lists/*
+USER agent

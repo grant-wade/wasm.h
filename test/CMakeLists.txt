@@ -1,5 +1,13 @@
+wl_add_native_executable(wl_test wl_test.c)
+wl_add_native_executable(wasm_test wasm_test.c)
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
+
+add_test(NAME wl_test COMMAND wl_test)
+set_tests_properties(wl_test PROPERTIES LABELS "unit")
+
+add_test(NAME wasm_test COMMAND wasm_test)
+set_tests_properties(wasm_test PROPERTIES LABELS "unit")
 
 find_program(WL_WASM_TOOLS_EXECUTABLE
     NAMES wasm-tools

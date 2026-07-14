@@ -320,9 +320,9 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `wasm.h` | Single-header runtime, validator, interpreter, and public API. |
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |
-| `wasm_test.c` | Runtime regression tests. |
-| `wl.h` | Local support library (used by tests and utilities). |
-| `wl_test.c` | Tests for `wl.h`. |
 | `examples/` | Demo code. |
-| `test/` | Spectest harness, emcc fixtures, and fixture runner. |
+| `test/wasm_test.c` | Runtime regression tests. |
+| `test/wl.h` | Local support library used by native tests. |
+| `test/wl_test.c` | Tests for `wl.h`. |
+| `test/` | Unit tests, spectest harness, emcc fixtures, and fixture runner. |
 | `docs/` | Release-facing embedding and build documentation. |
