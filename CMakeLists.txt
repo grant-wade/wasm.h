@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(wasm_h VERSION 0.1.0 LANGUAGES C)
+project(wasm_h VERSION 1.0.0 LANGUAGES C)
 
 include(CheckLibraryExists)
 include(CMakePackageConfigHelpers)

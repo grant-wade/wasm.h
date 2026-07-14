@@ -2,7 +2,7 @@
 
 A single-header WebAssembly runtime for C99. No external runtime dependency.
 
-The public API is currently **experimental** and may change incompatibly before 1.0. The current release version is available through `WASM_H_VERSION_MAJOR`, `WASM_H_VERSION_MINOR`, `WASM_H_VERSION_PATCH`, and `WASM_H_VERSION_STRING`.
+The public API follows Semantic Versioning. The current release version is available through `WASM_H_VERSION_MAJOR`, `WASM_H_VERSION_MINOR`, `WASM_H_VERSION_PATCH`, and `WASM_H_VERSION_STRING`.
 
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 

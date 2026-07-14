@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`wasm.h` is pre-1.0 software. Security fixes are applied to the latest release on the `main` branch. Older pre-1.0 releases are not maintained unless a release announcement says otherwise.
+Security fixes are applied to the latest release on the `main` branch. Older releases are not maintained unless a release announcement says otherwise.
 
 ## Reporting a vulnerability
 
@@ -12,7 +12,7 @@ An initial response should arrive within seven days. Confirmed issues will be tr
 
 ## Security model
 
-The binary decoder, validator, and portable interpreter are intended to process untrusted Wasm, subject to configured memory, stack, call-depth, and fuel limits. This intent is not a claim that the pre-1.0 runtime has completed an independent security audit.
+The binary decoder, validator, and portable interpreter are intended to process untrusted Wasm, subject to configured memory, stack, call-depth, and fuel limits. This intent is not a claim that the runtime has completed an independent security audit.
 
 Host imports define the guest's capabilities:
 

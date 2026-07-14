@@ -1,8 +1,12 @@
 # Changelog
 
-All notable changes are documented here. This project follows Semantic Versioning after 1.0; before 1.0, minor releases may contain incompatible API changes.
+All notable changes are documented here. This project follows Semantic Versioning.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-07-14
+
+Initial public release.
 
 ### Security
 
@@ -25,7 +29,3 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Release, sanitizer, platform, and compiler CI jobs.
 - A libFuzzer module-loader harness.
 - Version macros and installable CMake package metadata.
-
-## [0.1.0] - Unreleased
-
-Initial experimental public release.
