@@ -37,8 +37,6 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
 - For `wasm.h`, remember the single-header split: public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`.
 - `WL_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; standalone `wl.h` users may compile with it off.
-- `MEMORIES.md` is the canonical checked-in snapshot of repo memory. When you add, edit, or remove repo-memory content, update `MEMORIES.md` in the same change and increment its memory version.
-- Keep `/memories/repo/` in sync with `MEMORIES.md`; if a repo-memory entry no longer matches the current `MEMORIES.md` version, update it or remove it rather than leaving stale duplicates behind.
 - If a change touches validation, init expressions, memarg decoding, or spectest failures, check `wasm_test.c` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
 - The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64.
