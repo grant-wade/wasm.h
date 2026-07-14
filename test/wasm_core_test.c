@@ -30,6 +30,11 @@ int main(void) {
         failed = 1;
 
     wasm_free_module(mod);
+
+    if (wasm_load(rt, NULL, 0u) != NULL ||
+        wasm_runtime_last_error(rt) != WASM_ERR_MALFORMED)
+        failed = 1;
+
     wasm_runtime_free(rt);
     return failed;
 }

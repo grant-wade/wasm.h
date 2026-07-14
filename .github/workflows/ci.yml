@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install compiler and wasm-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.compiler }} curl
+          version=1.253.0
+          archive="wasm-tools-${version}-x86_64-linux"
+          curl --fail --location --show-error \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${version}/${archive}.tar.gz" \
+            -o /tmp/wasm-tools.tar.gz
+          tar -xzf /tmp/wasm-tools.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/${archive}/wasm-tools" /usr/local/bin/wasm-tools
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Build and test
+        run: cmake --build build --target check --parallel 2
+      - name: Verify install package
+        run: cmake --install build --prefix "$RUNNER_TEMP/wasm-h-install"
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install wasm-tools
+        run: |
+          version=1.253.0
+          archive="wasm-tools-${version}-x86_64-linux"
+          curl --fail --location --show-error \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${version}/${archive}.tar.gz" \
+            -o /tmp/wasm-tools.tar.gz
+          tar -xzf /tmp/wasm-tools.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/${archive}/wasm-tools" /usr/local/bin/wasm-tools
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DWASM_H_ENABLE_WERROR=OFF
+          -DWASM_H_ENABLE_EMCC_TESTS=OFF
+          -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+      - name: Build
+        run: cmake --build build --target wasm_test wasm_core_test wl_test spectest_runner wasm-spectest-build --parallel 2
+      - name: Test with ASan, LSan, and UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure --parallel 2
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Build and test
+        run: cmake --build build --target check --parallel 2
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S . -B build -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Build and test
+        run: cmake --build build --config Release --target check --parallel 2
+
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure libFuzzer harness
+        env:
+          CC: clang
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=OFF -DWASM_H_BUILD_FUZZER=ON
+      - name: Build and smoke-test fuzzer
+        run: |
+          cmake --build build --target wasm_load_fuzzer --parallel 2
+          ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1 \
+            ./build/wasm_load_fuzzer -runs=2000 -max_len=65536 -rss_limit_mb=2048

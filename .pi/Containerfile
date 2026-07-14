@@ -4,7 +4,7 @@ ARG WASM_TOOLS_VERSION=1.253.0
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates cmake curl \
+    && apt-get install -y --no-install-recommends ca-certificates clang cmake curl \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
         amd64) wasm_tools_arch=x86_64 ;; \

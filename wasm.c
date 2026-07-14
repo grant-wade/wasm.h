@@ -19,7 +19,7 @@ typedef struct wasm_cli_options_t {
 
 static void wasm_cli_print_usage(FILE* stream, const char* argv0) {
     fprintf(stream,
-            "usage: %s [--no-wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]\n"
+            "usage: %s [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]\n"
             "\n"
             "commands:\n"
             "  info\n"
@@ -1066,7 +1066,7 @@ int main(int argc, char** argv) {
     wasm_module_t* module = NULL;
     int exit_code = 1;
 
-    options.bind_wasi = 1;
+    options.bind_wasi = 0;
     options.bind_emscripten = 0;
     options.fuel_set = 0;
     options.fuel = 0;
@@ -1075,6 +1075,11 @@ int main(int argc, char** argv) {
         if (strcmp(argv[argi], "--help") == 0 || strcmp(argv[argi], "-h") == 0) {
             wasm_cli_print_usage(stdout, argv[0]);
             return 0;
+        }
+        if (strcmp(argv[argi], "--wasi") == 0) {
+            options.bind_wasi = 1;
+            argi++;
+            continue;
         }
         if (strcmp(argv[argi], "--no-wasi") == 0) {
             options.bind_wasi = 0;

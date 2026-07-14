@@ -22,16 +22,17 @@ cmake --build build
 cmake --build build --target check
 ```
 
-Warnings are treated as errors by default. Configure with `-DWL_ENABLE_WERROR=OFF` to disable that policy for local experimentation.
+Warnings are treated as errors by default. Configure with `-DWASM_H_ENABLE_WERROR=OFF` to disable that policy for local experimentation.
 
 Useful configuration options:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `BUILD_TESTING` | `ON` | Register CTest tests and the `check` target. |
-| `WL_ENABLE_PLATFORM` | `ON` | Enable platform-backed helpers in the test-only `test/wl.h` support library. |
-| `WL_ENABLE_WERROR` | `ON` | Treat compiler warnings as errors. |
-| `WL_ENABLE_EMCC_TESTS` | `ON` | Enable Emscripten fixtures when `emcc` is available. |
+| `WASM_H_ENABLE_PLATFORM` | `ON` | Enable platform-backed runtime compatibility helpers and `test/wl.h` helpers. |
+| `WASM_H_ENABLE_WERROR` | `ON` | Treat compiler warnings as errors. |
+| `WASM_H_ENABLE_EMCC_TESTS` | `ON` | Enable Emscripten fixtures when `emcc` is available. |
+| `WASM_H_BUILD_FUZZER` | `OFF` | Build the Clang/libFuzzer module-loader harness. |
 
 ## Focused targets
 
@@ -40,7 +41,6 @@ cmake --build build --target wasm_test
 cmake --build build --target wl_test
 cmake --build build --target wasm
 cmake --build build --target wasm2api
-cmake --build build --target sqlite_wasm_demo
 cmake --build build --target session_math_demo
 ```
 
@@ -69,6 +69,29 @@ cmake --build build --target wasm-emcc-run-strict
 ```
 
 The fixtures compile checked-in C sources under `test/fixtures/` to Wasm and execute them with the native fixture runner.
+
+## Sanitizers and fuzzing
+
+A Clang build can compile the module-loader libFuzzer harness with AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```sh
+CC=clang cmake -S . -B build-fuzz \
+  -DBUILD_TESTING=OFF -DWASM_H_BUILD_FUZZER=ON
+cmake --build build-fuzz --target wasm_load_fuzzer
+./build-fuzz/wasm_load_fuzzer -runs=10000 -max_len=65536
+```
+
+The CI sanitizer job runs the unit and specification suites with ASan, LeakSanitizer, and UBSan.
+
+## Installation
+
+Install the header and CMake package metadata with:
+
+```sh
+cmake --install build --prefix /desired/prefix
+```
+
+CMake consumers can then use `find_package(wasm_h CONFIG REQUIRED)` and link the header-only declaration target `wasm_h::wasm_h`.
 
 ## Standalone compilation
 

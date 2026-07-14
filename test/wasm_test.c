@@ -395,6 +395,7 @@ static void emit_export_kind(wasm_builder_t* b, const char* name, uint8_t kind, 
     emit_leb128_u32(b, index);
 }
 
+#if WASM_ENABLE_PLATFORM
 static void emit_import_func(wasm_builder_t* b, const char* module, const char* name, uint32_t type_index) {
     uint32_t module_len = (uint32_t)strlen(module);
     uint32_t name_len = (uint32_t)strlen(name);
@@ -406,6 +407,7 @@ static void emit_import_func(wasm_builder_t* b, const char* module, const char* 
     emit(b, 0x00);
     emit_leb128_u32(b, type_index);
 }
+#endif
 
 static void emit_import_table(wasm_builder_t* b,
                               const char* module,
@@ -426,6 +428,7 @@ static void emit_import_table(wasm_builder_t* b,
     emit_table_type(b, reftype, is_64, has_max, initial_elems, max_elems);
 }
 
+#if WASM_ENABLE_PLATFORM
 static void emit_import_memory(wasm_builder_t* b,
                                const char* module,
                                const char* name,
@@ -443,6 +446,7 @@ static void emit_import_memory(wasm_builder_t* b,
     emit(b, 0x02);
     emit_memory_type(b, is_64, has_max, initial_pages, max_pages);
 }
+#endif
 
 static void emit_malformed_uleb128_u32(wasm_builder_t* b) {
     emit(b, 0x80);
@@ -1017,6 +1021,7 @@ static int host_print_called = 0;
 static int32_t host_print_value = 0;
 static int host_fmt_add_called = 0;
 
+#if WASM_ENABLE_PLATFORM
 typedef struct wasm_test_stream_capture {
     FILE* stream;
     FILE* temp;
@@ -1088,6 +1093,7 @@ static size_t wasm_test_end_stream_capture(wasm_test_stream_capture* capture,
     memset(capture, 0, sizeof(*capture));
     return bytes_read;
 }
+#endif
 
 static wasm_error_t host_print(wasm_module_t* mod,
                                const wasm_value_t* args, uint32_t num_args,
@@ -8477,6 +8483,7 @@ WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
     wasm_destroy(&rt);
 }
 
+#if WASM_ENABLE_PLATFORM
 WL_TEST(test_public_wasi_stub_helpers) {
     static const uint8_t wasi_message[] = "hello wasi\n";
     static const uint8_t wasi_iov[] = {
@@ -9363,6 +9370,8 @@ WL_TEST(test_public_wasi_preview1_surface_imports) {
     wasm_init(&rt);
     err = wasm_bind_wasi_stubs(&rt);
     WASM_CHECK_OK(t, err);
+    WL_CHECK_MSG(t, wasm__wasi_fd_entry(&rt, 3u) == NULL,
+                 "%s", "WASI bindings must not implicitly preopen the host working directory");
 
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
@@ -9565,6 +9574,7 @@ WL_TEST(test_public_emscripten_stub_helpers) {
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
+#endif /* WASM_ENABLE_PLATFORM */
 
 WL_TEST(test_set_immutable_global_rejected) {
     wasm_builder_t mod = { 0 };
@@ -10580,7 +10590,7 @@ WL_TEST(test_simd_helper_ops) {
                         expected[lane] = (int16_t)wasm__sat_u16((int32_t)ua - (int32_t)ub);
                         break;
                     case 0x95:
-                        expected[lane] = (int16_t)(ua * ub);
+                        expected[lane] = (int16_t)((uint32_t)ua * (uint32_t)ub);
                         break;
                     case 0x96:
                         expected[lane] = (a < b) ? a : b;
@@ -12659,7 +12669,7 @@ WL_TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
     wasm_fieldtype_t struct_fields[3];
     wasm_gc_struct_t* struct_obj;
     wasm_gc_array_t* array_obj;
-    wasm_value_t value;
+    wasm_value_t value = { 0 };
 
     memset(&mod, 0, sizeof(mod));
     memset(types, 0, sizeof(types));
@@ -14466,10 +14476,12 @@ int main(void) {
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
         { "public api: fuel helpers meter finite execution", test_public_fuel_helpers_account_for_finite_calls },
         { "public api: fuel helpers stop infinite loops", test_public_fuel_helpers_trap_in_infinite_loop },
+#if WASM_ENABLE_PLATFORM
         { "public api: WASI stubs bind fd_write, environ_get, and proc_exit", test_public_wasi_stub_helpers },
         { "public api: WASI stubs expose args, env, fdstat, random, and clock helpers", test_public_wasi_metadata_helpers },
         { "public api: WASI stubs bind the full preview1 surface", test_public_wasi_preview1_surface_imports },
-        { "public api: Emscripten stubs bind sqlite-style env imports and memory", test_public_emscripten_stub_helpers },
+        { "public api: Emscripten stubs bind toolchain env imports and memory", test_public_emscripten_stub_helpers },
+#endif
         { "reject global.set on immutable global", test_set_immutable_global_rejected },
         { "public api: exported globals can be read and updated safely", test_public_global_helpers },
     };

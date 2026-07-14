@@ -1,44 +1,22 @@
-set(WL_EXAMPLES_EMCC_SEARCH_HINTS)
+set(WASM_H_EXAMPLES_EMCC_SEARCH_HINTS)
 if(DEFINED ENV{EMSDK})
-	list(APPEND WL_EXAMPLES_EMCC_SEARCH_HINTS
+	list(APPEND WASM_H_EXAMPLES_EMCC_SEARCH_HINTS
 		"$ENV{EMSDK}"
 		"$ENV{EMSDK}/upstream/emscripten"
 	)
 endif()
 if(DEFINED ENV{EMSCRIPTEN})
-	list(APPEND WL_EXAMPLES_EMCC_SEARCH_HINTS "$ENV{EMSCRIPTEN}")
+	list(APPEND WASM_H_EXAMPLES_EMCC_SEARCH_HINTS "$ENV{EMSCRIPTEN}")
 endif()
 
-find_program(WL_EXAMPLES_EMCC_EXECUTABLE
+find_program(WASM_H_EXAMPLES_EMCC_EXECUTABLE
 	NAMES emcc emcc.bat emcc.py
-	HINTS ${WL_EXAMPLES_EMCC_SEARCH_HINTS}
+	HINTS ${WASM_H_EXAMPLES_EMCC_SEARCH_HINTS}
 	DOC "Path to emcc used for wasm2api example builds."
 )
 
-set(SQLITE_WASM_MODULE "${CMAKE_CURRENT_SOURCE_DIR}/sqlite3.wasm")
-set(SQLITE_WASM_GEN_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/sqlite_wasm")
-set(SQLITE_WASM_GEN_H "${SQLITE_WASM_GEN_PREFIX}.h")
-set(SQLITE_WASM_GEN_C "${SQLITE_WASM_GEN_PREFIX}.c")
-
-add_custom_command(
-	OUTPUT "${SQLITE_WASM_GEN_H}" "${SQLITE_WASM_GEN_C}"
-	COMMAND $<TARGET_FILE:wasm2api> --singleton --no-prefix "${SQLITE_WASM_MODULE}" "${SQLITE_WASM_GEN_PREFIX}"
-	DEPENDS wasm2api "${SQLITE_WASM_MODULE}" "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt"
-	VERBATIM
-)
-add_custom_target(sqlite_wasm_generate DEPENDS "${SQLITE_WASM_GEN_H}" "${SQLITE_WASM_GEN_C}")
-
-wl_add_native_executable(sqlite_wasm_demo sqlite_wasm_demo.c "${SQLITE_WASM_GEN_C}")
-target_compile_definitions(sqlite_wasm_demo PRIVATE SQLITE_WASM_PATH="${SQLITE_WASM_MODULE}")
-add_dependencies(sqlite_wasm_demo sqlite_wasm_generate)
-
-if(BUILD_TESTING)
-	add_test(NAME sqlite_wasm_demo COMMAND sqlite_wasm_demo)
-	set_tests_properties(sqlite_wasm_demo PROPERTIES LABELS "unit")
-endif()
-
-if(WL_EXAMPLES_EMCC_EXECUTABLE)
-	message(STATUS "Using emcc example compiler: ${WL_EXAMPLES_EMCC_EXECUTABLE}")
+if(WASM_H_EXAMPLES_EMCC_EXECUTABLE)
+	message(STATUS "Using emcc example compiler: ${WASM_H_EXAMPLES_EMCC_EXECUTABLE}")
 
 	set(SESSION_MATH_WASM "${CMAKE_CURRENT_BINARY_DIR}/session_math.wasm")
 	set(SESSION_MATH_GEN_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/session_math")
@@ -48,7 +26,7 @@ if(WL_EXAMPLES_EMCC_EXECUTABLE)
 	add_custom_command(
 		OUTPUT "${SESSION_MATH_WASM}"
 		COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}"
-		COMMAND "${WL_EXAMPLES_EMCC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/session_math_wasm.c"
+		COMMAND "${WASM_H_EXAMPLES_EMCC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/session_math_wasm.c"
 				-sSTANDALONE_WASM=1
 				-Wl,--no-entry
 				-Wl,--export=add

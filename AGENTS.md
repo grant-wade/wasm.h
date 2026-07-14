@@ -27,7 +27,7 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 - Configure: `cmake -S . -B build`
 - Main validation pass: `cmake --build build --target check`
-- Focused native targets: `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`
+- Focused native targets: `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` when enabled
 - Emscripten fixtures: `wasm-emcc-build`, `wasm-emcc-run`, `wasm-emcc-run-strict`
 - Spectest targets exist only when system `wasm-tools` provides both `json-from-wast` and `parse`.
 
@@ -35,7 +35,7 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
 - For `wasm.h`, remember the single-header split: public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`.
-- `WL_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; `test/wl.h` may be compiled with it off.
+- `WASM_H_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; `test/wl.h` and the runtime platform bridges may be compiled with it off.
 - If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
 - The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64.

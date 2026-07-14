@@ -12,13 +12,13 @@ if(MSVC)
     target_compile_options(wasm_core_test PRIVATE
         /std:c11
         /W4
-        $<$<BOOL:${WL_ENABLE_WERROR}>:/WX>
+        $<$<BOOL:${WASM_H_ENABLE_WERROR}>:/WX>
     )
 else()
     target_compile_options(wasm_core_test PRIVATE
         -Wall
         -Wextra
-        $<$<BOOL:${WL_ENABLE_WERROR}>:-Werror>
+        $<$<BOOL:${WASM_H_ENABLE_WERROR}>:-Werror>
     )
 endif()
 
@@ -175,8 +175,8 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
     add_custom_target(wasm-spectest DEPENDS wasm-spectest-run)
 endif()
 
-if(NOT WL_ENABLE_EMCC_TESTS)
-    message(STATUS "emcc fixture tests disabled (WL_ENABLE_EMCC_TESTS=OFF).")
+if(NOT WASM_H_ENABLE_EMCC_TESTS OR NOT WASM_H_ENABLE_PLATFORM)
+    message(STATUS "emcc fixture tests disabled (WASM_H_ENABLE_EMCC_TESTS=OFF or WASM_H_ENABLE_PLATFORM=OFF).")
     return()
 endif()
 

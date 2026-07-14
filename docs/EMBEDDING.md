@@ -151,10 +151,11 @@ The helpers can then be bound before loading a module:
 
 ```c
 wasm_bind_wasi_stubs(rt);
+/* Bind only for trusted toolchain-produced modules. */
 wasm_bind_emscripten_stubs(rt);
 ```
 
-These are convenience bindings, not complete implementations of either environment. Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L`; the repository's CMake build supplies it automatically.
+These are convenience bindings, not complete implementations of either environment. The WASI helper does not preopen a host directory: it exposes standard I/O, but path operations have no ambient filesystem capability and return `BADF`. The Emscripten helper is more permissive and forwards some guest-requested filesystem operations to the host, so it must only be enabled for trusted modules. Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L`; the repository's CMake build supplies it automatically.
 
 ## Linear memory and globals
 

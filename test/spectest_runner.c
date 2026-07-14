@@ -1824,6 +1824,7 @@ static int spec_parse_value(const char* json,
     ok = 1;
 
 done:
+    free(type_text);
     free(lane_type);
     free(value_text);
     return ok;
@@ -3134,12 +3135,14 @@ static int spec_harness_init(spec_harness_t* harness,
 
     wasm_enable_all_features(&harness->runtime);
 
+#if WASM_ENABLE_PLATFORM
     err = wasm_bind_wasi_stubs(&harness->runtime);
     if (err != WASM_OK) {
         spec_set_error(error_text, error_size, "failed to bind WASI stubs: %s",
                        spec_runtime_error_text(&harness->runtime, err));
         return 0;
     }
+#endif
 
     err = spec_bind_print_imports(harness);
     if (err != WASM_OK) {

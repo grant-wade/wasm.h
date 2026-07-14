@@ -4,6 +4,7 @@ basic_add_demo
 wasm2api
 wasm
 build/
+build-*/
 test/build/
 test/out/
 *.dSYM/

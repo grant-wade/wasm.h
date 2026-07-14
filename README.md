@@ -2,6 +2,8 @@
 
 A single-header WebAssembly runtime for C99. No external runtime dependency.
 
+The public API is currently **experimental** and may change incompatibly before 1.0. The current release version is available through `WASM_H_VERSION_MAJOR`, `WASM_H_VERSION_MINOR`, `WASM_H_VERSION_PATCH`, and `WASM_H_VERSION_STRING`.
+
 Drop `wasm.h` into a project, define `WASM_IMPL` in one translation unit, and call exported Wasm functions from C. The runtime loads, validates, and interprets standard `.wasm` binaries, with support for most finalized post-MVP proposals.
 
 Release documentation lives in [`docs/`](docs/README.md), including the [embedding guide](docs/EMBEDDING.md) and [build and test guide](docs/BUILDING.md).
@@ -178,11 +180,15 @@ Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L` so li
 
 ### WASI stubs
 
-With platform bridges enabled, `wasm_bind_wasi_stubs(rt)` registers minimal stubs for these `wasi_snapshot_preview1` imports: `fd_write`, `fd_read`, `fd_close`, `fd_sync`, `fd_seek`, `fd_fdstat_get`, `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`, `random_get`, `clock_time_get`, and `proc_exit`.
+With platform bridges enabled, `wasm_bind_wasi_stubs(rt)` registers the WASI Preview 1 surface implemented by the runtime, including argument/environment metadata, clocks, random bytes, standard I/O, descriptor operations, path operations, and explicit `NOSYS` placeholders.
+
+The binding exposes only stdin, stdout, and stderr. It does **not** implicitly preopen the host working directory, so descriptor and path operations requiring a directory capability return `BADF`. This prevents a guest from acquiring ambient host filesystem access. The helper is still a compatibility layer rather than a complete WASI implementation.
 
 ### Emscripten stubs
 
-With platform bridges enabled, `wasm_bind_emscripten_stubs(rt)` registers the `env` imports commonly needed by Emscripten-targeted modules, including `emscripten_date_now`, `emscripten_get_now`, `emscripten_get_heap_max`, `emscripten_resize_heap`, `_tzset_js`, `_localtime_js`, `_mmap_js`, `_munmap_js`, and the `__syscall_*` shims used by the official sqlite3 Wasm build. When enabled, the runtime also lazily provides an imported `env.memory` that matches the module's declared memory limits.
+With platform bridges enabled, `wasm_bind_emscripten_stubs(rt)` registers the `env` imports commonly needed by Emscripten-targeted modules, including `emscripten_date_now`, `emscripten_get_now`, `emscripten_get_heap_max`, `emscripten_resize_heap`, `_tzset_js`, `_localtime_js`, `_mmap_js`, `_munmap_js`, and several `__syscall_*` shims. When enabled, the runtime also lazily provides an imported `env.memory` that matches the module's declared memory limits.
+
+**Security:** these Emscripten shims pass some guest-requested filesystem operations to the host and are intended only for trusted modules. They are never bound automatically.
 
 ## Build and test
 
@@ -191,11 +197,10 @@ cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the full test pass: unit tests (`wasm_test`, `wl_test`), the spectest harness, and the `emcc` fixture suite.
+`check` runs the strict native tests and, when their optional tools are available, the spectest harness and `emcc` fixture suite.
 
 - `wasm`
 - `wasm2api`
-- `sqlite_wasm_demo`
 - `wasm_test`
 - `wl_test`
 - `session_math_demo` (when `emcc` is available)
@@ -214,7 +219,7 @@ cmake --build build --target wasm-emcc-run       # Emcc fixtures only
 `wasm.c` builds a command-line tool for inspection and execution:
 
 ```
-wasm [--help] [--no-wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]
+wasm [--help] [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]
 ```
 
 | Command | Description |
@@ -237,12 +242,11 @@ wasm [--help] [--no-wasi] [--emscripten] [--fuel N] <module.wasm> <command> [arg
 ./build/wasm hello.wasm info
 ./build/wasm math.wasm call add 2 40
 ./build/wasm memory.wasm memory-read 0 0 64
-./build/wasm --no-wasi bare.wasm call _start
-./build/wasm --emscripten examples/sqlite3.wasm info
+./build/wasm --wasi command.wasm call _start
+./build/wasm --emscripten trusted-toolchain-module.wasm info
 ```
 
-WASI stubs are bound by default; `--no-wasi` disables them.
-Emscripten-compatible `env` shims are opt-in via `--emscripten` or `wasm_bind_emscripten_stubs(rt)` in the embedding API.
+WASI and Emscripten imports are unbound by default. `--wasi` enables the capability-free WASI compatibility bindings described above. Emscripten-compatible `env` shims are opt-in via `--emscripten` or `wasm_bind_emscripten_stubs(rt)` in the embedding API and must only be used with trusted modules.
 
 ## wasm2api
 
@@ -259,7 +263,6 @@ Generate wrapper files:
 ./build/wasm2api path/to/module.wasm my_module
 ./build/wasm2api --embed --init-func init_state path/to/module.wasm my_module
 ./build/wasm2api --singleton --embed path/to/module.wasm my_module
-./build/wasm2api --singleton --no-prefix examples/sqlite3.wasm sqlite_wasm
 ./build/wasm2api --all-exports path/to/module.wasm my_module
 ./build/wasm2api --exclude-prefix internal_ --exclude-export debug_dump path/to/module.wasm my_module
 ```
@@ -308,9 +311,6 @@ User rules override the built-in defaults, so you can re-include a filtered pref
 
 Checked-in example flow:
 
-- `examples/sqlite3.wasm` is a checked-in sqlite module that imports Emscripten-compatible host shims and imported memory
-- `cmake --build build --target sqlite_wasm_generate` runs `wasm2api --singleton --no-prefix` against that module and refreshes `examples/sqlite_wasm.h` plus `examples/sqlite_wasm.c`
-- `cmake --build build --target sqlite_wasm_demo` builds and runs a native demo that loads the `.wasm` from disk, opens an in-memory database, and prints query results
 - `examples/session_math_wasm.c` is a small stateful Wasm library source meant to be compiled with `emcc`
 - `cmake --build build --target session_math_wasm` builds the `.wasm` module from that checked-in C source
 - `cmake --build build --target session_math_generate` runs `wasm2api --singleton --embed --init-func init_state` against the built module and refreshes `examples/session_math.h` plus `examples/session_math.c`
@@ -359,3 +359,5 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `test/wl_test.c` | Tests for `wl.h`. |
 | `test/` | Unit tests, spectest harness, emcc fixtures, and fixture runner. |
 | `docs/` | Release-facing embedding and build documentation. |
+| `SECURITY.md` | Vulnerability reporting and host-capability security model. |
+| `test/fuzz_wasm_load.c` | ASan/UBSan libFuzzer harness for module loading. |
