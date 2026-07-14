@@ -1093,7 +1093,7 @@ static __m128i wasm__sse_select_si128(__m128i mask, __m128i if_true, __m128i if_
 }
 
 static __m128i wasm__sse_cmpgt_epu8(__m128i lhs, __m128i rhs) {
-    __m128i bias = _mm_set1_epi8((char)0x80);
+    __m128i bias = _mm_set1_epi8((char)-128);
     return _mm_cmpgt_epi8(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
 }
 
@@ -1133,7 +1133,11 @@ static __m128d wasm__sse_neg_pd(__m128d value) {
 #undef WASM__HAS_CUSTOM_MALLOC
 #undef WASM__NEEDS_CALLOC_FALLBACK
 
+#if defined(_MSC_VER)
+#define WASM__ALIGNOF(type) __alignof(type)
+#else
 #define WASM__ALIGNOF(type) offsetof(struct { char c; type value; }, value)
+#endif
 
 #if WASM_ENABLE_PLATFORM
 /* ── WASI platform hooks ─────────────────────────────────────────── */
@@ -1739,12 +1743,6 @@ static wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag) {
 
     if ((flag & WASM_FEATURE_GC) != 0) {
         mod->required_features |= WASM_FEATURE_REFERENCE_TYPES;
-        if ((WASM__IMPLEMENTED_FEATURES & WASM_FEATURE_REFERENCE_TYPES) == 0) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
-                          "feature '%s' is not implemented",
-                          wasm__feature_name(WASM_FEATURE_REFERENCE_TYPES));
-            return WASM_ERR_MALFORMED;
-        }
         if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
                           "feature '%s' is disabled",
@@ -12836,9 +12834,23 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                  &branch_count);
 
                 {
-                    uint32_t merged_count = branch_count ? branch_count : 1u;
-                    wasm_valtype_t merged_types[merged_count];
-                    wasm_reftype_t merged_reftypes[merged_count];
+                    wasm_valtype_t* merged_types = NULL;
+                    wasm_reftype_t* merged_reftypes = NULL;
+
+                    if (branch_count != 0) {
+                        merged_types = (wasm_valtype_t*)WASM_MALLOC(
+                            (size_t)branch_count * sizeof(*merged_types));
+                        merged_reftypes = (wasm_reftype_t*)WASM_MALLOC(
+                            (size_t)branch_count * sizeof(*merged_reftypes));
+                        if (!merged_types || !merged_reftypes) {
+                            WASM_FREE(merged_types);
+                            WASM_FREE(merged_reftypes);
+                            WASM__SET_ERR(v.mod->rt, WASM_ERR_OOM, "%s",
+                                          "failed to allocate br_table validator state");
+                            err = WASM_ERR_OOM;
+                            goto done;
+                        }
+                    }
 
                     for (i = 0; i < branch_count; i++) {
                         merged_types[i] = branch_types[i];
@@ -12855,8 +12867,11 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                             const wasm_reftype_t* candidate_reftypes;
                             uint32_t candidate_count;
 
-                            if (depth >= v.fp)
+                            if (depth >= v.fp) {
+                                WASM_FREE(merged_types);
+                                WASM_FREE(merged_reftypes);
                                 return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
+                            }
                             wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
                                                              &candidate_types,
                                                              &candidate_reftypes,
@@ -12871,6 +12886,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                             merged_types,
                                                             merged_reftypes)) {
                                 if (!(frame->unreachable && v.sp == frame->height && branch_count == candidate_count)) {
+                                    WASM_FREE(merged_types);
+                                    WASM_FREE(merged_reftypes);
                                     return wasm__validator_error(&v, at,
                                                                  "br_table targets do not share the same signature");
                                 }
@@ -12878,12 +12895,12 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                         }
                     }
 
-                    branch_types = merged_types;
-                    branch_reftypes = merged_reftypes;
                     err = wasm__validator_check_types_typed(&v, at,
-                                                            branch_types,
-                                                            branch_reftypes,
+                                                            merged_types,
+                                                            merged_reftypes,
                                                             branch_count);
+                    WASM_FREE(merged_types);
+                    WASM_FREE(merged_reftypes);
                     if (err != WASM_OK) return err;
                 }
                 wasm__validator_mark_unreachable(&v);
@@ -15502,7 +15519,6 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
 
                 if (clause.opcode == 0x07 && clause.immediate < mod->num_tags &&
                     mod->tags[clause.immediate].identity == rt->pending_exception.tag_identity) {
-                    wasm_error_t err;
                     uint32_t i;
 
                     while (*label_sp > idx) {
@@ -15522,8 +15538,6 @@ static wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                 }
 
                 if (clause.opcode == 0x19) {
-                    wasm_error_t err;
-
                     while (*label_sp > idx) {
                         wasm__clear_label(&labels[*label_sp - 1]);
                         rt->sp = labels[*label_sp - 1].sp_base;
@@ -17314,7 +17328,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                         uint64_t delta;
                         uint64_t new_size;
                         wasm_value_t* new_elems;
-                        uint32_t j;
+                        uint64_t j;
                         size_t alloc_count;
 
                         if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);

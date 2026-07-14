@@ -3266,7 +3266,7 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
     wasm_module_t* m;
     wasm_value_t result;
     wasm_error_t err;
-    int32_t old_pages;
+    int64_t old_pages;
     uint8_t* memory0;
     uint8_t* memory1;
 
@@ -3432,7 +3432,7 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
     WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 1), (int32_t)(2 * WASM_PAGE_SIZE));
 
     old_pages = wasm_memory_grow_at(m, 0, 1);
-    WASM_CHECK_I32(t, old_pages, 1);
+    WASM_CHECK_I64(t, old_pages, 1);
     WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), (int32_t)(2 * WASM_PAGE_SIZE));
 
     wasm_free_module(m);
@@ -10979,7 +10979,7 @@ WL_TEST(test_memory_grow_respects_zero_max) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
-    int32_t old_pages;
+    int64_t old_pages;
 
     emit_header(&mod);
 
@@ -11001,11 +11001,11 @@ WL_TEST(test_memory_grow_respects_zero_max) {
     }
 
     old_pages = wasm_memory_grow_at(m, 0, 0);
-    WASM_CHECK_I32(t, old_pages, 0);
+    WASM_CHECK_I64(t, old_pages, 0);
     WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
 
     old_pages = wasm_memory_grow_at(m, 0, 1);
-    WASM_CHECK_I32(t, old_pages, -1);
+    WASM_CHECK_I64(t, old_pages, -1);
     WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
 
     wasm_free_module(m);
