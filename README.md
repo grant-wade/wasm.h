@@ -8,16 +8,27 @@ Release documentation lives in [`docs/`](docs/README.md), including the [embeddi
 
 ## Quick start
 
-```c
-#define WASM_IMPL
-#include "wasm.h"
-```
+Save this as `quickstart.c` next to `wasm.h`:
 
 ```c
 #include <stdio.h>
 
 #define WASM_IMPL
 #include "wasm.h"
+
+/* (module
+ *   (func (export "main") (param i32) (result i32)
+ *     local.get 0
+ *     i32.const 1
+ *     i32.add))
+ */
+static const uint8_t wasm_bytes[] = {
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+	0x03, 0x02, 0x01, 0x00,
+	0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00,
+	0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x0b
+};
 
 int main(void) {
 	wasm_runtime_t* rt;
@@ -32,7 +43,7 @@ int main(void) {
 		return 1;
 	}
 
-	mod = wasm_load(rt, wasm_bytes, wasm_len);
+	mod = wasm_load(rt, wasm_bytes, sizeof(wasm_bytes));
 	if (!mod) {
 		fprintf(stderr, "load: %s\n", wasm_runtime_error_message(rt));
 		wasm_runtime_free(rt);
@@ -52,6 +63,14 @@ int main(void) {
 	wasm_runtime_free(rt);
 	return 0;
 }
+```
+
+Compile and run it:
+
+```sh
+cc -std=c99 -D_POSIX_C_SOURCE=200809L -O2 quickstart.c -lm -o quickstart
+./quickstart
+# result: 43
 ```
 
 `wasm_call_fmt` uses `args(results)` syntax: `"i(i)"` means one `i32` argument and one `i32` result.
