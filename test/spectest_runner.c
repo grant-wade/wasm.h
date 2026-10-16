@@ -18,6 +18,7 @@
 
 #if defined(_WIN32)
 #include <io.h>
+#include <windows.h>
 #define SPEC_UNLINK _unlink
 #else
 #include <sys/wait.h>
@@ -2192,18 +2193,31 @@ static int spec_compare_expected(const char* json,
 }
 
 static int spec_run_command_capture(const char* command, char** out_text, int* out_exit_code) {
+#if defined(_WIN32)
+    char temp_dir[MAX_PATH];
+    char temp_path[MAX_PATH];
+    DWORD temp_dir_len;
+#else
     char temp_path[] = "/tmp/wl-spectest-XXXXXX";
+    int fd;
+#endif
     char* text = NULL;
     char* wrapped;
-    int fd;
     int status;
 
     if (out_text) *out_text = NULL;
     if (out_exit_code) *out_exit_code = -1;
 
+#if defined(_WIN32)
+    temp_dir_len = GetTempPathA((DWORD)sizeof(temp_dir), temp_dir);
+    if (temp_dir_len == 0 || temp_dir_len >= (DWORD)sizeof(temp_dir)) return 0;
+    /* With a zero unique value, this creates and closes the file atomically. */
+    if (GetTempFileNameA(temp_dir, "wsp", 0, temp_path) == 0) return 0;
+#else
     fd = mkstemp(temp_path);
     if (fd < 0) return 0;
     close(fd);
+#endif
 
     wrapped = (char*)malloc(strlen(command) + strlen(temp_path) + 16u);
     if (!wrapped) {
@@ -2235,6 +2249,20 @@ static int spec_run_command_capture(const char* command, char** out_text, int* o
     }
 
     return 1;
+}
+
+static int spec_test_command_capture(void) {
+    char* text = NULL;
+    int exit_code = -1;
+    int ok = spec_run_command_capture(
+        "(echo spec-capture-out && echo spec-capture-err 1>&2 && exit 7)",
+        &text, &exit_code);
+
+    ok = ok && text && strstr(text, "spec-capture-out") &&
+         strstr(text, "spec-capture-err") && exit_code == 7;
+    free(text);
+    if (!ok) fprintf(stderr, "command capture failed (exit code %d)\n", exit_code);
+    return ok ? 0 : 1;
 }
 
 static int spec_compile_wat(spec_harness_t* harness,
@@ -3247,6 +3275,9 @@ int main(int argc, char** argv) {
     spec_harness_t harness;
     char error_text[512];
     int exit_code = 1;
+
+    if (argc == 2 && strcmp(argv[1], "--test-command-capture") == 0)
+        return spec_test_command_capture();
 
     if (argc != 4 && argc != 5) {
         spec_print_usage(argv[0]);

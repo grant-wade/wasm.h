@@ -177,7 +177,7 @@ add_subdirectory(examples)
 if(BUILD_TESTING)
     add_subdirectory(test)
 
-    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_modular_test wasm_core_test wasm_modular_core_test spectest_modular_runner)
+    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_modular_test wasm_core_test wasm_modular_core_test spectest_runner spectest_modular_runner)
     if(TARGET session_math_demo)
         list(APPEND WL_CHECK_TARGET_DEPS session_math_demo)
     endif()

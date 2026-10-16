@@ -29,6 +29,12 @@ wl_add_native_executable(spectest_modular_runner spectest_runner.c)
 target_compile_definitions(spectest_modular_runner PRIVATE WASM_TEST_MODULAR=1)
 target_link_libraries(spectest_modular_runner PRIVATE wasm_runtime)
 
+# Exercise command capture without requiring wasm-tools or the spec submodule.
+add_test(NAME spectest_capture COMMAND spectest_runner --test-command-capture)
+add_test(NAME spectest_modular_capture COMMAND spectest_modular_runner --test-command-capture)
+set_tests_properties(spectest_capture PROPERTIES LABELS "unit")
+set_tests_properties(spectest_modular_capture PROPERTIES LABELS "unit;modular")
+
 # Keep this target free of the platform feature definitions carried by
 # wl_project_options so strict C99 compilation exercises the core alone.
 add_executable(wasm_core_test wasm_core_test.c)
