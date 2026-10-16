@@ -1,21 +1,17 @@
 # Embedding wasm.h
 
-`wasm.h` is a C99 single-header runtime. Include it normally wherever declarations are needed and define `WASM_IMPL` in exactly one translation unit.
+Define `WASM_IMPL` in exactly one translation unit:
 
 ```c
-/* wasm_runtime.c */
 #define WASM_IMPL
 #include "wasm.h"
 ```
 
-```c
-/* application.c */
-#include "wasm.h"
-```
+Elsewhere, include `wasm.h` without `WASM_IMPL`. For modular linking, see the [build guide](BUILDING.md#modular-library).
 
 ## Runtime and module lifetime
 
-The allocation-based lifecycle is the recommended interface because `wasm_runtime_t` is opaque to declaration-only users.
+`wasm_runtime_t` is opaque to declaration-only users; allocate it with `wasm_runtime_new`.
 
 ```c
 wasm_runtime_t* rt = wasm_runtime_new(NULL);
@@ -35,7 +31,8 @@ if (!mod) {
     return 1;
 }
 
-/* Use mod here. */
+if (wasm_call(mod, "run", NULL, 0, NULL, 0) != WASM_OK)
+    fprintf(stderr, "run: %s\n", wasm_runtime_error_message(rt));
 
 wasm_free_module(mod);
 wasm_runtime_free(rt);
@@ -43,7 +40,7 @@ wasm_runtime_free(rt);
 
 `wasm_load` copies the input binary, so the caller may release its input buffer after the call returns. Free every module before freeing its runtime.
 
-For custom storage, `wasm_init` and `wasm_destroy` provide the non-allocating lifecycle when the implementation's concrete runtime definition is available. Most embedders should use `wasm_runtime_new` and `wasm_runtime_free` instead.
+`wasm_init` and `wasm_destroy` support custom storage when the concrete runtime definition is available.
 
 ## Configuration
 
@@ -66,13 +63,11 @@ rt = wasm_runtime_new(&config);
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
 
-All implemented proposal features are enabled by default. Use `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features` before loading a module when the embedder needs a narrower accepted feature set.
+All implemented proposals are enabled by default. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
 
 ## Calling exports
 
 ### Value-array API
-
-Construct `wasm_value_t` values with the provided helpers and inspect the matching union member in each result.
 
 ```c
 wasm_value_t args[2];
@@ -89,7 +84,7 @@ if (err != WASM_OK) {
 printf("%d\n", results[0].of.i32);
 ```
 
-Use `wasm_call_index` after resolving and caching a function index when repeated calls should avoid export-name lookup.
+Use `wasm_call_index` with a cached function index to avoid repeated name lookups.
 
 ### Format-string API
 
@@ -137,9 +132,9 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
                                        host_log, NULL);
 ```
 
-Lower-level registration functions are available for functions, globals, tables, memories, and tags when format strings are insufficient. `wasm_module_set_userdata` associates instance-specific host state with a loaded module; callbacks can retrieve it with `wasm_module_get_userdata`.
+Lower-level registration supports functions, globals, tables, memories, and tags. Use `wasm_module_set_userdata` and `wasm_module_get_userdata` for per-module host state.
 
-Optional compatibility helpers are available for common imports. Their OS-specific code is excluded from the portable core by default; enable it in the implementation translation unit when needed:
+Enable platform compatibility helpers in the implementation translation unit:
 
 ```c
 #define WASM_ENABLE_PLATFORM 1
@@ -147,15 +142,16 @@ Optional compatibility helpers are available for common imports. Their OS-specif
 #include "wasm.h"
 ```
 
-The helpers can then be bound before loading a module:
+Bind helpers before loading:
 
 ```c
 wasm_bind_wasi_stubs(rt);
-/* Bind only for trusted toolchain-produced modules. */
 wasm_bind_emscripten_stubs(rt);
 ```
 
-These are convenience bindings, not complete implementations of either environment. The WASI helper does not preopen a host directory: it exposes standard I/O, but path operations have no ambient filesystem capability and return `BADF`. The Emscripten helper is more permissive and forwards some guest-requested filesystem operations to the host, so it must only be enabled for trusted modules. Strict C99 builds on POSIX systems may also need `_POSIX_C_SOURCE=200809L`; the repository's CMake build supplies it automatically.
+These bindings are partial. WASI exposes standard I/O but preopens no directories; path operations requiring directory capabilities return `BADF`. Emscripten forwards some filesystem operations to the host: bind it only for trusted modules.
+
+Strict C99 POSIX builds may need `_POSIX_C_SOURCE=200809L`; CMake supplies it automatically.
 
 ## Linear memory and globals
 
@@ -173,7 +169,7 @@ Exported globals can be accessed by name with `wasm_global_get` and `wasm_global
 
 ## Introspection
 
-The public API exposes imports, exports, function signatures, custom sections, memories, tables, globals, tags, and GC composite types. A typical export walk is:
+Inspect imports, exports, signatures, custom sections, memories, tables, globals, tags, and GC types through the public accessors. For example:
 
 ```c
 uint32_t i;
@@ -189,7 +185,7 @@ Names may contain arbitrary bytes. Use `wasm_export_name_bytes` and `wasm_find_e
 
 ## Errors, traps, and limits
 
-Most operations return `wasm_error_t`; module loading returns `NULL` on failure. Read `wasm_runtime_error_message` immediately for the runtime's detailed diagnostic. `wasm_error_string` provides the generic name for an error code.
+Most operations return `wasm_error_t`; loading returns `NULL` on failure. Read `wasm_runtime_error_message` immediately for details, or `wasm_error_string` for the generic error name.
 
 Fuel metering is disabled until a budget is set:
 
@@ -197,7 +193,7 @@ Fuel metering is disabled until a budget is set:
 wasm_set_fuel(rt, 1000000);
 err = wasm_call(mod, "run", NULL, 0, NULL, 0);
 if (err == WASM_ERR_OUT_OF_FUEL) {
-    /* The guest exhausted its instruction budget. */
+    fprintf(stderr, "instruction budget exhausted\n");
 }
 ```
 
@@ -223,5 +219,3 @@ Define allocator overrides before the implementation include:
 #define WASM_IMPL
 #include "wasm.h"
 ```
-
-The declarations-only include does not need these definitions.
