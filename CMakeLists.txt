@@ -148,6 +148,11 @@ add_library(wasm_runtime STATIC ${WASM_RUNTIME_SOURCES})
 add_library(wasm_h::runtime ALIAS wasm_runtime)
 target_include_directories(wasm_runtime PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(wasm_runtime PRIVATE wl_project_options PUBLIC wl_math)
+if(MSVC)
+    # Match the single-header implementation's scoped warning policy: SIMD
+    # fast paths and platform branches retain unreachable portable fallbacks.
+    target_compile_options(wasm_runtime PRIVATE /wd4702)
+endif()
 
 get_property(WL_GENERATOR_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 set(WL_BUILD_CONFIG_ARGS)

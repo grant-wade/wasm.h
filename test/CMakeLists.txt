@@ -8,6 +8,8 @@ add_library(wasm_test_runtime STATIC ${WASM_TEST_RUNTIME_SOURCES})
 target_include_directories(wasm_test_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(wasm_test_runtime PRIVATE wl_project_options wl_math)
 if(MSVC)
+    # Match wasm_runtime and the single-header implementation's warning policy.
+    target_compile_options(wasm_test_runtime PRIVATE /wd4702)
     target_compile_options(wasm_test_runtime PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/wasm_test_alloc.h")
 else()
     target_compile_options(wasm_test_runtime PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/wasm_test_alloc.h")
