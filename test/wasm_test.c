@@ -25,6 +25,13 @@
 
 #include "wl.h"
 
+#ifdef WASM_TEST_MODULAR
+#include "wasm_test_alloc.h"
+#define WASM_TEST_ALLOC_LINKAGE
+#else
+#define WASM_TEST_ALLOC_LINKAGE static
+#endif
+
 typedef struct wasm_test_alloc_header {
     size_t size;
 } wasm_test_alloc_header;
@@ -63,18 +70,18 @@ static void* wasm_test_alloc_block(size_t size, int zero_fill) {
     return (void*)(header + 1);
 }
 
-static void* wasm_test_malloc(size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_malloc(size_t size) {
     g_wasm_test_alloc_stats.malloc_calls++;
     return wasm_test_alloc_block(size, 0);
 }
 
-static void* wasm_test_calloc(size_t count, size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_calloc(size_t count, size_t size) {
     g_wasm_test_alloc_stats.calloc_calls++;
     if (size != 0 && count > ((size_t)-1) / size) return NULL;
     return wasm_test_alloc_block(count * size, 1);
 }
 
-static void* wasm_test_realloc(void* ptr, size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
     wasm_test_alloc_header* header;
     wasm_test_alloc_header* resized;
     size_t payload_size = size ? size : 1u;
@@ -96,7 +103,7 @@ static void* wasm_test_realloc(void* ptr, size_t size) {
     return (void*)(resized + 1);
 }
 
-static void wasm_test_free(void* ptr) {
+WASM_TEST_ALLOC_LINKAGE void wasm_test_free(void* ptr) {
     g_wasm_test_alloc_stats.free_calls++;
     if (!ptr) return;
 
@@ -108,6 +115,7 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
     return g_wasm_test_alloc_stats;
 }
 
+#ifndef WASM_TEST_MODULAR
 #define WASM_MALLOC(sz) wasm_test_malloc(sz)
 #define WASM_REALLOC(p, sz) wasm_test_realloc((p), (sz))
 #define WASM_FREE(p) wasm_test_free(p)
@@ -115,6 +123,9 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
 
 #define WASM_IMPL
 #include "wasm.h"
+#else
+#include "../src/internal.h"
+#endif
 
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
     return wasm_init(rt, config);

@@ -1,11 +1,37 @@
 wl_add_native_executable(wl_test wl_test.c)
 wl_add_native_executable(wasm_test wasm_test.c)
+
+# Use the same allocator instrumentation in every independent runtime unit.
+set(WASM_TEST_RUNTIME_SOURCES ${WASM_RUNTIME_SOURCES})
+list(TRANSFORM WASM_TEST_RUNTIME_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
+add_library(wasm_test_runtime STATIC ${WASM_TEST_RUNTIME_SOURCES})
+target_include_directories(wasm_test_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(wasm_test_runtime PRIVATE wl_project_options wl_math)
+if(MSVC)
+    target_compile_options(wasm_test_runtime PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/wasm_test_alloc.h")
+else()
+    target_compile_options(wasm_test_runtime PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/wasm_test_alloc.h")
+endif()
+wl_add_native_executable(wasm_modular_test wasm_test.c)
+target_compile_definitions(wasm_modular_test PRIVATE WASM_TEST_MODULAR=1)
+target_link_libraries(wasm_modular_test PRIVATE wasm_test_runtime)
 wl_add_native_executable(wasm_runner fixture_runner.c)
 wl_add_native_executable(spectest_runner spectest_runner.c)
+
+add_executable(wasm_modular_core_test wasm_core_test.c)
+add_dependencies(wasm_modular_core_test wasm-header)
+target_compile_definitions(wasm_modular_core_test PRIVATE WASM_TEST_MODULAR=1)
+target_link_libraries(wasm_modular_core_test PRIVATE wasm_runtime)
+
+wl_add_native_executable(spectest_modular_runner spectest_runner.c)
+target_compile_definitions(spectest_modular_runner PRIVATE WASM_TEST_MODULAR=1)
+target_link_libraries(spectest_modular_runner PRIVATE wasm_runtime)
 
 # Keep this target free of the platform feature definitions carried by
 # wl_project_options so strict C99 compilation exercises the core alone.
 add_executable(wasm_core_test wasm_core_test.c)
+add_dependencies(wasm_core_test wasm-header)
+set_property(SOURCE wasm_core_test.c APPEND PROPERTY OBJECT_DEPENDS "${WASM_HEADER_STAMP}")
 target_include_directories(wasm_core_test PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(wasm_core_test PRIVATE wl_math)
 if(MSVC)
@@ -28,8 +54,28 @@ set_tests_properties(wl_test PROPERTIES LABELS "unit")
 add_test(NAME wasm_test COMMAND wasm_test)
 set_tests_properties(wasm_test PROPERTIES LABELS "unit")
 
+add_test(NAME wasm_modular_test COMMAND wasm_modular_test)
+set_tests_properties(wasm_modular_test PROPERTIES LABELS "unit;modular")
+
 add_test(NAME wasm_core_test COMMAND wasm_core_test)
 set_tests_properties(wasm_core_test PROPERTIES LABELS "unit")
+
+add_test(NAME wasm_modular_core_test COMMAND wasm_modular_core_test)
+set_tests_properties(wasm_modular_core_test PROPERTIES LABELS "unit;modular")
+
+add_test(NAME wasm_amalgamate_test COMMAND ${CMAKE_COMMAND}
+    -DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+    -DGENERATOR=${PROJECT_SOURCE_DIR}/cmake/Amalgamate.cmake
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate_test.cmake)
+set_tests_properties(wasm_amalgamate_test PROPERTIES LABELS "unit")
+if(UNIX)
+    find_program(WASM_H_GIT_EXECUTABLE git)
+    if(WASM_H_GIT_EXECUTABLE)
+        add_test(NAME wasm_amalgamate_hook_test COMMAND sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate_hook_test.sh ${PROJECT_SOURCE_DIR})
+        set_tests_properties(wasm_amalgamate_hook_test PROPERTIES LABELS "unit")
+    endif()
+endif()
 
 find_program(WL_WASM_TOOLS_EXECUTABLE
     NAMES wasm-tools
@@ -93,7 +139,7 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
 
     file(GLOB WL_SPECTEST_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/spec/*.wast")
 
-    set(WL_SPECTEST_BUILD_TARGETS spectest_runner spectest-support-build)
+    set(WL_SPECTEST_BUILD_TARGETS spectest_runner spectest_modular_runner spectest-support-build)
     foreach(WL_SPECTEST_FILE IN LISTS WL_SPECTEST_FILES)
         get_filename_component(WL_SPECTEST_NAME "${WL_SPECTEST_FILE}" NAME_WE)
         string(MAKE_C_IDENTIFIER "${WL_SPECTEST_NAME}" WL_SPECTEST_ID)
@@ -123,6 +169,7 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
         add_custom_target("${WL_SPECTEST_TARGET}"
             DEPENDS
                 spectest_runner
+                spectest_modular_runner
                 spectest-support-build
                 "${WL_SPECTEST_JSON}"
         )
@@ -138,6 +185,20 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
         )
         set_tests_properties("spectest.${WL_SPECTEST_NAME}" PROPERTIES
             LABELS "spectest"
+            FIXTURES_REQUIRED "${WL_SPECTEST_FIXTURE}"
+            SKIP_RETURN_CODE 125
+        )
+
+        add_test(
+            NAME "spectest.modular.${WL_SPECTEST_NAME}"
+            COMMAND $<TARGET_FILE:spectest_modular_runner>
+                    "${WL_SPECTEST_JSON}"
+                    "${WL_WASM_TOOLS_EXECUTABLE}"
+                    "${WL_SPECTEST_SUPPORT_WASM}"
+                    "${WL_SPECTEST_STATUS}"
+        )
+        set_tests_properties("spectest.modular.${WL_SPECTEST_NAME}" PROPERTIES
+            LABELS "spectest;modular"
             FIXTURES_REQUIRED "${WL_SPECTEST_FIXTURE}"
             SKIP_RETURN_CODE 125
         )

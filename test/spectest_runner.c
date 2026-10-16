@@ -1,4 +1,6 @@
+#ifndef WASM_TEST_MODULAR
 #define WASM_IMPL
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -8,7 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef WASM_TEST_MODULAR
+#include "../src/internal.h"
+#else
 #include "../wasm.h"
+#endif
 
 #if defined(_WIN32)
 #include <io.h>

@@ -192,12 +192,35 @@ With platform bridges enabled, `wasm_bind_emscripten_stubs(rt)` registers the `e
 
 ## Build and test
 
+Runtime development happens in `src/`: each `.c` file is an independently
+compiled C99 translation unit. The root `wasm.h` is the checked-in, generated
+single-header distribution. Edit the sources and regenerate it with:
+
+```sh
+cmake -P cmake/Amalgamate.cmake
+```
+
+Normal builds also regenerate the header before compiling its consumers:
+
 ```sh
 cmake -S . -B build
 cmake --build build --target check
 ```
 
-`check` runs the strict native tests and, when their optional tools are available, the spectest harness and `emcc` fixture suite.
+`check` runs the strict native tests against both the generated header and the
+modular library and, when their optional tools are available, the spectest harness
+and `emcc` fixture suite. Build `wasm_runtime` to compile the modular static
+library, or link `wasm_h::runtime` from a CMake project using this repository as a
+subdirectory. Modular consumers include `wasm.h` without defining `WASM_IMPL`.
+
+To reject commits with an outdated generated header, enable the optional hook:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook checks the staged source and header together, including partial commits.
+See the [build guide](docs/BUILDING.md) for generation and modular-build details.
 
 - `wasm`
 - `wasm2api`
@@ -350,7 +373,11 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 
 | Path | Description |
 | --- | --- |
-| `wasm.h` | Single-header runtime, validator, interpreter, and public API. |
+| `wasm.h` | Generated, standalone single-header distribution. |
+| `src/wasm.h` | Public declarations for the modular runtime. |
+| `src/` | Runtime source, including validation, interpretation, SIMD, and platform bridges. |
+| `src/amalgamation.h` | Assembly order for the generated header. |
+| `cmake/Amalgamate.cmake` | Deterministic header generator and freshness check. |
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |
 | `examples/` | Demo code. |
