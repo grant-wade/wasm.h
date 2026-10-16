@@ -109,7 +109,11 @@ typedef ptrdiff_t isize;
 #define WL_CONCAT(a, b) WL_CONCAT_IMPL(a, b)
 
 /* C99-compatible alignment helpers used to avoid newer language requirements. */
+#if defined(_MSC_VER)
+#define WL_ALIGNOF(T) __alignof(T)
+#else
 #define WL_ALIGNOF(T) offsetof(struct { char c; T value; }, value)
+#endif
 
 typedef union wl__max_align {
     void* ptr;

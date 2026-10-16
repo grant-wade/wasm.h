@@ -13,6 +13,16 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_valu
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
+    /* abs and neg manipulate the representation, including signaling NaNs. */
+    if (subop == 0xE0 || subop == 0xE1) {
+        for (lane = 0; lane < 4; lane++) {
+            uint32_t bits = wasm__v128_get_u32(value, lane);
+            bits = subop == 0xE0 ? bits & 0x7FFFFFFFu : bits ^ 0x80000000u;
+            wasm__v128_set_u32(&result, lane, bits);
+        }
+        return result;
+    }
+
     for (lane = 0; lane < 4; lane++) {
         float current = wasm__v128_get_f32(value, lane);
         float out = current;
@@ -122,7 +132,12 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
                 break;
         }
 
-        wasm__v128_set_f32(&result, lane, out);
+        if (subop == 0xEA || subop == 0xEB) {
+            const wasm_value_t* selected = (subop == 0xEA ? b < a : a < b) ? rhs : lhs;
+            wasm__v128_set_u32(&result, lane, wasm__v128_get_u32(selected, lane));
+        } else {
+            wasm__v128_set_f32(&result, lane, out);
+        }
     }
 
     return result;
@@ -140,6 +155,16 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_valu
 #endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
+
+    /* abs and neg manipulate the representation, including signaling NaNs. */
+    if (subop == 0xEC || subop == 0xED) {
+        for (lane = 0; lane < 2; lane++) {
+            uint64_t bits = wasm__v128_get_u64(value, lane);
+            bits = subop == 0xEC ? bits & UINT64_C(0x7FFFFFFFFFFFFFFF) : bits ^ UINT64_C(0x8000000000000000);
+            wasm__v128_set_u64(&result, lane, bits);
+        }
+        return result;
+    }
 
     for (lane = 0; lane < 2; lane++) {
         double current = wasm__v128_get_f64(value, lane);
@@ -250,7 +275,12 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
                 break;
         }
 
-        wasm__v128_set_f64(&result, lane, out);
+        if (subop == 0xF6 || subop == 0xF7) {
+            const wasm_value_t* selected = (subop == 0xF6 ? b < a : a < b) ? rhs : lhs;
+            wasm__v128_set_u64(&result, lane, wasm__v128_get_u64(selected, lane));
+        } else {
+            wasm__v128_set_f64(&result, lane, out);
+        }
     }
 
     return result;

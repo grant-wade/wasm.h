@@ -9766,6 +9766,56 @@ WL_TEST(test_public_global_helpers) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_float_signaling_nan_bits) {
+    static const uint8_t code[][16] = {
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0x8B, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0x7F, 0x8C, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xFD, 0x13, 0xFD, 0x1F, 0, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xFD, 0x13, 0xFD, 0xE0, 1, 0xFD, 0x1F, 0, 0xBC }
+    };
+    static const uint32_t lengths[] = { 6, 7, 7, 11, 14 };
+    static const uint32_t expected[] = { 0xFFA03210u, 0x7FA03210u, 0xFFA03210u, 0xFFA03210u, 0x7FA03210u };
+    uint32_t i;
+    for (i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        wasm_builder_t mod = { 0 }, sec = { 0 }, body = { 0 };
+        wasm_runtime_t rt;
+        wasm_module_t* m;
+        wasm_value_t result;
+        wasm_error_t err;
+        static const uint8_t type[] = { 1, 0x60, 0, 1, 0x7F };
+        static const uint8_t funcs[] = { 1, 0 };
+        emit_header(&mod);
+        emit_section(&mod, 1, type, sizeof(type));
+        emit_section(&mod, 3, funcs, sizeof(funcs));
+        emit(&sec, 1);
+        emit_export_func(&sec, "bits", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+        sec.len = 0;
+        emit(&body, 0);
+        emit_bytes(&body, code[i], lengths[i]);
+        emit(&body, 0x0B);
+        emit(&sec, 1);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+        wasm_init(&rt);
+        wasm_enable_all_features(&rt);
+        m = wasm_load(&rt, mod.buf, mod.len);
+        WL_CHECK_MSG(t, m != NULL, "case %u: %s", i, rt.error_msg);
+        if (m) {
+            err = wasm_call(m, "bits", NULL, 0, &result, 1);
+            WASM_CHECK_OK(t, err);
+            if (err == WASM_OK) {
+                WL_CHECK_MSG(t, (uint32_t)result.of.i32 == expected[i],
+                             "case %u: signaling NaN bits changed", i);
+            }
+            wasm_free_module(m);
+        }
+        wasm_destroy(&rt);
+    }
+}
+
 WL_TEST(test_float_min_max_semantics) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -14412,6 +14462,7 @@ int main(void) {
         { "multivalue if: type-index block returns two values", test_multivalue_if_block },
         { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
+        { "float copies/sign: signaling NaN payloads", test_float_signaling_nan_bits },
         { "float min/max: NaN propagation and signed zero semantics", test_float_min_max_semantics },
         { "float trunc: trapping conversions reject NaN and overflow", test_trapping_float_to_int_conversions },
         { "float trunc: fractional lower-edge values still convert", test_trunc_allows_fractional_lower_edges },

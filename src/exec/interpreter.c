@@ -936,20 +936,16 @@ WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     }
                     case 0x2A: {
                         uint32_t b;
-                        float v;
                         if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le32(memory->data + addr);
-                        memcpy(&v, &b, 4);
-                        WASM__PUSH(rt, wasm_f32(v));
+                        WASM__PUSH(rt, wasm__f32_bits(b));
                         break;
                     }
                     case 0x2B: {
                         uint64_t b;
-                        double v;
                         if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le64(memory->data + addr);
-                        memcpy(&v, &b, 8);
-                        WASM__PUSH(rt, wasm_f64(v));
+                        WASM__PUSH(rt, wasm__f64_bits(b));
                         break;
                     }
                     case 0x2C:
@@ -1223,10 +1219,10 @@ WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 WASM__PUSH(rt, wasm_i64(wasm__read_leb128_i64(&cf->r)));
                 break;
             case 0x43:
-                WASM__PUSH(rt, wasm_f32(wasm__read_f32(&cf->r)));
+                WASM__PUSH(rt, wasm__read_f32(&cf->r));
                 break;
             case 0x44:
-                WASM__PUSH(rt, wasm_f64(wasm__read_f64(&cf->r)));
+                WASM__PUSH(rt, wasm__read_f64(&cf->r));
                 break;
 
             default:

@@ -189,10 +189,18 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     for (lane = 0; lane < 2; lane++) wasm__v128_set_i64(&vector, lane, scalar.of.i64);
                     break;
                 case 0x13:
-                    for (lane = 0; lane < 4; lane++) wasm__v128_set_f32(&vector, lane, scalar.of.f32);
+                    {
+                        uint32_t bits;
+                        memcpy(&bits, &scalar.of.f32, sizeof(bits));
+                        for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&vector, lane, bits);
+                    }
                     break;
                 default:
-                    for (lane = 0; lane < 2; lane++) wasm__v128_set_f64(&vector, lane, scalar.of.f64);
+                    {
+                        uint64_t bits;
+                        memcpy(&bits, &scalar.of.f64, sizeof(bits));
+                        for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&vector, lane, bits);
+                    }
                     break;
             }
 
@@ -231,10 +239,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     WASM__PUSH(rt, wasm_i64(wasm__v128_get_i64(&vector, lane)));
                     break;
                 case 0x1F:
-                    WASM__PUSH(rt, wasm_f32(wasm__v128_get_f32(&vector, lane)));
+                    WASM__PUSH(rt, wasm__f32_bits(wasm__v128_get_u32(&vector, lane)));
                     break;
                 default:
-                    WASM__PUSH(rt, wasm_f64(wasm__v128_get_f64(&vector, lane)));
+                    WASM__PUSH(rt, wasm__f64_bits(wasm__v128_get_u64(&vector, lane)));
                     break;
             }
             break;
@@ -264,10 +272,18 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     wasm__v128_set_i64(&vector, lane, scalar.of.i64);
                     break;
                 case 0x20:
-                    wasm__v128_set_f32(&vector, lane, scalar.of.f32);
+                    {
+                        uint32_t bits;
+                        memcpy(&bits, &scalar.of.f32, sizeof(bits));
+                        wasm__v128_set_u32(&vector, lane, bits);
+                    }
                     break;
                 default:
-                    wasm__v128_set_f64(&vector, lane, scalar.of.f64);
+                    {
+                        uint64_t bits;
+                        memcpy(&bits, &scalar.of.f64, sizeof(bits));
+                        wasm__v128_set_u64(&vector, lane, bits);
+                    }
                     break;
             }
 

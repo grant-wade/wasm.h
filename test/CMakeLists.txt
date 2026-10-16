@@ -30,8 +30,20 @@ target_compile_definitions(spectest_modular_runner PRIVATE WASM_TEST_MODULAR=1)
 target_link_libraries(spectest_modular_runner PRIVATE wasm_runtime)
 
 # Exercise command capture without requiring wasm-tools or the spec submodule.
-add_test(NAME spectest_capture COMMAND spectest_runner --test-command-capture)
-add_test(NAME spectest_modular_capture COMMAND spectest_modular_runner --test-command-capture)
+# Copy each executable into a path with spaces to exercise shell quoting even
+# when the checkout and build paths themselves contain no spaces.
+foreach(runner spectest_runner spectest_modular_runner)
+    add_custom_command(TARGET ${runner} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${runner}>/command capture"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${runner}>"
+                "$<TARGET_FILE_DIR:${runner}>/command capture/$<TARGET_FILE_NAME:${runner}>"
+        VERBATIM
+    )
+endforeach()
+add_test(NAME spectest_capture COMMAND spectest_runner --test-command-capture
+    "$<TARGET_FILE_DIR:spectest_runner>/command capture/$<TARGET_FILE_NAME:spectest_runner>")
+add_test(NAME spectest_modular_capture COMMAND spectest_modular_runner --test-command-capture
+    "$<TARGET_FILE_DIR:spectest_modular_runner>/command capture/$<TARGET_FILE_NAME:spectest_modular_runner>")
 set_tests_properties(spectest_capture PROPERTIES LABELS "unit")
 set_tests_properties(spectest_modular_capture PROPERTIES LABELS "unit;modular")
 

@@ -79,7 +79,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memcpy(memory->data + dst_offset, segment->bytes + src_offset, len);
+                memcpy(memory->data + dst_offset, segment->bytes + src_offset, (size_t)len);
             break;
         }
         case 0x09: {
@@ -131,7 +131,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, len);
+                memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, (size_t)len);
             break;
         }
         case 0x0B: {
@@ -154,7 +154,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             dst_offset = memory->is_64 ? (uint64_t)dst.of.i64 : (uint64_t)(uint32_t)dst.of.i32;
             if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
+                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), (size_t)len);
             break;
         }
         case 0x0C: {
@@ -250,7 +250,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 if (!dst_table->elems || !src_table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 memmove(dst_table->elems + dst_offset,
                         src_table->elems + src_offset,
-                        len * sizeof(wasm_value_t));
+                        (size_t)len * sizeof(wasm_value_t));
             }
             break;
         }

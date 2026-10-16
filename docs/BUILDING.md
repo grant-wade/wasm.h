@@ -132,7 +132,10 @@ suites. Native 64-bit matrix jobs also exercise CMake installation.
 The shared `setup-wasm-tools` action installs a pinned release matching the
 runner's OS and architecture and verifies both required subcommands, so missing
 tool support fails setup instead of silently dropping spec coverage. A 32-bit
-runtime uses the 64-bit host's `wasm-tools` executable.
+runtime uses the 64-bit host's `wasm-tools` executable. CMake enables SSE2
+floating-point arithmetic for 32-bit x86 GCC/Clang targets to preserve Wasm's
+binary32/binary64 rounding. Standalone-header builds on those targets also need
+`-msse2 -mfpmath=sse`; x87 extended-precision arithmetic is not supported.
 
 Separate x64 and ARM64 Linux jobs run ASan/LSan/UBSan and libFuzzer smoke tests.
 Header freshness remains a separate check. The workflow has 53 blocking jobs

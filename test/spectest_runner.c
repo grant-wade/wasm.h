@@ -1406,44 +1406,18 @@ static int spec_message_matches(const char* expected, const char* actual) {
     return 0;
 }
 
-static uint32_t spec_f32_bits(float value) {
-    union {
-        float f;
-        uint32_t u;
-    } bits;
-
-    bits.f = value;
-    return bits.u;
+/* Inspect the stored representation without passing signaling NaNs through
+ * floating-point registers (notably the x87 return ABI on 32-bit x86). */
+static uint32_t spec_f32_bits(const float* value) {
+    uint32_t bits;
+    memcpy(&bits, value, sizeof(bits));
+    return bits;
 }
 
-static uint64_t spec_f64_bits(double value) {
-    union {
-        double f;
-        uint64_t u;
-    } bits;
-
-    bits.f = value;
-    return bits.u;
-}
-
-static float spec_f32_from_bits(uint32_t bits) {
-    union {
-        float f;
-        uint32_t u;
-    } value;
-
-    value.u = bits;
-    return value.f;
-}
-
-static double spec_f64_from_bits(uint64_t bits) {
-    union {
-        double f;
-        uint64_t u;
-    } value;
-
-    value.u = bits;
-    return value.f;
+static uint64_t spec_f64_bits(const double* value) {
+    uint64_t bits;
+    memcpy(&bits, value, sizeof(bits));
+    return bits;
 }
 
 static int spec_f32_matches(uint32_t actual_bits, spec_float_expectation_t expectation, uint32_t expected_bits) {
@@ -1672,14 +1646,16 @@ static int spec_parse_value(const char* json,
             spec_set_error(error_text, error_size, "invalid f32 bit pattern");
             goto done;
         }
-        out_value->value = wasm_f32(spec_f32_from_bits(bits));
+        out_value->value.type = WASM_TYPE_F32;
+        memcpy(&out_value->value.of.f32, &bits, sizeof(bits));
     } else if (strcmp(type_text, "f64") == 0) {
         uint64_t bits;
         if (!spec_parse_f64_bits_token(json, &tokens[value_index], &bits, &out_value->float_expectation)) {
             spec_set_error(error_text, error_size, "invalid f64 bit pattern");
             goto done;
         }
-        out_value->value = wasm_f64(spec_f64_from_bits(bits));
+        out_value->value.type = WASM_TYPE_F64;
+        memcpy(&out_value->value.of.f64, &bits, sizeof(bits));
     } else if (strcmp(type_text, "refnull") == 0) {
         out_value->value = wasm_ref_null(WASM_TYPE_ANYREF);
     } else if (strcmp(type_text, "nullref") == 0) {
@@ -1849,10 +1825,10 @@ static void spec_describe_value(const wasm_value_t* value, char* buffer, size_t 
             snprintf(buffer, buffer_size, "i64(0x%016" PRIx64 ")", (uint64_t)value->of.i64);
             break;
         case WASM_TYPE_F32:
-            snprintf(buffer, buffer_size, "f32(0x%08" PRIx32 ")", spec_f32_bits(value->of.f32));
+            snprintf(buffer, buffer_size, "f32(0x%08" PRIx32 ")", spec_f32_bits(&value->of.f32));
             break;
         case WASM_TYPE_F64:
-            snprintf(buffer, buffer_size, "f64(0x%016" PRIx64 ")", spec_f64_bits(value->of.f64));
+            snprintf(buffer, buffer_size, "f64(0x%016" PRIx64 ")", spec_f64_bits(&value->of.f64));
             break;
         case WASM_TYPE_FUNCREF:
             if (value->of.funcref == UINT32_MAX)
@@ -1961,15 +1937,15 @@ static int spec_values_match(const spec_value_t* expected,
             if ((uint64_t)expected->value.of.i64 == (uint64_t)actual->of.i64) return 1;
             break;
         case WASM_TYPE_F32:
-            if (spec_f32_matches(spec_f32_bits(actual->of.f32),
+            if (spec_f32_matches(spec_f32_bits(&actual->of.f32),
                                  expected->float_expectation,
-                                 spec_f32_bits(expected->value.of.f32)))
+                                 spec_f32_bits(&expected->value.of.f32)))
                 return 1;
             break;
         case WASM_TYPE_F64:
-            if (spec_f64_matches(spec_f64_bits(actual->of.f64),
+            if (spec_f64_matches(spec_f64_bits(&actual->of.f64),
                                  expected->float_expectation,
-                                 spec_f64_bits(expected->value.of.f64)))
+                                 spec_f64_bits(&expected->value.of.f64)))
                 return 1;
             break;
         case WASM_TYPE_FUNCREF:
@@ -2219,13 +2195,20 @@ static int spec_run_command_capture(const char* command, char** out_text, int* o
     close(fd);
 #endif
 
-    wrapped = (char*)malloc(strlen(command) + strlen(temp_path) + 16u);
+    wrapped = (char*)malloc(strlen(command) + strlen(temp_path) + 18u);
     if (!wrapped) {
         SPEC_UNLINK(temp_path);
         return 0;
     }
 
+#if defined(_WIN32)
+    /* cmd.exe /c strips the first and last quotes when the command starts
+     * with a quoted executable. Supply an outer pair around the entire
+     * command, including redirection, so the executable's quotes survive. */
+    sprintf(wrapped, "\"%s > \"%s\" 2>&1\"", command, temp_path);
+#else
     sprintf(wrapped, "%s > \"%s\" 2>&1", command, temp_path);
+#endif
     status = system(wrapped);
     free(wrapped);
 
@@ -2251,8 +2234,9 @@ static int spec_run_command_capture(const char* command, char** out_text, int* o
     return 1;
 }
 
-static int spec_test_command_capture(void) {
+static int spec_test_command_capture(const char* executable_path) {
     char* text = NULL;
+    char* command;
     int exit_code = -1;
     int ok = spec_run_command_capture(
         "(echo spec-capture-out && echo spec-capture-err 1>&2 && exit 7)",
@@ -2262,6 +2246,19 @@ static int spec_test_command_capture(void) {
          strstr(text, "spec-capture-err") && exit_code == 7;
     free(text);
     if (!ok) fprintf(stderr, "command capture failed (exit code %d)\n", exit_code);
+    if (!ok) return 1;
+
+    command = (char*)malloc(strlen(executable_path) + 128u);
+    if (!command) return 1;
+    sprintf(command, "\"%s\" --test-command-capture-child \"quoted argument\" \"second & argument\"",
+            executable_path);
+    ok = spec_run_command_capture(command, &text, &exit_code);
+    free(command);
+    ok = ok && text && strstr(text, "spec-capture-child-out") &&
+         strstr(text, "spec-capture-child-err") && exit_code == 7;
+    if (!ok) fprintf(stderr, "quoted command capture failed (exit code %d): %s\n",
+                     exit_code, text ? text : "no captured output");
+    free(text);
     return ok ? 0 : 1;
 }
 
@@ -3276,8 +3273,17 @@ int main(int argc, char** argv) {
     char error_text[512];
     int exit_code = 1;
 
-    if (argc == 2 && strcmp(argv[1], "--test-command-capture") == 0)
-        return spec_test_command_capture();
+    if ((argc == 2 || argc == 3) && strcmp(argv[1], "--test-command-capture") == 0)
+        return spec_test_command_capture(argc == 3 ? argv[2] : argv[0]);
+
+    if (argc >= 2 && strcmp(argv[1], "--test-command-capture-child") == 0) {
+        if (argc != 4 || strcmp(argv[2], "quoted argument") != 0 ||
+            strcmp(argv[3], "second & argument") != 0)
+            return 8;
+        fprintf(stdout, "spec-capture-child-out\n");
+        fprintf(stderr, "spec-capture-child-err\n");
+        return 7;
+    }
 
     if (argc != 4 && argc != 5) {
         spec_print_usage(argv[0]);

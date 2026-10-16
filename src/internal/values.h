@@ -3,6 +3,9 @@
 
 #include "common.h"
 
+WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits);
+WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits);
+
 /* ── LEB128 decoding ─────────────────────────────────────────────── */
 typedef struct wasm__reader_t {
     const uint8_t* ptr;
@@ -22,9 +25,9 @@ WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);
 
 WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r);
 
-WASM_PRIVATE float wasm__read_f32(wasm__reader_t* r);
+WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r);
 
-WASM_PRIVATE double wasm__read_f64(wasm__reader_t* r);
+WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r);
 
 WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len);
 
@@ -255,14 +258,6 @@ WASM_PRIVATE double wasm__trunc_f64(double value);
 WASM_PRIVATE double wasm__nearest_f64(double value);
 
 WASM_PRIVATE double wasm__sqrt_f64(double value);
-
-WASM_PRIVATE float wasm__f32_abs_bits(float value);
-
-WASM_PRIVATE float wasm__f32_neg_bits(float value);
-
-WASM_PRIVATE double wasm__f64_abs_bits(double value);
-
-WASM_PRIVATE double wasm__f64_neg_bits(double value);
 
 WASM_PRIVATE wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type);
 

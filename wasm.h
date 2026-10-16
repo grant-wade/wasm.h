@@ -1321,6 +1321,9 @@ WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
 #define WASM_INTERNAL_VALUES_H
 
 
+WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits);
+WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits);
+
 /* ── LEB128 decoding ─────────────────────────────────────────────── */
 typedef struct wasm__reader_t {
     const uint8_t* ptr;
@@ -1340,9 +1343,9 @@ WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);
 
 WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r);
 
-WASM_PRIVATE float wasm__read_f32(wasm__reader_t* r);
+WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r);
 
-WASM_PRIVATE double wasm__read_f64(wasm__reader_t* r);
+WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r);
 
 WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len);
 
@@ -1573,14 +1576,6 @@ WASM_PRIVATE double wasm__trunc_f64(double value);
 WASM_PRIVATE double wasm__nearest_f64(double value);
 
 WASM_PRIVATE double wasm__sqrt_f64(double value);
-
-WASM_PRIVATE float wasm__f32_abs_bits(float value);
-
-WASM_PRIVATE float wasm__f32_neg_bits(float value);
-
-WASM_PRIVATE double wasm__f64_abs_bits(double value);
-
-WASM_PRIVATE double wasm__f64_neg_bits(double value);
 
 WASM_PRIVATE wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type);
 
@@ -4887,30 +4882,30 @@ WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r) {
     return 0;
 }
 
-WASM_PRIVATE float wasm__read_f32(wasm__reader_t* r) {
+/* Return the value as a struct: floating returns can quiet signaling NaNs
+ * through the x87 ABI even when the caller only intends to copy bits. */
+WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r) {
+    uint32_t bits;
     if (!wasm__has(r, 4)) {
         r->ptr = r->end;
         r->malformed = 1;
-        return 0.0f;
+        return wasm__f32_bits(0u);
     }
-    uint32_t bits = wasm__load_le32(r->ptr);
-    float v;
-    memcpy(&v, &bits, 4);
+    bits = wasm__load_le32(r->ptr);
     r->ptr += 4;
-    return v;
+    return wasm__f32_bits(bits);
 }
 
-WASM_PRIVATE double wasm__read_f64(wasm__reader_t* r) {
+WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r) {
+    uint64_t bits;
     if (!wasm__has(r, 8)) {
         r->ptr = r->end;
         r->malformed = 1;
-        return 0.0;
+        return wasm__f64_bits(0u);
     }
-    uint64_t bits = wasm__load_le64(r->ptr);
-    double v;
-    memcpy(&v, &bits, 8);
+    bits = wasm__load_le64(r->ptr);
     r->ptr += 8;
-    return v;
+    return wasm__f64_bits(bits);
 }
 
 WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
@@ -5042,6 +5037,21 @@ WASM_PRIVATE char* wasm__strdup(const char* text) {
 
 /* BEGIN src/values.c */
 
+
+/* Bit transport must not pass signaling NaNs through floating registers. */
+WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits) {
+    wasm_value_t result = { 0 };
+    result.type = WASM_TYPE_F32;
+    memcpy(&result.of.f32, &bits, sizeof(bits));
+    return result;
+}
+
+WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits) {
+    wasm_value_t result = { 0 };
+    result.type = WASM_TYPE_F64;
+    memcpy(&result.of.f64, &bits, sizeof(bits));
+    return result;
+}
 
 WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value) {
     wasm_value_t result = { 0 };
@@ -5399,19 +5409,11 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_read_data_value(const wasm_arraytype_t*
             *out_value = wasm_i64((int64_t)wasm__load_le64(src));
             return WASM_OK;
         case WASM_TYPE_F32: {
-            uint32_t bits = wasm__load_le32(src);
-            float value;
-
-            memcpy(&value, &bits, sizeof(value));
-            *out_value = wasm_f32(value);
+            *out_value = wasm__f32_bits(wasm__load_le32(src));
             return WASM_OK;
         }
         case WASM_TYPE_F64: {
-            uint64_t bits = wasm__load_le64(src);
-            double value;
-
-            memcpy(&value, &bits, sizeof(value));
-            *out_value = wasm_f64(value);
+            *out_value = wasm__f64_bits(wasm__load_le64(src));
             return WASM_OK;
         }
         case WASM_TYPE_V128:
@@ -5720,7 +5722,14 @@ WASM_PRIVATE float wasm__nearest_f32(float value) {
 }
 
 WASM_PRIVATE float wasm__sqrt_f32(float value) {
-    return wasm__f32_is_nan_bits(value) ? wasm__quiet_f32_nan(value) : sqrtf(value);
+    if (wasm__f32_is_nan_bits(value)) return wasm__quiet_f32_nan(value);
+#if defined(WASM__SIMD_USE_SSE2) && (defined(__i386__) || defined(_M_IX86))
+    /* The i386 libm ABI may return an extended-precision x87 square root.
+     * Round in the Wasm format before crossing any floating return ABI. */
+    return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value)));
+#else
+    return sqrtf(value);
+#endif
 }
 
 WASM_PRIVATE double wasm__ceil_f64(double value) {
@@ -5740,43 +5749,14 @@ WASM_PRIVATE double wasm__nearest_f64(double value) {
 }
 
 WASM_PRIVATE double wasm__sqrt_f64(double value) {
-    return wasm__f64_is_nan_bits(value) ? wasm__quiet_f64_nan(value) : sqrt(value);
-}
-
-WASM_PRIVATE float wasm__f32_abs_bits(float value) {
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits &= 0x7FFFFFFFu;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE float wasm__f32_neg_bits(float value) {
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits ^= 0x80000000u;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE double wasm__f64_abs_bits(double value) {
-    uint64_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits &= UINT64_C(0x7FFFFFFFFFFFFFFF);
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE double wasm__f64_neg_bits(double value) {
-    uint64_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits ^= UINT64_C(0x8000000000000000);
-    memcpy(&value, &bits, sizeof(value));
-    return value;
+    if (wasm__f64_is_nan_bits(value)) return wasm__quiet_f64_nan(value);
+#if defined(WASM__SIMD_USE_SSE2) && (defined(__i386__) || defined(_M_IX86))
+    /* The i386 libm ABI may return an extended-precision x87 square root.
+     * Round in the Wasm format before crossing any floating return ABI. */
+    return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(value)));
+#else
+    return sqrt(value);
+#endif
 }
 /* END src/values.c */
 
@@ -10415,6 +10395,16 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_valu
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
 
+    /* abs and neg manipulate the representation, including signaling NaNs. */
+    if (subop == 0xE0 || subop == 0xE1) {
+        for (lane = 0; lane < 4; lane++) {
+            uint32_t bits = wasm__v128_get_u32(value, lane);
+            bits = subop == 0xE0 ? bits & 0x7FFFFFFFu : bits ^ 0x80000000u;
+            wasm__v128_set_u32(&result, lane, bits);
+        }
+        return result;
+    }
+
     for (lane = 0; lane < 4; lane++) {
         float current = wasm__v128_get_f32(value, lane);
         float out = current;
@@ -10524,7 +10514,12 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
                 break;
         }
 
-        wasm__v128_set_f32(&result, lane, out);
+        if (subop == 0xEA || subop == 0xEB) {
+            const wasm_value_t* selected = (subop == 0xEA ? b < a : a < b) ? rhs : lhs;
+            wasm__v128_set_u32(&result, lane, wasm__v128_get_u32(selected, lane));
+        } else {
+            wasm__v128_set_f32(&result, lane, out);
+        }
     }
 
     return result;
@@ -10542,6 +10537,16 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_valu
 #endif
     wasm_value_t result = wasm_v128_zero();
     uint32_t lane;
+
+    /* abs and neg manipulate the representation, including signaling NaNs. */
+    if (subop == 0xEC || subop == 0xED) {
+        for (lane = 0; lane < 2; lane++) {
+            uint64_t bits = wasm__v128_get_u64(value, lane);
+            bits = subop == 0xEC ? bits & UINT64_C(0x7FFFFFFFFFFFFFFF) : bits ^ UINT64_C(0x8000000000000000);
+            wasm__v128_set_u64(&result, lane, bits);
+        }
+        return result;
+    }
 
     for (lane = 0; lane < 2; lane++) {
         double current = wasm__v128_get_f64(value, lane);
@@ -10652,7 +10657,12 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
                 break;
         }
 
-        wasm__v128_set_f64(&result, lane, out);
+        if (subop == 0xF6 || subop == 0xF7) {
+            const wasm_value_t* selected = (subop == 0xF6 ? b < a : a < b) ? rhs : lhs;
+            wasm__v128_set_u64(&result, lane, wasm__v128_get_u64(selected, lane));
+        } else {
+            wasm__v128_set_f64(&result, lane, out);
+        }
     }
 
     return result;
@@ -10853,12 +10863,12 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                 err = wasm__init_expr_stack_push(&stack, wasm_i64(wasm__read_leb128_i64(r)));
                 break;
             case 0x43: {
-                wasm_value_t value = wasm_f32(wasm__read_f32(r));
+                wasm_value_t value = wasm__read_f32(r);
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }
             case 0x44: {
-                wasm_value_t value = wasm_f64(wasm__read_f64(r));
+                wasm_value_t value = wasm__read_f64(r);
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }
@@ -19185,7 +19195,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memcpy(memory->data + dst_offset, segment->bytes + src_offset, len);
+                memcpy(memory->data + dst_offset, segment->bytes + src_offset, (size_t)len);
             break;
         }
         case 0x09: {
@@ -19237,7 +19247,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, len);
+                memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, (size_t)len);
             break;
         }
         case 0x0B: {
@@ -19260,7 +19270,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             dst_offset = memory->is_64 ? (uint64_t)dst.of.i64 : (uint64_t)(uint32_t)dst.of.i32;
             if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             if (len > 0)
-                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), len);
+                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), (size_t)len);
             break;
         }
         case 0x0C: {
@@ -19356,7 +19366,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 if (!dst_table->elems || !src_table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 memmove(dst_table->elems + dst_offset,
                         src_table->elems + src_offset,
-                        len * sizeof(wasm_value_t));
+                        (size_t)len * sizeof(wasm_value_t));
             }
             break;
         }
@@ -19648,10 +19658,18 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     for (lane = 0; lane < 2; lane++) wasm__v128_set_i64(&vector, lane, scalar.of.i64);
                     break;
                 case 0x13:
-                    for (lane = 0; lane < 4; lane++) wasm__v128_set_f32(&vector, lane, scalar.of.f32);
+                    {
+                        uint32_t bits;
+                        memcpy(&bits, &scalar.of.f32, sizeof(bits));
+                        for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&vector, lane, bits);
+                    }
                     break;
                 default:
-                    for (lane = 0; lane < 2; lane++) wasm__v128_set_f64(&vector, lane, scalar.of.f64);
+                    {
+                        uint64_t bits;
+                        memcpy(&bits, &scalar.of.f64, sizeof(bits));
+                        for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&vector, lane, bits);
+                    }
                     break;
             }
 
@@ -19690,10 +19708,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     WASM__PUSH(rt, wasm_i64(wasm__v128_get_i64(&vector, lane)));
                     break;
                 case 0x1F:
-                    WASM__PUSH(rt, wasm_f32(wasm__v128_get_f32(&vector, lane)));
+                    WASM__PUSH(rt, wasm__f32_bits(wasm__v128_get_u32(&vector, lane)));
                     break;
                 default:
-                    WASM__PUSH(rt, wasm_f64(wasm__v128_get_f64(&vector, lane)));
+                    WASM__PUSH(rt, wasm__f64_bits(wasm__v128_get_u64(&vector, lane)));
                     break;
             }
             break;
@@ -19723,10 +19741,18 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
                     wasm__v128_set_i64(&vector, lane, scalar.of.i64);
                     break;
                 case 0x20:
-                    wasm__v128_set_f32(&vector, lane, scalar.of.f32);
+                    {
+                        uint32_t bits;
+                        memcpy(&bits, &scalar.of.f32, sizeof(bits));
+                        wasm__v128_set_u32(&vector, lane, bits);
+                    }
                     break;
                 default:
-                    wasm__v128_set_f64(&vector, lane, scalar.of.f64);
+                    {
+                        uint64_t bits;
+                        memcpy(&bits, &scalar.of.f64, sizeof(bits));
+                        wasm__v128_set_u64(&vector, lane, bits);
+                    }
                     break;
             }
 
@@ -20683,12 +20709,16 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
         /* f32 arithmetic */
         case 0x8B: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f32(wasm__f32_abs_bits(a.of.f32)));
+            uint32_t bits;
+            memcpy(&bits, &a.of.f32, sizeof(bits));
+            WASM__PUSH(rt, wasm__f32_bits(bits & 0x7FFFFFFFu));
             break;
         }
         case 0x8C: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f32(wasm__f32_neg_bits(a.of.f32)));
+            uint32_t bits;
+            memcpy(&bits, &a.of.f32, sizeof(bits));
+            WASM__PUSH(rt, wasm__f32_bits(bits ^ 0x80000000u));
             break;
         }
         case 0x8D: {
@@ -20752,23 +20782,23 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
             memcpy(&ab, &a.of.f32, 4);
             memcpy(&bb, &b.of.f32, 4);
             rb = (ab & 0x7FFFFFFFu) | (bb & 0x80000000u);
-            {
-                float fv;
-                memcpy(&fv, &rb, 4);
-                WASM__PUSH(rt, wasm_f32(fv));
-            }
+            WASM__PUSH(rt, wasm__f32_bits(rb));
             break;
         }
 
         /* f64 arithmetic */
         case 0x99: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f64(wasm__f64_abs_bits(a.of.f64)));
+            uint64_t bits;
+            memcpy(&bits, &a.of.f64, sizeof(bits));
+            WASM__PUSH(rt, wasm__f64_bits(bits & UINT64_C(0x7FFFFFFFFFFFFFFF)));
             break;
         }
         case 0x9A: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f64(wasm__f64_neg_bits(a.of.f64)));
+            uint64_t bits;
+            memcpy(&bits, &a.of.f64, sizeof(bits));
+            WASM__PUSH(rt, wasm__f64_bits(bits ^ UINT64_C(0x8000000000000000)));
             break;
         }
         case 0x9B: {
@@ -20832,11 +20862,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
             memcpy(&ab, &a.of.f64, 8);
             memcpy(&bb, &b.of.f64, 8);
             rb = (ab & (uint64_t)0x7FFFFFFFFFFFFFFFull) | (bb & (uint64_t)0x8000000000000000ull);
-            {
-                double dv;
-                memcpy(&dv, &rb, 8);
-                WASM__PUSH(rt, wasm_f64(dv));
-            }
+            WASM__PUSH(rt, wasm__f64_bits(rb));
             break;
         }
 
@@ -20988,16 +21014,14 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
         }
         case 0xBE: {
             wasm_value_t a = WASM__POP(rt);
-            float v;
-            memcpy(&v, &a.of.i32, 4);
-            WASM__PUSH(rt, wasm_f32(v));
+            a.type = WASM_TYPE_F32;
+            WASM__PUSH(rt, a);
             break;
         }
         case 0xBF: {
             wasm_value_t a = WASM__POP(rt);
-            double v;
-            memcpy(&v, &a.of.i64, 8);
-            WASM__PUSH(rt, wasm_f64(v));
+            a.type = WASM_TYPE_F64;
+            WASM__PUSH(rt, a);
             break;
         }
 
@@ -21986,20 +22010,16 @@ WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     }
                     case 0x2A: {
                         uint32_t b;
-                        float v;
                         if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le32(memory->data + addr);
-                        memcpy(&v, &b, 4);
-                        WASM__PUSH(rt, wasm_f32(v));
+                        WASM__PUSH(rt, wasm__f32_bits(b));
                         break;
                     }
                     case 0x2B: {
                         uint64_t b;
-                        double v;
                         if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                         b = wasm__load_le64(memory->data + addr);
-                        memcpy(&v, &b, 8);
-                        WASM__PUSH(rt, wasm_f64(v));
+                        WASM__PUSH(rt, wasm__f64_bits(b));
                         break;
                     }
                     case 0x2C:
@@ -22273,10 +22293,10 @@ WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 WASM__PUSH(rt, wasm_i64(wasm__read_leb128_i64(&cf->r)));
                 break;
             case 0x43:
-                WASM__PUSH(rt, wasm_f32(wasm__read_f32(&cf->r)));
+                WASM__PUSH(rt, wasm__read_f32(&cf->r));
                 break;
             case 0x44:
-                WASM__PUSH(rt, wasm_f64(wasm__read_f64(&cf->r)));
+                WASM__PUSH(rt, wasm__read_f64(&cf->r));
                 break;
 
             default:

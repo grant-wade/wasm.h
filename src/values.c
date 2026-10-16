@@ -1,5 +1,20 @@
 #include "internal.h"
 
+/* Bit transport must not pass signaling NaNs through floating registers. */
+WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits) {
+    wasm_value_t result = { 0 };
+    result.type = WASM_TYPE_F32;
+    memcpy(&result.of.f32, &bits, sizeof(bits));
+    return result;
+}
+
+WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits) {
+    wasm_value_t result = { 0 };
+    result.type = WASM_TYPE_F64;
+    memcpy(&result.of.f64, &bits, sizeof(bits));
+    return result;
+}
+
 WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value) {
     wasm_value_t result = { 0 };
 
@@ -356,19 +371,11 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_read_data_value(const wasm_arraytype_t*
             *out_value = wasm_i64((int64_t)wasm__load_le64(src));
             return WASM_OK;
         case WASM_TYPE_F32: {
-            uint32_t bits = wasm__load_le32(src);
-            float value;
-
-            memcpy(&value, &bits, sizeof(value));
-            *out_value = wasm_f32(value);
+            *out_value = wasm__f32_bits(wasm__load_le32(src));
             return WASM_OK;
         }
         case WASM_TYPE_F64: {
-            uint64_t bits = wasm__load_le64(src);
-            double value;
-
-            memcpy(&value, &bits, sizeof(value));
-            *out_value = wasm_f64(value);
+            *out_value = wasm__f64_bits(wasm__load_le64(src));
             return WASM_OK;
         }
         case WASM_TYPE_V128:
@@ -677,7 +684,14 @@ WASM_PRIVATE float wasm__nearest_f32(float value) {
 }
 
 WASM_PRIVATE float wasm__sqrt_f32(float value) {
-    return wasm__f32_is_nan_bits(value) ? wasm__quiet_f32_nan(value) : sqrtf(value);
+    if (wasm__f32_is_nan_bits(value)) return wasm__quiet_f32_nan(value);
+#if defined(WASM__SIMD_USE_SSE2) && (defined(__i386__) || defined(_M_IX86))
+    /* The i386 libm ABI may return an extended-precision x87 square root.
+     * Round in the Wasm format before crossing any floating return ABI. */
+    return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value)));
+#else
+    return sqrtf(value);
+#endif
 }
 
 WASM_PRIVATE double wasm__ceil_f64(double value) {
@@ -697,41 +711,12 @@ WASM_PRIVATE double wasm__nearest_f64(double value) {
 }
 
 WASM_PRIVATE double wasm__sqrt_f64(double value) {
-    return wasm__f64_is_nan_bits(value) ? wasm__quiet_f64_nan(value) : sqrt(value);
-}
-
-WASM_PRIVATE float wasm__f32_abs_bits(float value) {
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits &= 0x7FFFFFFFu;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE float wasm__f32_neg_bits(float value) {
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits ^= 0x80000000u;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE double wasm__f64_abs_bits(double value) {
-    uint64_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits &= UINT64_C(0x7FFFFFFFFFFFFFFF);
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-WASM_PRIVATE double wasm__f64_neg_bits(double value) {
-    uint64_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    bits ^= UINT64_C(0x8000000000000000);
-    memcpy(&value, &bits, sizeof(value));
-    return value;
+    if (wasm__f64_is_nan_bits(value)) return wasm__quiet_f64_nan(value);
+#if defined(WASM__SIMD_USE_SSE2) && (defined(__i386__) || defined(_M_IX86))
+    /* The i386 libm ABI may return an extended-precision x87 square root.
+     * Round in the Wasm format before crossing any floating return ABI. */
+    return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(value)));
+#else
+    return sqrt(value);
+#endif
 }

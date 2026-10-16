@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(wasm_h VERSION 1.0.0 LANGUAGES C)
 
 include(CheckLibraryExists)
+include(CheckCSourceCompiles)
 include(CMakePackageConfigHelpers)
 include(CTest)
 include(GNUInstallDirs)
@@ -10,6 +11,21 @@ include(GNUInstallDirs)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+# Wasm arithmetic needs binary32/binary64 rounding, rather than x87's
+# extended-precision intermediates. Probe the compiler target so this also
+# applies to -m32 builds on a 64-bit host, without affecting 32-bit ARM.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
+    check_c_source_compiles("
+        #ifndef __i386__
+        #error Not a 32-bit x86 target
+        #endif
+        int main(void) { return 0; }
+    " WASM_H_TARGET_X86_32)
+    if(WASM_H_TARGET_X86_32)
+        add_compile_options(-msse2 -mfpmath=sse)
+    endif()
+endif()
 
 # Honor the pre-release WL_* option names for existing build directories.
 if(DEFINED WL_ENABLE_PLATFORM AND NOT DEFINED WASM_H_ENABLE_PLATFORM)

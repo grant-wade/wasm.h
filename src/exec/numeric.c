@@ -391,12 +391,16 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
         /* f32 arithmetic */
         case 0x8B: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f32(wasm__f32_abs_bits(a.of.f32)));
+            uint32_t bits;
+            memcpy(&bits, &a.of.f32, sizeof(bits));
+            WASM__PUSH(rt, wasm__f32_bits(bits & 0x7FFFFFFFu));
             break;
         }
         case 0x8C: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f32(wasm__f32_neg_bits(a.of.f32)));
+            uint32_t bits;
+            memcpy(&bits, &a.of.f32, sizeof(bits));
+            WASM__PUSH(rt, wasm__f32_bits(bits ^ 0x80000000u));
             break;
         }
         case 0x8D: {
@@ -460,23 +464,23 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
             memcpy(&ab, &a.of.f32, 4);
             memcpy(&bb, &b.of.f32, 4);
             rb = (ab & 0x7FFFFFFFu) | (bb & 0x80000000u);
-            {
-                float fv;
-                memcpy(&fv, &rb, 4);
-                WASM__PUSH(rt, wasm_f32(fv));
-            }
+            WASM__PUSH(rt, wasm__f32_bits(rb));
             break;
         }
 
         /* f64 arithmetic */
         case 0x99: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f64(wasm__f64_abs_bits(a.of.f64)));
+            uint64_t bits;
+            memcpy(&bits, &a.of.f64, sizeof(bits));
+            WASM__PUSH(rt, wasm__f64_bits(bits & UINT64_C(0x7FFFFFFFFFFFFFFF)));
             break;
         }
         case 0x9A: {
             wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm_f64(wasm__f64_neg_bits(a.of.f64)));
+            uint64_t bits;
+            memcpy(&bits, &a.of.f64, sizeof(bits));
+            WASM__PUSH(rt, wasm__f64_bits(bits ^ UINT64_C(0x8000000000000000)));
             break;
         }
         case 0x9B: {
@@ -540,11 +544,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
             memcpy(&ab, &a.of.f64, 8);
             memcpy(&bb, &b.of.f64, 8);
             rb = (ab & (uint64_t)0x7FFFFFFFFFFFFFFFull) | (bb & (uint64_t)0x8000000000000000ull);
-            {
-                double dv;
-                memcpy(&dv, &rb, 8);
-                WASM__PUSH(rt, wasm_f64(dv));
-            }
+            WASM__PUSH(rt, wasm__f64_bits(rb));
             break;
         }
 
@@ -696,16 +696,14 @@ WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
         }
         case 0xBE: {
             wasm_value_t a = WASM__POP(rt);
-            float v;
-            memcpy(&v, &a.of.i32, 4);
-            WASM__PUSH(rt, wasm_f32(v));
+            a.type = WASM_TYPE_F32;
+            WASM__PUSH(rt, a);
             break;
         }
         case 0xBF: {
             wasm_value_t a = WASM__POP(rt);
-            double v;
-            memcpy(&v, &a.of.i64, 8);
-            WASM__PUSH(rt, wasm_f64(v));
+            a.type = WASM_TYPE_F64;
+            WASM__PUSH(rt, a);
             break;
         }
 

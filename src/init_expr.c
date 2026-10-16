@@ -79,12 +79,12 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                 err = wasm__init_expr_stack_push(&stack, wasm_i64(wasm__read_leb128_i64(r)));
                 break;
             case 0x43: {
-                wasm_value_t value = wasm_f32(wasm__read_f32(r));
+                wasm_value_t value = wasm__read_f32(r);
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }
             case 0x44: {
-                wasm_value_t value = wasm_f64(wasm__read_f64(r));
+                wasm_value_t value = wasm__read_f64(r);
                 err = wasm__init_expr_stack_push(&stack, value);
                 break;
             }

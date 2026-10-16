@@ -130,30 +130,30 @@ WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r) {
     return 0;
 }
 
-WASM_PRIVATE float wasm__read_f32(wasm__reader_t* r) {
+/* Return the value as a struct: floating returns can quiet signaling NaNs
+ * through the x87 ABI even when the caller only intends to copy bits. */
+WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r) {
+    uint32_t bits;
     if (!wasm__has(r, 4)) {
         r->ptr = r->end;
         r->malformed = 1;
-        return 0.0f;
+        return wasm__f32_bits(0u);
     }
-    uint32_t bits = wasm__load_le32(r->ptr);
-    float v;
-    memcpy(&v, &bits, 4);
+    bits = wasm__load_le32(r->ptr);
     r->ptr += 4;
-    return v;
+    return wasm__f32_bits(bits);
 }
 
-WASM_PRIVATE double wasm__read_f64(wasm__reader_t* r) {
+WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r) {
+    uint64_t bits;
     if (!wasm__has(r, 8)) {
         r->ptr = r->end;
         r->malformed = 1;
-        return 0.0;
+        return wasm__f64_bits(0u);
     }
-    uint64_t bits = wasm__load_le64(r->ptr);
-    double v;
-    memcpy(&v, &bits, 8);
+    bits = wasm__load_le64(r->ptr);
     r->ptr += 8;
-    return v;
+    return wasm__f64_bits(bits);
 }
 
 WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
