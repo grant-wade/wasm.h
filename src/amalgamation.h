@@ -10,8 +10,9 @@
 #pragma warning(push)
 #pragma warning(disable : 4702)
 #endif
-#include "internal.h"
 #include "support.c"
+#include "simd/native.c"
+#include "platform/host.c"
 #include "portable.c"
 #include "reader.c"
 #include "values.c"
@@ -21,6 +22,7 @@
 #include "module.c"
 #include "types/cross_module.c"
 #include "memory_internal.c"
+#include "instructions.c"
 #include "simd/lanes.c"
 #include "simd/compare.c"
 #include "simd/integer_small.c"

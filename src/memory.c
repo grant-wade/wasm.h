@@ -1,4 +1,13 @@
-#include "internal.h"
+#include "wasm.h"
+#include "memory_internal.h"
+#include "reader.h"
+#include "module.h"
+#include "types/canonical.h"
+#include "types/references.h"
+#include "runtime.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
 
 uint32_t wasm_memory_count(wasm_module_t* mod) {
     return mod ? mod->num_memories : 0;

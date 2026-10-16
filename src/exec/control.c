@@ -1,119 +1,16 @@
-#include "../internal.h"
+#include "control.h"
+#include "../module.h"
+#include "../instructions.h"
+#include "../internal/alloc.h"
+#include "../reader.h"
+#include "../validate/function.h"
 
-WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
-    switch (op) {
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x06:
-            wasm__skip_blocktype(r);
-            break;
-        case 0x1F:
-            wasm__skip_try_table_immediates(r);
-            break;
-        case 0x07:
-        case 0x08:
-        case 0x09:
-        case 0x0C:
-        case 0x0D:
-        case 0x10:
-        case 0x12:
-        case 0x14:
-        case 0x15:
-        case 0x18:
-        case 0x20:
-        case 0x21:
-        case 0x22:
-        case 0x23:
-        case 0x24:
-        case 0x25:
-        case 0x26:
-        case 0x3F:
-        case 0x40:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x41:
-            wasm__read_leb128_i32(r);
-            break;
-        case 0x42:
-            wasm__read_leb128_i64(r);
-            break;
-        case 0x43:
-            r->ptr += 4;
-            break;
-        case 0x44:
-            r->ptr += 8;
-            break;
-        case 0x28:
-        case 0x29:
-        case 0x2A:
-        case 0x2B:
-        case 0x2C:
-        case 0x2D:
-        case 0x2E:
-        case 0x2F:
-        case 0x30:
-        case 0x31:
-        case 0x32:
-        case 0x33:
-        case 0x34:
-        case 0x35:
-        case 0x36:
-        case 0x37:
-        case 0x38:
-        case 0x39:
-        case 0x3A:
-        case 0x3B:
-        case 0x3C:
-        case 0x3D:
-        case 0x3E: {
-            wasm__memarg_t memarg;
-            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
-                r->ptr = r->end;
-                return;
-            }
-        } break;
-        case 0x0E: {
-            uint32_t n = wasm__read_leb128_u32(r), j;
-            for (j = 0; j <= n; j++) wasm__read_leb128_u32(r);
-            break;
-        }
-        case 0x11:
-        case 0x13:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x1C: {
-            uint32_t count = wasm__read_leb128_u32(r);
-            while (count-- > 0 && r->ptr < r->end) wasm__skip_valtype(r);
-            break;
-        }
-        case 0xD0:
-            wasm__skip_heaptype(r);
-            break;
-        case 0xD2:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0xD5:
-        case 0xD6:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0xFC:
-            wasm__skip_prefixed_immediates(r);
-            break;
-        case 0xFB:
-            wasm__skip_gc_immediates(r);
-            break;
-        case 0xFD:
-            wasm__skip_simd_immediates(r);
-            break;
-        case 0x19:
-        default:
-            break;
-    }
-}
+typedef struct wasm__control_frame_t {
+    uint8_t opcode;
+    uint32_t offset;
+} wasm__control_frame_t;
 
-WASM_PRIVATE const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end) {
+static const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end) {
     wasm__reader_t scan;
     int nest = 1;
 

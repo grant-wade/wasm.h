@@ -1,4 +1,12 @@
-#include "internal.h"
+#include "memory_internal.h"
+#include "types/references.h"
+#include "values.h"
+#include "validate/module.h"
+#include "module.h"
+#include "runtime.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
 
 WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory) {
     while (memory && memory->is_import && memory->import_memory && memory->import_memory != memory)
@@ -231,38 +239,10 @@ WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
-    if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
-                                                      wasm__reader_t* r,
-                                                      wasm_valtype_t* out_type,
-                                                      wasm_reftype_t* out_reftype) {
-    uint32_t count = wasm__read_leb128_u32(r);
-
-    if (count != 1) return WASM_ERR_MALFORMED;
-    return wasm__read_valtype(mod, r, out_type, out_reftype);
-}
-
 WASM_PRIVATE int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit) {
     return offset <= limit && size <= (limit - offset);
 }
 
 WASM_PRIVATE int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t mem_size) {
     return wasm__range_in_bounds_u64(addr, width, mem_size);
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg) {
-    uint32_t flags = wasm__read_leb128_u32(r);
-
-    if ((flags & ~0x7Fu) != 0) return WASM_ERR_MALFORMED;
-
-    out_memarg->align_log2 = flags & 0x3Fu;
-    out_memarg->memory_index = 0;
-    out_memarg->has_memory_index = (uint8_t)(((flags & 0x40u) != 0) ? 1u : 0u);
-    if (out_memarg->has_memory_index) out_memarg->memory_index = wasm__read_leb128_u32(r);
-    out_memarg->offset = wasm__read_leb128_u64(r);
-    return WASM_OK;
 }

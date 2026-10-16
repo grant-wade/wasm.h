@@ -7,6 +7,26 @@ list(TRANSFORM WASM_TEST_RUNTIME_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
 add_library(wasm_test_runtime STATIC ${WASM_TEST_RUNTIME_SOURCES})
 target_include_directories(wasm_test_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(wasm_test_runtime PRIVATE wl_project_options wl_math)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wasm_test_runtime PRIVATE -Wmissing-prototypes)
+endif()
+
+# Compile each source header on its own so transitive includes cannot hide
+# missing prerequisites. The amalgamation manifest is not an interface header.
+file(GLOB_RECURSE WASM_SOURCE_HEADERS CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/*.h")
+list(REMOVE_ITEM WASM_SOURCE_HEADERS "${PROJECT_SOURCE_DIR}/src/amalgamation.h")
+set(WASM_HEADER_CHECK_SOURCES)
+foreach(header IN LISTS WASM_SOURCE_HEADERS)
+    file(RELATIVE_PATH relative_header "${PROJECT_SOURCE_DIR}/src" "${header}")
+    string(MAKE_C_IDENTIFIER "${relative_header}" header_id)
+    set(source "${CMAKE_CURRENT_BINARY_DIR}/header-check/${header_id}.c")
+    file(GENERATE OUTPUT "${source}" CONTENT "#include \"${relative_header}\"\n")
+    list(APPEND WASM_HEADER_CHECK_SOURCES "${source}")
+endforeach()
+add_library(wasm_private_header_check OBJECT ${WASM_HEADER_CHECK_SOURCES})
+target_include_directories(wasm_private_header_check PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(wasm_private_header_check PRIVATE wl_project_options)
 if(MSVC)
     # Match wasm_runtime and the single-header implementation's warning policy.
     target_compile_options(wasm_test_runtime PRIVATE /wd4702)

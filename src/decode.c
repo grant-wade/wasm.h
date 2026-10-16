@@ -1,4 +1,25 @@
-#include "internal.h"
+#include "decode.h"
+#include "memory_internal.h"
+#include "values.h"
+#include "reader.h"
+#include "module.h"
+#include "types/references.h"
+#include "runtime.h"
+#include "types/decode.h"
+#include "platform/emscripten.h"
+#include "types/canonical.h"
+#include "portable.h"
+#include "init_expr.h"
+#include "types/cross_module.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
+
+static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
+    if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+    return WASM_OK;
+}
 
 WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t entry_count = wasm__read_leb128_u32(r);
@@ -56,7 +77,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
                                            wasm__reader_t* r,
                                            wasm_memory_t* memory) {
     uint8_t flags = wasm__read_u8(r);
@@ -89,7 +110,7 @@ WASM_PRIVATE wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_table_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
                                           wasm__reader_t* r,
                                           wasm_table_t* table) {
     uint8_t leading;
@@ -168,7 +189,7 @@ WASM_PRIVATE wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
+static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                              wasm__reader_t* r,
                                              wasm_import_info_t* info,
                                              uint8_t kind) {
@@ -896,7 +917,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_data_count_section(wasm_module_t* mod, wa
     return WASM_OK;
 }
 
-WASM_PRIVATE uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name) {
+static uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name) {
     uint32_t i;
 
     for (i = 0; i < mod->num_exports; i++) {

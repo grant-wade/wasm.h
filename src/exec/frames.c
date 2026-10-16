@@ -1,4 +1,9 @@
-#include "../internal.h"
+#include "frames.h"
+#include "../module.h"
+#include "state.h"
+#include <stdio.h>
+#include "../internal/alloc.h"
+#include "../runtime.h"
 
 WASM_PRIVATE int wasm__size_mul(size_t a, size_t b, size_t* out) {
     if (a != 0 && b > ((size_t)-1) / a) return 0;
@@ -6,13 +11,13 @@ WASM_PRIVATE int wasm__size_mul(size_t a, size_t b, size_t* out) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__size_add(size_t a, size_t b, size_t* out) {
+static int wasm__size_add(size_t a, size_t b, size_t* out) {
     if (a > ((size_t)-1) - b) return 0;
     *out = a + b;
     return 1;
 }
 
-WASM_PRIVATE int wasm__size_align(size_t value, size_t alignment, size_t* out) {
+static int wasm__size_align(size_t value, size_t alignment, size_t* out) {
     size_t remainder;
 
     if (alignment <= 1) {
@@ -91,7 +96,7 @@ WASM_PRIVATE int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t
     return 1;
 }
 
-WASM_PRIVATE wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size) {
+static wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size) {
     uint8_t* arena;
 
     if (size <= rt->frame_arena_size) return WASM_OK;
@@ -146,7 +151,7 @@ WASM_PRIVATE void wasm__clear_backtrace(wasm_runtime_t* rt) {
     rt->backtrace_depth = 0;
 }
 
-WASM_PRIVATE uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
+static uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
     ptrdiff_t offset;
 
     if (!cf || !cf->func || !cf->func->code) return 0;

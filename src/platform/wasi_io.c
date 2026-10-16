@@ -1,6 +1,17 @@
-#include "../internal.h"
+#include "wasi_io.h"
+#include "host.h"
+#include "../module.h"
+#include "../runtime.h"
+#include "../portable.h"
+#include "../memory_internal.h"
+#include "wasi_state.h"
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
 
 #if WASM_ENABLE_PLATFORM
+typedef uint32_t (*wasm__wasi_string_count_fn)(void);
+typedef const char* (*wasm__wasi_string_at_fn)(uint32_t index);
 WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code) {
     if (results && num_results > 0) results[0] = wasm_i32((int32_t)errno_code);
 }
@@ -108,7 +119,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
+static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn) {
     uint32_t count;
     uint32_t i;
@@ -128,23 +139,23 @@ WASM_PRIVATE uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn cou
     return total;
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_args(void) {
+static uint32_t wasm__wasi_string_list_count_args(void) {
     return wasm__platform_wasi_arg_count();
 }
 
-WASM_PRIVATE const char* wasm__wasi_string_list_at_args(uint32_t index) {
+static const char* wasm__wasi_string_list_at_args(uint32_t index) {
     return wasm__platform_wasi_arg_at(index);
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_env(void) {
+static uint32_t wasm__wasi_string_list_count_env(void) {
     return wasm__platform_wasi_env_count();
 }
 
-WASM_PRIVATE const char* wasm__wasi_string_list_at_env(uint32_t index) {
+static const char* wasm__wasi_string_list_at_env(uint32_t index) {
     return wasm__platform_wasi_env_at(index);
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
+static uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
                                             wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn,
                                             uint32_t count_ptr,
@@ -178,7 +189,7 @@ WASM_PRIVATE uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
+static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
                                            wasm__wasi_string_count_fn count_fn,
                                            wasm__wasi_string_at_fn at_fn,
                                            uint32_t entries_ptr,

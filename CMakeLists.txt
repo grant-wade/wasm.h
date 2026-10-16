@@ -127,6 +127,7 @@ set(WASM_RUNTIME_SOURCES
     src/exec/interpreter.c
     src/gc.c
     src/init_expr.c
+    src/instructions.c
     src/inspect.c
     src/load.c
     src/memory.c
@@ -134,6 +135,7 @@ set(WASM_RUNTIME_SOURCES
     src/module.c
     src/platform/disabled.c
     src/platform/emscripten.c
+    src/platform/host.c
     src/platform/wasi_bind.c
     src/platform/wasi_fd.c
     src/platform/wasi_io.c
@@ -147,6 +149,7 @@ set(WASM_RUNTIME_SOURCES
     src/simd/integer_small.c
     src/simd/integer_wide.c
     src/simd/lanes.c
+    src/simd/native.c
     src/support.c
     src/types/canonical.c
     src/types/cross_module.c
@@ -164,6 +167,9 @@ add_library(wasm_runtime STATIC ${WASM_RUNTIME_SOURCES})
 add_library(wasm_h::runtime ALIAS wasm_runtime)
 target_include_directories(wasm_runtime PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(wasm_runtime PRIVATE wl_project_options PUBLIC wl_math)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wasm_runtime PRIVATE -Wmissing-prototypes)
+endif()
 if(MSVC)
     # Match the single-header implementation's scoped warning policy: SIMD
     # fast paths and platform branches retain unreachable portable fallbacks.
@@ -193,7 +199,7 @@ add_subdirectory(examples)
 if(BUILD_TESTING)
     add_subdirectory(test)
 
-    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_modular_test wasm_core_test wasm_modular_core_test spectest_runner spectest_modular_runner)
+    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_modular_test wasm_core_test wasm_modular_core_test spectest_runner spectest_modular_runner wasm_private_header_check)
     if(TARGET session_math_demo)
         list(APPEND WL_CHECK_TARGET_DEPS session_math_demo)
     endif()

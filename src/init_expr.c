@@ -1,4 +1,57 @@
-#include "internal.h"
+#include "init_expr.h"
+#include "module.h"
+#include "runtime.h"
+#include "values.h"
+#include "reader.h"
+#include "memory_internal.h"
+#include "types/references.h"
+#include "types/canonical.h"
+#include "portable.h"
+#include "internal/gc_types.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
+
+typedef struct wasm__init_expr_stack_t {
+    wasm_value_t* values;
+    uint32_t size;
+    uint32_t cap;
+} wasm__init_expr_stack_t;
+
+static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
+    if (stack->size >= stack->cap) {
+        uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
+        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
+        if (!values) return WASM_ERR_OOM;
+        stack->values = values;
+        stack->cap = new_cap;
+    }
+
+    stack->values[stack->size++] = value;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
+                                                     wasm__init_expr_stack_t* stack,
+                                                     wasm_valtype_t expected_type,
+                                                     const wasm_reftype_t* expected_ref,
+                                                     wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
+    value = stack->values[--stack->size];
+    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
+        return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
+                                                    wasm_valtype_t expected_type,
+                                                    wasm_value_t* out_value) {
+    return wasm__init_expr_stack_pop_expect(NULL, stack, expected_type, NULL, out_value);
+}
 
 WASM_PRIVATE wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod) {
     uint32_t i;
@@ -461,100 +514,4 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
     WASM_FREE(stack.values);
     return err;
-}
-
-WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
-                                                      const char* module,
-                                                      const char* name) {
-    uint32_t i = rt ? rt->num_global_imports : 0u;
-
-    while (i > 0u) {
-        i--;
-        if (strcmp(rt->global_imports[i].module, module) == 0 &&
-            strcmp(rt->global_imports[i].name, name) == 0)
-            return &rt->global_imports[i];
-    }
-
-    return NULL;
-}
-
-WASM_PRIVATE int wasm__has_import_named(const wasm_runtime_t* rt,
-                                  const char* module,
-                                  const char* name) {
-    uint32_t i;
-
-    if (!rt || !module || !name) return 0;
-
-    for (i = 0; i < rt->num_imports; i++) {
-        if (strcmp(rt->imports[i].module, module) == 0 &&
-            strcmp(rt->imports[i].name, name) == 0)
-            return 1;
-    }
-    for (i = 0; i < rt->num_global_imports; i++) {
-        if (strcmp(rt->global_imports[i].module, module) == 0 &&
-            strcmp(rt->global_imports[i].name, name) == 0)
-            return 1;
-    }
-    for (i = 0; i < rt->num_table_imports; i++) {
-        if (strcmp(rt->table_imports[i].module, module) == 0 &&
-            strcmp(rt->table_imports[i].name, name) == 0)
-            return 1;
-    }
-    for (i = 0; i < rt->num_memory_imports; i++) {
-        if (strcmp(rt->memory_imports[i].module, module) == 0 &&
-            strcmp(rt->memory_imports[i].name, name) == 0)
-            return 1;
-    }
-    for (i = 0; i < rt->num_tag_imports; i++) {
-        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
-            strcmp(rt->tag_imports[i].name, name) == 0)
-            return 1;
-    }
-
-    return 0;
-}
-
-WASM_PRIVATE wasm_table_import_t* wasm__find_table_import(wasm_runtime_t* rt,
-                                                    const char* module,
-                                                    const char* name) {
-    uint32_t i = rt ? rt->num_table_imports : 0u;
-
-    while (i > 0u) {
-        i--;
-        if (strcmp(rt->table_imports[i].module, module) == 0 &&
-            strcmp(rt->table_imports[i].name, name) == 0)
-            return &rt->table_imports[i];
-    }
-
-    return NULL;
-}
-
-WASM_PRIVATE wasm_memory_import_t* wasm__find_memory_import(wasm_runtime_t* rt,
-                                                      const char* module,
-                                                      const char* name) {
-    uint32_t i = rt ? rt->num_memory_imports : 0u;
-
-    while (i > 0u) {
-        i--;
-        if (strcmp(rt->memory_imports[i].module, module) == 0 &&
-            strcmp(rt->memory_imports[i].name, name) == 0)
-            return &rt->memory_imports[i];
-    }
-
-    return NULL;
-}
-
-WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
-                                                const char* module,
-                                                const char* name) {
-    uint32_t i = rt ? rt->num_tag_imports : 0u;
-
-    while (i > 0u) {
-        i--;
-        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
-            strcmp(rt->tag_imports[i].name, name) == 0)
-            return &rt->tag_imports[i];
-    }
-
-    return NULL;
 }

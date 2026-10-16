@@ -1,6 +1,115 @@
-#include "internal.h"
+#include "runtime.h"
+#include "values.h"
+#include "module.h"
+#include "types/canonical.h"
+#include "memory_internal.h"
+#include "reader.h"
+#include "exec/frames.h"
+#include "platform/wasi_state.h"
+#include "platform/emscripten.h"
+#include "internal/gc_types.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
 
-WASM_PRIVATE void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
+WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
+                                                      const char* module,
+                                                      const char* name) {
+    uint32_t i = rt ? rt->num_global_imports : 0u;
+
+    while (i > 0u) {
+        i--;
+        if (strcmp(rt->global_imports[i].module, module) == 0 &&
+            strcmp(rt->global_imports[i].name, name) == 0)
+            return &rt->global_imports[i];
+    }
+
+    return NULL;
+}
+
+WASM_PRIVATE int wasm__has_import_named(const wasm_runtime_t* rt,
+                                  const char* module,
+                                  const char* name) {
+    uint32_t i;
+
+    if (!rt || !module || !name) return 0;
+
+    for (i = 0; i < rt->num_imports; i++) {
+        if (strcmp(rt->imports[i].module, module) == 0 &&
+            strcmp(rt->imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_global_imports; i++) {
+        if (strcmp(rt->global_imports[i].module, module) == 0 &&
+            strcmp(rt->global_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        if (strcmp(rt->table_imports[i].module, module) == 0 &&
+            strcmp(rt->table_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_memory_imports; i++) {
+        if (strcmp(rt->memory_imports[i].module, module) == 0 &&
+            strcmp(rt->memory_imports[i].name, name) == 0)
+            return 1;
+    }
+    for (i = 0; i < rt->num_tag_imports; i++) {
+        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
+            strcmp(rt->tag_imports[i].name, name) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
+WASM_PRIVATE wasm_table_import_t* wasm__find_table_import(wasm_runtime_t* rt,
+                                                    const char* module,
+                                                    const char* name) {
+    uint32_t i = rt ? rt->num_table_imports : 0u;
+
+    while (i > 0u) {
+        i--;
+        if (strcmp(rt->table_imports[i].module, module) == 0 &&
+            strcmp(rt->table_imports[i].name, name) == 0)
+            return &rt->table_imports[i];
+    }
+
+    return NULL;
+}
+
+WASM_PRIVATE wasm_memory_import_t* wasm__find_memory_import(wasm_runtime_t* rt,
+                                                      const char* module,
+                                                      const char* name) {
+    uint32_t i = rt ? rt->num_memory_imports : 0u;
+
+    while (i > 0u) {
+        i--;
+        if (strcmp(rt->memory_imports[i].module, module) == 0 &&
+            strcmp(rt->memory_imports[i].name, name) == 0)
+            return &rt->memory_imports[i];
+    }
+
+    return NULL;
+}
+
+WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
+                                                const char* module,
+                                                const char* name) {
+    uint32_t i = rt ? rt->num_tag_imports : 0u;
+
+    while (i > 0u) {
+        i--;
+        if (strcmp(rt->tag_imports[i].module, module) == 0 &&
+            strcmp(rt->tag_imports[i].name, name) == 0)
+            return &rt->tag_imports[i];
+    }
+
+    return NULL;
+}
+
+static void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
     WASM_GC_FREE(rt->gc_heap);
     rt->gc_heap = NULL;
     rt->gc_heap_size = 0;
@@ -51,7 +160,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     return WASM_OK;
 }
 
-WASM_PRIVATE void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
+static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
     size_t aligned_offset = wasm__align_up_size(rt->gc_heap_offset, alignment);
 
     if (!rt->gc_heap) return NULL;
@@ -62,7 +171,7 @@ WASM_PRIVATE void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t a
     return rt->gc_heap + aligned_offset;
 }
 
-WASM_PRIVATE wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
+static wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
                                                const wasm_module_t* mod,
                                                uint32_t type_index,
                                                wasm_gc_object_kind_t kind,
@@ -162,7 +271,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->lazy_validation = 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
+static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
     rt->stack = (wasm_value_t*)WASM_MALLOC((size_t)max_stack * sizeof(*rt->stack));
@@ -173,14 +282,14 @@ WASM_PRIVATE wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stac
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__stack_destroy(wasm_runtime_t* rt) {
+static void wasm__stack_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->stack);
     rt->stack = NULL;
     rt->max_stack = 0;
     rt->sp = 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
+static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
     if (max_depth == 0) return WASM_ERR_MALFORMED;
 
     rt->backtrace_func_indices = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_func_indices));
@@ -197,7 +306,7 @@ WASM_PRIVATE wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__backtrace_destroy(wasm_runtime_t* rt) {
+static void wasm__backtrace_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->backtrace_func_indices);
     WASM_FREE(rt->backtrace_offsets);
     rt->backtrace_func_indices = NULL;
@@ -386,11 +495,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
     wasm__gc_heap_destroy(rt);
 #if WASM_ENABLE_PLATFORM
     if (rt->wasi_state) wasm__wasi_state_destroy(rt);
-    if (rt->emscripten_state) {
-        WASM_FREE(rt->emscripten_state->memory.data);
-        WASM_FREE(rt->emscripten_state);
-        rt->emscripten_state = NULL;
-    }
+    wasm__emscripten_state_destroy(rt);
 #endif
     wasm__stack_destroy(rt);
     memset(rt, 0, sizeof(*rt));

@@ -1,18 +1,30 @@
-#include "internal.h"
+#include "wasm.h"
+#include "exec/state.h"
+#include "values.h"
+#include "runtime.h"
+#include "types/canonical.h"
+#include "memory_internal.h"
+#include "module.h"
+#include "internal/gc_types.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
 
-WASM_PRIVATE void wasm__gc_mark_value(const wasm_value_t* value) {
+static void wasm__gc_mark_object(wasm_gc_header_t* object);
+
+static void wasm__gc_mark_value(const wasm_value_t* value) {
     if (!wasm__is_heap_gc_ref_value(value)) return;
     wasm__gc_mark_object((wasm_gc_header_t*)value->of.gc_obj);
 }
 
-WASM_PRIVATE void wasm__gc_mark_values(const wasm_value_t* values, uint32_t count) {
+static void wasm__gc_mark_values(const wasm_value_t* values, uint32_t count) {
     uint32_t i;
 
     if (!values) return;
     for (i = 0; i < count; i++) wasm__gc_mark_value(&values[i]);
 }
 
-WASM_PRIVATE void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
+static void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
                                         const wasm_structtype_t* type) {
     uint32_t i;
 
@@ -26,7 +38,7 @@ WASM_PRIVATE void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
     }
 }
 
-WASM_PRIVATE void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
+static void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
                                          const wasm_arraytype_t* type) {
     wasm_gc_array_t* array_object;
     size_t data_offset;
@@ -42,7 +54,7 @@ WASM_PRIVATE void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
     for (i = 0; i < array_object->length; i++) wasm__gc_mark_value(&elems[i]);
 }
 
-WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object) {
+static void wasm__gc_mark_object(wasm_gc_header_t* object) {
     const wasm_module_t* mod;
 
     if (!object || object->marked) return;
@@ -69,7 +81,7 @@ WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object) {
     }
 }
 
-WASM_PRIVATE void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
+static void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;
@@ -117,7 +129,7 @@ WASM_PRIVATE void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     }
 }
 
-WASM_PRIVATE void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value) {
+static void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value) {
     wasm_gc_header_t* old_object;
 
     if (!wasm__is_heap_gc_ref_value(value)) return;
@@ -128,14 +140,14 @@ WASM_PRIVATE void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value
     value->of.gc_ref = (uintptr_t)old_object->next_alloc;
 }
 
-WASM_PRIVATE void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
+static void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
     uint32_t i;
 
     if (!values) return;
     for (i = 0; i < count; i++) wasm__gc_forward_value(rt, &values[i]);
 }
 
-WASM_PRIVATE void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
+static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
     const wasm_module_t* mod;
 
     if (!object) return;
@@ -175,7 +187,7 @@ WASM_PRIVATE void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_heade
     }
 }
 
-WASM_PRIVATE void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
+static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;

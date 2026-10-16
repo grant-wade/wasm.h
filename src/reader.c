@@ -1,4 +1,9 @@
-#include "internal.h"
+#include "reader.h"
+#include "values.h"
+#include "portable.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
 
 WASM_PRIVATE int wasm__has(wasm__reader_t* r, size_t n) {
     return !r->malformed && (size_t)(r->end - r->ptr) >= n;
@@ -156,7 +161,7 @@ WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r) {
     return wasm__f64_bits(bits);
 }
 
-WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
+static int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
     uint32_t i = 0;
 
     while (i < len) {
@@ -206,7 +211,7 @@ WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, size_t rhs_len) {
+static int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, size_t rhs_len) {
     if (lhs_len != rhs_len) return 0;
     if (lhs_len == 0u) return 1;
     return memcmp(lhs, rhs, lhs_len) == 0;

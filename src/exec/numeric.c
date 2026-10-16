@@ -1,4 +1,9 @@
-#include "../internal.h"
+#include "numeric.h"
+#include "state.h"
+#include "../portable.h"
+#include "../runtime.h"
+#include "../values.h"
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
     wasm_error_t err = WASM_OK;

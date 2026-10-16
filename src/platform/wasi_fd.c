@@ -1,4 +1,12 @@
-#include "../internal.h"
+#include "wasi_fd.h"
+#include "host.h"
+#include "../module.h"
+#include "../portable.h"
+#include "wasi_state.h"
+#include "wasi_io.h"
+#include "../memory_internal.h"
+#include <errno.h>
+#include <stdio.h>
 
 #if WASM_ENABLE_PLATFORM
 WASM_PRIVATE wasm_error_t wasm__wasi_fd_datasync(wasm_module_t* mod,

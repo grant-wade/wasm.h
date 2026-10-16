@@ -1,14 +1,26 @@
-#include "../internal.h"
+#include "cross_module.h"
+#include "../module.h"
+#include "../internal/alloc.h"
+#include "canonical.h"
+#include "references.h"
+#include "../values.h"
+#include <string.h>
 
-WASM_PRIVATE int wasm__cross_group_contains_type(const wasm_recgroup_t* group, uint32_t type_idx) {
+static int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
+                                        uint32_t lhs_idx,
+                                        const wasm_module_t* rhs_mod,
+                                        uint32_t rhs_idx,
+                                        uint8_t* memo);
+
+static int wasm__cross_group_contains_type(const wasm_recgroup_t* group, uint32_t type_idx) {
     return group && type_idx >= group->first_type && type_idx < group->first_type + group->num_types;
 }
 
-WASM_PRIVATE uint32_t wasm__cross_group_type_offset(const wasm_recgroup_t* group, uint32_t type_idx) {
+static uint32_t wasm__cross_group_type_offset(const wasm_recgroup_t* group, uint32_t type_idx) {
     return type_idx - group->first_type;
 }
 
-WASM_PRIVATE int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs_mod,
                                                   uint32_t lhs_idx,
                                                   const wasm_recgroup_t* lhs_group,
                                                   const wasm_module_t* rhs_mod,
@@ -27,7 +39,7 @@ WASM_PRIVATE int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs
     return wasm__cross_type_equal_visit(lhs_mod, lhs_idx, rhs_mod, rhs_idx, memo);
 }
 
-WASM_PRIVATE int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                const wasm_reftype_t* lhs,
                                                const wasm_recgroup_t* lhs_group,
                                                const wasm_module_t* rhs_mod,
@@ -49,7 +61,7 @@ WASM_PRIVATE int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mo
                                                   memo);
 }
 
-WASM_PRIVATE int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                      wasm_valtype_t lhs_type,
                                                      const wasm_reftype_t* lhs_ref,
                                                      const wasm_recgroup_t* lhs_group,
@@ -75,7 +87,7 @@ WASM_PRIVATE int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* 
                                                memo);
 }
 
-WASM_PRIVATE int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                 const wasm_functype_t* lhs,
                                                 const wasm_recgroup_t* lhs_group,
                                                 const wasm_module_t* rhs_mod,
@@ -121,7 +133,7 @@ WASM_PRIVATE int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_m
     return 1;
 }
 
-WASM_PRIVATE int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                    const wasm_storagetype_t* lhs,
                                                    const wasm_recgroup_t* lhs_group,
                                                    const wasm_module_t* rhs_mod,
@@ -141,7 +153,7 @@ WASM_PRIVATE int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lh
                                                      memo);
 }
 
-WASM_PRIVATE int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                  const wasm_fieldtype_t* lhs,
                                                  const wasm_recgroup_t* lhs_group,
                                                  const wasm_module_t* rhs_mod,
@@ -154,7 +166,7 @@ WASM_PRIVATE int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_
                                                    memo);
 }
 
-WASM_PRIVATE int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                 uint32_t lhs_idx,
                                                 const wasm_recgroup_t* lhs_group,
                                                 const wasm_module_t* rhs_mod,
@@ -216,7 +228,7 @@ WASM_PRIVATE int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_m
     }
 }
 
-WASM_PRIVATE int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
+static int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
                                       const wasm_recgroup_t* lhs_group,
                                       const wasm_module_t* rhs_mod,
                                       const wasm_recgroup_t* rhs_group,
@@ -240,7 +252,7 @@ WASM_PRIVATE int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
     return 1;
 }
 
-WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
                                         uint32_t lhs_idx,
                                         const wasm_module_t* rhs_mod,
                                         uint32_t rhs_idx,
@@ -270,7 +282,7 @@ WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
     return result;
 }
 
-WASM_PRIVATE int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
                                                  uint32_t lhs_idx,
                                                  const wasm_module_t* rhs_mod,
                                                  uint32_t rhs_idx,

@@ -1,4 +1,19 @@
-#include "../internal.h"
+#include "simd.h"
+#include "../module.h"
+#include "state.h"
+#include <stdio.h>
+#include "../instructions.h"
+#include "../memory_internal.h"
+#include "../portable.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../simd/compare.h"
+#include "../simd/float.h"
+#include "../simd/integer_small.h"
+#include "../simd/integer_wide.h"
+#include "../simd/lanes.h"
+#include "../values.h"
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;

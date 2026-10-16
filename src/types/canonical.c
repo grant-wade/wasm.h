@@ -1,4 +1,20 @@
-#include "../internal.h"
+#include "canonical.h"
+#include "../module.h"
+#include "../internal/alloc.h"
+#include "references.h"
+#include "../values.h"
+#include <string.h>
+
+static int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
+                                                      uint32_t lhs_idx,
+                                                      uint32_t rhs_idx,
+                                                      const wasm_recgroup_t* lhs_group,
+                                                      const wasm_recgroup_t* rhs_group,
+                                                      uint8_t* memo);
+static int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
+                                            uint32_t lhs_idx,
+                                            uint32_t rhs_idx,
+                                            uint8_t* memo);
 
 WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft) {
     WASM_FREE(ft->params);
@@ -29,7 +45,7 @@ WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft) {
     ft->num_results = UINT32_MAX;
 }
 
-WASM_PRIVATE void wasm__free_structtype(wasm_structtype_t* st) {
+static void wasm__free_structtype(wasm_structtype_t* st) {
     WASM_FREE(st->fields);
     st->fields = NULL;
     st->num_fields = 0;
@@ -130,7 +146,7 @@ WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_fun
     return 1;
 }
 
-WASM_PRIVATE int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs) {
+static int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs) {
     if (lhs->kind != rhs->kind) return 0;
     if (lhs->kind == WASM_STORAGE_PACKED) return lhs->of.packed_type == rhs->of.packed_type;
     if (lhs->of.valtype != rhs->of.valtype) return 0;
@@ -140,17 +156,17 @@ WASM_PRIVATE int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wa
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_group_contains_type(const wasm_recgroup_t* group,
+static int wasm__canonical_group_contains_type(const wasm_recgroup_t* group,
                                                uint32_t type_idx) {
     return group && type_idx >= group->first_type && type_idx < group->first_type + group->num_types;
 }
 
-WASM_PRIVATE uint32_t wasm__canonical_group_type_offset(const wasm_recgroup_t* group,
+static uint32_t wasm__canonical_group_type_offset(const wasm_recgroup_t* group,
                                                   uint32_t type_idx) {
     return type_idx - group->first_type;
 }
 
-WASM_PRIVATE int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mod,
                                                    const wasm_reftype_t* lhs,
                                                    const wasm_reftype_t* rhs,
                                                    const wasm_recgroup_t* lhs_group,
@@ -170,7 +186,7 @@ WASM_PRIVATE int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mo
                                                       memo);
 }
 
-WASM_PRIVATE int wasm__canonical_functype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_functype_equal_in_groups(const wasm_module_t* mod,
                                                     const wasm_functype_t* lhs,
                                                     const wasm_functype_t* rhs,
                                                     const wasm_recgroup_t* lhs_group,
@@ -203,7 +219,7 @@ WASM_PRIVATE int wasm__canonical_functype_equal_in_groups(const wasm_module_t* m
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t* mod,
                                                        const wasm_storagetype_t* lhs,
                                                        const wasm_storagetype_t* rhs,
                                                        const wasm_recgroup_t* lhs_group,
@@ -223,7 +239,7 @@ WASM_PRIVATE int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* mod,
                                                      const wasm_fieldtype_t* lhs,
                                                      const wasm_fieldtype_t* rhs,
                                                      const wasm_recgroup_t* lhs_group,
@@ -238,7 +254,7 @@ WASM_PRIVATE int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* 
                                                        memo);
 }
 
-WASM_PRIVATE int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
+static int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
                                                const wasm_comptype_t* lhs,
                                                const wasm_comptype_t* rhs,
                                                const wasm_recgroup_t* lhs_group,
@@ -280,7 +296,7 @@ WASM_PRIVATE int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
     }
 }
 
-WASM_PRIVATE int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
+static int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
                                                 uint32_t lhs_idx,
                                                 uint32_t rhs_idx,
                                                 const wasm_recgroup_t* lhs_group,
@@ -310,7 +326,7 @@ WASM_PRIVATE int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
     return wasm__comptype_body_equal_in_groups(mod, lhs, rhs, lhs_group, rhs_group, memo);
 }
 
-WASM_PRIVATE int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
+static int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
                                           const wasm_recgroup_t* lhs_group,
                                           const wasm_recgroup_t* rhs_group,
                                           uint8_t* memo) {
@@ -332,7 +348,7 @@ WASM_PRIVATE int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
                                                       uint32_t lhs_idx,
                                                       uint32_t rhs_idx,
                                                       const wasm_recgroup_t* lhs_group,
@@ -350,7 +366,7 @@ WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t*
     return wasm__canonical_type_equal_visit(mod, lhs_idx, rhs_idx, memo);
 }
 
-WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
+static int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
                                             uint32_t lhs_idx,
                                             uint32_t rhs_idx,
                                             uint8_t* memo) {
@@ -385,7 +401,7 @@ WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
     return result;
 }
 
-WASM_PRIVATE int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
+static int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
     uint8_t* memo;
     size_t memo_size;
     int result;
@@ -468,7 +484,7 @@ WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,
     }
 }
 
-WASM_PRIVATE int wasm__is_reftype_subtype(const wasm_module_t* mod,
+static int wasm__is_reftype_subtype(const wasm_module_t* mod,
                                     wasm_valtype_t subtype,
                                     wasm_valtype_t supertype) {
     if (!wasm__is_ref_type(subtype) || !wasm__is_ref_type(supertype)) return 0;
@@ -496,7 +512,7 @@ WASM_PRIVATE int wasm__is_storagetype_subtype(const wasm_module_t* mod,
     return wasm__is_valtype_subtype(mod, subtype->of.valtype, supertype->of.valtype);
 }
 
-WASM_PRIVATE int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
+static int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
                                       const wasm_fieldtype_t* subtype,
                                       const wasm_fieldtype_t* supertype) {
     if (subtype->is_mutable != supertype->is_mutable) return 0;
@@ -568,12 +584,12 @@ WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod,
     return 0;
 }
 
-WASM_PRIVATE wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
+static wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_FUNC) return NULL;
     return &type->of.func;
 }
 
-WASM_PRIVATE const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type) {
+static const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_FUNC) return NULL;
     return &type->of.func;
 }
@@ -588,12 +604,12 @@ WASM_PRIVATE const wasm_functype_t* wasm__module_const_functype(const wasm_modul
     return wasm__type_as_const_functype(&mod->types[type_idx]);
 }
 
-WASM_PRIVATE const wasm_structtype_t* wasm__type_as_const_structtype(const wasm_comptype_t* type) {
+static const wasm_structtype_t* wasm__type_as_const_structtype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_STRUCT) return NULL;
     return &type->of.struct_;
 }
 
-WASM_PRIVATE const wasm_arraytype_t* wasm__type_as_const_arraytype(const wasm_comptype_t* type) {
+static const wasm_arraytype_t* wasm__type_as_const_arraytype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_ARRAY) return NULL;
     return &type->of.array;
 }

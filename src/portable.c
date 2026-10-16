@@ -1,4 +1,9 @@
-#include "internal.h"
+#include "portable.h"
+#include "module.h"
+#include "runtime.h"
+#include "internal/config.h"
+#include <string.h>
+#include <stdio.h>
 
 WASM_PRIVATE uint32_t wasm__clz32(uint32_t v) {
     uint32_t n = 0;
@@ -85,16 +90,16 @@ WASM_PRIVATE uint64_t wasm__shr_s64_bits(uint64_t value, uint32_t shift) {
 }
 
 #if WASM__BIG_ENDIAN
-WASM_PRIVATE uint16_t wasm__bswap16(uint16_t v) {
+static uint16_t wasm__bswap16(uint16_t v) {
     return (uint16_t)((v >> 8) | (v << 8));
 }
 
-WASM_PRIVATE uint32_t wasm__bswap32(uint32_t v) {
+static uint32_t wasm__bswap32(uint32_t v) {
     return ((v >> 24) & 0x000000FFu) | ((v >> 8) & 0x0000FF00u) |
            ((v << 8) & 0x00FF0000u) | ((v << 24) & 0xFF000000u);
 }
 
-WASM_PRIVATE uint64_t wasm__bswap64(uint64_t v) {
+static uint64_t wasm__bswap64(uint64_t v) {
     uint32_t lo = (uint32_t)v, hi = (uint32_t)(v >> 32);
     return ((uint64_t)wasm__bswap32(lo) << 32) | (uint64_t)wasm__bswap32(hi);
 }
@@ -148,7 +153,7 @@ WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v) {
     memcpy(p, &v, 8);
 }
 
-WASM_PRIVATE const char* wasm__feature_name(uint32_t flag) {
+static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
         case WASM_FEATURE_SIGN_EXT:
             return "sign-extension operators";

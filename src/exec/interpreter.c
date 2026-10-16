@@ -1,6 +1,28 @@
-#include "../internal.h"
+#include "interpreter.h"
+#include <stdio.h>
+#include "bulk.h"
+#include "calls.h"
+#include "control.h"
+#include "exceptions.h"
+#include "frames.h"
+#include "gc.h"
+#include "numeric.h"
+#include "simd.h"
+#include "../instructions.h"
+#include "../internal/alloc.h"
+#include "../memory_internal.h"
+#include "../module.h"
+#include "../portable.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../support.h"
+#include "../types/canonical.h"
+#include "../types/cross_module.h"
+#include "../types/references.h"
+#include "../values.h"
+#include <string.h>
 
-WASM_PRIVATE wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
+static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
                                            wasm_host_func_t host_func,
                                            const wasm_value_t* args,
                                            uint32_t num_args,
@@ -53,7 +75,7 @@ WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
     cf->lsp++;
 }
 
-WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
+static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm__call_frame_t* cf,
                                       wasm_module_t** next_module,
                                       uint32_t* next_func_idx,

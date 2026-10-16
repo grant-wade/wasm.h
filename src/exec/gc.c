@@ -1,4 +1,15 @@
-#include "../internal.h"
+#include "gc.h"
+#include "../module.h"
+#include "state.h"
+#include <stdio.h>
+#include "exceptions.h"
+#include "../internal/gc_types.h"
+#include "../memory_internal.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../types/canonical.h"
+#include "../types/references.h"
+#include "../values.h"
 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;

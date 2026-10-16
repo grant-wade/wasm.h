@@ -1,6 +1,15 @@
-#include "internal.h"
+#include "wasm.h"
+#include "values.h"
+#include "runtime.h"
+#include "exec/frames.h"
+#include "support.h"
+#include "types/references.h"
+#include "types/canonical.h"
+#include "module.h"
+#include "internal/gc_types.h"
+#include <stdio.h>
 
-WASM_PRIVATE const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
+static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     switch (kind) {
         case WASM_GC_OBJ_STRUCT:
             return "struct";
@@ -11,7 +20,7 @@ WASM_PRIVATE const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
+static wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
                                                    const wasm_value_t* ref,
                                                    wasm_gc_object_kind_t expected_kind,
                                                    const wasm_gc_header_t** out_object) {

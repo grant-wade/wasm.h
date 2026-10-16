@@ -6,6 +6,7 @@
 
 #define WL_IMPL
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -124,7 +125,20 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
 #define WASM_IMPL
 #include "wasm.h"
 #else
-#include "../src/internal.h"
+#include "../src/module.h"
+#include "../src/runtime.h"
+#include "../src/values.h"
+#include "../src/portable.h"
+#include "../src/types/canonical.h"
+#include "../src/types/references.h"
+#include "../src/exec/frames.h"
+#include "../src/exec/state.h"
+#include "../src/platform/wasi_state.h"
+#include "../src/simd/compare.h"
+#include "../src/simd/float.h"
+#include "../src/simd/integer_small.h"
+#include "../src/simd/integer_wide.h"
+#include "../src/simd/lanes.h"
 #endif
 
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {

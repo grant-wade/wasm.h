@@ -1,4 +1,9 @@
-#include "../internal.h"
+#include "numeric.h"
+#include "../module.h"
+#include "../memory_internal.h"
+#include "../reader.h"
+#include "../types/references.h"
+#include "stack.h"
 
 WASM_PRIVATE wasm_error_t wasm__validator_validate_numeric(wasm__validator_t* v,
                                                      const uint8_t* at,

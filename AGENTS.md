@@ -41,6 +41,9 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
 - Keep `.c` files independently compilable. Add new units to `WASM_RUNTIME_SOURCES` and `src/amalgamation.h`.
+- Private function declarations belong in a header beside their owning `.c` file, and only functions used by another translation unit belong there. Keep file-local helpers `static`; public API declarations remain in `src/wasm.h`.
+- Include a source file's own header first, then the interfaces it uses directly. Headers must be self-contained and their include graph acyclic. Shared layouts belong in focused owner/state headers; do not introduce umbrella internal headers.
+- Keep OS dependencies in `src/platform/` and SIMD intrinsics in `src/simd/native.h`. `check` compiles each source header independently and checks missing prototypes in modular runtime builds.
 - For generated `wasm.h`, public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`. Internal linkage uses `WASM_PRIVATE`/`WASM_PRIVATE_INLINE` to support both build forms.
 - `WASM_H_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; `test/wl.h` and the runtime platform bridges may be compiled with it off.
 - If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.

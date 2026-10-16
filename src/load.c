@@ -1,4 +1,18 @@
-#include "internal.h"
+#include "wasm.h"
+#include "validate/module.h"
+#include "memory_internal.h"
+#include "reader.h"
+#include "decode.h"
+#include "module.h"
+#include "exec/control.h"
+#include "runtime.h"
+#include "init_expr.h"
+#include "types/canonical.h"
+#include "validate/function.h"
+#include "internal/gc_types.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
 
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     wasm__reader_t r;

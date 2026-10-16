@@ -1,4 +1,42 @@
-#include "internal.h"
+#include "module.h"
+#include "values.h"
+#include "types/references.h"
+#include "runtime.h"
+#include "internal/config.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdio.h>
+
+WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
+                                                  const char* name,
+                                                  wasm_global_t** out_global,
+                                                  uint32_t* out_index) {
+    wasm_export_kind_t kind;
+    uint32_t index;
+
+    if (out_global) *out_global = NULL;
+    if (out_index) *out_index = 0;
+
+    if (!mod || !name) return WASM_ERR_MALFORMED;
+
+    if (!wasm_find_export(mod, name, &kind, &index) || kind != WASM_EXPORT_GLOBAL) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT,
+                          "global export '%s' not found", name);
+        return WASM_ERR_UNDEFINED_EXPORT;
+    }
+    if (index >= mod->num_globals) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "global export '%s' index %u out of range",
+                          name, (unsigned)index);
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (out_global) *out_global = &mod->globals[index];
+    if (out_index) *out_index = index;
+    return WASM_OK;
+}
 
 WASM_PRIVATE wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
     wasm_value_t value;
@@ -16,39 +54,11 @@ WASM_PRIVATE void wasm__global_set_value(wasm_global_t* global, wasm_value_t val
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
-    if (stack->size >= stack->cap) {
-        uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
-        if (!values) return WASM_ERR_OOM;
-        stack->values = values;
-        stack->cap = new_cap;
-    }
 
-    stack->values[stack->size++] = value;
-    return WASM_OK;
-}
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
-                                                     wasm__init_expr_stack_t* stack,
-                                                     wasm_valtype_t expected_type,
-                                                     const wasm_reftype_t* expected_ref,
-                                                     wasm_value_t* out_value) {
-    wasm_value_t value;
 
-    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
-    value = stack->values[--stack->size];
-    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
-        return WASM_ERR_TYPE_MISMATCH;
-    *out_value = value;
-    return WASM_OK;
-}
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
-                                                    wasm_valtype_t expected_type,
-                                                    wasm_value_t* out_value) {
-    return wasm__init_expr_stack_pop_expect(NULL, stack, expected_type, NULL, out_value);
-}
+
 
 WASM_PRIVATE int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs) {
     return (int32_t)((uint32_t)lhs + (uint32_t)rhs);
@@ -239,7 +249,7 @@ WASM_PRIVATE const wasm_table_t* wasm__table_actual_const(const wasm_table_t* ta
     return table;
 }
 
-WASM_PRIVATE wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
+static wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
                                                     wasm_module_t* mod,
                                                     uint32_t func_idx,
                                                     uint32_t* out_ref_id) {
@@ -270,7 +280,7 @@ WASM_PRIVATE wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
+static wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
                                              uint32_t func_idx,
                                              uint32_t* out_ref_id) {
     wasm_func_t* func;

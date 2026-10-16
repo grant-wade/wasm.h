@@ -1,4 +1,9 @@
-#include "../internal.h"
+#include "gc.h"
+#include "../module.h"
+#include "../reader.h"
+#include "../types/canonical.h"
+#include "../types/references.h"
+#include "stack.h"
 
 WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint8_t* at) {
     uint32_t subop = wasm__read_leb128_u32(&v->r);

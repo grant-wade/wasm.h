@@ -1,4 +1,15 @@
-#include "internal.h"
+#include "wasm.h"
+#include "runtime.h"
+#include "types/canonical.h"
+#include "exec/frames.h"
+#include "exec/exceptions.h"
+#include "exec/interpreter.h"
+#include "types/references.h"
+#include "module.h"
+#include "internal/alloc.h"
+#include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
@@ -48,7 +59,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
+static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
                                                 const char* name,
                                                 uint32_t* out_index,
                                                 const wasm_functype_t** out_type) {
@@ -88,38 +99,9 @@ WASM_PRIVATE wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
-                                                  const char* name,
-                                                  wasm_global_t** out_global,
-                                                  uint32_t* out_index) {
-    wasm_export_kind_t kind;
-    uint32_t index;
 
-    if (out_global) *out_global = NULL;
-    if (out_index) *out_index = 0;
 
-    if (!mod || !name) return WASM_ERR_MALFORMED;
-
-    if (!wasm_find_export(mod, name, &kind, &index) || kind != WASM_EXPORT_GLOBAL) {
-        if (mod->rt)
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT,
-                          "global export '%s' not found", name);
-        return WASM_ERR_UNDEFINED_EXPORT;
-    }
-    if (index >= mod->num_globals) {
-        if (mod->rt)
-            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
-                          "global export '%s' index %u out of range",
-                          name, (unsigned)index);
-        return WASM_ERR_MALFORMED;
-    }
-
-    if (out_global) *out_global = &mod->globals[index];
-    if (out_index) *out_index = index;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_error_t wasm__fmt_char_to_type(char ch,
+static wasm_error_t wasm__fmt_char_to_type(char ch,
                                            int in_results,
                                            int* out_is_void,
                                            wasm_valtype_t* out_type,
@@ -156,7 +138,7 @@ WASM_PRIVATE wasm_error_t wasm__fmt_char_to_type(char ch,
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__parse_fmt_string(const char* fmt,
+static wasm_error_t wasm__parse_fmt_string(const char* fmt,
                                            wasm_functype_t* out_type,
                                            const char** out_error) {
     const char* p;
@@ -273,7 +255,7 @@ WASM_PRIVATE wasm_error_t wasm__parse_fmt_string(const char* fmt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
+static wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
                                         wasm_error_t err,
                                         const char* prefix,
                                         const char* detail) {
@@ -284,7 +266,7 @@ WASM_PRIVATE wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
     return err;
 }
 
-WASM_PRIVATE wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
+static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
                                       const char* func_name,
                                       const char* fmt,
                                       va_list ap) {

@@ -1,6 +1,10 @@
-#include "../internal.h"
+#include "simd.h"
+#include "../module.h"
+#include "../instructions.h"
+#include "../reader.h"
+#include "stack.h"
 
-WASM_PRIVATE wasm_error_t wasm__validator_read_simd_lane(wasm__validator_t* v,
+static wasm_error_t wasm__validator_read_simd_lane(wasm__validator_t* v,
                                                    const uint8_t* at,
                                                    uint32_t subop) {
     uint32_t lane_limit = wasm__simd_lane_limit(subop);

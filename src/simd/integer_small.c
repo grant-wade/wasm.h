@@ -1,4 +1,6 @@
-#include "../internal.h"
+#include "integer_small.h"
+#include "native.h"
+#include "lanes.h"
 
 /* Use unsigned NEON arithmetic for Wasm wrapping operations: GCC exposes
  * some signed intrinsics as C vector operations instrumented by UBSan. */

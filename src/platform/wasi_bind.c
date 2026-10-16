@@ -1,4 +1,7 @@
-#include "../internal.h"
+#include "wasi_fd.h"
+#include "wasi_io.h"
+#include "wasi_path.h"
+#include "wasi_state.h"
 
 #if WASM_ENABLE_PLATFORM
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {

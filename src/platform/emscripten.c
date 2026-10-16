@@ -1,7 +1,29 @@
-#include "../internal.h"
+#include "emscripten.h"
+#include "host.h"
+#include "wasi_state.h"
+#include "../module.h"
+#include "../runtime.h"
+#include "../internal/alloc.h"
+#include "../portable.h"
+#include "../memory_internal.h"
+#include "wasi_io.h"
+#include <errno.h>
+#include <string.h>
+#include <time.h>
 
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE int32_t wasm__emscripten_errno_from_host(int err_code) {
+struct wasm__emscripten_state_t {
+    wasm_memory_t memory;
+};
+
+WASM_PRIVATE void wasm__emscripten_state_destroy(wasm_runtime_t* rt) {
+    if (!rt || !rt->emscripten_state) return;
+    WASM_FREE(rt->emscripten_state->memory.data);
+    WASM_FREE(rt->emscripten_state);
+    rt->emscripten_state = NULL;
+}
+
+static int32_t wasm__emscripten_errno_from_host(int err_code) {
     switch (err_code) {
         case 0:
             return 0;
@@ -118,12 +140,12 @@ WASM_PRIVATE int32_t wasm__emscripten_errno_from_host(int err_code) {
     }
 }
 
-WASM_PRIVATE int32_t wasm__emscripten_neg_errno(int err_code) {
+static int32_t wasm__emscripten_neg_errno(int err_code) {
     if (err_code <= 0) err_code = EINVAL;
     return -wasm__emscripten_errno_from_host(err_code);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
+static wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
                                                 uint32_t num_results,
                                                 int32_t value) {
     if (!results || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -131,7 +153,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
     return WASM_OK;
 }
 
-WASM_PRIVATE int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
+static int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
                                               uint64_t mem_size,
                                               uint32_t ptr,
                                               char** out_string) {
@@ -156,7 +178,7 @@ WASM_PRIVATE int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__emscripten_store_i32(wasm_memory_t* memory,
+static int wasm__emscripten_store_i32(wasm_memory_t* memory,
                                       uint64_t mem_size,
                                       uint32_t ptr,
                                       int32_t value) {
@@ -165,7 +187,7 @@ WASM_PRIVATE int wasm__emscripten_store_i32(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__emscripten_store_c_string(wasm_memory_t* memory,
+static int wasm__emscripten_store_c_string(wasm_memory_t* memory,
                                            uint64_t mem_size,
                                            uint32_t ptr,
                                            const char* text) {
@@ -249,7 +271,7 @@ WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* 
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
@@ -266,7 +288,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
@@ -284,7 +306,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
                                                   const wasm_value_t* args, uint32_t num_args,
                                                   wasm_value_t* results, uint32_t num_results,
                                                   void* userdata) {
@@ -300,7 +322,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
                                        memory ? (int32_t)(memory->max_pages * (uint64_t)WASM_PAGE_SIZE) : 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
                                                  const wasm_value_t* args, uint32_t num_args,
                                                  wasm_value_t* results, uint32_t num_results,
                                                  void* userdata) {
@@ -326,7 +348,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
                                        wasm_memory_grow(mod, target_pages - memory->pages) >= 0 ? 1 : 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
@@ -352,7 +374,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
                                                   const wasm_value_t* args, uint32_t num_args,
                                                   wasm_value_t* results, uint32_t num_results,
                                                   void* userdata) {
@@ -390,7 +412,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
@@ -405,7 +427,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOSYS));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
                                                const wasm_value_t* args, uint32_t num_args,
                                                wasm_value_t* results, uint32_t num_results,
                                                void* userdata) {
@@ -417,7 +439,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
                                                        const wasm_value_t* args, uint32_t num_args,
                                                        wasm_value_t* results, uint32_t num_results,
                                                        void* userdata) {
@@ -443,7 +465,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -463,7 +485,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -489,7 +511,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
                                                       const wasm_value_t* args, uint32_t num_args,
                                                       wasm_value_t* results, uint32_t num_results,
                                                       void* userdata) {
@@ -509,7 +531,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
                                                      const wasm_value_t* args, uint32_t num_args,
                                                      wasm_value_t* results, uint32_t num_results,
                                                      void* userdata) {
@@ -529,7 +551,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc >= 0 ? rc : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -555,7 +577,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc >= 0 ? rc : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -567,7 +589,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOTTY));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_t* mod,
                                                               const wasm_value_t* args, uint32_t num_args,
                                                               wasm_value_t* results, uint32_t num_results,
                                                               void* userdata) {
@@ -580,7 +602,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOSYS));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
                                                          const wasm_value_t* args, uint32_t num_args,
                                                          wasm_value_t* results, uint32_t num_results,
                                                          void* userdata) {
@@ -600,7 +622,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mo
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -632,7 +654,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
 #endif
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
                                                      const wasm_value_t* args, uint32_t num_args,
                                                      wasm_value_t* results, uint32_t num_results,
                                                      void* userdata) {
@@ -658,7 +680,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
                                                         const wasm_value_t* args, uint32_t num_args,
                                                         wasm_value_t* results, uint32_t num_results,
                                                         void* userdata) {
@@ -698,7 +720,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod
     return wasm__emscripten_return_i32(results, num_results, rc_value);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -724,7 +746,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
                                                       const wasm_value_t* args, uint32_t num_args,
                                                       wasm_value_t* results, uint32_t num_results,
                                                       void* userdata) {
@@ -750,7 +772,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_utimensat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_utimensat(wasm_module_t* mod,
                                                        const wasm_value_t* args, uint32_t num_args,
                                                        wasm_value_t* results, uint32_t num_results,
                                                        void* userdata) {

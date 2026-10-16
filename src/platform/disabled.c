@@ -1,4 +1,5 @@
-#include "../internal.h"
+#include "../runtime.h"
+
 
 #if WASM_ENABLE_PLATFORM
 #else

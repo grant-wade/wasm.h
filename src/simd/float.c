@@ -1,4 +1,8 @@
-#include "../internal.h"
+#include "float.h"
+#include "native.h"
+#include "../values.h"
+#include "lanes.h"
+#include <math.h>
 
 WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value) {
 #if defined(WASM__SIMD_USE_NEON)

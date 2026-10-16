@@ -1,6 +1,20 @@
-#include "../internal.h"
+#include "stack.h"
+#include "../module.h"
+#include "../instructions.h"
+#include "../internal/alloc.h"
+#include "../memory_internal.h"
+#include "../portable.h"
+#include "../runtime.h"
+#include "../support.h"
+#include "../types/canonical.h"
+#include "../types/references.h"
+#include "module.h"
+#include "../values.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
 
-WASM_PRIVATE uint32_t wasm__validator_local_init_word_count(uint32_t num_locals) {
+static uint32_t wasm__validator_local_init_word_count(uint32_t num_locals) {
     return num_locals ? ((num_locals + 63u) >> 6) : 0u;
 }
 
@@ -21,14 +35,14 @@ WASM_PRIVATE int wasm__validator_local_init_get(const uint64_t* bits, uint32_t i
     return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;
 }
 
-WASM_PRIVATE void wasm__validator_copy_local_init(uint64_t* dst,
+static void wasm__validator_copy_local_init(uint64_t* dst,
                                             const uint64_t* src,
                                             uint32_t word_count) {
     if (word_count == 0) return;
     memcpy(dst, src, (size_t)word_count * sizeof(*dst));
 }
 
-WASM_PRIVATE void wasm__validator_seed_local_init(wasm__validator_t* v,
+static void wasm__validator_seed_local_init(wasm__validator_t* v,
                                             const wasm_func_t* func,
                                             const wasm_functype_t* ft) {
     uint32_t index;
@@ -428,7 +442,7 @@ WASM_PRIVATE int wasm__validator_types_match(const wasm__validator_t* v,
     return 1;
 }
 
-WASM_PRIVATE int wasm__validator_meet_type(const wasm_module_t* mod,
+static int wasm__validator_meet_type(const wasm_module_t* mod,
                                      wasm_valtype_t lhs_type,
                                      const wasm_reftype_t* lhs_ref,
                                      wasm_valtype_t rhs_type,

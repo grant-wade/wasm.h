@@ -1,4 +1,14 @@
-#include "internal.h"
+#include "values.h"
+#include "simd/native.h"
+#include "portable.h"
+#include "support.h"
+#include "types/references.h"
+#include "types/canonical.h"
+#include "module.h"
+#include "internal/gc_types.h"
+#include "internal/config.h"
+#include <string.h>
+#include <math.h>
 
 /* Bit transport must not pass signaling NaNs through floating registers. */
 WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits) {
@@ -56,14 +66,14 @@ WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment) {
     return value + (alignment - remainder);
 }
 
-WASM_PRIVATE size_t wasm__gc_field_storage_alignment(const wasm_fieldtype_t* field) {
+static size_t wasm__gc_field_storage_alignment(const wasm_fieldtype_t* field) {
     if (field->storage.kind == WASM_STORAGE_PACKED) {
         return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
     }
     return (size_t)WASM__ALIGNOF(wasm_value_t);
 }
 
-WASM_PRIVATE size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
+static size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
     if (field->storage.kind == WASM_STORAGE_PACKED) {
         return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
     }
@@ -147,7 +157,7 @@ WASM_PRIVATE wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* f
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
+static wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
                                               const void* src,
                                               int sign_extend,
                                               wasm_value_t* out_value) {
@@ -170,7 +180,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* fiel
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
+static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
                                                const wasm_fieldtype_t* field,
                                                void* dst,
                                                wasm_value_t value) {
@@ -194,7 +204,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
+static void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
                                        const wasm_structtype_t* type,
                                        uint32_t field_index) {
     size_t offset;
@@ -205,7 +215,7 @@ WASM_PRIVATE void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
     return ((uint8_t*)object) + offset;
 }
 
-WASM_PRIVATE const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
+static const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
                                                    const wasm_structtype_t* type,
                                                    uint32_t field_index) {
     size_t offset;
@@ -250,7 +260,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
     return wasm__gc_struct_set_field(object, type, field_index, value);
 }
 
-WASM_PRIVATE const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
+static const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
                                                     const wasm_arraytype_t* type,
                                                     uint32_t index) {
     size_t data_offset = wasm__gc_array_data_offset(type);
@@ -260,7 +270,7 @@ WASM_PRIVATE const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t*
     return ((const uint8_t*)object) + data_offset + ((size_t)index * elem_size);
 }
 
-WASM_PRIVATE void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
+static void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
                                         const wasm_arraytype_t* type,
                                         uint32_t index) {
     size_t data_offset = wasm__gc_array_data_offset(type);
@@ -413,7 +423,7 @@ WASM_PRIVATE int wasm__is_vector_type(wasm_valtype_t type) {
     return type == WASM_TYPE_V128;
 }
 
-WASM_PRIVATE int wasm__is_numeric_type(wasm_valtype_t type) {
+static int wasm__is_numeric_type(wasm_valtype_t type) {
     return type == WASM_TYPE_I32 || type == WASM_TYPE_I64 ||
            type == WASM_TYPE_F32 || type == WASM_TYPE_F64;
 }
@@ -594,21 +604,21 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_valu
     return WASM_OK;
 }
 
-WASM_PRIVATE int wasm__f32_is_nan_bits(float value) {
+static int wasm__f32_is_nan_bits(float value) {
     uint32_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
     return (bits & 0x7FFFFFFFu) > 0x7F800000u;
 }
 
-WASM_PRIVATE int wasm__f64_is_nan_bits(double value) {
+static int wasm__f64_is_nan_bits(double value) {
     uint64_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
     return (bits & UINT64_C(0x7FFFFFFFFFFFFFFF)) > UINT64_C(0x7FF0000000000000);
 }
 
-WASM_PRIVATE float wasm__quiet_f32_nan(float value) {
+static float wasm__quiet_f32_nan(float value) {
     uint32_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
@@ -617,7 +627,7 @@ WASM_PRIVATE float wasm__quiet_f32_nan(float value) {
     return value;
 }
 
-WASM_PRIVATE double wasm__quiet_f64_nan(double value) {
+static double wasm__quiet_f64_nan(double value) {
     uint64_t bits;
 
     memcpy(&bits, &value, sizeof(bits));

@@ -1,4 +1,14 @@
-#include "../internal.h"
+#include "bulk.h"
+#include "../module.h"
+#include "state.h"
+#include <stdio.h>
+#include "../internal/alloc.h"
+#include "../memory_internal.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../types/references.h"
+#include "../values.h"
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;

@@ -1,7 +1,18 @@
-#include "../internal.h"
+#include "wasi_path.h"
+#include "host.h"
+#include "../module.h"
+#include "../runtime.h"
+#include "../internal/alloc.h"
+#include "../portable.h"
+#include "wasi_state.h"
+#include "wasi_io.h"
+#include "../memory_internal.h"
+#include <errno.h>
+#include <string.h>
 
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE int wasm__wasi_dirflags_to_host(uint32_t flags) {
+#if WASM__PLATFORM_POSIX
+static int wasm__wasi_dirflags_to_host(uint32_t flags) {
     int host_flags = 0;
 
 #ifdef AT_SYMLINK_NOFOLLOW
@@ -12,7 +23,9 @@ WASM_PRIVATE int wasm__wasi_dirflags_to_host(uint32_t flags) {
     return host_flags;
 }
 
-WASM_PRIVATE int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags) {
+#endif
+
+static int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags) {
     int host_flags = 0;
 
 #ifdef O_BINARY

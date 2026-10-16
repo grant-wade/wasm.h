@@ -11,7 +11,13 @@
 #include <string.h>
 
 #ifdef WASM_TEST_MODULAR
-#include "../src/internal.h"
+#include "../src/module.h"
+#include "../src/runtime.h"
+#include "../src/values.h"
+#include "../src/types/canonical.h"
+#include "../src/simd/lanes.h"
+#include "../src/exec/interpreter.h"
+#include "../src/exec/frames.h"
 #else
 #include "../wasm.h"
 #endif

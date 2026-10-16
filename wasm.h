@@ -753,14 +753,15 @@ const char* wasm_error_string(wasm_error_t err);
 #pragma warning(push)
 #pragma warning(disable : 4702)
 #endif
-/* BEGIN src/internal.h */
-/* Shared declarations for the independently compiled runtime sources. */
-#ifndef WASM_INTERNAL_H
-#define WASM_INTERNAL_H
+/* BEGIN src/support.c */
 
-/* BEGIN src/internal/common.h */
-#ifndef WASM_INTERNAL_COMMON_H
-#define WASM_INTERNAL_COMMON_H
+/* BEGIN src/support.h */
+#ifndef WASM_SUPPORT_H
+#define WASM_SUPPORT_H
+
+/* BEGIN src/internal/config.h */
+#ifndef WASM_INTERNAL_CONFIG_H
+#define WASM_INTERNAL_CONFIG_H
 
 
 #ifdef WASM_AMALGAMATION
@@ -771,225 +772,39 @@ const char* wasm_error_string(wasm_error_t err);
 #define WASM_PRIVATE_INLINE extern
 #endif
 
-#include <errno.h>
-#include <math.h>
-#include <stdarg.h>
-#include <stdio.h>
+#if defined(_MSC_VER)
+#define WASM__ALIGNOF(type) __alignof(type)
+#else
+#define WASM__ALIGNOF(type) offsetof(struct { char c; type value; }, value)
+#endif
+
+#define WASM__IMPLEMENTED_FEATURES                                                     \
+    (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
+     WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
+     WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
+     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
+     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
+
+#endif /* WASM_INTERNAL_CONFIG_H */
+/* END src/internal/config.h */
+
+WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type);
+
+WASM_PRIVATE_INLINE int wasm__uses_externref_storage(wasm_valtype_t type);
+
+WASM_PRIVATE_INLINE int wasm__uses_exnref_storage(wasm_valtype_t type);
+
+WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type);
+
+#endif /* WASM_SUPPORT_H */
+/* END src/support.h */
+
+/* BEGIN src/internal/alloc.h */
+#ifndef WASM_INTERNAL_ALLOC_H
+#define WASM_INTERNAL_ALLOC_H
+
+
 #include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
-#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
-#define WASM__SIMD_USE_NEON 1
-#include <arm_neon.h>
-#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define WASM__SIMD_USE_SSE2 1
-#include <emmintrin.h>
-#include <xmmintrin.h>
-#endif
-
-#if WASM_ENABLE_PLATFORM
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <direct.h>
-#include <fcntl.h>
-#include <io.h>
-#include <share.h>
-#include <signal.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <windows.h>
-#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
-#include <dirent.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sched.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-#include <unistd.h>
-#endif
-#endif
-
-typedef enum wasm_gc_object_kind_t {
-    WASM_GC_OBJ_STRUCT = 1,
-    WASM_GC_OBJ_ARRAY = 2
-} wasm_gc_object_kind_t;
-
-struct wasm_gc_header_t {
-    wasm_gc_header_t* next_alloc;
-    size_t object_size;
-    wasm_module_t* module;
-    uint32_t type_index;
-    uint8_t kind;
-    uint8_t marked;
-    uint16_t reserved;
-};
-
-typedef struct wasm_gc_struct_t {
-    wasm_gc_header_t header;
-    uint8_t payload[1];
-} wasm_gc_struct_t;
-
-typedef struct wasm_gc_array_t {
-    wasm_gc_header_t header;
-    uint32_t length;
-    uint8_t payload[1];
-} wasm_gc_array_t;
-
-#define WASM__GC_STRUCT_HEADER_SIZE offsetof(wasm_gc_struct_t, payload)
-#define WASM__GC_ARRAY_HEADER_SIZE offsetof(wasm_gc_array_t, payload)
-
-typedef struct wasm__control_target_t {
-    uint32_t end_offset;
-    uint32_t aux_offset;
-} wasm__control_target_t;
-
-struct wasm_func_t {
-    uint32_t type_idx;
-    uint32_t num_locals;
-    wasm_valtype_t* locals;
-    wasm_reftype_t* local_reftypes;
-    const uint8_t* code;
-    uint32_t code_len;
-    wasm__control_target_t* control_targets;
-    uint32_t max_label_depth;
-    uint32_t funcref_id;
-    int is_declared_ref;
-    int is_import;
-    wasm_host_func_t host_func;
-    void* host_userdata;
-};
-
-struct wasm_func_ref_t {
-    struct wasm_module_t* module;
-    uint32_t func_idx;
-};
-
-struct wasm__exception_object_t {
-    uint32_t tag_index;
-    uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
-    struct wasm__exception_object_t* next;
-};
-
-struct wasm__emscripten_state_t {
-    wasm_memory_t memory;
-};
-
-struct wasm__externref_box_t {
-    wasm_value_t value;
-    wasm__externref_box_t* next;
-};
-
-struct wasm_module_t {
-    wasm_runtime_t* rt;
-    void* host_userdata;
-    uint8_t* module_bytes;
-    size_t module_size;
-    wasm_comptype_t* types;
-    uint32_t num_types;
-    wasm_recgroup_t* rec_groups;
-    uint32_t num_rec_groups;
-    wasm_func_t* funcs;
-    uint32_t num_funcs;
-    wasm_import_info_t* imports;
-    uint32_t num_imports;
-    wasm_export_t* exports;
-    uint32_t num_exports;
-    wasm_global_t* globals;
-    uint32_t num_globals;
-    wasm_tag_t* tags;
-    uint32_t num_tags;
-    wasm_table_t* tables;
-    uint32_t num_tables;
-    wasm_memory_t* memories;
-    wasm_custom_section_t* custom_sections;
-    uint32_t num_custom_sections;
-    wasm_data_segment_t* data_segments;
-    uint32_t num_data_segments;
-    wasm_elem_segment_t* elem_segments;
-    uint32_t num_elem_segments;
-    uint32_t num_func_imports;
-    uint32_t num_global_imports;
-    uint32_t num_memories;
-    uint32_t num_code_bodies;
-    uint32_t declared_data_count;
-    uint32_t required_features;
-    int has_data_count_section;
-    int uses_data_count_section;
-    int preserve_on_failure;
-    uint32_t start_func;
-    int startup_ran;
-    wasm_module_t* gc_prev;
-    wasm_module_t* gc_next;
-    wasm_module_t* failed_next;
-};
-
-struct wasm_runtime_t {
-    wasm_import_t* imports;
-    uint32_t num_imports;
-    uint32_t cap_imports;
-    wasm_func_ref_t* func_refs;
-    uint32_t num_func_refs;
-    uint32_t cap_func_refs;
-    wasm_global_import_t* global_imports;
-    uint32_t num_global_imports;
-    uint32_t cap_global_imports;
-    wasm_table_import_t* table_imports;
-    uint32_t num_table_imports;
-    uint32_t cap_table_imports;
-    wasm_memory_import_t* memory_imports;
-    uint32_t num_memory_imports;
-    uint32_t cap_memory_imports;
-    wasm_tag_import_t* tag_imports;
-    uint32_t num_tag_imports;
-    uint32_t cap_tag_imports;
-    uint64_t next_tag_identity;
-    wasm_value_t* stack;
-    uint32_t max_stack;
-    uint32_t sp;
-    uint64_t fuel;
-    int fuel_enabled;
-    uint32_t enabled_features;
-    int lazy_validation;
-    wasm_error_t last_error;
-    char error_msg[256];
-    wasm__exception_state_t pending_exception;
-    wasm__exception_object_t* exception_objects;
-    uint8_t* gc_heap;
-    size_t gc_heap_size;
-    size_t gc_heap_offset;
-    wasm_gc_header_t* gc_allocations;
-    wasm_module_t* gc_modules;
-    wasm_module_t* failed_modules;
-    wasm__externref_box_t* externref_boxes;
-    uint8_t* frame_arena;
-    size_t frame_arena_size;
-    size_t frame_arena_offset;
-    wasm__call_frame_t* call_frames;
-    uint32_t max_call_frames;
-    uint32_t call_frame_sp;
-    wasm_valtype_t* validator_stack;
-    wasm_reftype_t* validator_stack_reftypes;
-    wasm__val_frame_t* validator_frames;
-    uint64_t* validator_local_init_bits;
-    uint64_t* validator_local_init_entry_bits;
-    size_t validator_local_init_capacity;
-    uint32_t backtrace_depth;
-    uint32_t max_labels;
-    uint32_t* backtrace_func_indices;
-    uint32_t* backtrace_offsets;
-    wasm__wasi_state_t* wasi_state;
-    int emscripten_stubs_enabled;
-    wasm__emscripten_state_t* emscripten_state;
-};
-
 #ifdef WASM_MALLOC
 #define WASM__HAS_CUSTOM_MALLOC 1
 #endif
@@ -1020,6 +835,67 @@ struct wasm_runtime_t {
 #if defined(WASM__NEEDS_CALLOC_FALLBACK)
 WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size);
 #define WASM_CALLOC(n, sz) wasm__calloc_fallback((n), (sz))
+#endif
+
+#endif /* WASM_INTERNAL_ALLOC_H */
+/* END src/internal/alloc.h */
+#include <string.h>
+
+#if defined(WASM__NEEDS_CALLOC_FALLBACK)
+WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size) {
+    size_t total;
+    void* ptr;
+
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+
+    total = count * size;
+    ptr = WASM_MALLOC(total);
+    if (ptr) memset(ptr, 0, total);
+    return ptr;
+}
+
+#endif
+WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
+    return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
+}
+
+WASM_PRIVATE_INLINE int wasm__uses_externref_storage(wasm_valtype_t type) {
+    return type == WASM_TYPE_EXTERNREF || type == WASM_TYPE_NOEXTERN;
+}
+
+WASM_PRIVATE_INLINE int wasm__uses_exnref_storage(wasm_valtype_t type) {
+    return type == WASM_TYPE_EXNREF || type == WASM_TYPE_NOEXN;
+}
+
+WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type) {
+    switch (type) {
+        case WASM_TYPE_NONE:
+        case WASM_TYPE_ANYREF:
+        case WASM_TYPE_EQREF:
+        case WASM_TYPE_I31REF:
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ARRAYREF:
+            return 1;
+        default:
+            return 0;
+    }
+}
+/* END src/support.c */
+
+/* BEGIN src/simd/native.c */
+
+/* BEGIN src/simd/native.h */
+#ifndef WASM_SIMD_NATIVE_H
+#define WASM_SIMD_NATIVE_H
+
+
+#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define WASM__SIMD_USE_NEON 1
+#include <arm_neon.h>
+#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define WASM__SIMD_USE_SSE2 1
+#include <emmintrin.h>
+#include <xmmintrin.h>
 #endif
 
 #if defined(WASM__SIMD_USE_NEON)
@@ -1090,2956 +966,9 @@ WASM_PRIVATE __m128d wasm__sse_abs_pd(__m128d value);
 WASM_PRIVATE __m128d wasm__sse_neg_pd(__m128d value);
 #endif
 
-#if defined(_MSC_VER)
-#define WASM__ALIGNOF(type) __alignof(type)
-#else
-#define WASM__ALIGNOF(type) offsetof(struct { char c; type value; }, value)
-#endif
+#endif /* WASM_SIMD_NATIVE_H */
+/* END src/simd/native.h */
 
-#if WASM_ENABLE_PLATFORM
-/* ── WASI platform hooks ─────────────────────────────────────────── */
-
-#if defined(_WIN32)
-#define WASM__PLATFORM_WINDOWS 1
-#define WASM__PLATFORM_POSIX 0
-#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
-#define WASM__PLATFORM_WINDOWS 0
-#define WASM__PLATFORM_POSIX 1
-#else
-#define WASM__PLATFORM_WINDOWS 0
-#define WASM__PLATFORM_POSIX 0
-#endif
-
-#ifndef WASM_WASI_ARG_COUNT
-#define WASM_WASI_ARG_COUNT() 0u
-#endif
-
-#ifndef WASM_WASI_ARG_AT
-#define WASM_WASI_ARG_AT(index) ((const char*)0)
-#endif
-
-#ifndef WASM_WASI_ENV_COUNT
-#define WASM_WASI_ENV_COUNT() 0u
-#endif
-
-#ifndef WASM_WASI_ENV_AT
-#define WASM_WASI_ENV_AT(index) ((const char*)0)
-#endif
-
-#ifndef WASM_WASI_FILL_RANDOM
-#define WASM__WASI_NEEDS_RANDOM_FALLBACK 1
-#endif
-
-#ifndef WASM_WASI_CLOCK_TIME_GET
-#define WASM__WASI_NEEDS_CLOCK_FALLBACK 1
-#endif
-#endif /* WASM_ENABLE_PLATFORM */
-
-/* ── Forward declarations ─────────────────────────────────────────── */
-WASM_PRIVATE wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
-WASM_PRIVATE int wasm__resolve_func_ref(const wasm_runtime_t* rt,
-                                  uint32_t ref_id,
-                                  wasm_module_t** out_module,
-                                  uint32_t* out_func_idx);
-WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,
-                                 wasm_valtype_t subtype,
-                                 wasm_valtype_t supertype);
-WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod,
-                                   uint32_t subtype_idx,
-                                   uint32_t supertype_idx);
-WASM_PRIVATE int wasm__is_valtype_subtype(const wasm_module_t* mod,
-                                    wasm_valtype_t subtype,
-                                    wasm_valtype_t supertype);
-WASM_PRIVATE struct wasm_table_t* wasm__table_actual(struct wasm_table_t* table);
-WASM_PRIVATE const struct wasm_table_t* wasm__table_actual_const(const struct wasm_table_t* table);
-WASM_PRIVATE struct wasm_memory_t* wasm__memory_actual(struct wasm_memory_t* memory);
-WASM_PRIVATE const struct wasm_memory_t* wasm__memory_actual_const(const struct wasm_memory_t* memory);
-
-#if WASM_ENABLE_PLATFORM
-WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
-#endif
-
-WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type);
-
-WASM_PRIVATE_INLINE int wasm__uses_externref_storage(wasm_valtype_t type);
-
-WASM_PRIVATE_INLINE int wasm__uses_exnref_storage(wasm_valtype_t type);
-
-WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type);
-
-WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
-                                                   const wasm_import_t* imp,
-                                                   int zeroed_type_is_unspecified);
-#if WASM_ENABLE_PLATFORM
-WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* rt,
-                                                          uint64_t min_pages,
-                                                          uint64_t max_pages,
-                                                          int is_64);
-
-WASM_PRIVATE uint32_t wasm__platform_wasi_arg_count(void);
-
-WASM_PRIVATE const char* wasm__platform_wasi_arg_at(uint32_t index);
-
-WASM_PRIVATE uint32_t wasm__platform_wasi_env_count(void);
-
-WASM_PRIVATE const char* wasm__platform_wasi_env_at(uint32_t index);
-
-#if WASM__PLATFORM_WINDOWS
-WASM_PRIVATE uint64_t wasm__platform_windows_filetime_to_unix_ns(FILETIME ft);
-
-WASM_PRIVATE int wasm__platform_windows_qpc_time_ns(uint64_t* out_time);
-
-WASM_PRIVATE int wasm__platform_windows_process_time_ns(uint64_t* out_time);
-
-WASM_PRIVATE int wasm__platform_windows_thread_time_ns(uint64_t* out_time);
-#endif
-
-#if WASM__PLATFORM_POSIX
-WASM_PRIVATE int wasm__platform_posix_clock_time_get(uint32_t clock_id, uint64_t* out_time);
-#endif
-
-#if defined(WASM__WASI_NEEDS_RANDOM_FALLBACK)
-#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
-WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
-#elif WASM__PLATFORM_POSIX
-WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
-#else
-WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
-#endif
-#else
-WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
-#endif
-
-#if defined(WASM__WASI_NEEDS_CLOCK_FALLBACK)
-#if WASM__PLATFORM_WINDOWS
-WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
-                                              uint64_t precision,
-                                              uint64_t* out_time);
-#elif WASM__PLATFORM_POSIX
-WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
-                                              uint64_t precision,
-                                              uint64_t* out_time);
-#else
-WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
-                                              uint64_t precision,
-                                              uint64_t* out_time);
-#endif
-#else
-WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
-                                              uint64_t precision,
-                                              uint64_t* out_time);
-#endif
-
-#endif /* WASM_ENABLE_PLATFORM */
-
-/* ── Portable bit operations (pure C99, no builtins) ──────────────── */
-
-WASM_PRIVATE uint32_t wasm__clz32(uint32_t v);
-
-WASM_PRIVATE uint32_t wasm__ctz32(uint32_t v);
-
-WASM_PRIVATE uint32_t wasm__popcnt32(uint32_t v);
-
-WASM_PRIVATE uint32_t wasm__clz64(uint64_t v);
-
-WASM_PRIVATE uint32_t wasm__ctz64(uint64_t v);
-
-WASM_PRIVATE uint32_t wasm__popcnt64(uint64_t v);
-
-WASM_PRIVATE uint32_t wasm__shr_s32_bits(uint32_t value, uint32_t shift);
-
-WASM_PRIVATE uint64_t wasm__shr_s64_bits(uint64_t value, uint32_t shift);
-
-/* ── Endian-aware memory access ───────────────────────────────────── */
-
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#define WASM__BIG_ENDIAN 1
-#else
-#define WASM__BIG_ENDIAN 0
-#endif
-#elif defined(_BIG_ENDIAN) || defined(__BIG_ENDIAN__) || \
-    defined(__ARMEB__) || defined(__MIPSEB__)
-#define WASM__BIG_ENDIAN 1
-#else
-#define WASM__BIG_ENDIAN 0
-#endif
-
-#if WASM__BIG_ENDIAN
-WASM_PRIVATE uint16_t wasm__bswap16(uint16_t v);
-
-WASM_PRIVATE uint32_t wasm__bswap32(uint32_t v);
-
-WASM_PRIVATE uint64_t wasm__bswap64(uint64_t v);
-#endif
-
-WASM_PRIVATE uint16_t wasm__load_le16(const void* p);
-
-WASM_PRIVATE uint32_t wasm__load_le32(const void* p);
-
-WASM_PRIVATE uint64_t wasm__load_le64(const void* p);
-
-WASM_PRIVATE void wasm__store_le16(void* p, uint16_t v);
-
-WASM_PRIVATE void wasm__store_le32(void* p, uint32_t v);
-
-WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v);
-
-/* ── Portable snprintf ────────────────────────────────────────────── */
-#if defined(_MSC_VER) && _MSC_VER < 1900
-#define wasm__snprintf _snprintf
-#else
-#define wasm__snprintf snprintf
-#endif
-
-#define WASM__SET_ERR(rt, code, ...)                             \
-    do {                                                         \
-        (rt)->last_error = (code);                               \
-        wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
-                       __VA_ARGS__);                             \
-    } while (0)
-
-#define WASM__IMPLEMENTED_FEATURES                                                     \
-    (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
-     WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
-     WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
-
-WASM_PRIVATE const char* wasm__feature_name(uint32_t flag);
-
-WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag);
-
-WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
-
-
-#endif /* WASM_INTERNAL_COMMON_H */
-/* END src/internal/common.h */
-
-/* BEGIN src/internal/values.h */
-#ifndef WASM_INTERNAL_VALUES_H
-#define WASM_INTERNAL_VALUES_H
-
-
-WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits);
-WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits);
-
-/* ── LEB128 decoding ─────────────────────────────────────────────── */
-typedef struct wasm__reader_t {
-    const uint8_t* ptr;
-    const uint8_t* end;
-    int malformed;
-} wasm__reader_t;
-
-WASM_PRIVATE int wasm__has(wasm__reader_t* r, size_t n);
-
-WASM_PRIVATE uint8_t wasm__read_u8(wasm__reader_t* r);
-
-WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r);
-
-WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r);
-
-WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);
-
-WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r);
-
-WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len);
-
-WASM_PRIVATE int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, size_t rhs_len);
-
-WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** out_name, uint32_t* out_len);
-
-WASM_PRIVATE wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name);
-
-WASM_PRIVATE int wasm__export_name_matches_bytes(const wasm_export_t* exp,
-                                           const uint8_t* name,
-                                           size_t name_len);
-
-WASM_PRIVATE int wasm__export_name_matches_cstr(const wasm_export_t* exp, const char* name);
-
-WASM_PRIVATE const char* wasm__export_name_cstr(const wasm_export_t* exp);
-
-WASM_PRIVATE void wasm__free_export(wasm_export_t* exp);
-
-WASM_PRIVATE char* wasm__strdup(const char* text);
-
-WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value);
-
-WASM_PRIVATE wasm_value_t wasm__u64_bits(uint64_t value);
-
-#define WASM__GC_I31_TAG ((uintptr_t)1u)
-
-WASM_PRIVATE uintptr_t wasm__gc_i31_encode(int32_t value);
-
-WASM_PRIVATE int32_t wasm__gc_i31_get_s(uintptr_t bits);
-
-WASM_PRIVATE uint32_t wasm__gc_i31_get_u(uintptr_t bits);
-
-WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
-                                            const wasm_value_t* value,
-                                            wasm_valtype_t expected_type,
-                                            const wasm_reftype_t* expected_ref);
-WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
-                                         const wasm_reftype_t* reftype);
-WASM_PRIVATE int wasm__get_effective_reftype(const wasm_module_t* mod,
-                                       wasm_valtype_t type,
-                                       const wasm_reftype_t* ref_type,
-                                       wasm_reftype_t* out_reftype);
-WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
-                                          wasm_valtype_t subtype,
-                                          const wasm_reftype_t* subtype_ref,
-                                          wasm_valtype_t supertype,
-                                          const wasm_reftype_t* supertype_ref);
-WASM_PRIVATE int wasm__typed_valtype_equal(const wasm_module_t* mod,
-                                     wasm_valtype_t lhs,
-                                     const wasm_reftype_t* lhs_ref,
-                                     wasm_valtype_t rhs,
-                                     const wasm_reftype_t* rhs_ref);
-WASM_PRIVATE int wasm__functype_is_subtype(const wasm_module_t* mod,
-                                     const wasm_functype_t* subtype,
-                                     const wasm_functype_t* supertype);
-WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
-                                           wasm_valtype_t actual_type,
-                                           const wasm_reftype_t* actual_ref,
-                                           int actual_mutable,
-                                           wasm_valtype_t expected_type,
-                                           const wasm_reftype_t* expected_ref,
-                                           int expected_mutable);
-
-WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment);
-
-WASM_PRIVATE size_t wasm__gc_field_storage_alignment(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index);
-
-WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size);
-
-WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type);
-
-WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
-                                     uint32_t length,
-                                     size_t* out_size);
-
-WASM_PRIVATE wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
-                                              const void* src,
-                                              int sign_extend,
-                                              wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
-                                               const wasm_fieldtype_t* field,
-                                               void* dst,
-                                               wasm_value_t value);
-
-WASM_PRIVATE void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
-                                       const wasm_structtype_t* type,
-                                       uint32_t field_index);
-
-WASM_PRIVATE const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
-                                                   const wasm_structtype_t* type,
-                                                   uint32_t field_index);
-
-WASM_PRIVATE_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_t* object,
-                                                   const wasm_structtype_t* type,
-                                                   uint32_t field_index,
-                                                   int sign_extend,
-                                                   wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
-                                              const wasm_structtype_t* type,
-                                              uint32_t field_index,
-                                              wasm_value_t value);
-
-WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
-                                                const wasm_structtype_t* type,
-                                                uint32_t field_index,
-                                                wasm_value_t value);
-
-WASM_PRIVATE const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
-                                                    const wasm_arraytype_t* type,
-                                                    uint32_t index);
-
-WASM_PRIVATE void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
-                                        const wasm_arraytype_t* type,
-                                        uint32_t index);
-
-WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* object,
-                                            const wasm_arraytype_t* type,
-                                            uint32_t index,
-                                            int sign_extend,
-                                            wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
-                                       const wasm_arraytype_t* type,
-                                       uint32_t index,
-                                       wasm_value_t value);
-
-WASM_PRIVATE_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object);
-
-WASM_PRIVATE wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
-                                                 const wasm_arraytype_t* type,
-                                                 uint32_t index,
-                                                 wasm_value_t value);
-
-WASM_PRIVATE wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,
-                                            uint32_t type_index,
-                                            wasm_gc_header_t* object);
-
-WASM_PRIVATE int wasm__gc_array_data_element_size(const wasm_arraytype_t* type, size_t* out_size);
-
-WASM_PRIVATE wasm_error_t wasm__gc_array_read_data_value(const wasm_arraytype_t* type,
-                                                   const uint8_t* src,
-                                                   wasm_value_t* out_value);
-
-WASM_PRIVATE int wasm__is_gc_ref_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_ref_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_vector_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_numeric_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_number_or_vector_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_value_type(wasm_valtype_t type);
-
-WASM_PRIVATE int wasm__is_null_ref(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__is_heap_gc_ref_value(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__value_matches_type(const wasm_value_t* value, wasm_valtype_t type);
-
-WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
-                                         const wasm_reftype_t* reftype);
-
-WASM_PRIVATE wasm_value_t wasm__retag_value_for_declared_type(wasm_valtype_t declared_type,
-                                                        const wasm_reftype_t* declared_reftype,
-                                                        wasm_value_t value);
-
-WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type);
-
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_s(double value);
-
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_u(double value);
-
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_s(double value);
-
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_u(double value);
-
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_value);
-
-WASM_PRIVATE int wasm__f32_is_nan_bits(float value);
-
-WASM_PRIVATE int wasm__f64_is_nan_bits(double value);
-
-WASM_PRIVATE float wasm__quiet_f32_nan(float value);
-
-WASM_PRIVATE double wasm__quiet_f64_nan(double value);
-
-WASM_PRIVATE float wasm__f32_min(float lhs, float rhs);
-
-WASM_PRIVATE float wasm__f32_max(float lhs, float rhs);
-
-WASM_PRIVATE double wasm__f64_min(double lhs, double rhs);
-
-WASM_PRIVATE double wasm__f64_max(double lhs, double rhs);
-
-WASM_PRIVATE float wasm__ceil_f32(float value);
-
-WASM_PRIVATE float wasm__floor_f32(float value);
-
-WASM_PRIVATE float wasm__trunc_f32(float value);
-
-WASM_PRIVATE float wasm__nearest_f32(float value);
-
-WASM_PRIVATE float wasm__sqrt_f32(float value);
-
-WASM_PRIVATE double wasm__ceil_f64(double value);
-
-WASM_PRIVATE double wasm__floor_f64(double value);
-
-WASM_PRIVATE double wasm__trunc_f64(double value);
-
-WASM_PRIVATE double wasm__nearest_f64(double value);
-
-WASM_PRIVATE double wasm__sqrt_f64(double value);
-
-WASM_PRIVATE wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type);
-
-WASM_PRIVATE void wasm__clear_reftype(wasm_reftype_t* reftype);
-
-WASM_PRIVATE int wasm__is_absheaptype_byte(uint8_t byte);
-
-WASM_PRIVATE int wasm__is_reftype_lead_byte(uint8_t byte);
-
-WASM_PRIVATE wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_reftype(wasm_module_t* mod, wasm_reftype_t* reftype);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_valtype_reftype(wasm_module_t* mod,
-                                                  wasm_valtype_t* type,
-                                                  wasm_reftype_t* reftype);
-
-WASM_PRIVATE int wasm__has_reftype_info(const wasm_reftype_t* reftype);
-
-WASM_PRIVATE int wasm__reftype_equal(const wasm_reftype_t* lhs, const wasm_reftype_t* rhs);
-
-WASM_PRIVATE int wasm__reftype_is_subtype(const wasm_module_t* mod,
-                                    const wasm_reftype_t* subtype,
-                                    const wasm_reftype_t* supertype);
-
-WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_module_t* mod,
-                                                           const wasm_value_t* value);
-
-WASM_PRIVATE wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
-                                                       uintptr_t handle);
-
-WASM_PRIVATE int wasm__is_host_anyref_value(const wasm_module_t* mod,
-                                      const wasm_value_t* value);
-
-WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
-                                                      wasm_module_t* mod,
-                                                      wasm_value_t value,
-                                                      wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_value_t wasm__anyref_from_externref_value(const wasm_runtime_t* rt,
-                                                      wasm_value_t value);
-
-WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
-                                       const wasm_value_t* value,
-                                       wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
-                                            const wasm_value_t* value,
-                                            wasm_valtype_t expected_type,
-                                            const wasm_reftype_t* expected_ref);
-
-WASM_PRIVATE int wasm__elem_segment_values_match_type(const wasm_module_t* mod,
-                                                const wasm_elem_segment_t* segment,
-                                                wasm_valtype_t expected_type,
-                                                const wasm_reftype_t* expected_ref);
-
-WASM_PRIVATE int wasm__get_effective_reftype(const wasm_module_t* mod,
-                                       wasm_valtype_t type,
-                                       const wasm_reftype_t* ref_type,
-                                       wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
-                                          wasm_valtype_t subtype,
-                                          const wasm_reftype_t* subtype_ref,
-                                          wasm_valtype_t supertype,
-                                          const wasm_reftype_t* supertype_ref);
-
-WASM_PRIVATE int wasm__typed_valtype_equal(const wasm_module_t* mod,
-                                     wasm_valtype_t lhs,
-                                     const wasm_reftype_t* lhs_ref,
-                                     wasm_valtype_t rhs,
-                                     const wasm_reftype_t* rhs_ref);
-
-WASM_PRIVATE int wasm__functype_is_subtype(const wasm_module_t* mod,
-                                     const wasm_functype_t* subtype,
-                                     const wasm_functype_t* supertype);
-
-WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
-                                           wasm_valtype_t actual_type,
-                                           const wasm_reftype_t* actual_ref,
-                                           int actual_mutable,
-                                           wasm_valtype_t expected_type,
-                                           const wasm_reftype_t* expected_ref,
-                                           int expected_mutable);
-
-WASM_PRIVATE int wasm__limits_match_import(uint64_t actual_min,
-                                     uint64_t actual_max,
-                                     uint64_t expected_min,
-                                     uint64_t expected_max);
-
-WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
-                                          const wasm_table_t* actual_table,
-                                          wasm_valtype_t expected_type,
-                                          const wasm_reftype_t* expected_ref,
-                                          uint64_t expected_min,
-                                          uint64_t expected_max,
-                                          int expected_is_64);
-
-WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
-                                           uint64_t expected_min,
-                                           uint64_t expected_max,
-                                           int expected_is_64);
-
-WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
-                                        wasm__reader_t* r,
-                                        wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
-                                                       uint32_t type_idx,
-                                                       int nullable,
-                                                       wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
-                                                    wasm__reader_t* r,
-                                                    int nullable,
-                                                    wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
-                                                     wasm_value_t value);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source,
-                                                        const wasm_reftype_t* target,
-                                                        wasm_value_t value);
-
-WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
-                                       wasm__reader_t* r,
-                                       wasm_valtype_t* out_type,
-                                       wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__read_valtype(wasm_module_t* mod,
-                                       wasm__reader_t* r,
-                                       wasm_valtype_t* out_type,
-                                       wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__read_unresolved_valtype(wasm_module_t* mod,
-                                                  wasm__reader_t* r,
-                                                  wasm_valtype_t* out_type,
-                                                  wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE void wasm__skip_heaptype(wasm__reader_t* r);
-
-WASM_PRIVATE void wasm__skip_reftype(wasm__reader_t* r);
-
-WASM_PRIVATE void wasm__skip_valtype(wasm__reader_t* r);
-
-WASM_PRIVATE int wasm__is_packedtype_byte(uint8_t byte);
-
-WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte);
-
-WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft);
-
-WASM_PRIVATE int wasm__functype_is_unspecified(const wasm_functype_t* ft);
-
-WASM_PRIVATE int wasm__functype_is_zeroed(const wasm_functype_t* ft);
-
-WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft);
-
-WASM_PRIVATE void wasm__free_structtype(wasm_structtype_t* st);
-
-WASM_PRIVATE void wasm__free_comptype(wasm_comptype_t* type);
-
-WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src);
-
-WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_functype_t* rhs);
-
-WASM_PRIVATE int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs);
-
-WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
-                                            uint32_t lhs_idx,
-                                            uint32_t rhs_idx,
-                                            uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_group_contains_type(const wasm_recgroup_t* group,
-                                               uint32_t type_idx);
-
-WASM_PRIVATE uint32_t wasm__canonical_group_type_offset(const wasm_recgroup_t* group,
-                                                  uint32_t type_idx);
-
-WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
-                                                      uint32_t lhs_idx,
-                                                      uint32_t rhs_idx,
-                                                      const wasm_recgroup_t* lhs_group,
-                                                      const wasm_recgroup_t* rhs_group,
-                                                      uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mod,
-                                                   const wasm_reftype_t* lhs,
-                                                   const wasm_reftype_t* rhs,
-                                                   const wasm_recgroup_t* lhs_group,
-                                                   const wasm_recgroup_t* rhs_group,
-                                                   uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_functype_equal_in_groups(const wasm_module_t* mod,
-                                                    const wasm_functype_t* lhs,
-                                                    const wasm_functype_t* rhs,
-                                                    const wasm_recgroup_t* lhs_group,
-                                                    const wasm_recgroup_t* rhs_group,
-                                                    uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t* mod,
-                                                       const wasm_storagetype_t* lhs,
-                                                       const wasm_storagetype_t* rhs,
-                                                       const wasm_recgroup_t* lhs_group,
-                                                       const wasm_recgroup_t* rhs_group,
-                                                       uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* mod,
-                                                     const wasm_fieldtype_t* lhs,
-                                                     const wasm_fieldtype_t* rhs,
-                                                     const wasm_recgroup_t* lhs_group,
-                                                     const wasm_recgroup_t* rhs_group,
-                                                     uint8_t* memo);
-
-WASM_PRIVATE int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
-                                               const wasm_comptype_t* lhs,
-                                               const wasm_comptype_t* rhs,
-                                               const wasm_recgroup_t* lhs_group,
-                                               const wasm_recgroup_t* rhs_group,
-                                               uint8_t* memo);
-
-WASM_PRIVATE int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
-                                                uint32_t lhs_idx,
-                                                uint32_t rhs_idx,
-                                                const wasm_recgroup_t* lhs_group,
-                                                const wasm_recgroup_t* rhs_group,
-                                                uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
-                                          const wasm_recgroup_t* lhs_group,
-                                          const wasm_recgroup_t* rhs_group,
-                                          uint8_t* memo);
-
-WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
-                                                      uint32_t lhs_idx,
-                                                      uint32_t rhs_idx,
-                                                      const wasm_recgroup_t* lhs_group,
-                                                      const wasm_recgroup_t* rhs_group,
-                                                      uint8_t* memo);
-
-WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx);
-
-WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
-                                            uint32_t lhs_idx,
-                                            uint32_t rhs_idx,
-                                            uint8_t* memo);
-
-WASM_PRIVATE int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx);
-
-WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod);
-
-WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx);
-
-WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,
-                                 wasm_valtype_t subtype,
-                                 wasm_valtype_t supertype);
-
-WASM_PRIVATE int wasm__is_reftype_subtype(const wasm_module_t* mod,
-                                    wasm_valtype_t subtype,
-                                    wasm_valtype_t supertype);
-
-WASM_PRIVATE int wasm__is_valtype_subtype(const wasm_module_t* mod,
-                                    wasm_valtype_t subtype,
-                                    wasm_valtype_t supertype);
-
-WASM_PRIVATE int wasm__is_storagetype_subtype(const wasm_module_t* mod,
-                                        const wasm_storagetype_t* subtype,
-                                        const wasm_storagetype_t* supertype);
-
-WASM_PRIVATE int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
-                                      const wasm_fieldtype_t* subtype,
-                                      const wasm_fieldtype_t* supertype);
-
-WASM_PRIVATE int wasm__is_comptype_immediate_subtype(const wasm_module_t* mod,
-                                               const wasm_comptype_t* subtype,
-                                               const wasm_comptype_t* supertype);
-
-WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod,
-                                   uint32_t subtype_idx,
-                                   uint32_t supertype_idx);
-
-WASM_PRIVATE wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type);
-
-WASM_PRIVATE const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type);
-
-WASM_PRIVATE wasm_functype_t* wasm__module_functype(wasm_module_t* mod, uint32_t type_idx);
-
-WASM_PRIVATE const wasm_functype_t* wasm__module_const_functype(const wasm_module_t* mod, uint32_t type_idx);
-
-WASM_PRIVATE const wasm_structtype_t* wasm__type_as_const_structtype(const wasm_comptype_t* type);
-
-WASM_PRIVATE const wasm_arraytype_t* wasm__type_as_const_arraytype(const wasm_comptype_t* type);
-
-WASM_PRIVATE const wasm_structtype_t* wasm__module_const_structtype(const wasm_module_t* mod, uint32_t type_idx);
-
-WASM_PRIVATE const wasm_arraytype_t* wasm__module_const_arraytype(const wasm_module_t* mod, uint32_t type_idx);
-
-WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
-                                                      const wasm_module_t* mod,
-                                                      uint32_t type_index,
-                                                      const wasm_structtype_t* type);
-WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
-                                                    const wasm_module_t* mod,
-                                                    uint32_t type_index,
-                                                    const wasm_arraytype_t* type,
-                                                    uint32_t length);
-
-WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base);
-
-WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t count, uint32_t* out_base);
-
-WASM_PRIVATE wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft);
-
-WASM_PRIVATE wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
-                                            wasm__reader_t* r,
-                                            wasm_storagetype_t* out_type);
-
-WASM_PRIVATE wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
-                                           wasm__reader_t* r,
-                                           wasm_fieldtype_t* field);
-
-WASM_PRIVATE wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
-                                               wasm__reader_t* r,
-                                               uint8_t opcode,
-                                               wasm_comptype_t* type);
-
-WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
-                                            wasm__reader_t* r,
-                                            uint8_t opcode,
-                                            uint32_t rec_group_idx,
-                                            wasm_comptype_t* type);
-
-WASM_PRIVATE wasm_value_t wasm__global_get_value(const wasm_global_t* global);
-
-WASM_PRIVATE void wasm__global_set_value(wasm_global_t* global, wasm_value_t value);
-
-typedef struct wasm__init_expr_stack_t {
-    wasm_value_t* values;
-    uint32_t size;
-    uint32_t cap;
-} wasm__init_expr_stack_t;
-
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value);
-
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
-                                                     wasm__init_expr_stack_t* stack,
-                                                     wasm_valtype_t expected_type,
-                                                     const wasm_reftype_t* expected_ref,
-                                                     wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
-                                                    wasm_valtype_t expected_type,
-                                                    wasm_value_t* out_value);
-
-WASM_PRIVATE int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs);
-
-WASM_PRIVATE int32_t wasm__wrap_i32_sub(int32_t lhs, int32_t rhs);
-
-WASM_PRIVATE int32_t wasm__wrap_i32_mul(int32_t lhs, int32_t rhs);
-
-WASM_PRIVATE int64_t wasm__wrap_i64_add(int64_t lhs, int64_t rhs);
-
-WASM_PRIVATE int64_t wasm__wrap_i64_sub(int64_t lhs, int64_t rhs);
-
-WASM_PRIVATE int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs);
-
-WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE void wasm__free_import_info(wasm_import_info_t* info);
-
-WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE void wasm__free_exception_state(wasm__exception_state_t* ex);
-
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
-                                              uint32_t tag_index,
-                                              uint64_t tag_identity,
-                                              const wasm_value_t* values,
-                                              uint32_t count);
-
-WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
-                                            const wasm__exception_state_t* ex,
-                                            wasm_value_t* out_value);
-
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE void wasm__free_data_segment(wasm_data_segment_t* segment);
-
-WASM_PRIVATE wasm_table_t* wasm__table_actual(wasm_table_t* table);
-
-WASM_PRIVATE const wasm_table_t* wasm__table_actual_const(const wasm_table_t* table);
-
-WASM_PRIVATE wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
-                                                    wasm_module_t* mod,
-                                                    uint32_t func_idx,
-                                                    uint32_t* out_ref_id);
-
-WASM_PRIVATE wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
-                                             uint32_t func_idx,
-                                             uint32_t* out_ref_id);
-
-WASM_PRIVATE int wasm__resolve_func_ref(const wasm_runtime_t* rt,
-                                  uint32_t ref_id,
-                                  wasm_module_t** out_module,
-                                  uint32_t* out_func_idx);
-
-WASM_PRIVATE void wasm__declare_func_ref(wasm_module_t* mod, uint32_t func_idx);
-
-WASM_PRIVATE wasm_error_t wasm__make_funcref(wasm_module_t* mod,
-                                       uint32_t func_idx,
-                                       wasm_value_t* out_value);
-
-WASM_PRIVATE int wasm__cross_group_contains_type(const wasm_recgroup_t* group, uint32_t type_idx);
-
-WASM_PRIVATE uint32_t wasm__cross_group_type_offset(const wasm_recgroup_t* group, uint32_t type_idx);
-
-WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
-                                        uint32_t lhs_idx,
-                                        const wasm_module_t* rhs_mod,
-                                        uint32_t rhs_idx,
-                                        uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
-                                                 uint32_t lhs_idx,
-                                                 const wasm_module_t* rhs_mod,
-                                                 uint32_t rhs_idx,
-                                                 uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                  uint32_t lhs_idx,
-                                                  const wasm_recgroup_t* lhs_group,
-                                                  const wasm_module_t* rhs_mod,
-                                                  uint32_t rhs_idx,
-                                                  const wasm_recgroup_t* rhs_group,
-                                                  uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                               const wasm_reftype_t* lhs,
-                                               const wasm_recgroup_t* lhs_group,
-                                               const wasm_module_t* rhs_mod,
-                                               const wasm_reftype_t* rhs,
-                                               const wasm_recgroup_t* rhs_group,
-                                               uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                     wasm_valtype_t lhs_type,
-                                                     const wasm_reftype_t* lhs_ref,
-                                                     const wasm_recgroup_t* lhs_group,
-                                                     const wasm_module_t* rhs_mod,
-                                                     wasm_valtype_t rhs_type,
-                                                     const wasm_reftype_t* rhs_ref,
-                                                     const wasm_recgroup_t* rhs_group,
-                                                     uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                const wasm_functype_t* lhs,
-                                                const wasm_recgroup_t* lhs_group,
-                                                const wasm_module_t* rhs_mod,
-                                                const wasm_functype_t* rhs,
-                                                const wasm_recgroup_t* rhs_group,
-                                                uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                   const wasm_storagetype_t* lhs,
-                                                   const wasm_recgroup_t* lhs_group,
-                                                   const wasm_module_t* rhs_mod,
-                                                   const wasm_storagetype_t* rhs,
-                                                   const wasm_recgroup_t* rhs_group,
-                                                   uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                 const wasm_fieldtype_t* lhs,
-                                                 const wasm_recgroup_t* lhs_group,
-                                                 const wasm_module_t* rhs_mod,
-                                                 const wasm_fieldtype_t* rhs,
-                                                 const wasm_recgroup_t* rhs_group,
-                                                 uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_mod,
-                                                uint32_t lhs_idx,
-                                                const wasm_recgroup_t* lhs_group,
-                                                const wasm_module_t* rhs_mod,
-                                                uint32_t rhs_idx,
-                                                const wasm_recgroup_t* rhs_group,
-                                                uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
-                                      const wasm_recgroup_t* lhs_group,
-                                      const wasm_module_t* rhs_mod,
-                                      const wasm_recgroup_t* rhs_group,
-                                      uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
-                                        uint32_t lhs_idx,
-                                        const wasm_module_t* rhs_mod,
-                                        uint32_t rhs_idx,
-                                        uint8_t* memo);
-
-WASM_PRIVATE int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
-                                                 uint32_t lhs_idx,
-                                                 const wasm_module_t* rhs_mod,
-                                                 uint32_t rhs_idx,
-                                                 uint8_t* memo);
-
-WASM_PRIVATE int wasm__functype_equal_across_modules(const wasm_module_t* lhs_mod,
-                                               uint32_t lhs_type_idx,
-                                               const wasm_module_t* rhs_mod,
-                                               uint32_t rhs_type_idx);
-
-WASM_PRIVATE int wasm__functype_is_subtype_across_modules(const wasm_module_t* lhs_mod,
-                                                    uint32_t lhs_type_idx,
-                                                    const wasm_module_t* rhs_mod,
-                                                    uint32_t rhs_type_idx);
-
-WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory);
-
-WASM_PRIVATE const wasm_memory_t* wasm__memory_actual_const(const wasm_memory_t* memory);
-
-WASM_PRIVATE void wasm__free_table(wasm_table_t* table);
-
-WASM_PRIVATE void wasm__free_memory(wasm_memory_t* memory);
-
-WASM_PRIVATE wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE wasm_table_t* wasm__table_at(wasm_module_t* mod, uint32_t table_index);
-
-WASM_PRIVATE wasm_memory_t* wasm__memory_at(wasm_module_t* mod, uint32_t memory_index);
-
-WASM_PRIVATE wasm_valtype_t wasm__memory_index_type(const wasm_memory_t* memory);
-
-WASM_PRIVATE wasm_valtype_t wasm__table_index_type(const wasm_table_t* table);
-
-WASM_PRIVATE wasm_valtype_t wasm__table_copy_size_type(const wasm_table_t* dst_table,
-                                                 const wasm_table_t* src_table);
-
-WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value);
-
-WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory);
-
-WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
-                                               uint32_t func_idx,
-                                               uint32_t offset,
-                                               const char* fmt,
-                                               ...);
-
-WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
-                                                 uint32_t memory_index,
-                                                 const wasm_memory_t* memory);
-
-WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory);
-
-WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size);
-
-WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
-                                       const wasm_value_t* base,
-                                       uint64_t offset,
-                                       uint64_t* out_addr);
-
-WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory);
-
-WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table);
-
-WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE void wasm__free_custom_section(wasm_custom_section_t* section);
-
-WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE void wasm__free_elem_segment(wasm_elem_segment_t* segment);
-
-WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
-
-WASM_PRIVATE wasm_error_t wasm__read_elemkind(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
-                                                      wasm__reader_t* r,
-                                                      wasm_valtype_t* out_type,
-                                                      wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit);
-
-WASM_PRIVATE int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t mem_size);
-
-typedef struct wasm__memarg_t {
-    uint32_t align_log2;
-    uint32_t memory_index;
-    uint8_t has_memory_index;
-    uint64_t offset;
-} wasm__memarg_t;
-
-WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg);
-
-
-#endif /* WASM_INTERNAL_VALUES_H */
-/* END src/internal/values.h */
-
-/* BEGIN src/internal/simd.h */
-#ifndef WASM_INTERNAL_SIMD_H
-#define WASM_INTERNAL_SIMD_H
-
-
-/* ── SIMD helpers ────────────────────────────────────────────────── */
-
-WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint8_t wasm__v128_get_u8(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int16_t wasm__v128_get_i16(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint16_t wasm__v128_get_u16(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int32_t wasm__v128_get_i32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint32_t wasm__v128_get_u32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int64_t wasm__v128_get_i64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint64_t wasm__v128_get_u64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE float wasm__v128_get_f32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE double wasm__v128_get_f64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE void wasm__v128_set_u8(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i16(wasm_value_t* value, uint32_t lane, int32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u16(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i32(wasm_value_t* value, uint32_t lane, int32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u32(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i64(wasm_value_t* value, uint32_t lane, int64_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u64(wasm_value_t* value, uint32_t lane, uint64_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_f32(wasm_value_t* value, uint32_t lane, float lane_value);
-
-WASM_PRIVATE void wasm__v128_set_f64(wasm_value_t* value, uint32_t lane, double lane_value);
-
-WASM_PRIVATE int8_t wasm__sat_i8(int32_t value);
-
-WASM_PRIVATE uint8_t wasm__sat_u8(int32_t value);
-
-WASM_PRIVATE int16_t wasm__sat_i16(int32_t value);
-
-WASM_PRIVATE uint16_t wasm__sat_u16(int32_t value);
-
-WASM_PRIVATE uint8_t wasm__popcount_u8(uint8_t value);
-
-WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value);
-
-WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value);
-
-WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value);
-
-WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value);
-
-WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value);
-
-WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
-                                              const wasm_value_t* lhs,
-                                              const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs,
-                                         const wasm_value_t* mask);
-
-WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
-                                       const wasm_value_t* rhs,
-                                       const uint8_t lanes[16]);
-
-WASM_PRIVATE wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs,
-                                            const wasm_value_t* acc);
-
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
-                                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
-                                                             const wasm_value_t* rhs,
-                                                             const wasm_value_t* acc);
-
-WASM_PRIVATE uint32_t wasm__simd_memory_align_log2(uint32_t subop);
-
-WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop);
-
-WASM_PRIVATE void wasm__skip_simd_immediates(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
-                                           const wasm_value_t* value,
-                                           uint32_t amount);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
-                                           const wasm_value_t* value,
-                                           uint32_t amount);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
-                                           const wasm_value_t* value,
-                                           uint32_t amount);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
-                                           const wasm_value_t* value,
-                                           uint32_t amount);
-
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
-
-WASM_PRIVATE wasm_value_t wasm__simd_demote_f64x2_zero(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_promote_low_f32x4(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_convert_i32x4(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm_value_t* value);
-
-WASM_PRIVATE wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
-                                         uint32_t max_global_index,
-                                         wasm_value_t* out_value);
-
-WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
-                                                      const char* module,
-                                                      const char* name);
-
-WASM_PRIVATE int wasm__has_import_named(const wasm_runtime_t* rt,
-                                  const char* module,
-                                  const char* name);
-
-WASM_PRIVATE wasm_table_import_t* wasm__find_table_import(wasm_runtime_t* rt,
-                                                    const char* module,
-                                                    const char* name);
-
-WASM_PRIVATE wasm_memory_import_t* wasm__find_memory_import(wasm_runtime_t* rt,
-                                                      const char* module,
-                                                      const char* name);
-
-WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
-                                                const char* module,
-                                                const char* name);
-
-
-#endif /* WASM_INTERNAL_SIMD_H */
-/* END src/internal/simd.h */
-
-/* BEGIN src/internal/runtime.h */
-#ifndef WASM_INTERNAL_RUNTIME_H
-#define WASM_INTERNAL_RUNTIME_H
-
-
-/* ── Init / Destroy ───────────────────────────────────────────────── */
-
-WASM_PRIVATE void wasm__gc_heap_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__gc_register_module(wasm_runtime_t* rt, wasm_module_t* mod);
-
-WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* mod);
-
-WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
-
-WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment);
-
-WASM_PRIVATE wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
-                                               const wasm_module_t* mod,
-                                               uint32_t type_index,
-                                               wasm_gc_object_kind_t kind,
-                                               size_t object_size);
-
-WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
-                                                      const wasm_module_t* mod,
-                                                      uint32_t type_index,
-                                                      const wasm_structtype_t* type);
-
-WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
-                                                    const wasm_module_t* mod,
-                                                    uint32_t type_index,
-                                                    const wasm_arraytype_t* type,
-                                                    uint32_t length);
-
-WASM_PRIVATE void wasm__arena_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__arena_init(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE void* wasm__arena_alloc(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, size_t saved_offset);
-
-void wasm_config_default(wasm_config_t* config);
-
-WASM_PRIVATE wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack);
-
-WASM_PRIVATE void wasm__stack_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth);
-
-WASM_PRIVATE void wasm__backtrace_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt);
-WASM_PRIVATE void wasm__call_frame_stack_destroy(wasm_runtime_t* rt);
-WASM_PRIVATE wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod);
-
-wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config);
-
-void wasm_runtime_free(wasm_runtime_t* rt);
-
-wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config);
-
-wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
-
-const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
-
-void wasm_runtime_clear_error(wasm_runtime_t* rt);
-
-void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
-
-void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
-
-uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
-
-void wasm_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
-                                                   const wasm_import_t* imp,
-                                                   int zeroed_type_is_unspecified);
-
-wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
-
-wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
-
-wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_import_t* imp);
-
-wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_import_t* imp);
-
-wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_t* imp);
-
-void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag);
-
-void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
-
-void wasm_enable_all_features(wasm_runtime_t* rt);
-
-/* ── Section decoders ─────────────────────────────────────────────── */
-
-WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
-                                           wasm__reader_t* r,
-                                           wasm_memory_t* memory);
-
-WASM_PRIVATE wasm_error_t wasm__read_table_type(wasm_module_t* mod,
-                                          wasm__reader_t* r,
-                                          wasm_table_t* table);
-
-WASM_PRIVATE wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
-                                             wasm__reader_t* r,
-                                             wasm_import_info_t* info,
-                                             uint8_t kind);
-
-WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_start_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__decode_data_count_section(wasm_module_t* mod, wasm__reader_t* r);
-
-WASM_PRIVATE uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name);
-
-WASM_PRIVATE wasm_error_t wasm__check_unresolved_function_imports(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
-                                               uint32_t func_idx,
-                                               uint32_t offset,
-                                               const char* fmt,
-                                               ...);
-
-WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wasm_functype_t* ft);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_storagetype_reftype(wasm_module_t* mod, wasm_storagetype_t* storage);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod);
-
-#endif /* WASM_INTERNAL_RUNTIME_H */
-/* END src/internal/runtime.h */
-
-/* BEGIN src/internal/validate.h */
-#ifndef WASM_INTERNAL_VALIDATE_H
-#define WASM_INTERNAL_VALIDATE_H
-
-
-typedef struct wasm__blocktype_t {
-    uint32_t param_arity;
-    uint32_t result_arity;
-    const wasm_valtype_t* params;
-    const wasm_valtype_t* results;
-    const wasm_reftype_t* param_reftypes;
-    const wasm_reftype_t* result_reftypes;
-    wasm_valtype_t inline_result;
-    wasm_reftype_t inline_result_reftype;
-} wasm__blocktype_t;
-WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype);
-
-#define WASM__TYPE_BOT ((wasm_valtype_t)0xFF)
-
-struct wasm__val_frame_t {
-    uint8_t opcode;
-    uint32_t height;
-    const wasm_valtype_t* param_types;
-    const wasm_reftype_t* param_reftypes;
-    uint32_t num_params;
-    const wasm_valtype_t* result_types;
-    const wasm_reftype_t* result_reftypes;
-    uint32_t num_results;
-    wasm_valtype_t inline_result;
-    wasm_reftype_t inline_result_reftype;
-    int unreachable;
-    int seen_else;
-    int in_catch;
-    int seen_catch_all;
-    int seen_delegate;
-    uint64_t* local_init;
-    uint64_t* local_init_entry;
-};
-
-typedef struct wasm__validator_t {
-    wasm_module_t* mod;
-    uint32_t func_idx;
-    const uint8_t* body_start;
-    wasm__reader_t r;
-    wasm_valtype_t* stack;
-    wasm_reftype_t* stack_reftypes;
-    uint32_t stack_capacity;
-    uint32_t sp;
-    wasm__val_frame_t* frames;
-    uint32_t frame_capacity;
-    uint32_t fp;
-    uint32_t max_fp;
-    uint64_t* local_init_bits;
-    uint64_t* local_init_entry_bits;
-    uint32_t local_init_words;
-} wasm__validator_t;
-
-WASM_PRIVATE uint32_t wasm__validator_local_init_word_count(uint32_t num_locals);
-
-WASM_PRIVATE int wasm__validator_local_is_undefaulted(const wasm_func_t* func, uint32_t index);
-
-WASM_PRIVATE void wasm__validator_local_init_set(uint64_t* bits, uint32_t index);
-
-WASM_PRIVATE int wasm__validator_local_init_get(const uint64_t* bits, uint32_t index);
-
-WASM_PRIVATE void wasm__validator_copy_local_init(uint64_t* dst,
-                                            const uint64_t* src,
-                                            uint32_t word_count);
-
-WASM_PRIVATE void wasm__validator_seed_local_init(wasm__validator_t* v,
-                                            const wasm_func_t* func,
-                                            const wasm_functype_t* ft);
-
-WASM_PRIVATE void wasm__validator_enter_child_frame(wasm__validator_t* v, uint32_t frame_index);
-
-WASM_PRIVATE void wasm__validator_restore_entry_local_init(wasm__validator_t* v, wasm__val_frame_t* frame);
-
-WASM_PRIVATE void wasm__validator_destroy(wasm__validator_t* v);
-
-WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mod, uint32_t func_idx);
-
-WASM_PRIVATE wasm_error_t wasm__validator_error(wasm__validator_t* v,
-                                          const uint8_t* at,
-                                          const char* fmt,
-                                          ...);
-
-WASM_PRIVATE wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
-                                                    const uint8_t* at,
-                                                    uint32_t flag);
-
-WASM_PRIVATE int wasm__validator_get_effective_reftype(wasm_valtype_t type,
-                                                 const wasm_reftype_t* ref_type,
-                                                 wasm_reftype_t* out);
-
-typedef struct wasm__try_table_clause_t {
-    uint8_t kind;
-    uint32_t tag_index;
-    uint32_t label_depth;
-} wasm__try_table_clause_t;
-
-WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
-                                                wasm__try_table_clause_t* out_clause);
-
-WASM_PRIVATE int wasm__validator_type_matches(const wasm__validator_t* v,
-                                        wasm_valtype_t actual,
-                                        const wasm_reftype_t* actual_ref,
-                                        wasm_valtype_t expected,
-                                        const wasm_reftype_t* expected_ref);
-
-WASM_PRIVATE wasm__val_frame_t* wasm__validator_frame(wasm__validator_t* v);
-
-WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
-                                               const uint8_t* at,
-                                               wasm_valtype_t type,
-                                               const wasm_reftype_t* ref_type);
-WASM_PRIVATE wasm_error_t wasm__validator_push_many_typed(wasm__validator_t* v,
-                                                    const uint8_t* at,
-                                                    const wasm_valtype_t* types,
-                                                    const wasm_reftype_t* reftypes,
-                                                    uint32_t count);
-WASM_PRIVATE wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
-                                                  const uint8_t* at,
-                                                  wasm_valtype_t* out_type,
-                                                  wasm_reftype_t* out_ref_type);
-WASM_PRIVATE wasm_error_t wasm__validator_pop_expect_typed(wasm__validator_t* v,
-                                                     const uint8_t* at,
-                                                     wasm_valtype_t expected,
-                                                     const wasm_reftype_t* expected_ref);
-WASM_PRIVATE wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
-                                                      const uint8_t* at,
-                                                      const wasm_valtype_t* types,
-                                                      const wasm_reftype_t* reftypes,
-                                                      uint32_t count);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_direct_non_null_branch_operand(wasm__validator_t* v,
-                                                                       const uint8_t* at,
-                                                                       wasm_valtype_t* out_type,
-                                                                       wasm_reftype_t* out_source_ref,
-                                                                       wasm_reftype_t* out_target_ref);
-
-WASM_PRIVATE wasm_error_t wasm__validator_push(wasm__validator_t* v,
-                                         const uint8_t* at,
-                                         wasm_valtype_t type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
-                                               const uint8_t* at,
-                                               wasm_valtype_t type,
-                                               const wasm_reftype_t* ref_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_push_many_typed(wasm__validator_t* v,
-                                                    const uint8_t* at,
-                                                    const wasm_valtype_t* types,
-                                                    const wasm_reftype_t* reftypes,
-                                                    uint32_t count);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_any(wasm__validator_t* v,
-                                            const uint8_t* at,
-                                            wasm_valtype_t* out_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
-                                                  const uint8_t* at,
-                                                  wasm_valtype_t* out_type,
-                                                  wasm_reftype_t* out_ref_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_expect(wasm__validator_t* v,
-                                               const uint8_t* at,
-                                               wasm_valtype_t expected);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_expect_typed(wasm__validator_t* v,
-                                                     const uint8_t* at,
-                                                     wasm_valtype_t expected,
-                                                     const wasm_reftype_t* expected_ref);
-
-WASM_PRIVATE wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
-                                                      const uint8_t* at,
-                                                      const wasm_valtype_t* types,
-                                                      const wasm_reftype_t* reftypes,
-                                                      uint32_t count);
-
-WASM_PRIVATE uint32_t wasm__validator_stack_floor_after_checked(const wasm__validator_t* v,
-                                                          uint32_t count);
-
-WASM_PRIVATE void wasm__validator_consume_checked(wasm__validator_t* v, uint32_t count);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_and_push_types(wasm__validator_t* v,
-                                                       const uint8_t* at,
-                                                       const wasm_valtype_t* types,
-                                                       const wasm_reftype_t* reftypes,
-                                                       uint32_t count);
-
-WASM_PRIVATE void wasm__validator_mark_unreachable(wasm__validator_t* v);
-
-WASM_PRIVATE int wasm__validator_same_types(const wasm_valtype_t* a,
-                                      const wasm_reftype_t* a_refs,
-                                      uint32_t a_count,
-                                      const wasm_valtype_t* b,
-                                      const wasm_reftype_t* b_refs,
-                                      uint32_t b_count);
-
-WASM_PRIVATE int wasm__validator_types_match(const wasm__validator_t* v,
-                                       const wasm_valtype_t* actual_types,
-                                       const wasm_reftype_t* actual_refs,
-                                       uint32_t actual_count,
-                                       const wasm_valtype_t* expected_types,
-                                       const wasm_reftype_t* expected_refs,
-                                       uint32_t expected_count);
-
-WASM_PRIVATE int wasm__validator_meet_type(const wasm_module_t* mod,
-                                     wasm_valtype_t lhs_type,
-                                     const wasm_reftype_t* lhs_ref,
-                                     wasm_valtype_t rhs_type,
-                                     const wasm_reftype_t* rhs_ref,
-                                     wasm_valtype_t* out_type,
-                                     wasm_reftype_t* out_ref);
-
-WASM_PRIVATE int wasm__validator_meet_types(const wasm_module_t* mod,
-                                      const wasm_valtype_t* lhs_types,
-                                      const wasm_reftype_t* lhs_reftypes,
-                                      uint32_t lhs_count,
-                                      const wasm_valtype_t* rhs_types,
-                                      const wasm_reftype_t* rhs_reftypes,
-                                      uint32_t rhs_count,
-                                      wasm_valtype_t* out_types,
-                                      wasm_reftype_t* out_reftypes);
-
-WASM_PRIVATE void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
-                                             const wasm_valtype_t** out_types,
-                                             const wasm_reftype_t** out_reftypes,
-                                             uint32_t* out_count);
-
-WASM_PRIVATE wasm_error_t wasm__validator_check_tail_results(wasm__validator_t* v,
-                                                       const uint8_t* at,
-                                                       const wasm_functype_t* caller_type,
-                                                       const wasm_functype_t* callee_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_check_frame_results(wasm__validator_t* v,
-                                                        const uint8_t* at,
-                                                        const wasm__val_frame_t* frame,
-                                                        const char* wrong_stack_message);
-
-WASM_PRIVATE wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
-                                                   const uint8_t* at,
-                                                   wasm__val_frame_t* frame);
-
-WASM_PRIVATE wasm_error_t wasm__validator_find_rethrow_frame(wasm__validator_t* v,
-                                                       uint32_t depth,
-                                                       wasm__val_frame_t** out_frame);
-
-WASM_PRIVATE wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
-                                                const uint8_t* at,
-                                                uint32_t max_align_log2,
-                                                wasm__memarg_t* out_memarg);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_memory_index(wasm__validator_t* v,
-                                                     const uint8_t* at,
-                                                     uint32_t memory_index);
-
-WASM_PRIVATE wasm_error_t wasm__validator_unary(wasm__validator_t* v,
-                                          const uint8_t* at,
-                                          wasm_valtype_t in_type,
-                                          wasm_valtype_t out_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_binary(wasm__validator_t* v,
-                                           const uint8_t* at,
-                                           wasm_valtype_t lhs_type,
-                                           wasm_valtype_t rhs_type,
-                                           wasm_valtype_t out_type);
-
-WASM_PRIVATE wasm_error_t wasm__validator_read_typed_select(wasm__validator_t* v,
-                                                      const uint8_t* at,
-                                                      wasm_valtype_t* out_type,
-                                                      wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_valtype_t wasm__field_stack_type(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE const wasm_reftype_t* wasm__field_stack_reftype(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE int wasm__field_is_reference_type(const wasm_fieldtype_t* field);
-
-WASM_PRIVATE wasm_error_t wasm__validator_make_typeidx_reftype(wasm__validator_t* v,
-                                                         const uint8_t* at,
-                                                         uint32_t type_idx,
-                                                         int nullable,
-                                                         wasm_valtype_t* out_type,
-                                                         wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__validator_read_heap_reftype(wasm__validator_t* v,
-                                                      const uint8_t* at,
-                                                      int nullable,
-                                                      wasm_valtype_t* out_type,
-                                                      wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__validator_read_cast_flag_reftype(wasm__validator_t* v,
-                                                           const uint8_t* at,
-                                                           uint8_t flags,
-                                                           uint8_t bit,
-                                                           wasm_valtype_t* out_type,
-                                                           wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_subtype(wasm__validator_t* v,
-                                                    const uint8_t* at,
-                                                    wasm_valtype_t expected_type,
-                                                    const wasm_reftype_t* expected_ref,
-                                                    wasm_valtype_t* out_type,
-                                                    wasm_reftype_t* out_ref);
-
-WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_castable(wasm__validator_t* v,
-                                                     const uint8_t* at,
-                                                     wasm_valtype_t expected_type,
-                                                     const wasm_reftype_t* expected_ref,
-                                                     wasm_valtype_t* out_type,
-                                                     wasm_reftype_t* out_ref);
-
-WASM_PRIVATE void wasm__validator_reference_difference(const wasm_reftype_t* source,
-                                                 const wasm_reftype_t* target,
-                                                 wasm_valtype_t* out_type,
-                                                 wasm_reftype_t* out_ref);
-
-WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint8_t* at);
-
-WASM_PRIVATE wasm_error_t wasm__validator_read_simd_lane(wasm__validator_t* v,
-                                                   const uint8_t* at,
-                                                   uint32_t subop);
-
-WASM_PRIVATE wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const uint8_t* at);
-
-WASM_PRIVATE wasm_error_t wasm__validator_validate_numeric(wasm__validator_t* v,
-                                                     const uint8_t* at,
-                                                     uint8_t op);
-
-WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
-                                                      const uint8_t* at);
-
-WASM_PRIVATE wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx);
-
-WASM_PRIVATE wasm_error_t wasm__validate_code(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func);
-
-WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t func_idx);
-
-WASM_PRIVATE wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod);
-
-
-#endif /* WASM_INTERNAL_VALIDATE_H */
-/* END src/internal/validate.h */
-
-/* BEGIN src/internal/exec.h */
-#ifndef WASM_INTERNAL_EXEC_H
-#define WASM_INTERNAL_EXEC_H
-
-
-/* ── Module loader ────────────────────────────────────────────────── */
-
-wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
-
-void wasm_free_module(wasm_module_t* mod);
-
-/* ── Interpreter types ────────────────────────────────────────────── */
-
-typedef struct wasm__label_t {
-    const uint8_t* continuation;
-    const uint8_t* handler_ptr;
-    uint32_t sp_base;
-    uint32_t param_arity;
-    uint32_t arity;
-    uint32_t caught_tag;
-    uint64_t caught_tag_identity;
-    uint32_t caught_count;
-    wasm_value_t* caught_values;
-    uint32_t delegate_depth;
-    uint8_t opcode;
-    uint8_t active_catch;
-} wasm__label_t;
-
-WASM_PRIVATE int wasm__size_mul(size_t a, size_t b, size_t* out);
-
-WASM_PRIVATE int wasm__size_add(size_t a, size_t b, size_t* out);
-
-WASM_PRIVATE int wasm__size_align(size_t value, size_t alignment, size_t* out);
-
-WASM_PRIVATE int wasm__frame_storage_size(uint32_t num_locals,
-                                    uint32_t max_labels,
-                                    size_t* out);
-
-WASM_PRIVATE int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out);
-
-WASM_PRIVATE wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod);
-
-struct wasm__call_frame_t {
-    wasm_module_t* module;
-    uint32_t func_idx;
-    uint32_t sp_base;
-    wasm_value_t* locals;
-    wasm__label_t* labels;
-    uint32_t lsp;
-    uint32_t max_labels;
-    wasm__reader_t r;
-    wasm_func_t* func;
-    wasm_functype_t* ft;
-    wasm_value_t* results_dst;
-    uint32_t num_results;
-    size_t arena_saved;
-    uint32_t current_offset;
-};
-
-WASM_PRIVATE wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__call_frame_stack_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__clear_backtrace(wasm_runtime_t* rt);
-
-WASM_PRIVATE uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf);
-
-WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_frame_sp);
-
-WASM_PRIVATE uint32_t wasm__visible_call_stack_depth(const wasm_runtime_t* rt);
-
-WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
-                                         uint32_t depth,
-                                         uint32_t* out_func_idx,
-                                         uint32_t* out_offset);
-
-WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object);
-
-WASM_PRIVATE void wasm__gc_mark_value(const wasm_value_t* value);
-
-WASM_PRIVATE void wasm__gc_mark_values(const wasm_value_t* values, uint32_t count);
-
-WASM_PRIVATE void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
-                                        const wasm_structtype_t* type);
-
-WASM_PRIVATE void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
-                                         const wasm_arraytype_t* type);
-
-WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object);
-
-WASM_PRIVATE void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value);
-
-WASM_PRIVATE void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
-
-WASM_PRIVATE void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object);
-
-WASM_PRIVATE void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt);
-
-void wasm_gc_collect(wasm_runtime_t* rt);
-
-typedef struct wasm__try_clause_t {
-    uint8_t opcode;
-    uint32_t immediate;
-    const uint8_t* body_start;
-    const uint8_t* next_clause;
-} wasm__try_clause_t;
-
-WASM_PRIVATE void wasm__clear_label(wasm__label_t* label);
-
-#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
-#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
-#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
-#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
-#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-
-WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
-                                  wasm_module_t* mod,
-                                  wasm_runtime_t* rt,
-                                  uint32_t func_idx,
-                                  wasm_func_t* func,
-                                  wasm_functype_t* ft,
-                                  wasm_value_t* locals,
-                                  wasm__label_t* labels,
-                                  wasm_value_t* results_dst,
-                                  uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
-                                                    wasm__label_t* labels,
-                                                    uint32_t* label_sp,
-                                                    wasm__reader_t* r,
-                                                    uint32_t sp_base);
-WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
-
-WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf);
-
-WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
-                                          uint32_t func_idx,
-                                          const wasm_value_t* args,
-                                          uint32_t num_args,
-                                          wasm_value_t* results_dst,
-                                          uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp);
-
-WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
-
-WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
-                                                wasm__try_table_clause_t* out_clause);
-
-WASM_PRIVATE void wasm__skip_try_table_immediates(wasm__reader_t* r);
-
-WASM_PRIVATE void wasm__skip_prefixed_immediates(wasm__reader_t* r);
-
-WASM_PRIVATE void wasm__skip_gc_immediates(wasm__reader_t* r);
-
-WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype);
-
-/* ── Block scanning ───────────────────────────────────────────────── */
-
-WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r);
-
-WASM_PRIVATE const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end);
-
-typedef struct wasm__control_frame_t {
-    uint8_t opcode;
-    uint32_t offset;
-} wasm__control_frame_t;
-
-WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func);
-
-WASM_PRIVATE const wasm__control_target_t* wasm__control_target_at(const wasm_func_t* func, const uint8_t* pc);
-
-WASM_PRIVATE wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod);
-
-WASM_PRIVATE wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,
-                                          const uint8_t* code_end,
-                                          wasm__try_clause_t* out_clause);
-
-/* ── Branch helper ────────────────────────────────────────────────── */
-
-WASM_PRIVATE wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
-                                                  const wasm__exception_state_t* ex);
-
-WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
-
-WASM_PRIVATE int wasm__find_rethrow_label(const wasm__label_t* labels,
-                                    uint32_t lsp,
-                                    uint32_t depth,
-                                    uint32_t* out_index);
-
-WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
-                                    wasm__label_t* labels,
-                                    wasm__label_t* target,
-                                    wasm__reader_t* r,
-                                    uint32_t* label_sp,
-                                    uint32_t depth_l);
-
-WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
-                                                    wasm__label_t* labels,
-                                                    uint32_t* label_sp,
-                                                    wasm__reader_t* r,
-                                                    uint32_t sp_base);
-
-WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
-                                    wasm__label_t* labels,
-                                    wasm__label_t* target,
-                                    wasm__reader_t* r,
-                                    uint32_t* label_sp,
-                                    uint32_t depth_l);
-
-WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label);
-
-/* ── Interpreter ──────────────────────────────────────────────────── */
-
-#define WASM__PUSH(rt, val)                \
-    do {                                   \
-        if ((rt)->sp >= (rt)->max_stack) { \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        (rt)->stack[(rt)->sp++] = (val);   \
-    } while (0)
-#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
-#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
-#define WASM__TRAP(code) \
-    do {                 \
-        err = (code);    \
-        goto cleanup;    \
-    } while (0)
-
-WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
-                                 wasm_value_t* args, uint32_t num_args,
-                                 wasm_value_t* results, uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
-                                           wasm_host_func_t host_func,
-                                           const wasm_value_t* args,
-                                           uint32_t num_args,
-                                           wasm_value_t* results,
-                                           uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
-                                  wasm_module_t* mod,
-                                  wasm_runtime_t* rt,
-                                  uint32_t func_idx,
-                                  wasm_func_t* func,
-                                  wasm_functype_t* ft,
-                                  wasm_value_t* locals,
-                                  wasm__label_t* labels,
-                                  wasm_value_t* results_dst,
-                                  uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
-                                      wasm__call_frame_t* cf,
-                                      wasm_module_t** next_module,
-                                      uint32_t* next_func_idx,
-                                      wasm_value_t** next_args,
-                                      uint32_t* next_num_args,
-                                      int* next_args_owned,
-                                      wasm_value_t* tail_args_buf,
-                                      uint32_t base_frame_sp);
-
-WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
-                                      wasm__call_frame_t* cf,
-                                      wasm_module_t** next_module,
-                                      uint32_t* next_func_idx,
-                                      wasm_value_t** next_args,
-                                      uint32_t* next_num_args,
-                                      int* next_args_owned,
-                                      wasm_value_t* tail_args_buf,
-                                      uint32_t base_frame_sp);
-
-WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
-                                 wasm_value_t* args, uint32_t num_args,
-                                 wasm_value_t* results, uint32_t num_results);
-
-/* ── Public call API ──────────────────────────────────────────────── */
-
-wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
-                       const wasm_value_t* args, uint32_t num_args,
-                       wasm_value_t* results, uint32_t num_results);
-
-wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
-                             const wasm_value_t* args, uint32_t num_args,
-                             wasm_value_t* results, uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
-                                                const char* name,
-                                                uint32_t* out_index,
-                                                const wasm_functype_t** out_type);
-
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
-                                                  const char* name,
-                                                  wasm_global_t** out_global,
-                                                  uint32_t* out_index);
-
-WASM_PRIVATE wasm_error_t wasm__fmt_char_to_type(char ch,
-                                           int in_results,
-                                           int* out_is_void,
-                                           wasm_valtype_t* out_type,
-                                           wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_error_t wasm__parse_fmt_string(const char* fmt,
-                                           wasm_functype_t* out_type,
-                                           const char** out_error);
-
-WASM_PRIVATE wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
-                                        wasm_error_t err,
-                                        const char* prefix,
-                                        const char* detail);
-
-WASM_PRIVATE wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
-                                      const char* func_name,
-                                      const char* fmt,
-                                      va_list ap);
-
-wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char* fmt, ...);
-
-wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
-                                 const char* func_name, const char* fmt,
-                                 wasm_host_func_t callback, void* userdata);
-
-
-#endif /* WASM_INTERNAL_EXEC_H */
-/* END src/internal/exec.h */
-
-/* BEGIN src/internal/platform.h */
-#ifndef WASM_INTERNAL_PLATFORM_H
-#define WASM_INTERNAL_PLATFORM_H
-
-
-#if WASM_ENABLE_PLATFORM
-#define WASM__WASI_MODULE_NAME "wasi_snapshot_preview1"
-#define WASM__WASI_FD_STDIN 0u
-#define WASM__WASI_FD_STDOUT 1u
-#define WASM__WASI_FD_STDERR 2u
-#define WASM__WASI_FILETYPE_CHARACTER_DEVICE 2u
-#define WASM__WASI_FILETYPE_REGULAR_FILE 4u
-#define WASM__WASI_WHENCE_SET 0u
-#define WASM__WASI_WHENCE_CUR 1u
-#define WASM__WASI_WHENCE_END 2u
-#define WASM__WASI_CLOCKID_REALTIME 0u
-#define WASM__WASI_CLOCKID_MONOTONIC 1u
-#define WASM__WASI_CLOCKID_PROCESS_CPUTIME_ID 2u
-#define WASM__WASI_CLOCKID_THREAD_CPUTIME_ID 3u
-#define WASM__WASI_ERRNO_SUCCESS 0u
-#define WASM__WASI_ERRNO_ACCES 2u
-#define WASM__WASI_ERRNO_AGAIN 6u
-#define WASM__WASI_ERRNO_BADF 8u
-#define WASM__WASI_ERRNO_EXIST 20u
-#define WASM__WASI_ERRNO_INVAL 28u
-#define WASM__WASI_ERRNO_IO 29u
-#define WASM__WASI_ERRNO_FAULT 21u
-#define WASM__WASI_ERRNO_NOENT 44u
-#define WASM__WASI_ERRNO_NOMEM 48u
-#define WASM__WASI_ERRNO_NOSPC 51u
-#define WASM__WASI_ERRNO_NOSYS 52u
-#define WASM__WASI_ERRNO_NOTDIR 54u
-#define WASM__WASI_ERRNO_NOTEMPTY 55u
-#define WASM__WASI_ERRNO_NOTSUP 58u
-#define WASM__WASI_ERRNO_ISDIR 31u
-#define WASM__WASI_ERRNO_PERM 63u
-#define WASM__WASI_ERRNO_PIPE 64u
-#define WASM__WASI_ERRNO_SPIPE 70u
-#define WASM__WASI_ERRNO_NOTCAPABLE 76u
-#define WASM__WASI_FILETYPE_UNKNOWN 0u
-#define WASM__WASI_FILETYPE_BLOCK_DEVICE 1u
-#define WASM__WASI_FILETYPE_DIRECTORY 3u
-#define WASM__WASI_FILETYPE_SOCKET_DGRAM 5u
-#define WASM__WASI_FILETYPE_SOCKET_STREAM 6u
-#define WASM__WASI_FILETYPE_SYMBOLIC_LINK 7u
-#define WASM__WASI_PREOPENTYPE_DIR 0u
-#define WASM__WASI_RIGHTS_ALL UINT64_MAX
-#define WASM__WASI_MAX_FDS 64u
-
-typedef struct wasm__wasi_fd_entry_t {
-    int used;
-    int host_fd;
-    int owns_host_fd;
-    int is_preopen;
-    uint8_t filetype;
-    uint16_t fdflags;
-    uint64_t rights_base;
-    uint64_t rights_inheriting;
-    char* host_path;
-    char* preopen_path;
-} wasm__wasi_fd_entry_t;
-
-struct wasm__wasi_state_t {
-    wasm__wasi_fd_entry_t fds[WASM__WASI_MAX_FDS];
-};
-
-#if defined(_WIN32)
-typedef struct __stat64 wasm__wasi_host_stat_t;
-#else
-typedef struct stat wasm__wasi_host_stat_t;
-#endif
-
-WASM_PRIVATE char* wasm__wasi_strdup(const char* text);
-
-WASM_PRIVATE int wasm__wasi_host_close(int fd);
-
-WASM_PRIVATE int wasm__wasi_host_fileno(FILE* stream);
-
-WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode);
-
-WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry);
-
-WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__wasi_fd_entry_init_stdio(wasm__wasi_fd_entry_t* entry,
-                                           int host_fd,
-                                           uint8_t filetype);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
-                                            int host_fd,
-                                            int owns_host_fd,
-                                            uint8_t filetype,
-                                            uint64_t rights_base,
-                                            uint64_t rights_inheriting,
-                                            const char* host_path,
-                                            const char* preopen_path,
-                                            uint32_t* out_fd);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint32_t fd);
-
-WASM_PRIVATE int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
-                                       uint64_t mem_size,
-                                       uint32_t ptr,
-                                       uint32_t len,
-                                       uint8_t** out_bytes);
-
-WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      uint32_t len,
-                                      char** out_path);
-
-WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry);
-
-WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry);
-
-WASM_PRIVATE int wasm__wasi_host_read(int fd, void* buf, size_t len, size_t* out_count);
-
-WASM_PRIVATE int wasm__wasi_host_write(int fd, const void* buf, size_t len, size_t* out_count);
-
-WASM_PRIVATE int wasm__wasi_host_seek(int fd, int64_t offset, int whence, uint64_t* out_offset);
-
-WASM_PRIVATE int wasm__wasi_host_sync(int fd);
-
-WASM_PRIVATE int wasm__wasi_host_datasync(int fd);
-
-WASM_PRIVATE int wasm__wasi_host_fstat(int fd, wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_host_ftruncate(int fd, uint64_t size);
-
-WASM_PRIVATE int wasm__wasi_host_pread(int fd, void* buf, size_t len, uint64_t offset, size_t* out_count);
-
-WASM_PRIVATE int wasm__wasi_host_pwrite(int fd, const void* buf, size_t len, uint64_t offset, size_t* out_count);
-
-#if defined(_WIN32)
-WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out_wide);
-
-WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out_text);
-
-WASM_PRIVATE void wasm__wasi_windows_normalize_slashes(char* text);
-
-WASM_PRIVATE int wasm__wasi_windows_path_is_absolute(const char* path);
-
-WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path, char** out_path);
-
-WASM_PRIVATE int wasm__wasi_windows_stat_path(const char* path, wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_windows_open_path(const char* path, int oflags);
-
-WASM_PRIVATE uint32_t wasm__wasi_windows_error_to_wasi(DWORD error_code);
-
-WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm__wasi_fd_entry_t* entry,
-                                           const char* path,
-                                           char** out_path);
-
-WASM_PRIVATE uint8_t wasm__wasi_windows_filetype_from_attributes(DWORD attributes);
-
-WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_target);
-#endif
-
-WASM_PRIVATE uint64_t wasm__wasi_stat_time_ns(const wasm__wasi_host_stat_t* st, int which);
-
-WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig);
-
-typedef uint32_t (*wasm__wasi_string_count_fn)(void);
-typedef const char* (*wasm__wasi_string_at_fn)(uint32_t index);
-
-WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code);
-
-WASM_PRIVATE uint32_t wasm__wasi_errno_from_host(int err_code);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
-                                           const char* op_name,
-                                           wasm_memory_t** out_memory,
-                                           uint64_t* out_mem_size);
-
-WASM_PRIVATE uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
-                                            wasm__wasi_string_at_fn at_fn);
-
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_args(void);
-
-WASM_PRIVATE const char* wasm__wasi_string_list_at_args(uint32_t index);
-
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_env(void);
-
-WASM_PRIVATE const char* wasm__wasi_string_list_at_env(uint32_t index);
-
-WASM_PRIVATE uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
-                                            wasm__wasi_string_count_fn count_fn,
-                                            wasm__wasi_string_at_fn at_fn,
-                                            uint32_t count_ptr,
-                                            uint32_t size_ptr,
-                                            wasm_value_t* results,
-                                            uint32_t num_results);
-
-WASM_PRIVATE uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
-                                           wasm__wasi_string_count_fn count_fn,
-                                           wasm__wasi_string_at_fn at_fn,
-                                           uint32_t entries_ptr,
-                                           uint32_t data_ptr,
-                                           wasm_value_t* results,
-                                           uint32_t num_results);
-
-WASM_PRIVATE int wasm__wasi_is_stdio_fd(uint32_t fd);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_args_sizes_get(wasm_module_t* mod,
-                                              const wasm_value_t* args, uint32_t num_args,
-                                              wasm_value_t* results, uint32_t num_results,
-                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_args_get(wasm_module_t* mod,
-                                        const wasm_value_t* args, uint32_t num_args,
-                                        wasm_value_t* results, uint32_t num_results,
-                                        void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_environ_sizes_get(wasm_module_t* mod,
-                                                 const wasm_value_t* args, uint32_t num_args,
-                                                 wasm_value_t* results, uint32_t num_results,
-                                                 void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_write(wasm_module_t* mod,
-                                        const wasm_value_t* args, uint32_t num_args,
-                                        wasm_value_t* results, uint32_t num_results,
-                                        void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_read(wasm_module_t* mod,
-                                       const wasm_value_t* args, uint32_t num_args,
-                                       wasm_value_t* results, uint32_t num_results,
-                                       void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_exit(wasm_module_t* mod,
-                                         const wasm_value_t* args, uint32_t num_args,
-                                         wasm_value_t* results, uint32_t num_results,
-                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,
-                                        const wasm_value_t* args, uint32_t num_args,
-                                        wasm_value_t* results, uint32_t num_results,
-                                        void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_seek(wasm_module_t* mod,
-                                       const wasm_value_t* args, uint32_t num_args,
-                                       wasm_value_t* results, uint32_t num_results,
-                                       void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_sync(wasm_module_t* mod,
-                                       const wasm_value_t* args, uint32_t num_args,
-                                       wasm_value_t* results, uint32_t num_results,
-                                       void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_environ_get(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
-                                             const wasm_value_t* args, uint32_t num_args,
-                                             wasm_value_t* results, uint32_t num_results,
-                                             void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
-                                              const wasm_value_t* args, uint32_t num_args,
-                                              wasm_value_t* results, uint32_t num_results,
-                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
-                                             const wasm_value_t* args, uint32_t num_args,
-                                             wasm_value_t* results, uint32_t num_results,
-                                             void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_datasync(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_set_flags(wasm_module_t* mod,
-                                                   const wasm_value_t* args, uint32_t num_args,
-                                                   wasm_value_t* results, uint32_t num_results,
-                                                   void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_set_rights(wasm_module_t* mod,
-                                                    const wasm_value_t* args, uint32_t num_args,
-                                                    wasm_value_t* results, uint32_t num_results,
-                                                    void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_get(wasm_module_t* mod,
-                                               const wasm_value_t* args, uint32_t num_args,
-                                               wasm_value_t* results, uint32_t num_results,
-                                               void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_set_size(wasm_module_t* mod,
-                                                    const wasm_value_t* args, uint32_t num_args,
-                                                    wasm_value_t* results, uint32_t num_results,
-                                                    void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_tell(wasm_module_t* mod,
-                                       const wasm_value_t* args, uint32_t num_args,
-                                       wasm_value_t* results, uint32_t num_results,
-                                       void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_advise(wasm_module_t* mod,
-                                         const wasm_value_t* args, uint32_t num_args,
-                                         wasm_value_t* results, uint32_t num_results,
-                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_sched_yield(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_errno_stub(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
-
-WASM_PRIVATE int wasm__wasi_dirflags_to_host(uint32_t flags);
-
-WASM_PRIVATE int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_prestat_get(wasm_module_t* mod,
-                                              const wasm_value_t* args, uint32_t num_args,
-                                              wasm_value_t* results, uint32_t num_results,
-                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_prestat_dir_name(wasm_module_t* mod,
-                                                   const wasm_value_t* args, uint32_t num_args,
-                                                   wasm_value_t* results, uint32_t num_results,
-                                                   void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
-                                                     const wasm_value_t* args, uint32_t num_args,
-                                                     wasm_value_t* results, uint32_t num_results,
-                                                     void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
-                                                 const wasm_value_t* args, uint32_t num_args,
-                                                 wasm_value_t* results, uint32_t num_results,
-                                                 void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
-                                         const wasm_value_t* args, uint32_t num_args,
-                                         wasm_value_t* results, uint32_t num_results,
-                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
-                                         const wasm_value_t* args, uint32_t num_args,
-                                         wasm_value_t* results, uint32_t num_results,
-                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
-                                             const wasm_value_t* args, uint32_t num_args,
-                                             wasm_value_t* results, uint32_t num_results,
-                                             void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
-                                                     const wasm_value_t* args, uint32_t num_args,
-                                                     wasm_value_t* results, uint32_t num_results,
-                                                     void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
-                                            const wasm_value_t* args, uint32_t num_args,
-                                            wasm_value_t* results, uint32_t num_results,
-                                            void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
-                                                const wasm_value_t* args, uint32_t num_args,
-                                                wasm_value_t* results, uint32_t num_results,
-                                                void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_renumber(wasm_module_t* mod,
-                                           const wasm_value_t* args, uint32_t num_args,
-                                           wasm_value_t* results, uint32_t num_results,
-                                           void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_pread(wasm_module_t* mod,
-                                        const wasm_value_t* args, uint32_t num_args,
-                                        wasm_value_t* results, uint32_t num_results,
-                                        void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_pwrite(wasm_module_t* mod,
-                                         const wasm_value_t* args, uint32_t num_args,
-                                         wasm_value_t* results, uint32_t num_results,
-                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
-
-wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
-
-#define WASM__EMSCRIPTEN_MODULE_NAME "env"
-#define WASM__EMSCRIPTEN_MEMORY_NAME "memory"
-
-#ifndef ENOSYS
-#define ENOSYS 38
-#endif
-
-#ifndef ENOTTY
-#define ENOTTY 25
-#endif
-
-WASM_PRIVATE int32_t wasm__emscripten_errno_from_host(int err_code);
-
-WASM_PRIVATE int32_t wasm__emscripten_neg_errno(int err_code);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
-                                                uint32_t num_results,
-                                                int32_t value);
-
-WASM_PRIVATE int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
-                                              uint64_t mem_size,
-                                              uint32_t ptr,
-                                              char** out_string);
-
-WASM_PRIVATE int wasm__emscripten_store_i32(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      int32_t value);
-
-WASM_PRIVATE int wasm__emscripten_store_c_string(wasm_memory_t* memory,
-                                           uint64_t mem_size,
-                                           uint32_t ptr,
-                                           const char* text);
-
-WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* rt,
-                                                          uint64_t min_pages,
-                                                          uint64_t max_pages,
-                                                          int is_64);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
-                                              const wasm_value_t* args, uint32_t num_args,
-                                              wasm_value_t* results, uint32_t num_results,
-                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
-                                             const wasm_value_t* args, uint32_t num_args,
-                                             wasm_value_t* results, uint32_t num_results,
-                                             void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
-                                                  const wasm_value_t* args, uint32_t num_args,
-                                                  wasm_value_t* results, uint32_t num_results,
-                                                  void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
-                                                 const wasm_value_t* args, uint32_t num_args,
-                                                 wasm_value_t* results, uint32_t num_results,
-                                                 void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
-                                              const wasm_value_t* args, uint32_t num_args,
-                                              wasm_value_t* results, uint32_t num_results,
-                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
-                                                  const wasm_value_t* args, uint32_t num_args,
-                                                  wasm_value_t* results, uint32_t num_results,
-                                                  void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
-                                             const wasm_value_t* args, uint32_t num_args,
-                                             wasm_value_t* results, uint32_t num_results,
-                                             void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
-                                               const wasm_value_t* args, uint32_t num_args,
-                                               wasm_value_t* results, uint32_t num_results,
-                                               void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
-                                                       const wasm_value_t* args, uint32_t num_args,
-                                                       wasm_value_t* results, uint32_t num_results,
-                                                       void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
-                                                    const wasm_value_t* args, uint32_t num_args,
-                                                    wasm_value_t* results, uint32_t num_results,
-                                                    void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
-                                                   const wasm_value_t* args, uint32_t num_args,
-                                                   wasm_value_t* results, uint32_t num_results,
-                                                   void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
-                                                      const wasm_value_t* args, uint32_t num_args,
-                                                      wasm_value_t* results, uint32_t num_results,
-                                                      void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
-                                                     const wasm_value_t* args, uint32_t num_args,
-                                                     wasm_value_t* results, uint32_t num_results,
-                                                     void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
-                                                    const wasm_value_t* args, uint32_t num_args,
-                                                    wasm_value_t* results, uint32_t num_results,
-                                                    void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
-                                                   const wasm_value_t* args, uint32_t num_args,
-                                                   wasm_value_t* results, uint32_t num_results,
-                                                   void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_t* mod,
-                                                              const wasm_value_t* args, uint32_t num_args,
-                                                              wasm_value_t* results, uint32_t num_results,
-                                                              void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
-                                                         const wasm_value_t* args, uint32_t num_args,
-                                                         wasm_value_t* results, uint32_t num_results,
-                                                         void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
-                                                    const wasm_value_t* args, uint32_t num_args,
-                                                    wasm_value_t* results, uint32_t num_results,
-                                                    void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
-                                                     const wasm_value_t* args, uint32_t num_args,
-                                                     wasm_value_t* results, uint32_t num_results,
-                                                     void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
-                                                        const wasm_value_t* args, uint32_t num_args,
-                                                        wasm_value_t* results, uint32_t num_results,
-                                                        void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
-                                                   const wasm_value_t* args, uint32_t num_args,
-                                                   wasm_value_t* results, uint32_t num_results,
-                                                   void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
-                                                      const wasm_value_t* args, uint32_t num_args,
-                                                      wasm_value_t* results, uint32_t num_results,
-                                                      void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_utimensat(wasm_module_t* mod,
-                                                       const wasm_value_t* args, uint32_t num_args,
-                                                       wasm_value_t* results, uint32_t num_results,
-                                                       void* userdata);
-
-wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt);
-
-#else
-
-wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
-
-wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt);
-
-#endif /* WASM_ENABLE_PLATFORM */
-
-
-#endif /* WASM_INTERNAL_PLATFORM_H */
-/* END src/internal/platform.h */
-
-/* BEGIN src/internal/inspect.h */
-#ifndef WASM_INTERNAL_INSPECT_H
-#define WASM_INTERNAL_INSPECT_H
-
-
-/* ── Memory helpers ───────────────────────────────────────────────── */
-
-uint32_t wasm_memory_count(wasm_module_t* mod);
-
-wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
-                              uint64_t offset, void* dst, size_t len);
-
-wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
-                               uint64_t offset, const void* src, size_t len);
-
-wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
-                                    uint64_t offset, char* dst, size_t max_len);
-
-uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index);
-
-uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
-
-int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
-
-wasm_memory_t* wasm_memory_ref_at(wasm_module_t* mod, uint32_t memory_index);
-
-uint8_t* wasm_memory_data(wasm_module_t* mod);
-uint64_t wasm_memory_size(wasm_module_t* mod);
-
-int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages);
-
-uint32_t wasm_table_count(wasm_module_t* mod);
-
-wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx);
-
-wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx);
-
-const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx);
-
-uint32_t wasm_global_count(wasm_module_t* mod);
-
-wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx);
-
-const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx);
-
-int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx);
-
-wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx);
-
-wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val);
-
-wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t val);
-
-uint32_t wasm_export_count(wasm_module_t* mod);
-
-uint32_t wasm_import_count(wasm_module_t* mod);
-
-const wasm_import_info_t* wasm_import_info(wasm_module_t* mod, uint32_t index);
-
-const char* wasm_export_name(wasm_module_t* mod, uint32_t index);
-
-const uint8_t* wasm_export_name_bytes(wasm_module_t* mod, uint32_t index, size_t* out_len);
-
-wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
-
-uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index);
-
-int wasm_find_export(wasm_module_t* mod, const char* name,
-                     wasm_export_kind_t* out_kind, uint32_t* out_index);
-
-int wasm_find_export_bytes(wasm_module_t* mod, const uint8_t* name, size_t name_len,
-                           wasm_export_kind_t* out_kind, uint32_t* out_index);
-
-uint32_t wasm_custom_section_count(wasm_module_t* mod);
-
-const char* wasm_custom_section_name(wasm_module_t* mod, uint32_t index);
-
-const uint8_t* wasm_custom_section_data(wasm_module_t* mod, uint32_t index, size_t* out_len);
-
-const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, size_t* out_len);
-
-uint32_t wasm_type_count(wasm_module_t* mod);
-
-wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx);
-
-const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx);
-
-uint32_t wasm_struct_type_field_count(wasm_module_t* mod, uint32_t type_idx);
-
-const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type_idx,
-                                               uint32_t field_idx);
-
-const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx);
-
-uint32_t wasm_func_count(wasm_module_t* mod);
-
-const wasm_functype_t* wasm_func_functype(wasm_module_t* mod, uint32_t func_idx);
-
-uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx);
-
-uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx);
-
-wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
-                                    uint32_t param_idx);
-
-wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
-                                     uint32_t result_idx);
-
-uint32_t wasm_tag_count(wasm_module_t* mod);
-
-const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx);
-
-WASM_PRIVATE const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind);
-
-WASM_PRIVATE wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
-                                                   const wasm_value_t* ref,
-                                                   wasm_gc_object_kind_t expected_kind,
-                                                   const wasm_gc_header_t** out_object);
-
-wasm_error_t wasm_struct_get_field(wasm_module_t* mod, wasm_value_t struct_ref,
-                                   uint32_t field_idx, wasm_value_t* out_val);
-
-wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
-                                   uint32_t field_idx, wasm_value_t val);
-
-wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
-                               uint32_t* out_len);
-
-wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
-                                 uint32_t index, wasm_value_t* out_val);
-
-wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
-                                 uint32_t index, wasm_value_t val);
-
-void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size);
-
-uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
-
-wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
-                                      uint32_t* out_func_idx, uint32_t* out_offset);
-
-void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
-
-uint64_t wasm_get_fuel(wasm_runtime_t* rt);
-
-const wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod);
-
-void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);
-
-void* wasm_module_get_userdata(wasm_module_t* mod);
-
-wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
-                             const wasm_value_t* field_values, uint32_t num_fields,
-                             wasm_value_t* out_ref);
-
-wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
-                            const wasm_value_t* elem_values, uint32_t num_elems,
-                            wasm_value_t* out_ref);
-
-const char* wasm_error_string(wasm_error_t err);
-
-
-#endif /* WASM_INTERNAL_INSPECT_H */
-/* END src/internal/inspect.h */
-
-/* BEGIN src/exec/opcodes.h */
-#ifndef WASM_EXEC_OPCODES_H
-#define WASM_EXEC_OPCODES_H
-
-
-WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf);
-WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t* cf);
-WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf);
-
-WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op);
-
-#endif /* WASM_EXEC_OPCODES_H */
-/* END src/exec/opcodes.h */
-
-#endif /* WASM_INTERNAL_H */
-/* END src/internal.h */
-
-/* BEGIN src/support.c */
-
-
-#if defined(WASM__NEEDS_CALLOC_FALLBACK)
-WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size) {
-    size_t total;
-    void* ptr;
-
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
-
-    total = count * size;
-    ptr = WASM_MALLOC(total);
-    if (ptr) memset(ptr, 0, total);
-    return ptr;
-}
-
-#endif
 #if defined(WASM__SIMD_USE_NEON)
 WASM_PRIVATE uint8x16_t wasm__neon_load_u8x16(const wasm_value_t* value) {
     return vld1q_u8(value->of.v128);
@@ -4183,31 +1112,96 @@ WASM_PRIVATE __m128d wasm__sse_neg_pd(__m128d value) {
 }
 
 #endif
-WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
-    return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
-}
+/* END src/simd/native.c */
 
-WASM_PRIVATE_INLINE int wasm__uses_externref_storage(wasm_valtype_t type) {
-    return type == WASM_TYPE_EXTERNREF || type == WASM_TYPE_NOEXTERN;
-}
+/* BEGIN src/platform/host.c */
 
-WASM_PRIVATE_INLINE int wasm__uses_exnref_storage(wasm_valtype_t type) {
-    return type == WASM_TYPE_EXNREF || type == WASM_TYPE_NOEXN;
-}
+/* BEGIN src/platform/host.h */
+#ifndef WASM_PLATFORM_HOST_H
+#define WASM_PLATFORM_HOST_H
 
-WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type) {
-    switch (type) {
-        case WASM_TYPE_NONE:
-        case WASM_TYPE_ANYREF:
-        case WASM_TYPE_EQREF:
-        case WASM_TYPE_I31REF:
-        case WASM_TYPE_STRUCTREF:
-        case WASM_TYPE_ARRAYREF:
-            return 1;
-        default:
-            return 0;
-    }
-}
+
+#if WASM_ENABLE_PLATFORM
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <direct.h>
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <windows.h>
+#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+#include <dirent.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
+#endif
+
+#if WASM_ENABLE_PLATFORM
+/* ── WASI platform hooks ─────────────────────────────────────────── */
+
+#if defined(_WIN32)
+#define WASM__PLATFORM_WINDOWS 1
+#define WASM__PLATFORM_POSIX 0
+#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+#define WASM__PLATFORM_WINDOWS 0
+#define WASM__PLATFORM_POSIX 1
+#else
+#define WASM__PLATFORM_WINDOWS 0
+#define WASM__PLATFORM_POSIX 0
+#endif
+
+#ifndef WASM_WASI_ARG_COUNT
+#define WASM_WASI_ARG_COUNT() 0u
+#endif
+
+#ifndef WASM_WASI_ARG_AT
+#define WASM_WASI_ARG_AT(index) ((const char*)0)
+#endif
+
+#ifndef WASM_WASI_ENV_COUNT
+#define WASM_WASI_ENV_COUNT() 0u
+#endif
+
+#ifndef WASM_WASI_ENV_AT
+#define WASM_WASI_ENV_AT(index) ((const char*)0)
+#endif
+
+#ifndef WASM_WASI_FILL_RANDOM
+#define WASM__WASI_NEEDS_RANDOM_FALLBACK 1
+#endif
+
+#ifndef WASM_WASI_CLOCK_TIME_GET
+#define WASM__WASI_NEEDS_CLOCK_FALLBACK 1
+#endif
+#endif /* WASM_ENABLE_PLATFORM */
+
+#if WASM_ENABLE_PLATFORM
+WASM_PRIVATE uint32_t wasm__platform_wasi_arg_count(void);
+WASM_PRIVATE const char* wasm__platform_wasi_arg_at(uint32_t index);
+WASM_PRIVATE uint32_t wasm__platform_wasi_env_count(void);
+WASM_PRIVATE const char* wasm__platform_wasi_env_at(uint32_t index);
+WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
+WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id, uint64_t precision, uint64_t* out_time);
+#endif
+
+#endif /* WASM_PLATFORM_HOST_H */
+/* END src/platform/host.h */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #if WASM_ENABLE_PLATFORM
 WASM_PRIVATE uint32_t wasm__platform_wasi_arg_count(void) {
@@ -4230,8 +1224,8 @@ WASM_PRIVATE const char* wasm__platform_wasi_env_at(uint32_t index) {
 
 #endif
 #if WASM_ENABLE_PLATFORM
-#if WASM__PLATFORM_WINDOWS
-WASM_PRIVATE uint64_t wasm__platform_windows_filetime_to_unix_ns(FILETIME ft) {
+#if WASM__PLATFORM_WINDOWS && defined(WASM__WASI_NEEDS_CLOCK_FALLBACK)
+static uint64_t wasm__platform_windows_filetime_to_unix_ns(FILETIME ft) {
     ULARGE_INTEGER ticks;
 
     ticks.LowPart = ft.dwLowDateTime;
@@ -4240,7 +1234,7 @@ WASM_PRIVATE uint64_t wasm__platform_windows_filetime_to_unix_ns(FILETIME ft) {
     return (ticks.QuadPart - 116444736000000000ull) * 100ull;
 }
 
-WASM_PRIVATE int wasm__platform_windows_qpc_time_ns(uint64_t* out_time) {
+static int wasm__platform_windows_qpc_time_ns(uint64_t* out_time) {
     static LARGE_INTEGER freq = { 0 };
     LARGE_INTEGER counter;
 
@@ -4255,7 +1249,7 @@ WASM_PRIVATE int wasm__platform_windows_qpc_time_ns(uint64_t* out_time) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__platform_windows_process_time_ns(uint64_t* out_time) {
+static int wasm__platform_windows_process_time_ns(uint64_t* out_time) {
     FILETIME create_time;
     FILETIME exit_time;
     FILETIME kernel_time;
@@ -4274,7 +1268,7 @@ WASM_PRIVATE int wasm__platform_windows_process_time_ns(uint64_t* out_time) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__platform_windows_thread_time_ns(uint64_t* out_time) {
+static int wasm__platform_windows_thread_time_ns(uint64_t* out_time) {
     FILETIME create_time;
     FILETIME exit_time;
     FILETIME kernel_time;
@@ -4296,8 +1290,8 @@ WASM_PRIVATE int wasm__platform_windows_thread_time_ns(uint64_t* out_time) {
 #endif
 #endif
 #if WASM_ENABLE_PLATFORM
-#if WASM__PLATFORM_POSIX
-WASM_PRIVATE int wasm__platform_posix_clock_time_get(uint32_t clock_id, uint64_t* out_time) {
+#if WASM__PLATFORM_POSIX && defined(WASM__WASI_NEEDS_CLOCK_FALLBACK)
+static int wasm__platform_posix_clock_time_get(uint32_t clock_id, uint64_t* out_time) {
 #if defined(CLOCK_REALTIME)
     struct timespec ts;
     int native_clock = -1;
@@ -4525,10 +1519,394 @@ WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
 
 #endif
 #endif
-/* END src/support.c */
+/* END src/platform/host.c */
 
 /* BEGIN src/portable.c */
 
+/* BEGIN src/portable.h */
+#ifndef WASM_PORTABLE_H
+#define WASM_PORTABLE_H
+
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define WASM__BIG_ENDIAN 1
+#else
+#define WASM__BIG_ENDIAN 0
+#endif
+#elif defined(_BIG_ENDIAN) || defined(__BIG_ENDIAN__) || \
+    defined(__ARMEB__) || defined(__MIPSEB__)
+#define WASM__BIG_ENDIAN 1
+#else
+#define WASM__BIG_ENDIAN 0
+#endif
+
+
+
+WASM_PRIVATE uint32_t wasm__clz32(uint32_t v);
+
+WASM_PRIVATE uint32_t wasm__ctz32(uint32_t v);
+
+WASM_PRIVATE uint32_t wasm__popcnt32(uint32_t v);
+
+WASM_PRIVATE uint32_t wasm__clz64(uint64_t v);
+
+WASM_PRIVATE uint32_t wasm__ctz64(uint64_t v);
+
+WASM_PRIVATE uint32_t wasm__popcnt64(uint64_t v);
+
+WASM_PRIVATE uint32_t wasm__shr_s32_bits(uint32_t value, uint32_t shift);
+
+WASM_PRIVATE uint64_t wasm__shr_s64_bits(uint64_t value, uint32_t shift);
+
+WASM_PRIVATE uint16_t wasm__load_le16(const void* p);
+
+WASM_PRIVATE uint32_t wasm__load_le32(const void* p);
+
+WASM_PRIVATE uint64_t wasm__load_le64(const void* p);
+
+WASM_PRIVATE void wasm__store_le16(void* p, uint16_t v);
+
+WASM_PRIVATE void wasm__store_le32(void* p, uint32_t v);
+
+WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v);
+
+WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag);
+
+WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
+
+#endif /* WASM_PORTABLE_H */
+/* END src/portable.h */
+
+/* BEGIN src/module.h */
+#ifndef WASM_MODULE_H
+#define WASM_MODULE_H
+
+
+typedef struct wasm__control_target_t {
+    uint32_t end_offset;
+    uint32_t aux_offset;
+} wasm__control_target_t;
+
+struct wasm_func_t {
+    uint32_t type_idx;
+    uint32_t num_locals;
+    wasm_valtype_t* locals;
+    wasm_reftype_t* local_reftypes;
+    const uint8_t* code;
+    uint32_t code_len;
+    wasm__control_target_t* control_targets;
+    uint32_t max_label_depth;
+    uint32_t funcref_id;
+    int is_declared_ref;
+    int is_import;
+    wasm_host_func_t host_func;
+    void* host_userdata;
+};
+
+struct wasm_module_t {
+    wasm_runtime_t* rt;
+    void* host_userdata;
+    uint8_t* module_bytes;
+    size_t module_size;
+    wasm_comptype_t* types;
+    uint32_t num_types;
+    wasm_recgroup_t* rec_groups;
+    uint32_t num_rec_groups;
+    wasm_func_t* funcs;
+    uint32_t num_funcs;
+    wasm_import_info_t* imports;
+    uint32_t num_imports;
+    wasm_export_t* exports;
+    uint32_t num_exports;
+    wasm_global_t* globals;
+    uint32_t num_globals;
+    wasm_tag_t* tags;
+    uint32_t num_tags;
+    wasm_table_t* tables;
+    uint32_t num_tables;
+    wasm_memory_t* memories;
+    wasm_custom_section_t* custom_sections;
+    uint32_t num_custom_sections;
+    wasm_data_segment_t* data_segments;
+    uint32_t num_data_segments;
+    wasm_elem_segment_t* elem_segments;
+    uint32_t num_elem_segments;
+    uint32_t num_func_imports;
+    uint32_t num_global_imports;
+    uint32_t num_memories;
+    uint32_t num_code_bodies;
+    uint32_t declared_data_count;
+    uint32_t required_features;
+    int has_data_count_section;
+    int uses_data_count_section;
+    int preserve_on_failure;
+    uint32_t start_func;
+    int startup_ran;
+    wasm_module_t* gc_prev;
+    wasm_module_t* gc_next;
+    wasm_module_t* failed_next;
+};
+
+WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
+                                                  const char* name,
+                                                  wasm_global_t** out_global,
+                                                  uint32_t* out_index);
+
+WASM_PRIVATE wasm_value_t wasm__global_get_value(const wasm_global_t* global);
+
+WASM_PRIVATE void wasm__global_set_value(wasm_global_t* global, wasm_value_t value);
+
+WASM_PRIVATE int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs);
+
+WASM_PRIVATE int32_t wasm__wrap_i32_sub(int32_t lhs, int32_t rhs);
+
+WASM_PRIVATE int32_t wasm__wrap_i32_mul(int32_t lhs, int32_t rhs);
+
+WASM_PRIVATE int64_t wasm__wrap_i64_add(int64_t lhs, int64_t rhs);
+
+WASM_PRIVATE int64_t wasm__wrap_i64_sub(int64_t lhs, int64_t rhs);
+
+WASM_PRIVATE int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs);
+
+WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE void wasm__free_import_info(wasm_import_info_t* info);
+
+WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE void wasm__free_exception_state(wasm__exception_state_t* ex);
+
+WASM_PRIVATE wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
+                                              uint32_t tag_index,
+                                              uint64_t tag_identity,
+                                              const wasm_value_t* values,
+                                              uint32_t count);
+
+WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt);
+
+WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
+                                            const wasm__exception_state_t* ex,
+                                            wasm_value_t* out_value);
+
+WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value);
+
+WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE void wasm__free_data_segment(wasm_data_segment_t* segment);
+
+WASM_PRIVATE wasm_table_t* wasm__table_actual(wasm_table_t* table);
+
+WASM_PRIVATE const wasm_table_t* wasm__table_actual_const(const wasm_table_t* table);
+
+WASM_PRIVATE int wasm__resolve_func_ref(const wasm_runtime_t* rt,
+                                  uint32_t ref_id,
+                                  wasm_module_t** out_module,
+                                  uint32_t* out_func_idx);
+
+WASM_PRIVATE void wasm__declare_func_ref(wasm_module_t* mod, uint32_t func_idx);
+
+WASM_PRIVATE wasm_error_t wasm__make_funcref(wasm_module_t* mod,
+                                       uint32_t func_idx,
+                                       wasm_value_t* out_value);
+
+#endif /* WASM_MODULE_H */
+/* END src/module.h */
+
+/* BEGIN src/runtime.h */
+#ifndef WASM_RUNTIME_H
+#define WASM_RUNTIME_H
+
+#include <stdio.h>
+/* BEGIN src/internal/gc_types.h */
+#ifndef WASM_INTERNAL_GC_TYPES_H
+#define WASM_INTERNAL_GC_TYPES_H
+
+
+/* Shared heap object layouts used by allocation, tracing, and execution. */
+#define WASM__GC_I31_TAG ((uintptr_t)1u)
+
+typedef enum wasm_gc_object_kind_t {
+    WASM_GC_OBJ_STRUCT = 1,
+    WASM_GC_OBJ_ARRAY = 2
+} wasm_gc_object_kind_t;
+
+struct wasm_gc_header_t {
+    wasm_gc_header_t* next_alloc;
+    size_t object_size;
+    wasm_module_t* module;
+    uint32_t type_index;
+    uint8_t kind;
+    uint8_t marked;
+    uint16_t reserved;
+};
+
+typedef struct wasm_gc_struct_t {
+    wasm_gc_header_t header;
+    uint8_t payload[1];
+} wasm_gc_struct_t;
+
+typedef struct wasm_gc_array_t {
+    wasm_gc_header_t header;
+    uint32_t length;
+    uint8_t payload[1];
+} wasm_gc_array_t;
+
+#define WASM__GC_STRUCT_HEADER_SIZE offsetof(wasm_gc_struct_t, payload)
+#define WASM__GC_ARRAY_HEADER_SIZE offsetof(wasm_gc_array_t, payload)
+
+struct wasm__exception_object_t {
+    uint32_t tag_index;
+    uint64_t tag_identity;
+    wasm_value_t* values;
+    uint32_t num_values;
+    struct wasm__exception_object_t* next;
+};
+
+struct wasm__externref_box_t {
+    wasm_value_t value;
+    wasm__externref_box_t* next;
+};
+
+#endif /* WASM_INTERNAL_GC_TYPES_H */
+/* END src/internal/gc_types.h */
+
+/* ── Portable snprintf ────────────────────────────────────────────── */
+#if defined(_MSC_VER) && _MSC_VER < 1900
+#define wasm__snprintf _snprintf
+#else
+#define wasm__snprintf snprintf
+#endif
+
+#define WASM__SET_ERR(rt, code, ...)                             \
+    do {                                                         \
+        (rt)->last_error = (code);                               \
+        wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
+                       __VA_ARGS__);                             \
+    } while (0)
+
+struct wasm_func_ref_t {
+    struct wasm_module_t* module;
+    uint32_t func_idx;
+};
+
+struct wasm_runtime_t {
+    wasm_import_t* imports;
+    uint32_t num_imports;
+    uint32_t cap_imports;
+    wasm_func_ref_t* func_refs;
+    uint32_t num_func_refs;
+    uint32_t cap_func_refs;
+    wasm_global_import_t* global_imports;
+    uint32_t num_global_imports;
+    uint32_t cap_global_imports;
+    wasm_table_import_t* table_imports;
+    uint32_t num_table_imports;
+    uint32_t cap_table_imports;
+    wasm_memory_import_t* memory_imports;
+    uint32_t num_memory_imports;
+    uint32_t cap_memory_imports;
+    wasm_tag_import_t* tag_imports;
+    uint32_t num_tag_imports;
+    uint32_t cap_tag_imports;
+    uint64_t next_tag_identity;
+    wasm_value_t* stack;
+    uint32_t max_stack;
+    uint32_t sp;
+    uint64_t fuel;
+    int fuel_enabled;
+    uint32_t enabled_features;
+    int lazy_validation;
+    wasm_error_t last_error;
+    char error_msg[256];
+    wasm__exception_state_t pending_exception;
+    wasm__exception_object_t* exception_objects;
+    uint8_t* gc_heap;
+    size_t gc_heap_size;
+    size_t gc_heap_offset;
+    wasm_gc_header_t* gc_allocations;
+    wasm_module_t* gc_modules;
+    wasm_module_t* failed_modules;
+    wasm__externref_box_t* externref_boxes;
+    uint8_t* frame_arena;
+    size_t frame_arena_size;
+    size_t frame_arena_offset;
+    wasm__call_frame_t* call_frames;
+    uint32_t max_call_frames;
+    uint32_t call_frame_sp;
+    wasm_valtype_t* validator_stack;
+    wasm_reftype_t* validator_stack_reftypes;
+    wasm__val_frame_t* validator_frames;
+    uint64_t* validator_local_init_bits;
+    uint64_t* validator_local_init_entry_bits;
+    size_t validator_local_init_capacity;
+    uint32_t backtrace_depth;
+    uint32_t max_labels;
+    uint32_t* backtrace_func_indices;
+    uint32_t* backtrace_offsets;
+    wasm__wasi_state_t* wasi_state;
+    int emscripten_stubs_enabled;
+    wasm__emscripten_state_t* emscripten_state;
+};
+
+WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
+                                                      const char* module,
+                                                      const char* name);
+
+WASM_PRIVATE int wasm__has_import_named(const wasm_runtime_t* rt,
+                                  const char* module,
+                                  const char* name);
+
+WASM_PRIVATE wasm_table_import_t* wasm__find_table_import(wasm_runtime_t* rt,
+                                                    const char* module,
+                                                    const char* name);
+
+WASM_PRIVATE wasm_memory_import_t* wasm__find_memory_import(wasm_runtime_t* rt,
+                                                      const char* module,
+                                                      const char* name);
+
+WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
+                                                const char* module,
+                                                const char* name);
+
+WASM_PRIVATE void wasm__gc_register_module(wasm_runtime_t* rt, wasm_module_t* mod);
+
+WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* mod);
+
+WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
+
+WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
+                                                      const wasm_module_t* mod,
+                                                      uint32_t type_index,
+                                                      const wasm_structtype_t* type);
+
+WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
+                                                    const wasm_module_t* mod,
+                                                    uint32_t type_index,
+                                                    const wasm_arraytype_t* type,
+                                                    uint32_t length);
+
+WASM_PRIVATE void wasm__arena_destroy(wasm_runtime_t* rt);
+
+WASM_PRIVATE wasm_error_t wasm__arena_init(wasm_runtime_t* rt, size_t size);
+
+WASM_PRIVATE void* wasm__arena_alloc(wasm_runtime_t* rt, size_t size);
+
+WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, size_t saved_offset);
+
+WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
+                                                   const wasm_import_t* imp,
+                                                   int zeroed_type_is_unspecified);
+
+#endif /* WASM_RUNTIME_H */
+/* END src/runtime.h */
+
+#include <string.h>
+#include <stdio.h>
 
 WASM_PRIVATE uint32_t wasm__clz32(uint32_t v) {
     uint32_t n = 0;
@@ -4615,16 +1993,16 @@ WASM_PRIVATE uint64_t wasm__shr_s64_bits(uint64_t value, uint32_t shift) {
 }
 
 #if WASM__BIG_ENDIAN
-WASM_PRIVATE uint16_t wasm__bswap16(uint16_t v) {
+static uint16_t wasm__bswap16(uint16_t v) {
     return (uint16_t)((v >> 8) | (v << 8));
 }
 
-WASM_PRIVATE uint32_t wasm__bswap32(uint32_t v) {
+static uint32_t wasm__bswap32(uint32_t v) {
     return ((v >> 24) & 0x000000FFu) | ((v >> 8) & 0x0000FF00u) |
            ((v << 8) & 0x00FF0000u) | ((v << 24) & 0xFF000000u);
 }
 
-WASM_PRIVATE uint64_t wasm__bswap64(uint64_t v) {
+static uint64_t wasm__bswap64(uint64_t v) {
     uint32_t lo = (uint32_t)v, hi = (uint32_t)(v >> 32);
     return ((uint64_t)wasm__bswap32(lo) << 32) | (uint64_t)wasm__bswap32(hi);
 }
@@ -4678,7 +2056,7 @@ WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v) {
     memcpy(p, &v, 8);
 }
 
-WASM_PRIVATE const char* wasm__feature_name(uint32_t flag) {
+static const char* wasm__feature_name(uint32_t flag) {
     switch (flag) {
         case WASM_FEATURE_SIGN_EXT:
             return "sign-extension operators";
@@ -4751,6 +2129,205 @@ WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod) {
 
 /* BEGIN src/reader.c */
 
+/* BEGIN src/reader.h */
+#ifndef WASM_READER_H
+#define WASM_READER_H
+
+
+typedef struct wasm__reader_t {
+    const uint8_t* ptr;
+    const uint8_t* end;
+    int malformed;
+} wasm__reader_t;
+
+WASM_PRIVATE int wasm__has(wasm__reader_t* r, size_t n);
+
+WASM_PRIVATE uint8_t wasm__read_u8(wasm__reader_t* r);
+
+WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r);
+
+WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r);
+
+WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);
+
+WASM_PRIVATE int64_t wasm__read_leb128_i64(wasm__reader_t* r);
+
+WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r);
+
+WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** out_name, uint32_t* out_len);
+
+WASM_PRIVATE wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name);
+
+WASM_PRIVATE int wasm__export_name_matches_bytes(const wasm_export_t* exp,
+                                           const uint8_t* name,
+                                           size_t name_len);
+
+WASM_PRIVATE int wasm__export_name_matches_cstr(const wasm_export_t* exp, const char* name);
+
+WASM_PRIVATE const char* wasm__export_name_cstr(const wasm_export_t* exp);
+
+WASM_PRIVATE void wasm__free_export(wasm_export_t* exp);
+
+WASM_PRIVATE char* wasm__strdup(const char* text);
+
+#endif /* WASM_READER_H */
+/* END src/reader.h */
+
+/* BEGIN src/values.h */
+#ifndef WASM_VALUES_H
+#define WASM_VALUES_H
+
+
+
+WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits);
+
+WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits);
+
+WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value);
+
+WASM_PRIVATE wasm_value_t wasm__u64_bits(uint64_t value);
+
+WASM_PRIVATE uintptr_t wasm__gc_i31_encode(int32_t value);
+
+WASM_PRIVATE int32_t wasm__gc_i31_get_s(uintptr_t bits);
+
+WASM_PRIVATE uint32_t wasm__gc_i31_get_u(uintptr_t bits);
+
+WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment);
+
+WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index);
+
+WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size);
+
+WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type);
+
+WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
+                                     uint32_t length,
+                                     size_t* out_size);
+
+WASM_PRIVATE wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* field);
+
+WASM_PRIVATE_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_t* object,
+                                                   const wasm_structtype_t* type,
+                                                   uint32_t field_index,
+                                                   int sign_extend,
+                                                   wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
+                                              const wasm_structtype_t* type,
+                                              uint32_t field_index,
+                                              wasm_value_t value);
+
+WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
+                                                const wasm_structtype_t* type,
+                                                uint32_t field_index,
+                                                wasm_value_t value);
+
+WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* object,
+                                            const wasm_arraytype_t* type,
+                                            uint32_t index,
+                                            int sign_extend,
+                                            wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
+                                       const wasm_arraytype_t* type,
+                                       uint32_t index,
+                                       wasm_value_t value);
+
+WASM_PRIVATE_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object);
+
+WASM_PRIVATE wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
+                                                 const wasm_arraytype_t* type,
+                                                 uint32_t index,
+                                                 wasm_value_t value);
+
+WASM_PRIVATE wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,
+                                            uint32_t type_index,
+                                            wasm_gc_header_t* object);
+
+WASM_PRIVATE int wasm__gc_array_data_element_size(const wasm_arraytype_t* type, size_t* out_size);
+
+WASM_PRIVATE wasm_error_t wasm__gc_array_read_data_value(const wasm_arraytype_t* type,
+                                                   const uint8_t* src,
+                                                   wasm_value_t* out_value);
+
+WASM_PRIVATE int wasm__is_gc_ref_type(wasm_valtype_t type);
+
+WASM_PRIVATE int wasm__is_ref_type(wasm_valtype_t type);
+
+WASM_PRIVATE int wasm__is_vector_type(wasm_valtype_t type);
+
+WASM_PRIVATE int wasm__is_number_or_vector_type(wasm_valtype_t type);
+
+WASM_PRIVATE int wasm__is_value_type(wasm_valtype_t type);
+
+WASM_PRIVATE int wasm__is_null_ref(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__is_heap_gc_ref_value(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__value_matches_type(const wasm_value_t* value, wasm_valtype_t type);
+
+WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
+                                         const wasm_reftype_t* reftype);
+
+WASM_PRIVATE wasm_value_t wasm__retag_value_for_declared_type(wasm_valtype_t declared_type,
+                                                        const wasm_reftype_t* declared_reftype,
+                                                        wasm_value_t value);
+
+WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type);
+
+WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_s(double value);
+
+WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_u(double value);
+
+WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_s(double value);
+
+WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_u(double value);
+
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_value);
+
+WASM_PRIVATE float wasm__f32_min(float lhs, float rhs);
+
+WASM_PRIVATE float wasm__f32_max(float lhs, float rhs);
+
+WASM_PRIVATE double wasm__f64_min(double lhs, double rhs);
+
+WASM_PRIVATE double wasm__f64_max(double lhs, double rhs);
+
+WASM_PRIVATE float wasm__ceil_f32(float value);
+
+WASM_PRIVATE float wasm__floor_f32(float value);
+
+WASM_PRIVATE float wasm__trunc_f32(float value);
+
+WASM_PRIVATE float wasm__nearest_f32(float value);
+
+WASM_PRIVATE float wasm__sqrt_f32(float value);
+
+WASM_PRIVATE double wasm__ceil_f64(double value);
+
+WASM_PRIVATE double wasm__floor_f64(double value);
+
+WASM_PRIVATE double wasm__trunc_f64(double value);
+
+WASM_PRIVATE double wasm__nearest_f64(double value);
+
+WASM_PRIVATE double wasm__sqrt_f64(double value);
+
+#endif /* WASM_VALUES_H */
+/* END src/values.h */
+
+
+
+#include <string.h>
 
 WASM_PRIVATE int wasm__has(wasm__reader_t* r, size_t n) {
     return !r->malformed && (size_t)(r->end - r->ptr) >= n;
@@ -4908,7 +2485,7 @@ WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r) {
     return wasm__f64_bits(bits);
 }
 
-WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
+static int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
     uint32_t i = 0;
 
     while (i < len) {
@@ -4958,7 +2535,7 @@ WASM_PRIVATE int wasm__is_valid_utf8(const uint8_t* bytes, uint32_t len) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, size_t rhs_len) {
+static int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, size_t rhs_len) {
     if (lhs_len != rhs_len) return 0;
     if (lhs_len == 0u) return 1;
     return memcmp(lhs, rhs, lhs_len) == 0;
@@ -5038,6 +2615,195 @@ WASM_PRIVATE char* wasm__strdup(const char* text) {
 /* BEGIN src/values.c */
 
 
+
+
+
+/* BEGIN src/types/references.h */
+#ifndef WASM_SRC_TYPES_REFERENCES_H
+#define WASM_SRC_TYPES_REFERENCES_H
+
+
+
+WASM_PRIVATE void wasm__clear_reftype(wasm_reftype_t* reftype);
+
+WASM_PRIVATE wasm_error_t wasm__resolve_reftype(wasm_module_t* mod, wasm_reftype_t* reftype);
+
+WASM_PRIVATE wasm_error_t wasm__resolve_valtype_reftype(wasm_module_t* mod,
+                                                  wasm_valtype_t* type,
+                                                  wasm_reftype_t* reftype);
+
+WASM_PRIVATE int wasm__has_reftype_info(const wasm_reftype_t* reftype);
+
+WASM_PRIVATE int wasm__reftype_equal(const wasm_reftype_t* lhs, const wasm_reftype_t* rhs);
+
+WASM_PRIVATE int wasm__reftype_is_subtype(const wasm_module_t* mod,
+                                    const wasm_reftype_t* subtype,
+                                    const wasm_reftype_t* supertype);
+
+WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_module_t* mod,
+                                                           const wasm_value_t* value);
+
+WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
+                                                      wasm_module_t* mod,
+                                                      wasm_value_t value,
+                                                      wasm_value_t* out_value);
+
+WASM_PRIVATE wasm_value_t wasm__anyref_from_externref_value(const wasm_runtime_t* rt,
+                                                      wasm_value_t value);
+
+WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
+                                       const wasm_value_t* value,
+                                       wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
+                                            const wasm_value_t* value,
+                                            wasm_valtype_t expected_type,
+                                            const wasm_reftype_t* expected_ref);
+
+WASM_PRIVATE int wasm__elem_segment_values_match_type(const wasm_module_t* mod,
+                                                const wasm_elem_segment_t* segment,
+                                                wasm_valtype_t expected_type,
+                                                const wasm_reftype_t* expected_ref);
+
+WASM_PRIVATE int wasm__get_effective_reftype(const wasm_module_t* mod,
+                                       wasm_valtype_t type,
+                                       const wasm_reftype_t* ref_type,
+                                       wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
+                                          wasm_valtype_t subtype,
+                                          const wasm_reftype_t* subtype_ref,
+                                          wasm_valtype_t supertype,
+                                          const wasm_reftype_t* supertype_ref);
+
+WASM_PRIVATE int wasm__functype_is_subtype(const wasm_module_t* mod,
+                                     const wasm_functype_t* subtype,
+                                     const wasm_functype_t* supertype);
+
+WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
+                                           wasm_valtype_t actual_type,
+                                           const wasm_reftype_t* actual_ref,
+                                           int actual_mutable,
+                                           wasm_valtype_t expected_type,
+                                           const wasm_reftype_t* expected_ref,
+                                           int expected_mutable);
+
+WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
+                                          const wasm_table_t* actual_table,
+                                          wasm_valtype_t expected_type,
+                                          const wasm_reftype_t* expected_ref,
+                                          uint64_t expected_min,
+                                          uint64_t expected_max,
+                                          int expected_is_64);
+
+WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
+                                           uint64_t expected_min,
+                                           uint64_t expected_max,
+                                           int expected_is_64);
+
+WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
+                                        wasm__reader_t* r,
+                                        wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
+                                                       uint32_t type_idx,
+                                                       int nullable,
+                                                       wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
+                                                    wasm__reader_t* r,
+                                                    int nullable,
+                                                    wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
+                                                     wasm_value_t value);
+
+WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source,
+                                                        const wasm_reftype_t* target,
+                                                        wasm_value_t value);
+
+WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
+                                       wasm__reader_t* r,
+                                       wasm_valtype_t* out_type,
+                                       wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__read_valtype(wasm_module_t* mod,
+                                       wasm__reader_t* r,
+                                       wasm_valtype_t* out_type,
+                                       wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__read_unresolved_valtype(wasm_module_t* mod,
+                                                  wasm__reader_t* r,
+                                                  wasm_valtype_t* out_type,
+                                                  wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE void wasm__skip_heaptype(wasm__reader_t* r);
+
+WASM_PRIVATE void wasm__skip_valtype(wasm__reader_t* r);
+
+WASM_PRIVATE int wasm__is_packedtype_byte(uint8_t byte);
+
+WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte);
+
+#endif /* WASM_SRC_TYPES_REFERENCES_H */
+/* END src/types/references.h */
+
+/* BEGIN src/types/canonical.h */
+#ifndef WASM_SRC_TYPES_CANONICAL_H
+#define WASM_SRC_TYPES_CANONICAL_H
+
+
+WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft);
+
+WASM_PRIVATE int wasm__functype_is_unspecified(const wasm_functype_t* ft);
+
+WASM_PRIVATE int wasm__functype_is_zeroed(const wasm_functype_t* ft);
+
+WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft);
+
+WASM_PRIVATE void wasm__free_comptype(wasm_comptype_t* type);
+
+WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src);
+
+WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_functype_t* rhs);
+
+WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod);
+
+WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx);
+
+WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,
+                                 wasm_valtype_t subtype,
+                                 wasm_valtype_t supertype);
+
+WASM_PRIVATE int wasm__is_valtype_subtype(const wasm_module_t* mod,
+                                    wasm_valtype_t subtype,
+                                    wasm_valtype_t supertype);
+
+WASM_PRIVATE int wasm__is_storagetype_subtype(const wasm_module_t* mod,
+                                        const wasm_storagetype_t* subtype,
+                                        const wasm_storagetype_t* supertype);
+
+WASM_PRIVATE int wasm__is_comptype_immediate_subtype(const wasm_module_t* mod,
+                                               const wasm_comptype_t* subtype,
+                                               const wasm_comptype_t* supertype);
+
+WASM_PRIVATE wasm_functype_t* wasm__module_functype(wasm_module_t* mod, uint32_t type_idx);
+
+WASM_PRIVATE const wasm_functype_t* wasm__module_const_functype(const wasm_module_t* mod, uint32_t type_idx);
+
+WASM_PRIVATE const wasm_structtype_t* wasm__module_const_structtype(const wasm_module_t* mod, uint32_t type_idx);
+
+WASM_PRIVATE const wasm_arraytype_t* wasm__module_const_arraytype(const wasm_module_t* mod, uint32_t type_idx);
+WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod, uint32_t subtype_idx, uint32_t supertype_idx);
+
+#endif /* WASM_SRC_TYPES_CANONICAL_H */
+/* END src/types/canonical.h */
+
+
+
+#include <string.h>
+#include <math.h>
+
 /* Bit transport must not pass signaling NaNs through floating registers. */
 WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits) {
     wasm_value_t result = { 0 };
@@ -5094,14 +2860,14 @@ WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment) {
     return value + (alignment - remainder);
 }
 
-WASM_PRIVATE size_t wasm__gc_field_storage_alignment(const wasm_fieldtype_t* field) {
+static size_t wasm__gc_field_storage_alignment(const wasm_fieldtype_t* field) {
     if (field->storage.kind == WASM_STORAGE_PACKED) {
         return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
     }
     return (size_t)WASM__ALIGNOF(wasm_value_t);
 }
 
-WASM_PRIVATE size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
+static size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
     if (field->storage.kind == WASM_STORAGE_PACKED) {
         return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
     }
@@ -5185,7 +2951,7 @@ WASM_PRIVATE wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* f
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
+static wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
                                               const void* src,
                                               int sign_extend,
                                               wasm_value_t* out_value) {
@@ -5208,7 +2974,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* fiel
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
+static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
                                                const wasm_fieldtype_t* field,
                                                void* dst,
                                                wasm_value_t value) {
@@ -5232,7 +2998,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
+static void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
                                        const wasm_structtype_t* type,
                                        uint32_t field_index) {
     size_t offset;
@@ -5243,7 +3009,7 @@ WASM_PRIVATE void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
     return ((uint8_t*)object) + offset;
 }
 
-WASM_PRIVATE const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
+static const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
                                                    const wasm_structtype_t* type,
                                                    uint32_t field_index) {
     size_t offset;
@@ -5288,7 +3054,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
     return wasm__gc_struct_set_field(object, type, field_index, value);
 }
 
-WASM_PRIVATE const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
+static const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
                                                     const wasm_arraytype_t* type,
                                                     uint32_t index) {
     size_t data_offset = wasm__gc_array_data_offset(type);
@@ -5298,7 +3064,7 @@ WASM_PRIVATE const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t*
     return ((const uint8_t*)object) + data_offset + ((size_t)index * elem_size);
 }
 
-WASM_PRIVATE void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
+static void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
                                         const wasm_arraytype_t* type,
                                         uint32_t index) {
     size_t data_offset = wasm__gc_array_data_offset(type);
@@ -5451,7 +3217,7 @@ WASM_PRIVATE int wasm__is_vector_type(wasm_valtype_t type) {
     return type == WASM_TYPE_V128;
 }
 
-WASM_PRIVATE int wasm__is_numeric_type(wasm_valtype_t type) {
+static int wasm__is_numeric_type(wasm_valtype_t type) {
     return type == WASM_TYPE_I32 || type == WASM_TYPE_I64 ||
            type == WASM_TYPE_F32 || type == WASM_TYPE_F64;
 }
@@ -5632,21 +3398,21 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_valu
     return WASM_OK;
 }
 
-WASM_PRIVATE int wasm__f32_is_nan_bits(float value) {
+static int wasm__f32_is_nan_bits(float value) {
     uint32_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
     return (bits & 0x7FFFFFFFu) > 0x7F800000u;
 }
 
-WASM_PRIVATE int wasm__f64_is_nan_bits(double value) {
+static int wasm__f64_is_nan_bits(double value) {
     uint64_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
     return (bits & UINT64_C(0x7FFFFFFFFFFFFFFF)) > UINT64_C(0x7FF0000000000000);
 }
 
-WASM_PRIVATE float wasm__quiet_f32_nan(float value) {
+static float wasm__quiet_f32_nan(float value) {
     uint32_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
@@ -5655,7 +3421,7 @@ WASM_PRIVATE float wasm__quiet_f32_nan(float value) {
     return value;
 }
 
-WASM_PRIVATE double wasm__quiet_f64_nan(double value) {
+static double wasm__quiet_f64_nan(double value) {
     uint64_t bits;
 
     memcpy(&bits, &value, sizeof(bits));
@@ -5762,8 +3528,87 @@ WASM_PRIVATE double wasm__sqrt_f64(double value) {
 
 /* BEGIN src/types/references.c */
 
+#include <stdio.h>
 
-WASM_PRIVATE wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
+
+/* BEGIN src/memory_internal.h */
+#ifndef WASM_MEMORY_INTERNAL_H
+#define WASM_MEMORY_INTERNAL_H
+
+
+WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory);
+
+WASM_PRIVATE const wasm_memory_t* wasm__memory_actual_const(const wasm_memory_t* memory);
+
+WASM_PRIVATE void wasm__free_table(wasm_table_t* table);
+
+WASM_PRIVATE void wasm__free_memory(wasm_memory_t* memory);
+
+WASM_PRIVATE wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE wasm_table_t* wasm__table_at(wasm_module_t* mod, uint32_t table_index);
+
+WASM_PRIVATE wasm_memory_t* wasm__memory_at(wasm_module_t* mod, uint32_t memory_index);
+
+WASM_PRIVATE wasm_valtype_t wasm__memory_index_type(const wasm_memory_t* memory);
+
+WASM_PRIVATE wasm_valtype_t wasm__table_index_type(const wasm_table_t* table);
+
+WASM_PRIVATE wasm_valtype_t wasm__table_copy_size_type(const wasm_table_t* dst_table,
+                                                 const wasm_table_t* src_table);
+
+WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value);
+
+WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory);
+
+WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
+                                                 uint32_t memory_index,
+                                                 const wasm_memory_t* memory);
+
+WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory);
+
+WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size);
+
+WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
+                                       const wasm_value_t* base,
+                                       uint64_t offset,
+                                       uint64_t* out_addr);
+
+WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory);
+
+WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table);
+
+WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE void wasm__free_custom_section(wasm_custom_section_t* section);
+
+WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE void wasm__free_elem_segment(wasm_elem_segment_t* segment);
+
+WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
+
+WASM_PRIVATE int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit);
+
+WASM_PRIVATE int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t mem_size);
+
+
+#endif /* WASM_MEMORY_INTERNAL_H */
+/* END src/memory_internal.h */
+
+
+
+
+
+
+
+#include <string.h>
+
+static wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
     if (!mod) return WASM_OK;
     if (type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF)
         return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
@@ -5786,7 +3631,7 @@ WASM_PRIVATE void wasm__clear_reftype(wasm_reftype_t* reftype) {
     memset(reftype, 0, sizeof(*reftype));
 }
 
-WASM_PRIVATE int wasm__is_absheaptype_byte(uint8_t byte) {
+static int wasm__is_absheaptype_byte(uint8_t byte) {
     switch (byte) {
         case 0x69:
         case 0x6A:
@@ -5806,11 +3651,11 @@ WASM_PRIVATE int wasm__is_absheaptype_byte(uint8_t byte) {
     }
 }
 
-WASM_PRIVATE int wasm__is_reftype_lead_byte(uint8_t byte) {
+static int wasm__is_reftype_lead_byte(uint8_t byte) {
     return byte == 0x63 || byte == 0x64 || wasm__is_absheaptype_byte(byte);
 }
 
-WASM_PRIVATE wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
+static wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
     switch (byte) {
         case 0x74:
             return WASM_TYPE_NOEXN;
@@ -5932,7 +3777,7 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
     return (const wasm_gc_header_t*)value->of.gc_ref;
 }
 
-WASM_PRIVATE wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
+static wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
                                                        uintptr_t handle) {
     wasm__externref_box_t* box;
 
@@ -5943,7 +3788,7 @@ WASM_PRIVATE wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_
     return NULL;
 }
 
-WASM_PRIVATE int wasm__is_host_anyref_value(const wasm_module_t* mod,
+static int wasm__is_host_anyref_value(const wasm_module_t* mod,
                                       const wasm_value_t* value) {
     if (!value || value->type != WASM_TYPE_ANYREF || value->of.gc_ref == (uintptr_t)0) return 0;
     if ((value->of.gc_ref & WASM__GC_I31_TAG) != 0) return 0;
@@ -6162,7 +4007,7 @@ WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
     return wasm__reftype_is_subtype(mod, &effective_subtype, &effective_supertype);
 }
 
-WASM_PRIVATE int wasm__typed_valtype_equal(const wasm_module_t* mod,
+static int wasm__typed_valtype_equal(const wasm_module_t* mod,
                                      wasm_valtype_t lhs,
                                      const wasm_reftype_t* lhs_ref,
                                      wasm_valtype_t rhs,
@@ -6220,7 +4065,7 @@ WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
     return wasm__typed_valtype_is_subtype(mod, actual_type, actual_ref, expected_type, expected_ref);
 }
 
-WASM_PRIVATE int wasm__limits_match_import(uint64_t actual_min,
+static int wasm__limits_match_import(uint64_t actual_min,
                                      uint64_t actual_max,
                                      uint64_t expected_min,
                                      uint64_t expected_max) {
@@ -6437,7 +4282,7 @@ WASM_PRIVATE void wasm__skip_heaptype(wasm__reader_t* r) {
     (void)wasm__read_leb128_i64(r);
 }
 
-WASM_PRIVATE void wasm__skip_reftype(wasm__reader_t* r) {
+static void wasm__skip_reftype(wasm__reader_t* r) {
     if (r->ptr >= r->end) return;
     if (wasm__is_absheaptype_byte(*r->ptr)) {
         r->ptr++;
@@ -6495,6 +4340,22 @@ WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte) {
 /* BEGIN src/types/canonical.c */
 
 
+
+
+
+#include <string.h>
+
+static int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
+                                                      uint32_t lhs_idx,
+                                                      uint32_t rhs_idx,
+                                                      const wasm_recgroup_t* lhs_group,
+                                                      const wasm_recgroup_t* rhs_group,
+                                                      uint8_t* memo);
+static int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
+                                            uint32_t lhs_idx,
+                                            uint32_t rhs_idx,
+                                            uint8_t* memo);
+
 WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft) {
     WASM_FREE(ft->params);
     WASM_FREE(ft->results);
@@ -6524,7 +4385,7 @@ WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft) {
     ft->num_results = UINT32_MAX;
 }
 
-WASM_PRIVATE void wasm__free_structtype(wasm_structtype_t* st) {
+static void wasm__free_structtype(wasm_structtype_t* st) {
     WASM_FREE(st->fields);
     st->fields = NULL;
     st->num_fields = 0;
@@ -6625,7 +4486,7 @@ WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_fun
     return 1;
 }
 
-WASM_PRIVATE int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs) {
+static int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wasm_storagetype_t* rhs) {
     if (lhs->kind != rhs->kind) return 0;
     if (lhs->kind == WASM_STORAGE_PACKED) return lhs->of.packed_type == rhs->of.packed_type;
     if (lhs->of.valtype != rhs->of.valtype) return 0;
@@ -6635,17 +4496,17 @@ WASM_PRIVATE int wasm__storagetype_equal(const wasm_storagetype_t* lhs, const wa
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_group_contains_type(const wasm_recgroup_t* group,
+static int wasm__canonical_group_contains_type(const wasm_recgroup_t* group,
                                                uint32_t type_idx) {
     return group && type_idx >= group->first_type && type_idx < group->first_type + group->num_types;
 }
 
-WASM_PRIVATE uint32_t wasm__canonical_group_type_offset(const wasm_recgroup_t* group,
+static uint32_t wasm__canonical_group_type_offset(const wasm_recgroup_t* group,
                                                   uint32_t type_idx) {
     return type_idx - group->first_type;
 }
 
-WASM_PRIVATE int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mod,
                                                    const wasm_reftype_t* lhs,
                                                    const wasm_reftype_t* rhs,
                                                    const wasm_recgroup_t* lhs_group,
@@ -6665,7 +4526,7 @@ WASM_PRIVATE int wasm__canonical_reftype_equal_in_groups(const wasm_module_t* mo
                                                       memo);
 }
 
-WASM_PRIVATE int wasm__canonical_functype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_functype_equal_in_groups(const wasm_module_t* mod,
                                                     const wasm_functype_t* lhs,
                                                     const wasm_functype_t* rhs,
                                                     const wasm_recgroup_t* lhs_group,
@@ -6698,7 +4559,7 @@ WASM_PRIVATE int wasm__canonical_functype_equal_in_groups(const wasm_module_t* m
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t* mod,
                                                        const wasm_storagetype_t* lhs,
                                                        const wasm_storagetype_t* rhs,
                                                        const wasm_recgroup_t* lhs_group,
@@ -6718,7 +4579,7 @@ WASM_PRIVATE int wasm__canonical_storagetype_equal_in_groups(const wasm_module_t
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* mod,
                                                      const wasm_fieldtype_t* lhs,
                                                      const wasm_fieldtype_t* rhs,
                                                      const wasm_recgroup_t* lhs_group,
@@ -6733,7 +4594,7 @@ WASM_PRIVATE int wasm__canonical_fieldtype_equal_in_groups(const wasm_module_t* 
                                                        memo);
 }
 
-WASM_PRIVATE int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
+static int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
                                                const wasm_comptype_t* lhs,
                                                const wasm_comptype_t* rhs,
                                                const wasm_recgroup_t* lhs_group,
@@ -6775,7 +4636,7 @@ WASM_PRIVATE int wasm__comptype_body_equal_in_groups(const wasm_module_t* mod,
     }
 }
 
-WASM_PRIVATE int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
+static int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
                                                 uint32_t lhs_idx,
                                                 uint32_t rhs_idx,
                                                 const wasm_recgroup_t* lhs_group,
@@ -6805,7 +4666,7 @@ WASM_PRIVATE int wasm__comptype_equal_visit_in_groups(const wasm_module_t* mod,
     return wasm__comptype_body_equal_in_groups(mod, lhs, rhs, lhs_group, rhs_group, memo);
 }
 
-WASM_PRIVATE int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
+static int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
                                           const wasm_recgroup_t* lhs_group,
                                           const wasm_recgroup_t* rhs_group,
                                           uint8_t* memo) {
@@ -6827,7 +4688,7 @@ WASM_PRIVATE int wasm__canonical_recgroup_equal(const wasm_module_t* mod,
     return 1;
 }
 
-WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
+static int wasm__canonical_type_index_equal_in_groups(const wasm_module_t* mod,
                                                       uint32_t lhs_idx,
                                                       uint32_t rhs_idx,
                                                       const wasm_recgroup_t* lhs_group,
@@ -6845,7 +4706,7 @@ WASM_PRIVATE int wasm__canonical_type_index_equal_in_groups(const wasm_module_t*
     return wasm__canonical_type_equal_visit(mod, lhs_idx, rhs_idx, memo);
 }
 
-WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
+static int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
                                             uint32_t lhs_idx,
                                             uint32_t rhs_idx,
                                             uint8_t* memo) {
@@ -6880,7 +4741,7 @@ WASM_PRIVATE int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
     return result;
 }
 
-WASM_PRIVATE int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
+static int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
     uint8_t* memo;
     size_t memo_size;
     int result;
@@ -6963,7 +4824,7 @@ WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,
     }
 }
 
-WASM_PRIVATE int wasm__is_reftype_subtype(const wasm_module_t* mod,
+static int wasm__is_reftype_subtype(const wasm_module_t* mod,
                                     wasm_valtype_t subtype,
                                     wasm_valtype_t supertype) {
     if (!wasm__is_ref_type(subtype) || !wasm__is_ref_type(supertype)) return 0;
@@ -6991,7 +4852,7 @@ WASM_PRIVATE int wasm__is_storagetype_subtype(const wasm_module_t* mod,
     return wasm__is_valtype_subtype(mod, subtype->of.valtype, supertype->of.valtype);
 }
 
-WASM_PRIVATE int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
+static int wasm__is_fieldtype_subtype(const wasm_module_t* mod,
                                       const wasm_fieldtype_t* subtype,
                                       const wasm_fieldtype_t* supertype) {
     if (subtype->is_mutable != supertype->is_mutable) return 0;
@@ -7063,12 +4924,12 @@ WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod,
     return 0;
 }
 
-WASM_PRIVATE wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
+static wasm_functype_t* wasm__type_as_functype(wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_FUNC) return NULL;
     return &type->of.func;
 }
 
-WASM_PRIVATE const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type) {
+static const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_FUNC) return NULL;
     return &type->of.func;
 }
@@ -7083,12 +4944,12 @@ WASM_PRIVATE const wasm_functype_t* wasm__module_const_functype(const wasm_modul
     return wasm__type_as_const_functype(&mod->types[type_idx]);
 }
 
-WASM_PRIVATE const wasm_structtype_t* wasm__type_as_const_structtype(const wasm_comptype_t* type) {
+static const wasm_structtype_t* wasm__type_as_const_structtype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_STRUCT) return NULL;
     return &type->of.struct_;
 }
 
-WASM_PRIVATE const wasm_arraytype_t* wasm__type_as_const_arraytype(const wasm_comptype_t* type) {
+static const wasm_arraytype_t* wasm__type_as_const_arraytype(const wasm_comptype_t* type) {
     if (!type || type->kind != WASM_COMP_ARRAY) return NULL;
     return &type->of.array;
 }
@@ -7106,6 +4967,30 @@ WASM_PRIVATE const wasm_arraytype_t* wasm__module_const_arraytype(const wasm_mod
 
 /* BEGIN src/types/decode.c */
 
+/* BEGIN src/types/decode.h */
+#ifndef WASM_SRC_TYPES_DECODE_H
+#define WASM_SRC_TYPES_DECODE_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base);
+
+WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t count, uint32_t* out_base);
+
+WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
+                                            wasm__reader_t* r,
+                                            uint8_t opcode,
+                                            uint32_t rec_group_idx,
+                                            wasm_comptype_t* type);
+
+#endif /* WASM_SRC_TYPES_DECODE_H */
+/* END src/types/decode.h */
+
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
     uint32_t base;
@@ -7153,7 +5038,7 @@ WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t c
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
+static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
     uint32_t p;
 
     ft->num_params = wasm__read_leb128_u32(r);
@@ -7185,7 +5070,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
                                             wasm__reader_t* r,
                                             wasm_storagetype_t* out_type) {
     uint8_t byte = wasm__read_u8(r);
@@ -7203,7 +5088,7 @@ WASM_PRIVATE wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
     return wasm__read_unresolved_valtype(mod, r, &out_type->of.valtype, &out_type->ref_type);
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
+static wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
                                            wasm__reader_t* r,
                                            wasm_fieldtype_t* field) {
     uint8_t mutability;
@@ -7216,7 +5101,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
+static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
                                                wasm__reader_t* r,
                                                uint8_t opcode,
                                                wasm_comptype_t* type) {
@@ -7286,6 +5171,44 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 /* BEGIN src/module.c */
 
 
+
+
+
+
+#include <string.h>
+#include <stdio.h>
+
+WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
+                                                  const char* name,
+                                                  wasm_global_t** out_global,
+                                                  uint32_t* out_index) {
+    wasm_export_kind_t kind;
+    uint32_t index;
+
+    if (out_global) *out_global = NULL;
+    if (out_index) *out_index = 0;
+
+    if (!mod || !name) return WASM_ERR_MALFORMED;
+
+    if (!wasm_find_export(mod, name, &kind, &index) || kind != WASM_EXPORT_GLOBAL) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT,
+                          "global export '%s' not found", name);
+        return WASM_ERR_UNDEFINED_EXPORT;
+    }
+    if (index >= mod->num_globals) {
+        if (mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
+                          "global export '%s' index %u out of range",
+                          name, (unsigned)index);
+        return WASM_ERR_MALFORMED;
+    }
+
+    if (out_global) *out_global = &mod->globals[index];
+    if (out_index) *out_index = index;
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_value_t wasm__global_get_value(const wasm_global_t* global) {
     wasm_value_t value;
 
@@ -7302,39 +5225,11 @@ WASM_PRIVATE void wasm__global_set_value(wasm_global_t* global, wasm_value_t val
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
-    if (stack->size >= stack->cap) {
-        uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
-        if (!values) return WASM_ERR_OOM;
-        stack->values = values;
-        stack->cap = new_cap;
-    }
 
-    stack->values[stack->size++] = value;
-    return WASM_OK;
-}
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
-                                                     wasm__init_expr_stack_t* stack,
-                                                     wasm_valtype_t expected_type,
-                                                     const wasm_reftype_t* expected_ref,
-                                                     wasm_value_t* out_value) {
-    wasm_value_t value;
 
-    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
-    value = stack->values[--stack->size];
-    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
-        return WASM_ERR_TYPE_MISMATCH;
-    *out_value = value;
-    return WASM_OK;
-}
 
-WASM_PRIVATE wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
-                                                    wasm_valtype_t expected_type,
-                                                    wasm_value_t* out_value) {
-    return wasm__init_expr_stack_pop_expect(NULL, stack, expected_type, NULL, out_value);
-}
+
 
 WASM_PRIVATE int32_t wasm__wrap_i32_add(int32_t lhs, int32_t rhs) {
     return (int32_t)((uint32_t)lhs + (uint32_t)rhs);
@@ -7525,7 +5420,7 @@ WASM_PRIVATE const wasm_table_t* wasm__table_actual_const(const wasm_table_t* ta
     return table;
 }
 
-WASM_PRIVATE wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
+static wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
                                                     wasm_module_t* mod,
                                                     uint32_t func_idx,
                                                     uint32_t* out_ref_id) {
@@ -7556,7 +5451,7 @@ WASM_PRIVATE wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
+static wasm_error_t wasm__ensure_func_ref_id(wasm_module_t* mod,
                                              uint32_t func_idx,
                                              uint32_t* out_ref_id) {
     wasm_func_t* func;
@@ -7607,16 +5502,45 @@ WASM_PRIVATE wasm_error_t wasm__make_funcref(wasm_module_t* mod,
 
 /* BEGIN src/types/cross_module.c */
 
+/* BEGIN src/types/cross_module.h */
+#ifndef WASM_SRC_TYPES_CROSS_MODULE_H
+#define WASM_SRC_TYPES_CROSS_MODULE_H
 
-WASM_PRIVATE int wasm__cross_group_contains_type(const wasm_recgroup_t* group, uint32_t type_idx) {
+
+WASM_PRIVATE int wasm__functype_equal_across_modules(const wasm_module_t* lhs_mod,
+                                               uint32_t lhs_type_idx,
+                                               const wasm_module_t* rhs_mod,
+                                               uint32_t rhs_type_idx);
+
+WASM_PRIVATE int wasm__functype_is_subtype_across_modules(const wasm_module_t* lhs_mod,
+                                                    uint32_t lhs_type_idx,
+                                                    const wasm_module_t* rhs_mod,
+                                                    uint32_t rhs_type_idx);
+
+#endif /* WASM_SRC_TYPES_CROSS_MODULE_H */
+/* END src/types/cross_module.h */
+
+
+
+
+
+#include <string.h>
+
+static int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
+                                        uint32_t lhs_idx,
+                                        const wasm_module_t* rhs_mod,
+                                        uint32_t rhs_idx,
+                                        uint8_t* memo);
+
+static int wasm__cross_group_contains_type(const wasm_recgroup_t* group, uint32_t type_idx) {
     return group && type_idx >= group->first_type && type_idx < group->first_type + group->num_types;
 }
 
-WASM_PRIVATE uint32_t wasm__cross_group_type_offset(const wasm_recgroup_t* group, uint32_t type_idx) {
+static uint32_t wasm__cross_group_type_offset(const wasm_recgroup_t* group, uint32_t type_idx) {
     return type_idx - group->first_type;
 }
 
-WASM_PRIVATE int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs_mod,
                                                   uint32_t lhs_idx,
                                                   const wasm_recgroup_t* lhs_group,
                                                   const wasm_module_t* rhs_mod,
@@ -7635,7 +5559,7 @@ WASM_PRIVATE int wasm__cross_type_index_equal_in_groups(const wasm_module_t* lhs
     return wasm__cross_type_equal_visit(lhs_mod, lhs_idx, rhs_mod, rhs_idx, memo);
 }
 
-WASM_PRIVATE int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                const wasm_reftype_t* lhs,
                                                const wasm_recgroup_t* lhs_group,
                                                const wasm_module_t* rhs_mod,
@@ -7657,7 +5581,7 @@ WASM_PRIVATE int wasm__cross_reftype_equal_in_groups(const wasm_module_t* lhs_mo
                                                   memo);
 }
 
-WASM_PRIVATE int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                      wasm_valtype_t lhs_type,
                                                      const wasm_reftype_t* lhs_ref,
                                                      const wasm_recgroup_t* lhs_group,
@@ -7683,7 +5607,7 @@ WASM_PRIVATE int wasm__cross_typed_valtype_equal_in_groups(const wasm_module_t* 
                                                memo);
 }
 
-WASM_PRIVATE int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                 const wasm_functype_t* lhs,
                                                 const wasm_recgroup_t* lhs_group,
                                                 const wasm_module_t* rhs_mod,
@@ -7729,7 +5653,7 @@ WASM_PRIVATE int wasm__cross_functype_equal_in_groups(const wasm_module_t* lhs_m
     return 1;
 }
 
-WASM_PRIVATE int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                    const wasm_storagetype_t* lhs,
                                                    const wasm_recgroup_t* lhs_group,
                                                    const wasm_module_t* rhs_mod,
@@ -7749,7 +5673,7 @@ WASM_PRIVATE int wasm__cross_storagetype_equal_in_groups(const wasm_module_t* lh
                                                      memo);
 }
 
-WASM_PRIVATE int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                  const wasm_fieldtype_t* lhs,
                                                  const wasm_recgroup_t* lhs_group,
                                                  const wasm_module_t* rhs_mod,
@@ -7762,7 +5686,7 @@ WASM_PRIVATE int wasm__cross_fieldtype_equal_in_groups(const wasm_module_t* lhs_
                                                    memo);
 }
 
-WASM_PRIVATE int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_mod,
+static int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_mod,
                                                 uint32_t lhs_idx,
                                                 const wasm_recgroup_t* lhs_group,
                                                 const wasm_module_t* rhs_mod,
@@ -7824,7 +5748,7 @@ WASM_PRIVATE int wasm__cross_comptype_equal_in_groups(const wasm_module_t* lhs_m
     }
 }
 
-WASM_PRIVATE int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
+static int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
                                       const wasm_recgroup_t* lhs_group,
                                       const wasm_module_t* rhs_mod,
                                       const wasm_recgroup_t* rhs_group,
@@ -7848,7 +5772,7 @@ WASM_PRIVATE int wasm__cross_recgroup_equal(const wasm_module_t* lhs_mod,
     return 1;
 }
 
-WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
                                         uint32_t lhs_idx,
                                         const wasm_module_t* rhs_mod,
                                         uint32_t rhs_idx,
@@ -7878,7 +5802,7 @@ WASM_PRIVATE int wasm__cross_type_equal_visit(const wasm_module_t* lhs_mod,
     return result;
 }
 
-WASM_PRIVATE int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
+static int wasm__cross_type_is_subtype_with_memo(const wasm_module_t* lhs_mod,
                                                  uint32_t lhs_idx,
                                                  const wasm_module_t* rhs_mod,
                                                  uint32_t rhs_idx,
@@ -7955,6 +5879,33 @@ WASM_PRIVATE int wasm__functype_is_subtype_across_modules(const wasm_module_t* l
 
 /* BEGIN src/memory_internal.c */
 
+
+
+
+/* BEGIN src/validate/module.h */
+#ifndef WASM_SRC_VALIDATE_MODULE_H
+#define WASM_SRC_VALIDATE_MODULE_H
+
+
+WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
+                                               uint32_t func_idx,
+                                               uint32_t offset,
+                                               const char* fmt,
+                                               ...);
+
+WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod);
+
+#endif /* WASM_SRC_VALIDATE_MODULE_H */
+/* END src/validate/module.h */
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory) {
     while (memory && memory->is_import && memory->import_memory && memory->import_memory != memory)
@@ -8187,27 +6138,503 @@ WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
-    if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
-                                                      wasm__reader_t* r,
-                                                      wasm_valtype_t* out_type,
-                                                      wasm_reftype_t* out_reftype) {
-    uint32_t count = wasm__read_leb128_u32(r);
-
-    if (count != 1) return WASM_ERR_MALFORMED;
-    return wasm__read_valtype(mod, r, out_type, out_reftype);
-}
-
 WASM_PRIVATE int wasm__range_in_bounds_u64(uint64_t offset, uint64_t size, uint64_t limit) {
     return offset <= limit && size <= (limit - offset);
 }
 
 WASM_PRIVATE int wasm__memory_access_in_bounds(uint64_t addr, uint64_t width, uint64_t mem_size) {
     return wasm__range_in_bounds_u64(addr, width, mem_size);
+}
+/* END src/memory_internal.c */
+
+/* BEGIN src/instructions.c */
+
+/* BEGIN src/instructions.h */
+#ifndef WASM_SRC_INSTRUCTIONS_H
+#define WASM_SRC_INSTRUCTIONS_H
+
+
+
+typedef struct wasm__blocktype_t {
+    uint32_t param_arity;
+    uint32_t result_arity;
+    const wasm_valtype_t* params;
+    const wasm_valtype_t* results;
+    const wasm_reftype_t* param_reftypes;
+    const wasm_reftype_t* result_reftypes;
+    wasm_valtype_t inline_result;
+    wasm_reftype_t inline_result_reftype;
+} wasm__blocktype_t;
+typedef struct wasm__try_table_clause_t {
+    uint8_t kind;
+    uint32_t tag_index;
+    uint32_t label_depth;
+} wasm__try_table_clause_t;
+typedef struct wasm__memarg_t {
+    uint32_t align_log2;
+    uint32_t memory_index;
+    uint8_t has_memory_index;
+    uint64_t offset;
+} wasm__memarg_t;
+
+WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
+                                                wasm__try_table_clause_t* out_clause);
+
+WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype);
+
+WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r);
+
+WASM_PRIVATE uint32_t wasm__simd_memory_align_log2(uint32_t subop);
+
+WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop);
+
+WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg);
+
+WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
+                                                      wasm__reader_t* r,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype);
+
+#endif /* WASM_SRC_INSTRUCTIONS_H */
+/* END src/instructions.h */
+
+
+
+
+
+#include <string.h>
+
+static void wasm__skip_simd_immediates(wasm__reader_t* r);
+
+WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r) {
+    uint8_t lead = *r->ptr;
+
+    if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
+        if (lead == 0x40)
+            r->ptr++;
+        else
+            wasm__skip_valtype(r);
+        return;
+    }
+
+    (void)wasm__read_leb128_i32(r);
+}
+
+WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
+                                                wasm__try_table_clause_t* out_clause) {
+    if (!r || !out_clause) return WASM_ERR_MALFORMED;
+
+    memset(out_clause, 0, sizeof(*out_clause));
+    out_clause->kind = wasm__read_u8(r);
+    switch (out_clause->kind) {
+        case 0x00:
+        case 0x01:
+            out_clause->tag_index = wasm__read_leb128_u32(r);
+            out_clause->label_depth = wasm__read_leb128_u32(r);
+            break;
+        case 0x02:
+        case 0x03:
+            out_clause->label_depth = wasm__read_leb128_u32(r);
+            break;
+        default:
+            return WASM_ERR_MALFORMED;
+    }
+
+    if (r->malformed) return WASM_ERR_MALFORMED;
+    return WASM_OK;
+}
+
+static void wasm__skip_try_table_immediates(wasm__reader_t* r) {
+    uint32_t count;
+
+    wasm__skip_blocktype(r);
+    count = wasm__read_leb128_u32(r);
+    while (count-- > 0 && r->ptr < r->end) {
+        wasm__try_table_clause_t clause;
+
+        if (wasm__read_try_table_clause(r, &clause) != WASM_OK) {
+            r->ptr = r->end;
+            r->malformed = 1;
+            return;
+        }
+    }
+}
+
+static void wasm__skip_prefixed_immediates(wasm__reader_t* r) {
+    uint32_t subop = wasm__read_leb128_u32(r);
+
+    switch (subop) {
+        case 0x08:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x09:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0A:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0B:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0C:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0D:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0E:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x0F:
+        case 0x10:
+        case 0x11:
+            wasm__read_leb128_u32(r);
+            break;
+        default:
+            break;
+    }
+}
+
+static void wasm__skip_gc_immediates(wasm__reader_t* r) {
+    uint32_t subop = wasm__read_leb128_u32(r);
+
+    switch (subop) {
+        case 0x00:
+        case 0x01:
+        case 0x06:
+        case 0x07:
+        case 0x0B:
+        case 0x0C:
+        case 0x0D:
+        case 0x0E:
+        case 0x10:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05:
+        case 0x09:
+        case 0x0A:
+        case 0x11:
+        case 0x12:
+        case 0x13:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x08:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+            wasm__skip_heaptype(r);
+            break;
+        case 0x18:
+        case 0x19:
+            if (r->ptr < r->end) r->ptr++;
+            wasm__read_leb128_u32(r);
+            wasm__skip_heaptype(r);
+            wasm__skip_heaptype(r);
+            break;
+        default:
+            break;
+    }
+}
+
+WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
+    uint8_t lead = *r->ptr;
+    wasm_error_t err;
+
+    blocktype->param_arity = 0;
+    blocktype->result_arity = 0;
+    blocktype->params = NULL;
+    blocktype->results = NULL;
+    blocktype->param_reftypes = NULL;
+    blocktype->result_reftypes = NULL;
+    blocktype->inline_result = WASM_TYPE_VOID;
+    wasm__clear_reftype(&blocktype->inline_result_reftype);
+
+    if (lead == 0x40) {
+        r->ptr++;
+        return WASM_OK;
+    }
+
+    if (wasm__is_valtype_byte(lead)) {
+        err = wasm__read_valtype(mod, r, &blocktype->inline_result, &blocktype->inline_result_reftype);
+        if (err != WASM_OK) return err;
+        blocktype->result_arity = 1;
+        blocktype->results = &blocktype->inline_result;
+        blocktype->result_reftypes = &blocktype->inline_result_reftype;
+        return WASM_OK;
+    }
+
+    {
+        int32_t type_idx = wasm__read_leb128_i32(r);
+        wasm_functype_t* ft;
+
+        if (wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE) != WASM_OK) return WASM_ERR_MALFORMED;
+        if (type_idx < 0 || (uint32_t)type_idx >= mod->num_types) return WASM_ERR_MALFORMED;
+        ft = wasm__module_functype(mod, (uint32_t)type_idx);
+        if (!ft) return WASM_ERR_MALFORMED;
+        blocktype->param_arity = ft->num_params;
+        blocktype->result_arity = ft->num_results;
+        blocktype->params = ft->params;
+        blocktype->results = ft->results;
+        blocktype->param_reftypes = ft->param_reftypes;
+        blocktype->result_reftypes = ft->result_reftypes;
+    }
+
+    return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
+    switch (op) {
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x06:
+            wasm__skip_blocktype(r);
+            break;
+        case 0x1F:
+            wasm__skip_try_table_immediates(r);
+            break;
+        case 0x07:
+        case 0x08:
+        case 0x09:
+        case 0x0C:
+        case 0x0D:
+        case 0x10:
+        case 0x12:
+        case 0x14:
+        case 0x15:
+        case 0x18:
+        case 0x20:
+        case 0x21:
+        case 0x22:
+        case 0x23:
+        case 0x24:
+        case 0x25:
+        case 0x26:
+        case 0x3F:
+        case 0x40:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x41:
+            wasm__read_leb128_i32(r);
+            break;
+        case 0x42:
+            wasm__read_leb128_i64(r);
+            break;
+        case 0x43:
+            r->ptr += 4;
+            break;
+        case 0x44:
+            r->ptr += 8;
+            break;
+        case 0x28:
+        case 0x29:
+        case 0x2A:
+        case 0x2B:
+        case 0x2C:
+        case 0x2D:
+        case 0x2E:
+        case 0x2F:
+        case 0x30:
+        case 0x31:
+        case 0x32:
+        case 0x33:
+        case 0x34:
+        case 0x35:
+        case 0x36:
+        case 0x37:
+        case 0x38:
+        case 0x39:
+        case 0x3A:
+        case 0x3B:
+        case 0x3C:
+        case 0x3D:
+        case 0x3E: {
+            wasm__memarg_t memarg;
+            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
+                r->ptr = r->end;
+                return;
+            }
+        } break;
+        case 0x0E: {
+            uint32_t n = wasm__read_leb128_u32(r), j;
+            for (j = 0; j <= n; j++) wasm__read_leb128_u32(r);
+            break;
+        }
+        case 0x11:
+        case 0x13:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x1C: {
+            uint32_t count = wasm__read_leb128_u32(r);
+            while (count-- > 0 && r->ptr < r->end) wasm__skip_valtype(r);
+            break;
+        }
+        case 0xD0:
+            wasm__skip_heaptype(r);
+            break;
+        case 0xD2:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0xD5:
+        case 0xD6:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0xFC:
+            wasm__skip_prefixed_immediates(r);
+            break;
+        case 0xFB:
+            wasm__skip_gc_immediates(r);
+            break;
+        case 0xFD:
+            wasm__skip_simd_immediates(r);
+            break;
+        case 0x19:
+        default:
+            break;
+    }
+}
+
+WASM_PRIVATE uint32_t wasm__simd_memory_align_log2(uint32_t subop) {
+    switch (subop) {
+        case 0x00:
+        case 0x0B:
+            return 4;
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05:
+        case 0x06:
+            return 3;
+        case 0x07:
+        case 0x54:
+        case 0x58:
+            return 0;
+        case 0x08:
+        case 0x55:
+        case 0x59:
+            return 1;
+        case 0x09:
+        case 0x5C:
+        case 0x56:
+        case 0x5A:
+            return 2;
+        case 0x0A:
+        case 0x5D:
+        case 0x57:
+        case 0x5B:
+            return 3;
+        default:
+            return UINT32_MAX;
+    }
+}
+
+WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop) {
+    switch (subop) {
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        case 0x54:
+        case 0x58:
+            return 16;
+        case 0x18:
+        case 0x19:
+        case 0x1A:
+        case 0x55:
+        case 0x59:
+            return 8;
+        case 0x1B:
+        case 0x1C:
+        case 0x1F:
+        case 0x20:
+        case 0x56:
+        case 0x5A:
+            return 4;
+        default:
+            return 2;
+    }
+}
+
+static void wasm__skip_simd_immediates(wasm__reader_t* r) {
+    uint32_t subop = wasm__read_leb128_u32(r);
+
+    switch (subop) {
+        case 0x00:
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05:
+        case 0x06:
+        case 0x07:
+        case 0x08:
+        case 0x09:
+        case 0x0A:
+        case 0x0B:
+        case 0x54:
+        case 0x55:
+        case 0x56:
+        case 0x57:
+        case 0x58:
+        case 0x59:
+        case 0x5A:
+        case 0x5B:
+        case 0x5C:
+        case 0x5D: {
+            wasm__memarg_t memarg;
+            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
+                r->ptr = r->end;
+                return;
+            }
+            if (subop >= 0x54 && subop <= 0x5B) (void)wasm__read_u8(r);
+            break;
+        }
+        case 0x0C:
+            r->ptr += 16;
+            if (r->ptr > r->end) {
+                r->ptr = r->end;
+                r->malformed = 1;
+            }
+            break;
+        case 0x0D: {
+            uint32_t lane;
+            for (lane = 0; lane < 16 && r->ptr < r->end; lane++) (void)wasm__read_u8(r);
+            break;
+        }
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        case 0x18:
+        case 0x19:
+        case 0x1A:
+        case 0x1B:
+        case 0x1C:
+        case 0x1D:
+        case 0x1E:
+        case 0x1F:
+        case 0x20:
+        case 0x21:
+        case 0x22:
+            (void)wasm__read_u8(r);
+            break;
+        default:
+            break;
+    }
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg) {
@@ -8222,10 +6649,124 @@ WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* o
     out_memarg->offset = wasm__read_leb128_u64(r);
     return WASM_OK;
 }
-/* END src/memory_internal.c */
+
+WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
+                                                      wasm__reader_t* r,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype) {
+    uint32_t count = wasm__read_leb128_u32(r);
+
+    if (count != 1) return WASM_ERR_MALFORMED;
+    return wasm__read_valtype(mod, r, out_type, out_reftype);
+}
+/* END src/instructions.c */
 
 /* BEGIN src/simd/lanes.c */
 
+/* BEGIN src/simd/lanes.h */
+#ifndef WASM_SIMD_LANES_H
+#define WASM_SIMD_LANES_H
+
+
+WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE uint8_t wasm__v128_get_u8(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE int16_t wasm__v128_get_i16(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE uint16_t wasm__v128_get_u16(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE int32_t wasm__v128_get_i32(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE uint32_t wasm__v128_get_u32(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE int64_t wasm__v128_get_i64(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE uint64_t wasm__v128_get_u64(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE float wasm__v128_get_f32(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE double wasm__v128_get_f64(const wasm_value_t* value, uint32_t lane);
+
+WASM_PRIVATE void wasm__v128_set_u8(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_i16(wasm_value_t* value, uint32_t lane, int32_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_u16(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_i32(wasm_value_t* value, uint32_t lane, int32_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_u32(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_i64(wasm_value_t* value, uint32_t lane, int64_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_u64(wasm_value_t* value, uint32_t lane, uint64_t lane_value);
+
+WASM_PRIVATE void wasm__v128_set_f32(wasm_value_t* value, uint32_t lane, float lane_value);
+
+WASM_PRIVATE void wasm__v128_set_f64(wasm_value_t* value, uint32_t lane, double lane_value);
+
+WASM_PRIVATE int8_t wasm__sat_i8(int32_t value);
+
+WASM_PRIVATE uint8_t wasm__sat_u8(int32_t value);
+
+WASM_PRIVATE int16_t wasm__sat_i16(int32_t value);
+
+WASM_PRIVATE uint16_t wasm__sat_u16(int32_t value);
+
+WASM_PRIVATE uint8_t wasm__popcount_u8(uint8_t value);
+
+WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value);
+
+WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value);
+
+WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value);
+
+WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value);
+
+WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value);
+
+WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
+                                              const wasm_value_t* lhs,
+                                              const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs,
+                                         const wasm_value_t* mask);
+
+WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
+                                       const wasm_value_t* rhs,
+                                       const uint8_t lanes[16]);
+
+WASM_PRIVATE wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs,
+                                            const wasm_value_t* acc);
+
+WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
+                                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
+                                                             const wasm_value_t* rhs,
+                                                             const wasm_value_t* acc);
+
+#endif /* WASM_SIMD_LANES_H */
+/* END src/simd/lanes.h */
+
+
+#include <string.h>
 
 WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane) {
     return (int8_t)value->of.v128[lane];
@@ -8669,137 +7210,42 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_va
 
     return result;
 }
-
-WASM_PRIVATE uint32_t wasm__simd_memory_align_log2(uint32_t subop) {
-    switch (subop) {
-        case 0x00:
-        case 0x0B:
-            return 4;
-        case 0x01:
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x06:
-            return 3;
-        case 0x07:
-        case 0x54:
-        case 0x58:
-            return 0;
-        case 0x08:
-        case 0x55:
-        case 0x59:
-            return 1;
-        case 0x09:
-        case 0x5C:
-        case 0x56:
-        case 0x5A:
-            return 2;
-        case 0x0A:
-        case 0x5D:
-        case 0x57:
-        case 0x5B:
-            return 3;
-        default:
-            return UINT32_MAX;
-    }
-}
-
-WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop) {
-    switch (subop) {
-        case 0x15:
-        case 0x16:
-        case 0x17:
-        case 0x54:
-        case 0x58:
-            return 16;
-        case 0x18:
-        case 0x19:
-        case 0x1A:
-        case 0x55:
-        case 0x59:
-            return 8;
-        case 0x1B:
-        case 0x1C:
-        case 0x1F:
-        case 0x20:
-        case 0x56:
-        case 0x5A:
-            return 4;
-        default:
-            return 2;
-    }
-}
-
-WASM_PRIVATE void wasm__skip_simd_immediates(wasm__reader_t* r) {
-    uint32_t subop = wasm__read_leb128_u32(r);
-
-    switch (subop) {
-        case 0x00:
-        case 0x01:
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x06:
-        case 0x07:
-        case 0x08:
-        case 0x09:
-        case 0x0A:
-        case 0x0B:
-        case 0x54:
-        case 0x55:
-        case 0x56:
-        case 0x57:
-        case 0x58:
-        case 0x59:
-        case 0x5A:
-        case 0x5B:
-        case 0x5C:
-        case 0x5D: {
-            wasm__memarg_t memarg;
-            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
-                r->ptr = r->end;
-                return;
-            }
-            if (subop >= 0x54 && subop <= 0x5B) (void)wasm__read_u8(r);
-            break;
-        }
-        case 0x0C:
-            r->ptr += 16;
-            if (r->ptr > r->end) {
-                r->ptr = r->end;
-                r->malformed = 1;
-            }
-            break;
-        case 0x0D: {
-            uint32_t lane;
-            for (lane = 0; lane < 16 && r->ptr < r->end; lane++) (void)wasm__read_u8(r);
-            break;
-        }
-        case 0x15:
-        case 0x16:
-        case 0x17:
-        case 0x18:
-        case 0x19:
-        case 0x1A:
-        case 0x1B:
-        case 0x1C:
-        case 0x1D:
-        case 0x1E:
-        case 0x1F:
-        case 0x20:
-        case 0x21:
-        case 0x22:
-            (void)wasm__read_u8(r);
-            break;
-        default:
-            break;
-    }
-}
 /* END src/simd/lanes.c */
 
 /* BEGIN src/simd/compare.c */
+
+/* BEGIN src/simd/compare.h */
+#ifndef WASM_SIMD_COMPARE_H
+#define WASM_SIMD_COMPARE_H
+
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
+                                         const wasm_value_t* lhs,
+                                         const wasm_value_t* rhs);
+
+#endif /* WASM_SIMD_COMPARE_H */
+/* END src/simd/compare.h */
+
 
 
 WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
@@ -9357,6 +7803,35 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
 /* END src/simd/compare.c */
 
 /* BEGIN src/simd/integer_small.c */
+
+/* BEGIN src/simd/integer_small.h */
+#ifndef WASM_SIMD_INTEGER_SMALL_H
+#define WASM_SIMD_INTEGER_SMALL_H
+
+
+WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
+                                           const wasm_value_t* value,
+                                           uint32_t amount);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
+                                           const wasm_value_t* value,
+                                           uint32_t amount);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+#endif /* WASM_SIMD_INTEGER_SMALL_H */
+/* END src/simd/integer_small.h */
+
 
 
 /* Use unsigned NEON arithmetic for Wasm wrapping operations: GCC exposes
@@ -9933,6 +8408,35 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
 
 /* BEGIN src/simd/integer_wide.c */
 
+/* BEGIN src/simd/integer_wide.h */
+#ifndef WASM_SIMD_INTEGER_WIDE_H
+#define WASM_SIMD_INTEGER_WIDE_H
+
+
+WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
+                                           const wasm_value_t* value,
+                                           uint32_t amount);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
+                                           const wasm_value_t* value,
+                                           uint32_t amount);
+
+WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+#endif /* WASM_SIMD_INTEGER_WIDE_H */
+/* END src/simd/integer_wide.h */
+
+
 
 WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
@@ -10391,6 +8895,43 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
 
 /* BEGIN src/simd/float.c */
 
+/* BEGIN src/simd/float.h */
+#ifndef WASM_SIMD_FLOAT_H
+#define WASM_SIMD_FLOAT_H
+
+
+WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
+                                            const wasm_value_t* lhs,
+                                            const wasm_value_t* rhs);
+
+WASM_PRIVATE wasm_value_t wasm__simd_demote_f64x2_zero(const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_promote_low_f32x4(const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_convert_i32x4(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm_value_t* value);
+
+WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm_value_t* value);
+
+#endif /* WASM_SIMD_FLOAT_H */
+/* END src/simd/float.h */
+
+
+
+#include <math.h>
 
 WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
@@ -10793,6 +9334,75 @@ WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, 
 
 /* BEGIN src/init_expr.c */
 
+/* BEGIN src/init_expr.h */
+#ifndef WASM_INIT_EXPR_H
+#define WASM_INIT_EXPR_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_t* r,
+                                         uint32_t max_global_index,
+                                         wasm_value_t* out_value);
+
+#endif /* WASM_INIT_EXPR_H */
+/* END src/init_expr.h */
+
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdio.h>
+
+typedef struct wasm__init_expr_stack_t {
+    wasm_value_t* values;
+    uint32_t size;
+    uint32_t cap;
+} wasm__init_expr_stack_t;
+
+static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
+    if (stack->size >= stack->cap) {
+        uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
+        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
+        if (!values) return WASM_ERR_OOM;
+        stack->values = values;
+        stack->cap = new_cap;
+    }
+
+    stack->values[stack->size++] = value;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
+                                                     wasm__init_expr_stack_t* stack,
+                                                     wasm_valtype_t expected_type,
+                                                     const wasm_reftype_t* expected_ref,
+                                                     wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
+    value = stack->values[--stack->size];
+    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
+        return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
+                                                    wasm_valtype_t expected_type,
+                                                    wasm_value_t* out_value) {
+    return wasm__init_expr_stack_pop_expect(NULL, stack, expected_type, NULL, out_value);
+}
 
 WASM_PRIVATE wasm_error_t wasm__apply_active_data_segments(wasm_module_t* mod) {
     uint32_t i;
@@ -11256,6 +9866,231 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
     WASM_FREE(stack.values);
     return err;
 }
+/* END src/init_expr.c */
+
+/* BEGIN src/runtime.c */
+
+
+
+
+
+
+
+/* BEGIN src/exec/frames.h */
+#ifndef WASM_SRC_EXEC_FRAMES_H
+#define WASM_SRC_EXEC_FRAMES_H
+
+
+WASM_PRIVATE int wasm__size_mul(size_t a, size_t b, size_t* out);
+
+WASM_PRIVATE int wasm__frame_storage_size(uint32_t num_locals,
+                                    uint32_t max_labels,
+                                    size_t* out);
+
+WASM_PRIVATE int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t* out);
+
+WASM_PRIVATE wasm_error_t wasm__ensure_module_frame_arena(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt);
+
+WASM_PRIVATE void wasm__call_frame_stack_destroy(wasm_runtime_t* rt);
+
+WASM_PRIVATE void wasm__clear_backtrace(wasm_runtime_t* rt);
+
+WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_frame_sp);
+
+WASM_PRIVATE uint32_t wasm__visible_call_stack_depth(const wasm_runtime_t* rt);
+
+WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
+                                         uint32_t depth,
+                                         uint32_t* out_func_idx,
+                                         uint32_t* out_offset);
+
+#endif /* WASM_SRC_EXEC_FRAMES_H */
+/* END src/exec/frames.h */
+
+/* BEGIN src/platform/wasi_state.h */
+#ifndef WASM_PLATFORM_WASI_STATE_H
+#define WASM_PLATFORM_WASI_STATE_H
+
+
+
+#if WASM_ENABLE_PLATFORM
+#define WASM__WASI_MODULE_NAME "wasi_snapshot_preview1"
+#define WASM__WASI_FD_STDIN 0u
+#define WASM__WASI_FD_STDOUT 1u
+#define WASM__WASI_FD_STDERR 2u
+#define WASM__WASI_FILETYPE_CHARACTER_DEVICE 2u
+#define WASM__WASI_FILETYPE_REGULAR_FILE 4u
+#define WASM__WASI_WHENCE_SET 0u
+#define WASM__WASI_WHENCE_CUR 1u
+#define WASM__WASI_WHENCE_END 2u
+#define WASM__WASI_CLOCKID_REALTIME 0u
+#define WASM__WASI_CLOCKID_MONOTONIC 1u
+#define WASM__WASI_CLOCKID_PROCESS_CPUTIME_ID 2u
+#define WASM__WASI_CLOCKID_THREAD_CPUTIME_ID 3u
+#define WASM__WASI_ERRNO_SUCCESS 0u
+#define WASM__WASI_ERRNO_ACCES 2u
+#define WASM__WASI_ERRNO_AGAIN 6u
+#define WASM__WASI_ERRNO_BADF 8u
+#define WASM__WASI_ERRNO_EXIST 20u
+#define WASM__WASI_ERRNO_INVAL 28u
+#define WASM__WASI_ERRNO_IO 29u
+#define WASM__WASI_ERRNO_FAULT 21u
+#define WASM__WASI_ERRNO_NOENT 44u
+#define WASM__WASI_ERRNO_NOMEM 48u
+#define WASM__WASI_ERRNO_NOSPC 51u
+#define WASM__WASI_ERRNO_NOSYS 52u
+#define WASM__WASI_ERRNO_NOTDIR 54u
+#define WASM__WASI_ERRNO_NOTEMPTY 55u
+#define WASM__WASI_ERRNO_NOTSUP 58u
+#define WASM__WASI_ERRNO_ISDIR 31u
+#define WASM__WASI_ERRNO_PERM 63u
+#define WASM__WASI_ERRNO_PIPE 64u
+#define WASM__WASI_ERRNO_SPIPE 70u
+#define WASM__WASI_ERRNO_NOTCAPABLE 76u
+#define WASM__WASI_FILETYPE_UNKNOWN 0u
+#define WASM__WASI_FILETYPE_BLOCK_DEVICE 1u
+#define WASM__WASI_FILETYPE_DIRECTORY 3u
+#define WASM__WASI_FILETYPE_SOCKET_DGRAM 5u
+#define WASM__WASI_FILETYPE_SOCKET_STREAM 6u
+#define WASM__WASI_FILETYPE_SYMBOLIC_LINK 7u
+#define WASM__WASI_PREOPENTYPE_DIR 0u
+#define WASM__WASI_RIGHTS_ALL UINT64_MAX
+#define WASM__WASI_MAX_FDS 64u
+
+typedef struct wasm__wasi_fd_entry_t {
+    int used;
+    int host_fd;
+    int owns_host_fd;
+    int is_preopen;
+    uint8_t filetype;
+    uint16_t fdflags;
+    uint64_t rights_base;
+    uint64_t rights_inheriting;
+    char* host_path;
+    char* preopen_path;
+} wasm__wasi_fd_entry_t;
+
+struct wasm__wasi_state_t {
+    wasm__wasi_fd_entry_t fds[WASM__WASI_MAX_FDS];
+};
+
+#if defined(_WIN32)
+typedef struct __stat64 wasm__wasi_host_stat_t;
+#else
+typedef struct stat wasm__wasi_host_stat_t;
+#endif
+
+WASM_PRIVATE char* wasm__wasi_strdup(const char* text);
+
+WASM_PRIVATE int wasm__wasi_host_close(int fd);
+
+WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode);
+
+WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry);
+
+WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
+                                            int host_fd,
+                                            int owns_host_fd,
+                                            uint8_t filetype,
+                                            uint64_t rights_base,
+                                            uint64_t rights_inheriting,
+                                            const char* host_path,
+                                            const char* preopen_path,
+                                            uint32_t* out_fd);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
+
+WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint32_t fd);
+
+WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
+                                      uint64_t mem_size,
+                                      uint32_t ptr,
+                                      uint32_t len,
+                                      char** out_path);
+
+WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry);
+
+WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry);
+
+WASM_PRIVATE int wasm__wasi_host_read(int fd, void* buf, size_t len, size_t* out_count);
+
+WASM_PRIVATE int wasm__wasi_host_write(int fd, const void* buf, size_t len, size_t* out_count);
+
+WASM_PRIVATE int wasm__wasi_host_seek(int fd, int64_t offset, int whence, uint64_t* out_offset);
+
+WASM_PRIVATE int wasm__wasi_host_sync(int fd);
+
+WASM_PRIVATE int wasm__wasi_host_datasync(int fd);
+
+WASM_PRIVATE int wasm__wasi_host_fstat(int fd, wasm__wasi_host_stat_t* st);
+
+WASM_PRIVATE int wasm__wasi_host_ftruncate(int fd, uint64_t size);
+
+WASM_PRIVATE int wasm__wasi_host_pread(int fd, void* buf, size_t len, uint64_t offset, size_t* out_count);
+
+WASM_PRIVATE int wasm__wasi_host_pwrite(int fd, const void* buf, size_t len, uint64_t offset, size_t* out_count);
+
+#if defined(_WIN32)
+WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out_wide);
+
+WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out_text);
+
+WASM_PRIVATE int wasm__wasi_windows_path_is_absolute(const char* path);
+
+WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path, char** out_path);
+
+WASM_PRIVATE int wasm__wasi_windows_stat_path(const char* path, wasm__wasi_host_stat_t* st);
+
+WASM_PRIVATE int wasm__wasi_windows_open_path(const char* path, int oflags);
+
+WASM_PRIVATE uint32_t wasm__wasi_windows_error_to_wasi(DWORD error_code);
+
+WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm__wasi_fd_entry_t* entry,
+                                           const char* path,
+                                           char** out_path);
+
+WASM_PRIVATE uint8_t wasm__wasi_windows_filetype_from_attributes(DWORD attributes);
+
+WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_target);
+
+#endif
+
+WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_stat_t* st);
+
+WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
+
+WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig);
+#endif
+
+#endif /* WASM_PLATFORM_WASI_STATE_H */
+/* END src/platform/wasi_state.h */
+
+/* BEGIN src/platform/emscripten.h */
+#ifndef WASM_PLATFORM_EMSCRIPTEN_H
+#define WASM_PLATFORM_EMSCRIPTEN_H
+
+
+#if WASM_ENABLE_PLATFORM
+#define WASM__EMSCRIPTEN_MODULE_NAME "env"
+#define WASM__EMSCRIPTEN_MEMORY_NAME "memory"
+WASM_PRIVATE void wasm__emscripten_state_destroy(wasm_runtime_t* rt);
+WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* rt,
+                                                          uint64_t min_pages,
+                                                          uint64_t max_pages,
+                                                          int is_64);
+#endif
+
+#endif /* WASM_PLATFORM_EMSCRIPTEN_H */
+/* END src/platform/emscripten.h */
+
+
+
+#include <string.h>
+#include <stdio.h>
 
 WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
                                                       const char* module,
@@ -11352,12 +10187,8 @@ WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
 
     return NULL;
 }
-/* END src/init_expr.c */
 
-/* BEGIN src/runtime.c */
-
-
-WASM_PRIVATE void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
+static void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
     WASM_GC_FREE(rt->gc_heap);
     rt->gc_heap = NULL;
     rt->gc_heap_size = 0;
@@ -11408,7 +10239,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     return WASM_OK;
 }
 
-WASM_PRIVATE void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
+static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
     size_t aligned_offset = wasm__align_up_size(rt->gc_heap_offset, alignment);
 
     if (!rt->gc_heap) return NULL;
@@ -11419,7 +10250,7 @@ WASM_PRIVATE void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t a
     return rt->gc_heap + aligned_offset;
 }
 
-WASM_PRIVATE wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
+static wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
                                                const wasm_module_t* mod,
                                                uint32_t type_index,
                                                wasm_gc_object_kind_t kind,
@@ -11519,7 +10350,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->lazy_validation = 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
+static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
     rt->stack = (wasm_value_t*)WASM_MALLOC((size_t)max_stack * sizeof(*rt->stack));
@@ -11530,14 +10361,14 @@ WASM_PRIVATE wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stac
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__stack_destroy(wasm_runtime_t* rt) {
+static void wasm__stack_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->stack);
     rt->stack = NULL;
     rt->max_stack = 0;
     rt->sp = 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
+static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
     if (max_depth == 0) return WASM_ERR_MALFORMED;
 
     rt->backtrace_func_indices = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_func_indices));
@@ -11554,7 +10385,7 @@ WASM_PRIVATE wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__backtrace_destroy(wasm_runtime_t* rt) {
+static void wasm__backtrace_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->backtrace_func_indices);
     WASM_FREE(rt->backtrace_offsets);
     rt->backtrace_func_indices = NULL;
@@ -11743,11 +10574,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
     wasm__gc_heap_destroy(rt);
 #if WASM_ENABLE_PLATFORM
     if (rt->wasi_state) wasm__wasi_state_destroy(rt);
-    if (rt->emscripten_state) {
-        WASM_FREE(rt->emscripten_state->memory.data);
-        WASM_FREE(rt->emscripten_state);
-        rt->emscripten_state = NULL;
-    }
+    wasm__emscripten_state_destroy(rt);
 #endif
     wasm__stack_destroy(rt);
     memset(rt, 0, sizeof(*rt));
@@ -11966,6 +10793,67 @@ void wasm_enable_all_features(wasm_runtime_t* rt) {
 
 /* BEGIN src/decode.c */
 
+/* BEGIN src/decode.h */
+#ifndef WASM_DECODE_H
+#define WASM_DECODE_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_start_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__decode_data_count_section(wasm_module_t* mod, wasm__reader_t* r);
+
+WASM_PRIVATE wasm_error_t wasm__check_unresolved_function_imports(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod);
+
+#endif /* WASM_DECODE_H */
+/* END src/decode.h */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdio.h>
+
+static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
+    if (wasm__read_u8(r) != 0x00) return WASM_ERR_MALFORMED;
+    return WASM_OK;
+}
 
 WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t entry_count = wasm__read_leb128_u32(r);
@@ -12023,7 +10911,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
                                            wasm__reader_t* r,
                                            wasm_memory_t* memory) {
     uint8_t flags = wasm__read_u8(r);
@@ -12056,7 +10944,7 @@ WASM_PRIVATE wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_table_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
                                           wasm__reader_t* r,
                                           wasm_table_t* table) {
     uint8_t leading;
@@ -12135,7 +11023,7 @@ WASM_PRIVATE wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
+static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                              wasm__reader_t* r,
                                              wasm_import_info_t* info,
                                              uint8_t kind) {
@@ -12863,7 +11751,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_data_count_section(wasm_module_t* mod, wa
     return WASM_OK;
 }
 
-WASM_PRIVATE uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name) {
+static uint32_t wasm__find_exported_func(wasm_module_t* mod, const char* name) {
     uint32_t i;
 
     for (i = 0; i < mod->num_exports; i++) {
@@ -12940,6 +11828,15 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod) {
 
 /* BEGIN src/validate/module.c */
 
+
+
+
+
+
+
+
+#include <stdio.h>
+#include <stdarg.h>
 
 WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
                                                uint32_t func_idx,
@@ -13097,7 +11994,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wasm_functype_t* ft) {
+static wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wasm_functype_t* ft) {
     uint32_t i;
 
     for (i = 0; i < ft->num_params; i++) {
@@ -13113,7 +12010,7 @@ WASM_PRIVATE wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wa
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_storagetype_reftype(wasm_module_t* mod, wasm_storagetype_t* storage) {
+static wasm_error_t wasm__resolve_storagetype_reftype(wasm_module_t* mod, wasm_storagetype_t* storage) {
     if (storage->kind != WASM_STORAGE_VALTYPE) return WASM_OK;
     return wasm__resolve_valtype_reftype(mod, &storage->of.valtype, &storage->ref_type);
 }
@@ -13362,8 +12259,287 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
 
 /* BEGIN src/validate/stack.c */
 
+/* BEGIN src/validate/stack.h */
+#ifndef WASM_SRC_VALIDATE_STACK_H
+#define WASM_SRC_VALIDATE_STACK_H
 
-WASM_PRIVATE uint32_t wasm__validator_local_init_word_count(uint32_t num_locals) {
+
+/* BEGIN src/validate/state.h */
+#ifndef WASM_VALIDATE_STATE_H
+#define WASM_VALIDATE_STATE_H
+
+
+#define WASM__TYPE_BOT ((wasm_valtype_t)0xFF)
+struct wasm__val_frame_t {
+    uint8_t opcode;
+    uint32_t height;
+    const wasm_valtype_t* param_types;
+    const wasm_reftype_t* param_reftypes;
+    uint32_t num_params;
+    const wasm_valtype_t* result_types;
+    const wasm_reftype_t* result_reftypes;
+    uint32_t num_results;
+    wasm_valtype_t inline_result;
+    wasm_reftype_t inline_result_reftype;
+    int unreachable;
+    int seen_else;
+    int in_catch;
+    int seen_catch_all;
+    int seen_delegate;
+    uint64_t* local_init;
+    uint64_t* local_init_entry;
+};
+typedef struct wasm__validator_t {
+    wasm_module_t* mod;
+    uint32_t func_idx;
+    const uint8_t* body_start;
+    wasm__reader_t r;
+    wasm_valtype_t* stack;
+    wasm_reftype_t* stack_reftypes;
+    uint32_t stack_capacity;
+    uint32_t sp;
+    wasm__val_frame_t* frames;
+    uint32_t frame_capacity;
+    uint32_t fp;
+    uint32_t max_fp;
+    uint64_t* local_init_bits;
+    uint64_t* local_init_entry_bits;
+    uint32_t local_init_words;
+} wasm__validator_t;
+
+#endif /* WASM_VALIDATE_STATE_H */
+/* END src/validate/state.h */
+
+
+WASM_PRIVATE int wasm__validator_local_is_undefaulted(const wasm_func_t* func, uint32_t index);
+
+WASM_PRIVATE void wasm__validator_local_init_set(uint64_t* bits, uint32_t index);
+
+WASM_PRIVATE int wasm__validator_local_init_get(const uint64_t* bits, uint32_t index);
+
+WASM_PRIVATE void wasm__validator_enter_child_frame(wasm__validator_t* v, uint32_t frame_index);
+
+WASM_PRIVATE void wasm__validator_restore_entry_local_init(wasm__validator_t* v, wasm__val_frame_t* frame);
+
+WASM_PRIVATE void wasm__validator_destroy(wasm__validator_t* v);
+
+WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module_t* mod, uint32_t func_idx);
+
+WASM_PRIVATE wasm_error_t wasm__validator_error(wasm__validator_t* v,
+                                          const uint8_t* at,
+                                          const char* fmt,
+                                          ...);
+
+WASM_PRIVATE wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
+                                                    const uint8_t* at,
+                                                    uint32_t flag);
+
+WASM_PRIVATE int wasm__validator_get_effective_reftype(wasm_valtype_t type,
+                                                 const wasm_reftype_t* ref_type,
+                                                 wasm_reftype_t* out);
+
+WASM_PRIVATE int wasm__validator_type_matches(const wasm__validator_t* v,
+                                        wasm_valtype_t actual,
+                                        const wasm_reftype_t* actual_ref,
+                                        wasm_valtype_t expected,
+                                        const wasm_reftype_t* expected_ref);
+
+WASM_PRIVATE wasm__val_frame_t* wasm__validator_frame(wasm__validator_t* v);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_direct_non_null_branch_operand(wasm__validator_t* v,
+                                                                       const uint8_t* at,
+                                                                       wasm_valtype_t* out_type,
+                                                                       wasm_reftype_t* out_source_ref,
+                                                                       wasm_reftype_t* out_target_ref);
+
+WASM_PRIVATE wasm_error_t wasm__validator_push(wasm__validator_t* v,
+                                         const uint8_t* at,
+                                         wasm_valtype_t type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
+                                               const uint8_t* at,
+                                               wasm_valtype_t type,
+                                               const wasm_reftype_t* ref_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_push_many_typed(wasm__validator_t* v,
+                                                    const uint8_t* at,
+                                                    const wasm_valtype_t* types,
+                                                    const wasm_reftype_t* reftypes,
+                                                    uint32_t count);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_any(wasm__validator_t* v,
+                                            const uint8_t* at,
+                                            wasm_valtype_t* out_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_any_typed(wasm__validator_t* v,
+                                                  const uint8_t* at,
+                                                  wasm_valtype_t* out_type,
+                                                  wasm_reftype_t* out_ref_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_expect(wasm__validator_t* v,
+                                               const uint8_t* at,
+                                               wasm_valtype_t expected);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_expect_typed(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     wasm_valtype_t expected,
+                                                     const wasm_reftype_t* expected_ref);
+
+WASM_PRIVATE wasm_error_t wasm__validator_check_types_typed(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      const wasm_valtype_t* types,
+                                                      const wasm_reftype_t* reftypes,
+                                                      uint32_t count);
+
+WASM_PRIVATE uint32_t wasm__validator_stack_floor_after_checked(const wasm__validator_t* v,
+                                                          uint32_t count);
+
+WASM_PRIVATE void wasm__validator_consume_checked(wasm__validator_t* v, uint32_t count);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_and_push_types(wasm__validator_t* v,
+                                                       const uint8_t* at,
+                                                       const wasm_valtype_t* types,
+                                                       const wasm_reftype_t* reftypes,
+                                                       uint32_t count);
+
+WASM_PRIVATE void wasm__validator_mark_unreachable(wasm__validator_t* v);
+
+WASM_PRIVATE int wasm__validator_same_types(const wasm_valtype_t* a,
+                                      const wasm_reftype_t* a_refs,
+                                      uint32_t a_count,
+                                      const wasm_valtype_t* b,
+                                      const wasm_reftype_t* b_refs,
+                                      uint32_t b_count);
+
+WASM_PRIVATE int wasm__validator_types_match(const wasm__validator_t* v,
+                                       const wasm_valtype_t* actual_types,
+                                       const wasm_reftype_t* actual_refs,
+                                       uint32_t actual_count,
+                                       const wasm_valtype_t* expected_types,
+                                       const wasm_reftype_t* expected_refs,
+                                       uint32_t expected_count);
+
+WASM_PRIVATE int wasm__validator_meet_types(const wasm_module_t* mod,
+                                      const wasm_valtype_t* lhs_types,
+                                      const wasm_reftype_t* lhs_reftypes,
+                                      uint32_t lhs_count,
+                                      const wasm_valtype_t* rhs_types,
+                                      const wasm_reftype_t* rhs_reftypes,
+                                      uint32_t rhs_count,
+                                      wasm_valtype_t* out_types,
+                                      wasm_reftype_t* out_reftypes);
+
+WASM_PRIVATE void wasm__validator_branch_signature(const wasm__val_frame_t* frame,
+                                             const wasm_valtype_t** out_types,
+                                             const wasm_reftype_t** out_reftypes,
+                                             uint32_t* out_count);
+
+WASM_PRIVATE wasm_error_t wasm__validator_check_tail_results(wasm__validator_t* v,
+                                                       const uint8_t* at,
+                                                       const wasm_functype_t* caller_type,
+                                                       const wasm_functype_t* callee_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_check_frame_results(wasm__validator_t* v,
+                                                        const uint8_t* at,
+                                                        const wasm__val_frame_t* frame,
+                                                        const char* wrong_stack_message);
+
+WASM_PRIVATE wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
+                                                   const uint8_t* at,
+                                                   wasm__val_frame_t* frame);
+
+WASM_PRIVATE wasm_error_t wasm__validator_find_rethrow_frame(wasm__validator_t* v,
+                                                       uint32_t depth,
+                                                       wasm__val_frame_t** out_frame);
+
+WASM_PRIVATE wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
+                                                const uint8_t* at,
+                                                uint32_t max_align_log2,
+                                                wasm__memarg_t* out_memarg);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_memory_index(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     uint32_t memory_index);
+
+WASM_PRIVATE wasm_error_t wasm__validator_unary(wasm__validator_t* v,
+                                          const uint8_t* at,
+                                          wasm_valtype_t in_type,
+                                          wasm_valtype_t out_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_binary(wasm__validator_t* v,
+                                           const uint8_t* at,
+                                           wasm_valtype_t lhs_type,
+                                           wasm_valtype_t rhs_type,
+                                           wasm_valtype_t out_type);
+
+WASM_PRIVATE wasm_error_t wasm__validator_read_typed_select(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_valtype_t wasm__field_stack_type(const wasm_fieldtype_t* field);
+
+WASM_PRIVATE const wasm_reftype_t* wasm__field_stack_reftype(const wasm_fieldtype_t* field);
+
+WASM_PRIVATE int wasm__field_is_reference_type(const wasm_fieldtype_t* field);
+
+WASM_PRIVATE wasm_error_t wasm__validator_make_typeidx_reftype(wasm__validator_t* v,
+                                                         const uint8_t* at,
+                                                         uint32_t type_idx,
+                                                         int nullable,
+                                                         wasm_valtype_t* out_type,
+                                                         wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__validator_read_heap_reftype(wasm__validator_t* v,
+                                                      const uint8_t* at,
+                                                      int nullable,
+                                                      wasm_valtype_t* out_type,
+                                                      wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__validator_read_cast_flag_reftype(wasm__validator_t* v,
+                                                           const uint8_t* at,
+                                                           uint8_t flags,
+                                                           uint8_t bit,
+                                                           wasm_valtype_t* out_type,
+                                                           wasm_reftype_t* out_reftype);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_subtype(wasm__validator_t* v,
+                                                    const uint8_t* at,
+                                                    wasm_valtype_t expected_type,
+                                                    const wasm_reftype_t* expected_ref,
+                                                    wasm_valtype_t* out_type,
+                                                    wasm_reftype_t* out_ref);
+
+WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_castable(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     wasm_valtype_t expected_type,
+                                                     const wasm_reftype_t* expected_ref,
+                                                     wasm_valtype_t* out_type,
+                                                     wasm_reftype_t* out_ref);
+
+WASM_PRIVATE void wasm__validator_reference_difference(const wasm_reftype_t* source,
+                                                 const wasm_reftype_t* target,
+                                                 wasm_valtype_t* out_type,
+                                                 wasm_reftype_t* out_ref);
+
+#endif /* WASM_SRC_VALIDATE_STACK_H */
+/* END src/validate/stack.h */
+
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+static uint32_t wasm__validator_local_init_word_count(uint32_t num_locals) {
     return num_locals ? ((num_locals + 63u) >> 6) : 0u;
 }
 
@@ -13384,14 +12560,14 @@ WASM_PRIVATE int wasm__validator_local_init_get(const uint64_t* bits, uint32_t i
     return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;
 }
 
-WASM_PRIVATE void wasm__validator_copy_local_init(uint64_t* dst,
+static void wasm__validator_copy_local_init(uint64_t* dst,
                                             const uint64_t* src,
                                             uint32_t word_count) {
     if (word_count == 0) return;
     memcpy(dst, src, (size_t)word_count * sizeof(*dst));
 }
 
-WASM_PRIVATE void wasm__validator_seed_local_init(wasm__validator_t* v,
+static void wasm__validator_seed_local_init(wasm__validator_t* v,
                                             const wasm_func_t* func,
                                             const wasm_functype_t* ft) {
     uint32_t index;
@@ -13791,7 +12967,7 @@ WASM_PRIVATE int wasm__validator_types_match(const wasm__validator_t* v,
     return 1;
 }
 
-WASM_PRIVATE int wasm__validator_meet_type(const wasm_module_t* mod,
+static int wasm__validator_meet_type(const wasm_module_t* mod,
                                      wasm_valtype_t lhs_type,
                                      const wasm_reftype_t* lhs_ref,
                                      wasm_valtype_t rhs_type,
@@ -14201,6 +13377,21 @@ WASM_PRIVATE void wasm__validator_reference_difference(const wasm_reftype_t* sou
 /* END src/validate/stack.c */
 
 /* BEGIN src/validate/gc.c */
+
+/* BEGIN src/validate/gc.h */
+#ifndef WASM_SRC_VALIDATE_GC_H
+#define WASM_SRC_VALIDATE_GC_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint8_t* at);
+
+#endif /* WASM_SRC_VALIDATE_GC_H */
+/* END src/validate/gc.h */
+
+
+
+
 
 
 WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, const uint8_t* at) {
@@ -14632,8 +13823,22 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, cons
 
 /* BEGIN src/validate/simd.c */
 
+/* BEGIN src/validate/simd.h */
+#ifndef WASM_SRC_VALIDATE_SIMD_H
+#define WASM_SRC_VALIDATE_SIMD_H
 
-WASM_PRIVATE wasm_error_t wasm__validator_read_simd_lane(wasm__validator_t* v,
+
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, const uint8_t* at);
+
+#endif /* WASM_SRC_VALIDATE_SIMD_H */
+/* END src/validate/simd.h */
+
+
+
+
+
+static wasm_error_t wasm__validator_read_simd_lane(wasm__validator_t* v,
                                                    const uint8_t* at,
                                                    uint32_t subop) {
     uint32_t lane_limit = wasm__simd_lane_limit(subop);
@@ -15085,6 +14290,26 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_simd(wasm__validator_t* v, co
 
 /* BEGIN src/validate/numeric.c */
 
+/* BEGIN src/validate/numeric.h */
+#ifndef WASM_SRC_VALIDATE_NUMERIC_H
+#define WASM_SRC_VALIDATE_NUMERIC_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_numeric(wasm__validator_t* v,
+                                                     const uint8_t* at,
+                                                     uint8_t op);
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v,
+                                                      const uint8_t* at);
+
+#endif /* WASM_SRC_VALIDATE_NUMERIC_H */
+/* END src/validate/numeric.h */
+
+
+
+
+
 
 WASM_PRIVATE wasm_error_t wasm__validator_validate_numeric(wasm__validator_t* v,
                                                      const uint8_t* at,
@@ -15392,8 +14617,60 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v
 
 /* BEGIN src/validate/function.c */
 
+/* BEGIN src/validate/function.h */
+#ifndef WASM_SRC_VALIDATE_FUNCTION_H
+#define WASM_SRC_VALIDATE_FUNCTION_H
 
-WASM_PRIVATE wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
+
+WASM_PRIVATE wasm_error_t wasm__validate_code(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t func_idx);
+
+#endif /* WASM_SRC_VALIDATE_FUNCTION_H */
+/* END src/validate/function.h */
+
+#include <stdio.h>
+
+/* BEGIN src/exec/control.h */
+#ifndef WASM_SRC_EXEC_CONTROL_H
+#define WASM_SRC_EXEC_CONTROL_H
+
+
+
+typedef struct wasm__try_clause_t {
+    uint8_t opcode;
+    uint32_t immediate;
+    const uint8_t* body_start;
+    const uint8_t* next_clause;
+} wasm__try_clause_t;
+
+WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func);
+
+WASM_PRIVATE const wasm__control_target_t* wasm__control_target_at(const wasm_func_t* func, const uint8_t* pc);
+
+WASM_PRIVATE wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod);
+
+WASM_PRIVATE wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,
+                                          const uint8_t* code_end,
+                                          wasm__try_clause_t* out_clause);
+
+#endif /* WASM_SRC_EXEC_CONTROL_H */
+/* END src/exec/control.h */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
@@ -16854,6 +16131,20 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 /* BEGIN src/load.c */
 
 
+
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdio.h>
+
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     wasm__reader_t r;
     uint32_t version;
@@ -17124,19 +16415,81 @@ void wasm_free_module(wasm_module_t* mod) {
 /* BEGIN src/exec/frames.c */
 
 
+
+/* BEGIN src/exec/state.h */
+#ifndef WASM_EXEC_STATE_H
+#define WASM_EXEC_STATE_H
+
+
+typedef struct wasm__label_t {
+    const uint8_t* continuation;
+    const uint8_t* handler_ptr;
+    uint32_t sp_base;
+    uint32_t param_arity;
+    uint32_t arity;
+    uint32_t caught_tag;
+    uint64_t caught_tag_identity;
+    uint32_t caught_count;
+    wasm_value_t* caught_values;
+    uint32_t delegate_depth;
+    uint8_t opcode;
+    uint8_t active_catch;
+} wasm__label_t;
+struct wasm__call_frame_t {
+    wasm_module_t* module;
+    uint32_t func_idx;
+    uint32_t sp_base;
+    wasm_value_t* locals;
+    wasm__label_t* labels;
+    uint32_t lsp;
+    uint32_t max_labels;
+    wasm__reader_t r;
+    wasm_func_t* func;
+    wasm_functype_t* ft;
+    wasm_value_t* results_dst;
+    uint32_t num_results;
+    size_t arena_saved;
+    uint32_t current_offset;
+};
+#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
+#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
+#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
+#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
+#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
+#define WASM__PUSH(rt, val)                \
+    do {                                   \
+        if ((rt)->sp >= (rt)->max_stack) { \
+            err = WASM_ERR_STACK_OVERFLOW; \
+            goto cleanup;                  \
+        }                                  \
+        (rt)->stack[(rt)->sp++] = (val);   \
+    } while (0)
+#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
+#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
+#define WASM__TRAP(code) \
+    do {                 \
+        err = (code);    \
+        goto cleanup;    \
+    } while (0)
+
+#endif /* WASM_EXEC_STATE_H */
+/* END src/exec/state.h */
+#include <stdio.h>
+
+
 WASM_PRIVATE int wasm__size_mul(size_t a, size_t b, size_t* out) {
     if (a != 0 && b > ((size_t)-1) / a) return 0;
     *out = a * b;
     return 1;
 }
 
-WASM_PRIVATE int wasm__size_add(size_t a, size_t b, size_t* out) {
+static int wasm__size_add(size_t a, size_t b, size_t* out) {
     if (a > ((size_t)-1) - b) return 0;
     *out = a + b;
     return 1;
 }
 
-WASM_PRIVATE int wasm__size_align(size_t value, size_t alignment, size_t* out) {
+static int wasm__size_align(size_t value, size_t alignment, size_t* out) {
     size_t remainder;
 
     if (alignment <= 1) {
@@ -17215,7 +16568,7 @@ WASM_PRIVATE int wasm__module_frame_arena_requirement(wasm_module_t* mod, size_t
     return 1;
 }
 
-WASM_PRIVATE wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size) {
+static wasm_error_t wasm__reserve_frame_arena(wasm_runtime_t* rt, size_t size) {
     uint8_t* arena;
 
     if (size <= rt->frame_arena_size) return WASM_OK;
@@ -17270,7 +16623,7 @@ WASM_PRIVATE void wasm__clear_backtrace(wasm_runtime_t* rt) {
     rt->backtrace_depth = 0;
 }
 
-WASM_PRIVATE uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
+static uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
     ptrdiff_t offset;
 
     if (!cf || !cf->func || !cf->func->code) return 0;
@@ -17335,19 +16688,31 @@ WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
 /* BEGIN src/gc.c */
 
 
-WASM_PRIVATE void wasm__gc_mark_value(const wasm_value_t* value) {
+
+
+
+
+
+
+
+
+#include <string.h>
+
+static void wasm__gc_mark_object(wasm_gc_header_t* object);
+
+static void wasm__gc_mark_value(const wasm_value_t* value) {
     if (!wasm__is_heap_gc_ref_value(value)) return;
     wasm__gc_mark_object((wasm_gc_header_t*)value->of.gc_obj);
 }
 
-WASM_PRIVATE void wasm__gc_mark_values(const wasm_value_t* values, uint32_t count) {
+static void wasm__gc_mark_values(const wasm_value_t* values, uint32_t count) {
     uint32_t i;
 
     if (!values) return;
     for (i = 0; i < count; i++) wasm__gc_mark_value(&values[i]);
 }
 
-WASM_PRIVATE void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
+static void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
                                         const wasm_structtype_t* type) {
     uint32_t i;
 
@@ -17361,7 +16726,7 @@ WASM_PRIVATE void wasm__gc_mark_struct_fields(wasm_gc_header_t* object,
     }
 }
 
-WASM_PRIVATE void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
+static void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
                                          const wasm_arraytype_t* type) {
     wasm_gc_array_t* array_object;
     size_t data_offset;
@@ -17377,7 +16742,7 @@ WASM_PRIVATE void wasm__gc_mark_array_elements(wasm_gc_header_t* object,
     for (i = 0; i < array_object->length; i++) wasm__gc_mark_value(&elems[i]);
 }
 
-WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object) {
+static void wasm__gc_mark_object(wasm_gc_header_t* object) {
     const wasm_module_t* mod;
 
     if (!object || object->marked) return;
@@ -17404,7 +16769,7 @@ WASM_PRIVATE void wasm__gc_mark_object(wasm_gc_header_t* object) {
     }
 }
 
-WASM_PRIVATE void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
+static void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;
@@ -17452,7 +16817,7 @@ WASM_PRIVATE void wasm__gc_mark_runtime_roots(wasm_runtime_t* rt) {
     }
 }
 
-WASM_PRIVATE void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value) {
+static void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value) {
     wasm_gc_header_t* old_object;
 
     if (!wasm__is_heap_gc_ref_value(value)) return;
@@ -17463,14 +16828,14 @@ WASM_PRIVATE void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value
     value->of.gc_ref = (uintptr_t)old_object->next_alloc;
 }
 
-WASM_PRIVATE void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
+static void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
     uint32_t i;
 
     if (!values) return;
     for (i = 0; i < count; i++) wasm__gc_forward_value(rt, &values[i]);
 }
 
-WASM_PRIVATE void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
+static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
     const wasm_module_t* mod;
 
     if (!object) return;
@@ -17510,7 +16875,7 @@ WASM_PRIVATE void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_heade
     }
 }
 
-WASM_PRIVATE void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
+static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__exception_object_t* exception_object;
     wasm__externref_box_t* box;
@@ -17633,6 +16998,92 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
 
 /* BEGIN src/exec/calls.c */
 
+/* BEGIN src/exec/calls.h */
+#ifndef WASM_SRC_EXEC_CALLS_H
+#define WASM_SRC_EXEC_CALLS_H
+
+
+
+WASM_PRIVATE void wasm__clear_label(wasm__label_t* label);
+
+WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf);
+
+WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
+                                          uint32_t func_idx,
+                                          const wasm_value_t* args,
+                                          uint32_t num_args,
+                                          wasm_value_t* results_dst,
+                                          uint32_t num_results);
+
+WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp);
+
+WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
+
+#endif /* WASM_SRC_EXEC_CALLS_H */
+/* END src/exec/calls.h */
+
+#include <stdio.h>
+/* BEGIN src/exec/exceptions.h */
+#ifndef WASM_SRC_EXEC_EXCEPTIONS_H
+#define WASM_SRC_EXEC_EXCEPTIONS_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
+
+WASM_PRIVATE int wasm__find_rethrow_label(const wasm__label_t* labels,
+                                    uint32_t lsp,
+                                    uint32_t depth,
+                                    uint32_t* out_index);
+
+WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
+                                                    wasm__label_t* labels,
+                                                    uint32_t* label_sp,
+                                                    wasm__reader_t* r,
+                                                    uint32_t sp_base);
+
+WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
+                                    wasm__label_t* labels,
+                                    wasm__label_t* target,
+                                    wasm__reader_t* r,
+                                    uint32_t* label_sp,
+                                    uint32_t depth_l);
+
+WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label);
+
+#endif /* WASM_SRC_EXEC_EXCEPTIONS_H */
+/* END src/exec/exceptions.h */
+
+
+/* BEGIN src/exec/interpreter.h */
+#ifndef WASM_SRC_EXEC_INTERPRETER_H
+#define WASM_SRC_EXEC_INTERPRETER_H
+
+
+
+WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
+                                  wasm_module_t* mod,
+                                  wasm_runtime_t* rt,
+                                  uint32_t func_idx,
+                                  wasm_func_t* func,
+                                  wasm_functype_t* ft,
+                                  wasm_value_t* locals,
+                                  wasm__label_t* labels,
+                                  wasm_value_t* results_dst,
+                                  uint32_t num_results);
+
+WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
+                                 wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results);
+
+#endif /* WASM_SRC_EXEC_INTERPRETER_H */
+/* END src/exec/interpreter.h */
+
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
     WASM_FREE(label->caught_values);
@@ -17799,313 +17250,22 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint
 
     return WASM__ERR_EXCEPTION;
 }
-
-WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r) {
-    uint8_t lead = *r->ptr;
-
-    if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
-        if (lead == 0x40)
-            r->ptr++;
-        else
-            wasm__skip_valtype(r);
-        return;
-    }
-
-    (void)wasm__read_leb128_i32(r);
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
-                                                wasm__try_table_clause_t* out_clause) {
-    if (!r || !out_clause) return WASM_ERR_MALFORMED;
-
-    memset(out_clause, 0, sizeof(*out_clause));
-    out_clause->kind = wasm__read_u8(r);
-    switch (out_clause->kind) {
-        case 0x00:
-        case 0x01:
-            out_clause->tag_index = wasm__read_leb128_u32(r);
-            out_clause->label_depth = wasm__read_leb128_u32(r);
-            break;
-        case 0x02:
-        case 0x03:
-            out_clause->label_depth = wasm__read_leb128_u32(r);
-            break;
-        default:
-            return WASM_ERR_MALFORMED;
-    }
-
-    if (r->malformed) return WASM_ERR_MALFORMED;
-    return WASM_OK;
-}
-
-WASM_PRIVATE void wasm__skip_try_table_immediates(wasm__reader_t* r) {
-    uint32_t count;
-
-    wasm__skip_blocktype(r);
-    count = wasm__read_leb128_u32(r);
-    while (count-- > 0 && r->ptr < r->end) {
-        wasm__try_table_clause_t clause;
-
-        if (wasm__read_try_table_clause(r, &clause) != WASM_OK) {
-            r->ptr = r->end;
-            r->malformed = 1;
-            return;
-        }
-    }
-}
-
-WASM_PRIVATE void wasm__skip_prefixed_immediates(wasm__reader_t* r) {
-    uint32_t subop = wasm__read_leb128_u32(r);
-
-    switch (subop) {
-        case 0x08:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x09:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0A:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0B:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0C:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0D:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0E:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0F:
-        case 0x10:
-        case 0x11:
-            wasm__read_leb128_u32(r);
-            break;
-        default:
-            break;
-    }
-}
-
-WASM_PRIVATE void wasm__skip_gc_immediates(wasm__reader_t* r) {
-    uint32_t subop = wasm__read_leb128_u32(r);
-
-    switch (subop) {
-        case 0x00:
-        case 0x01:
-        case 0x06:
-        case 0x07:
-        case 0x0B:
-        case 0x0C:
-        case 0x0D:
-        case 0x0E:
-        case 0x10:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x09:
-        case 0x0A:
-        case 0x11:
-        case 0x12:
-        case 0x13:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x08:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x14:
-        case 0x15:
-        case 0x16:
-        case 0x17:
-            wasm__skip_heaptype(r);
-            break;
-        case 0x18:
-        case 0x19:
-            if (r->ptr < r->end) r->ptr++;
-            wasm__read_leb128_u32(r);
-            wasm__skip_heaptype(r);
-            wasm__skip_heaptype(r);
-            break;
-        default:
-            break;
-    }
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
-    uint8_t lead = *r->ptr;
-    wasm_error_t err;
-
-    blocktype->param_arity = 0;
-    blocktype->result_arity = 0;
-    blocktype->params = NULL;
-    blocktype->results = NULL;
-    blocktype->param_reftypes = NULL;
-    blocktype->result_reftypes = NULL;
-    blocktype->inline_result = WASM_TYPE_VOID;
-    wasm__clear_reftype(&blocktype->inline_result_reftype);
-
-    if (lead == 0x40) {
-        r->ptr++;
-        return WASM_OK;
-    }
-
-    if (wasm__is_valtype_byte(lead)) {
-        err = wasm__read_valtype(mod, r, &blocktype->inline_result, &blocktype->inline_result_reftype);
-        if (err != WASM_OK) return err;
-        blocktype->result_arity = 1;
-        blocktype->results = &blocktype->inline_result;
-        blocktype->result_reftypes = &blocktype->inline_result_reftype;
-        return WASM_OK;
-    }
-
-    {
-        int32_t type_idx = wasm__read_leb128_i32(r);
-        wasm_functype_t* ft;
-
-        if (wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE) != WASM_OK) return WASM_ERR_MALFORMED;
-        if (type_idx < 0 || (uint32_t)type_idx >= mod->num_types) return WASM_ERR_MALFORMED;
-        ft = wasm__module_functype(mod, (uint32_t)type_idx);
-        if (!ft) return WASM_ERR_MALFORMED;
-        blocktype->param_arity = ft->num_params;
-        blocktype->result_arity = ft->num_results;
-        blocktype->params = ft->params;
-        blocktype->results = ft->results;
-        blocktype->param_reftypes = ft->param_reftypes;
-        blocktype->result_reftypes = ft->result_reftypes;
-    }
-
-    return WASM_OK;
-}
 /* END src/exec/calls.c */
 
 /* BEGIN src/exec/control.c */
 
 
-WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
-    switch (op) {
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x06:
-            wasm__skip_blocktype(r);
-            break;
-        case 0x1F:
-            wasm__skip_try_table_immediates(r);
-            break;
-        case 0x07:
-        case 0x08:
-        case 0x09:
-        case 0x0C:
-        case 0x0D:
-        case 0x10:
-        case 0x12:
-        case 0x14:
-        case 0x15:
-        case 0x18:
-        case 0x20:
-        case 0x21:
-        case 0x22:
-        case 0x23:
-        case 0x24:
-        case 0x25:
-        case 0x26:
-        case 0x3F:
-        case 0x40:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x41:
-            wasm__read_leb128_i32(r);
-            break;
-        case 0x42:
-            wasm__read_leb128_i64(r);
-            break;
-        case 0x43:
-            r->ptr += 4;
-            break;
-        case 0x44:
-            r->ptr += 8;
-            break;
-        case 0x28:
-        case 0x29:
-        case 0x2A:
-        case 0x2B:
-        case 0x2C:
-        case 0x2D:
-        case 0x2E:
-        case 0x2F:
-        case 0x30:
-        case 0x31:
-        case 0x32:
-        case 0x33:
-        case 0x34:
-        case 0x35:
-        case 0x36:
-        case 0x37:
-        case 0x38:
-        case 0x39:
-        case 0x3A:
-        case 0x3B:
-        case 0x3C:
-        case 0x3D:
-        case 0x3E: {
-            wasm__memarg_t memarg;
-            if (wasm__read_memarg(r, &memarg) != WASM_OK) {
-                r->ptr = r->end;
-                return;
-            }
-        } break;
-        case 0x0E: {
-            uint32_t n = wasm__read_leb128_u32(r), j;
-            for (j = 0; j <= n; j++) wasm__read_leb128_u32(r);
-            break;
-        }
-        case 0x11:
-        case 0x13:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x1C: {
-            uint32_t count = wasm__read_leb128_u32(r);
-            while (count-- > 0 && r->ptr < r->end) wasm__skip_valtype(r);
-            break;
-        }
-        case 0xD0:
-            wasm__skip_heaptype(r);
-            break;
-        case 0xD2:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0xD5:
-        case 0xD6:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0xFC:
-            wasm__skip_prefixed_immediates(r);
-            break;
-        case 0xFB:
-            wasm__skip_gc_immediates(r);
-            break;
-        case 0xFD:
-            wasm__skip_simd_immediates(r);
-            break;
-        case 0x19:
-        default:
-            break;
-    }
-}
 
-WASM_PRIVATE const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end) {
+
+
+
+
+typedef struct wasm__control_frame_t {
+    uint8_t opcode;
+    uint32_t offset;
+} wasm__control_frame_t;
+
+static const uint8_t* wasm__find_try_clause_boundary(const uint8_t* start, const uint8_t* code_end) {
     wasm__reader_t scan;
     int nest = 1;
 
@@ -18291,8 +17451,17 @@ WASM_PRIVATE wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,
 
 /* BEGIN src/exec/exceptions.c */
 
+#include <stdio.h>
 
-WASM_PRIVATE wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
+
+
+
+
+
+
+#include <string.h>
+
+static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
                                                   const wasm__exception_state_t* ex) {
     wasm_value_t* copy = NULL;
 
@@ -18569,6 +17738,25 @@ WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__labe
 /* END src/exec/exceptions.c */
 
 /* BEGIN src/exec/gc.c */
+
+/* BEGIN src/exec/gc.h */
+#ifndef WASM_SRC_EXEC_GC_H
+#define WASM_SRC_EXEC_GC_H
+
+
+WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf);
+
+#endif /* WASM_SRC_EXEC_GC_H */
+/* END src/exec/gc.h */
+
+
+#include <stdio.h>
+
+
+
+
+
+
 
 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf) {
@@ -19125,6 +18313,24 @@ cleanup:
 
 /* BEGIN src/exec/bulk.c */
 
+/* BEGIN src/exec/bulk.h */
+#ifndef WASM_SRC_EXEC_BULK_H
+#define WASM_SRC_EXEC_BULK_H
+
+
+WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t* cf);
+
+#endif /* WASM_SRC_EXEC_BULK_H */
+/* END src/exec/bulk.h */
+
+
+#include <stdio.h>
+
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
@@ -19478,6 +18684,29 @@ cleanup:
 
 /* BEGIN src/exec/simd.c */
 
+/* BEGIN src/exec/simd.h */
+#ifndef WASM_SRC_EXEC_SIMD_H
+#define WASM_SRC_EXEC_SIMD_H
+
+
+WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf);
+
+#endif /* WASM_SRC_EXEC_SIMD_H */
+/* END src/exec/simd.h */
+
+
+#include <stdio.h>
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
@@ -20327,6 +19556,20 @@ cleanup:
 
 /* BEGIN src/exec/numeric.c */
 
+/* BEGIN src/exec/numeric.h */
+#ifndef WASM_SRC_EXEC_NUMERIC_H
+#define WASM_SRC_EXEC_NUMERIC_H
+
+
+WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op);
+
+#endif /* WASM_SRC_EXEC_NUMERIC_H */
+/* END src/exec/numeric.h */
+
+
+
+
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__exec_numeric(wasm_runtime_t* rt, uint8_t op) {
     wasm_error_t err = WASM_OK;
@@ -21083,8 +20326,29 @@ cleanup:
 
 /* BEGIN src/exec/interpreter.c */
 
+#include <stdio.h>
 
-WASM_PRIVATE wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <string.h>
+
+static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
                                            wasm_host_func_t host_func,
                                            const wasm_value_t* args,
                                            uint32_t num_args,
@@ -21137,7 +20401,7 @@ WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
     cf->lsp++;
 }
 
-WASM_PRIVATE wasm_error_t wasm__interp_loop(wasm_module_t* mod,
+static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                       wasm__call_frame_t* cf,
                                       wasm_module_t** next_module,
                                       uint32_t* next_func_idx,
@@ -22445,6 +21709,17 @@ cleanup:
 /* BEGIN src/call.c */
 
 
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
+
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results) {
@@ -22493,7 +21768,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
+static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
                                                 const char* name,
                                                 uint32_t* out_index,
                                                 const wasm_functype_t** out_type) {
@@ -22533,38 +21808,9 @@ WASM_PRIVATE wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
-                                                  const char* name,
-                                                  wasm_global_t** out_global,
-                                                  uint32_t* out_index) {
-    wasm_export_kind_t kind;
-    uint32_t index;
 
-    if (out_global) *out_global = NULL;
-    if (out_index) *out_index = 0;
 
-    if (!mod || !name) return WASM_ERR_MALFORMED;
-
-    if (!wasm_find_export(mod, name, &kind, &index) || kind != WASM_EXPORT_GLOBAL) {
-        if (mod->rt)
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT,
-                          "global export '%s' not found", name);
-        return WASM_ERR_UNDEFINED_EXPORT;
-    }
-    if (index >= mod->num_globals) {
-        if (mod->rt)
-            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
-                          "global export '%s' index %u out of range",
-                          name, (unsigned)index);
-        return WASM_ERR_MALFORMED;
-    }
-
-    if (out_global) *out_global = &mod->globals[index];
-    if (out_index) *out_index = index;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_error_t wasm__fmt_char_to_type(char ch,
+static wasm_error_t wasm__fmt_char_to_type(char ch,
                                            int in_results,
                                            int* out_is_void,
                                            wasm_valtype_t* out_type,
@@ -22601,7 +21847,7 @@ WASM_PRIVATE wasm_error_t wasm__fmt_char_to_type(char ch,
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__parse_fmt_string(const char* fmt,
+static wasm_error_t wasm__parse_fmt_string(const char* fmt,
                                            wasm_functype_t* out_type,
                                            const char** out_error) {
     const char* p;
@@ -22718,7 +21964,7 @@ WASM_PRIVATE wasm_error_t wasm__parse_fmt_string(const char* fmt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
+static wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
                                         wasm_error_t err,
                                         const char* prefix,
                                         const char* detail) {
@@ -22729,7 +21975,7 @@ WASM_PRIVATE wasm_error_t wasm__set_fmt_error(wasm_runtime_t* rt,
     return err;
 }
 
-WASM_PRIVATE wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
+static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
                                       const char* func_name,
                                       const char* fmt,
                                       va_list ap) {
@@ -22908,6 +22154,14 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
 /* BEGIN src/platform/wasi_state.c */
 
 
+
+
+
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
 #if WASM_ENABLE_PLATFORM
 WASM_PRIVATE char* wasm__wasi_strdup(const char* text) {
     size_t len;
@@ -22929,7 +22183,7 @@ WASM_PRIVATE int wasm__wasi_host_close(int fd) {
 #endif
 }
 
-WASM_PRIVATE int wasm__wasi_host_fileno(FILE* stream) {
+static int wasm__wasi_host_fileno(FILE* stream) {
 #if defined(_WIN32)
     return _fileno(stream);
 #else
@@ -22987,7 +22241,7 @@ WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
     rt->wasi_state = NULL;
 }
 
-WASM_PRIVATE void wasm__wasi_fd_entry_init_stdio(wasm__wasi_fd_entry_t* entry,
+static void wasm__wasi_fd_entry_init_stdio(wasm__wasi_fd_entry_t* entry,
                                            int host_fd,
                                            uint8_t filetype) {
     if (!entry) return;
@@ -23082,7 +22336,7 @@ WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint
     return &rt->wasi_state->fds[fd];
 }
 
-WASM_PRIVATE int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
+static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
                                        uint64_t mem_size,
                                        uint32_t ptr,
                                        uint32_t len,
@@ -23291,7 +22545,7 @@ WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out
     return 1;
 }
 
-WASM_PRIVATE void wasm__wasi_windows_normalize_slashes(char* text) {
+static void wasm__wasi_windows_normalize_slashes(char* text) {
     char* p;
 
     if (!text) return;
@@ -23446,7 +22700,7 @@ cleanup:
 #endif
 #endif
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE uint64_t wasm__wasi_stat_time_ns(const wasm__wasi_host_stat_t* st, int which) {
+static uint64_t wasm__wasi_stat_time_ns(const wasm__wasi_host_stat_t* st, int which) {
     if (!st) return 0u;
     if (which == 0) return (uint64_t)st->st_atime * 1000000000ull;
     if (which == 1) return (uint64_t)st->st_mtime * 1000000000ull;
@@ -23555,8 +22809,109 @@ WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig) {
 
 /* BEGIN src/platform/wasi_io.c */
 
+/* BEGIN src/platform/wasi_io.h */
+#ifndef WASM_PLATFORM_WASI_IO_H
+#define WASM_PLATFORM_WASI_IO_H
+
 
 #if WASM_ENABLE_PLATFORM
+WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code);
+
+WASM_PRIVATE uint32_t wasm__wasi_errno_from_host(int err_code);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
+                                           const char* op_name,
+                                           wasm_memory_t** out_memory,
+                                           uint64_t* out_mem_size);
+
+WASM_PRIVATE int wasm__wasi_is_stdio_fd(uint32_t fd);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_args_sizes_get(wasm_module_t* mod,
+                                              const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results,
+                                              void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_args_get(wasm_module_t* mod,
+                                        const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results,
+                                        void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_environ_sizes_get(wasm_module_t* mod,
+                                                 const wasm_value_t* args, uint32_t num_args,
+                                                 wasm_value_t* results, uint32_t num_results,
+                                                 void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_write(wasm_module_t* mod,
+                                        const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results,
+                                        void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_read(wasm_module_t* mod,
+                                       const wasm_value_t* args, uint32_t num_args,
+                                       wasm_value_t* results, uint32_t num_results,
+                                       void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_proc_exit(wasm_module_t* mod,
+                                         const wasm_value_t* args, uint32_t num_args,
+                                         wasm_value_t* results, uint32_t num_results,
+                                         void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,
+                                        const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results,
+                                        void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_seek(wasm_module_t* mod,
+                                       const wasm_value_t* args, uint32_t num_args,
+                                       wasm_value_t* results, uint32_t num_results,
+                                       void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_sync(wasm_module_t* mod,
+                                       const wasm_value_t* args, uint32_t num_args,
+                                       wasm_value_t* results, uint32_t num_results,
+                                       void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_environ_get(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
+                                             const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results,
+                                             void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
+                                          const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results,
+                                          void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
+                                              const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results,
+                                              void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
+                                             const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results,
+                                             void* userdata);
+#endif
+
+#endif /* WASM_PLATFORM_WASI_IO_H */
+/* END src/platform/wasi_io.h */
+
+
+
+
+
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+#if WASM_ENABLE_PLATFORM
+typedef uint32_t (*wasm__wasi_string_count_fn)(void);
+typedef const char* (*wasm__wasi_string_at_fn)(uint32_t index);
 WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code) {
     if (results && num_results > 0) results[0] = wasm_i32((int32_t)errno_code);
 }
@@ -23664,7 +23019,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
+static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn) {
     uint32_t count;
     uint32_t i;
@@ -23684,23 +23039,23 @@ WASM_PRIVATE uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn cou
     return total;
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_args(void) {
+static uint32_t wasm__wasi_string_list_count_args(void) {
     return wasm__platform_wasi_arg_count();
 }
 
-WASM_PRIVATE const char* wasm__wasi_string_list_at_args(uint32_t index) {
+static const char* wasm__wasi_string_list_at_args(uint32_t index) {
     return wasm__platform_wasi_arg_at(index);
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_count_env(void) {
+static uint32_t wasm__wasi_string_list_count_env(void) {
     return wasm__platform_wasi_env_count();
 }
 
-WASM_PRIVATE const char* wasm__wasi_string_list_at_env(uint32_t index) {
+static const char* wasm__wasi_string_list_at_env(uint32_t index) {
     return wasm__platform_wasi_env_at(index);
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
+static uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
                                             wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn,
                                             uint32_t count_ptr,
@@ -23734,7 +23089,7 @@ WASM_PRIVATE uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
+static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
                                            wasm__wasi_string_count_fn count_fn,
                                            wasm__wasi_string_at_fn at_fn,
                                            uint32_t entries_ptr,
@@ -24397,6 +23752,78 @@ WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
 
 /* BEGIN src/platform/wasi_fd.c */
 
+/* BEGIN src/platform/wasi_fd.h */
+#ifndef WASM_PLATFORM_WASI_FD_H
+#define WASM_PLATFORM_WASI_FD_H
+
+
+#if WASM_ENABLE_PLATFORM
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_datasync(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_set_flags(wasm_module_t* mod,
+                                                   const wasm_value_t* args, uint32_t num_args,
+                                                   wasm_value_t* results, uint32_t num_results,
+                                                   void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_set_rights(wasm_module_t* mod,
+                                                    const wasm_value_t* args, uint32_t num_args,
+                                                    wasm_value_t* results, uint32_t num_results,
+                                                    void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_get(wasm_module_t* mod,
+                                               const wasm_value_t* args, uint32_t num_args,
+                                               wasm_value_t* results, uint32_t num_results,
+                                               void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_set_size(wasm_module_t* mod,
+                                                    const wasm_value_t* args, uint32_t num_args,
+                                                    wasm_value_t* results, uint32_t num_results,
+                                                    void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_tell(wasm_module_t* mod,
+                                       const wasm_value_t* args, uint32_t num_args,
+                                       wasm_value_t* results, uint32_t num_results,
+                                       void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_advise(wasm_module_t* mod,
+                                         const wasm_value_t* args, uint32_t num_args,
+                                         wasm_value_t* results, uint32_t num_results,
+                                         void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
+                                          const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results,
+                                          void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_sched_yield(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_errno_stub(wasm_module_t* mod,
+                                          const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results,
+                                          void* userdata);
+#endif
+
+#endif /* WASM_PLATFORM_WASI_FD_H */
+/* END src/platform/wasi_fd.h */
+
+
+
+
+
+
+#include <errno.h>
+#include <stdio.h>
 
 #if WASM_ENABLE_PLATFORM
 WASM_PRIVATE wasm_error_t wasm__wasi_fd_datasync(wasm_module_t* mod,
@@ -24780,9 +24207,104 @@ WASM_PRIVATE wasm_error_t wasm__wasi_errno_stub(wasm_module_t* mod,
 
 /* BEGIN src/platform/wasi_path.c */
 
+/* BEGIN src/platform/wasi_path.h */
+#ifndef WASM_PLATFORM_WASI_PATH_H
+#define WASM_PLATFORM_WASI_PATH_H
+
 
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE int wasm__wasi_dirflags_to_host(uint32_t flags) {
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_prestat_get(wasm_module_t* mod,
+                                              const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results,
+                                              void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_prestat_dir_name(wasm_module_t* mod,
+                                                   const wasm_value_t* args, uint32_t num_args,
+                                                   wasm_value_t* results, uint32_t num_results,
+                                                   void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
+                                                     const wasm_value_t* args, uint32_t num_args,
+                                                     wasm_value_t* results, uint32_t num_results,
+                                                     void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
+                                                 const wasm_value_t* args, uint32_t num_args,
+                                                 wasm_value_t* results, uint32_t num_results,
+                                                 void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
+                                         const wasm_value_t* args, uint32_t num_args,
+                                         wasm_value_t* results, uint32_t num_results,
+                                         void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
+                                         const wasm_value_t* args, uint32_t num_args,
+                                         wasm_value_t* results, uint32_t num_results,
+                                         void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
+                                             const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results,
+                                             void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
+                                                     const wasm_value_t* args, uint32_t num_args,
+                                                     wasm_value_t* results, uint32_t num_results,
+                                                     void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
+                                            const wasm_value_t* args, uint32_t num_args,
+                                            wasm_value_t* results, uint32_t num_results,
+                                            void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
+                                                const wasm_value_t* args, uint32_t num_args,
+                                                wasm_value_t* results, uint32_t num_results,
+                                                void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_renumber(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_pread(wasm_module_t* mod,
+                                        const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results,
+                                        void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_pwrite(wasm_module_t* mod,
+                                         const wasm_value_t* args, uint32_t num_args,
+                                         wasm_value_t* results, uint32_t num_results,
+                                         void* userdata);
+
+WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
+                                          const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results,
+                                          void* userdata);
+#endif
+
+#endif /* WASM_PLATFORM_WASI_PATH_H */
+/* END src/platform/wasi_path.h */
+
+
+
+
+
+
+
+
+#include <errno.h>
+#include <string.h>
+
+#if WASM_ENABLE_PLATFORM
+#if WASM__PLATFORM_POSIX
+static int wasm__wasi_dirflags_to_host(uint32_t flags) {
     int host_flags = 0;
 
 #ifdef AT_SYMLINK_NOFOLLOW
@@ -24793,7 +24315,9 @@ WASM_PRIVATE int wasm__wasi_dirflags_to_host(uint32_t flags) {
     return host_flags;
 }
 
-WASM_PRIVATE int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags) {
+#endif
+
+static int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags) {
     int host_flags = 0;
 
 #ifdef O_BINARY
@@ -25856,6 +25380,9 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
 /* BEGIN src/platform/wasi_bind.c */
 
 
+
+
+
 #if WASM_ENABLE_PLATFORM
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
     wasm_error_t err;
@@ -25935,8 +25462,30 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
 /* BEGIN src/platform/emscripten.c */
 
 
+
+
+
+
+
+
+
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE int32_t wasm__emscripten_errno_from_host(int err_code) {
+struct wasm__emscripten_state_t {
+    wasm_memory_t memory;
+};
+
+WASM_PRIVATE void wasm__emscripten_state_destroy(wasm_runtime_t* rt) {
+    if (!rt || !rt->emscripten_state) return;
+    WASM_FREE(rt->emscripten_state->memory.data);
+    WASM_FREE(rt->emscripten_state);
+    rt->emscripten_state = NULL;
+}
+
+static int32_t wasm__emscripten_errno_from_host(int err_code) {
     switch (err_code) {
         case 0:
             return 0;
@@ -26053,12 +25602,12 @@ WASM_PRIVATE int32_t wasm__emscripten_errno_from_host(int err_code) {
     }
 }
 
-WASM_PRIVATE int32_t wasm__emscripten_neg_errno(int err_code) {
+static int32_t wasm__emscripten_neg_errno(int err_code) {
     if (err_code <= 0) err_code = EINVAL;
     return -wasm__emscripten_errno_from_host(err_code);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
+static wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
                                                 uint32_t num_results,
                                                 int32_t value) {
     if (!results || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
@@ -26066,7 +25615,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
     return WASM_OK;
 }
 
-WASM_PRIVATE int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
+static int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
                                               uint64_t mem_size,
                                               uint32_t ptr,
                                               char** out_string) {
@@ -26091,7 +25640,7 @@ WASM_PRIVATE int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__emscripten_store_i32(wasm_memory_t* memory,
+static int wasm__emscripten_store_i32(wasm_memory_t* memory,
                                       uint64_t mem_size,
                                       uint32_t ptr,
                                       int32_t value) {
@@ -26100,7 +25649,7 @@ WASM_PRIVATE int wasm__emscripten_store_i32(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__emscripten_store_c_string(wasm_memory_t* memory,
+static int wasm__emscripten_store_c_string(wasm_memory_t* memory,
                                            uint64_t mem_size,
                                            uint32_t ptr,
                                            const char* text) {
@@ -26184,7 +25733,7 @@ WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* 
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
@@ -26201,7 +25750,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_date_now(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
@@ -26219,7 +25768,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_get_now(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
                                                   const wasm_value_t* args, uint32_t num_args,
                                                   wasm_value_t* results, uint32_t num_results,
                                                   void* userdata) {
@@ -26235,7 +25784,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_get_heap_max(wasm_module_t* mod,
                                        memory ? (int32_t)(memory->max_pages * (uint64_t)WASM_PAGE_SIZE) : 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
                                                  const wasm_value_t* args, uint32_t num_args,
                                                  wasm_value_t* results, uint32_t num_results,
                                                  void* userdata) {
@@ -26261,7 +25810,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
                                        wasm_memory_grow(mod, target_pages - memory->pages) >= 0 ? 1 : 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata) {
@@ -26287,7 +25836,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
                                                   const wasm_value_t* args, uint32_t num_args,
                                                   wasm_value_t* results, uint32_t num_results,
                                                   void* userdata) {
@@ -26325,7 +25874,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_localtime_js(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
                                              void* userdata) {
@@ -26340,7 +25889,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_mmap_js(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOSYS));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
                                                const wasm_value_t* args, uint32_t num_args,
                                                wasm_value_t* results, uint32_t num_results,
                                                void* userdata) {
@@ -26352,7 +25901,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_munmap_js(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, 0);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
                                                        const wasm_value_t* args, uint32_t num_args,
                                                        wasm_value_t* results, uint32_t num_results,
                                                        void* userdata) {
@@ -26378,7 +25927,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -26398,7 +25947,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchmod(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -26424,7 +25973,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
                                                       const wasm_value_t* args, uint32_t num_args,
                                                       wasm_value_t* results, uint32_t num_results,
                                                       void* userdata) {
@@ -26444,7 +25993,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fchown32(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
                                                      const wasm_value_t* args, uint32_t num_args,
                                                      wasm_value_t* results, uint32_t num_results,
                                                      void* userdata) {
@@ -26464,7 +26013,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_fcntl64(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc >= 0 ? rc : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -26490,7 +26039,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc >= 0 ? rc : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -26502,7 +26051,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ioctl(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOTTY));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_t* mod,
                                                               const wasm_value_t* args, uint32_t num_args,
                                                               wasm_value_t* results, uint32_t num_results,
                                                               void* userdata) {
@@ -26515,7 +26064,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_stat_unsupported(wasm_module_
     return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(ENOSYS));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mod,
                                                          const wasm_value_t* args, uint32_t num_args,
                                                          wasm_value_t* results, uint32_t num_results,
                                                          void* userdata) {
@@ -26535,7 +26084,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_ftruncate64(wasm_module_t* mo
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
                                                     const wasm_value_t* args, uint32_t num_args,
                                                     wasm_value_t* results, uint32_t num_results,
                                                     void* userdata) {
@@ -26567,7 +26116,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_getcwd(wasm_module_t* mod,
 #endif
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
                                                      const wasm_value_t* args, uint32_t num_args,
                                                      wasm_value_t* results, uint32_t num_results,
                                                      void* userdata) {
@@ -26593,7 +26142,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
                                                         const wasm_value_t* args, uint32_t num_args,
                                                         wasm_value_t* results, uint32_t num_results,
                                                         void* userdata) {
@@ -26633,7 +26182,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod
     return wasm__emscripten_return_i32(results, num_results, rc_value);
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
                                                    const wasm_value_t* args, uint32_t num_args,
                                                    wasm_value_t* results, uint32_t num_results,
                                                    void* userdata) {
@@ -26659,7 +26208,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
                                                       const wasm_value_t* args, uint32_t num_args,
                                                       wasm_value_t* results, uint32_t num_results,
                                                       void* userdata) {
@@ -26685,7 +26234,7 @@ WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
-WASM_PRIVATE wasm_error_t wasm__emscripten_syscall_utimensat(wasm_module_t* mod,
+static wasm_error_t wasm__emscripten_syscall_utimensat(wasm_module_t* mod,
                                                        const wasm_value_t* args, uint32_t num_args,
                                                        wasm_value_t* results, uint32_t num_results,
                                                        void* userdata) {
@@ -26792,6 +26341,7 @@ wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
 /* BEGIN src/platform/disabled.c */
 
 
+
 #if WASM_ENABLE_PLATFORM
 #else
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
@@ -26813,6 +26363,15 @@ wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
 
 /* BEGIN src/memory.c */
 
+
+
+
+
+
+
+
+#include <string.h>
+#include <stdio.h>
 
 uint32_t wasm_memory_count(wasm_module_t* mod) {
     return mod ? mod->num_memories : 0;
@@ -27265,7 +26824,16 @@ const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
 /* BEGIN src/inspect.c */
 
 
-WASM_PRIVATE const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
+
+
+
+
+
+
+
+#include <stdio.h>
+
+static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     switch (kind) {
         case WASM_GC_OBJ_STRUCT:
             return "struct";
@@ -27276,7 +26844,7 @@ WASM_PRIVATE const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
+static wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
                                                    const wasm_value_t* ref,
                                                    wasm_gc_object_kind_t expected_kind,
                                                    const wasm_gc_header_t** out_object) {

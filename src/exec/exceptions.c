@@ -1,6 +1,16 @@
-#include "../internal.h"
+#include "exceptions.h"
+#include <stdio.h>
+#include "calls.h"
+#include "control.h"
+#include "../instructions.h"
+#include "../internal/alloc.h"
+#include "../module.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../types/canonical.h"
+#include <string.h>
 
-WASM_PRIVATE wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
+static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
                                                   const wasm__exception_state_t* ex) {
     wasm_value_t* copy = NULL;
 

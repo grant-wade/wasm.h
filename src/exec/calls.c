@@ -1,4 +1,15 @@
-#include "../internal.h"
+#include "calls.h"
+#include "../module.h"
+#include <stdio.h>
+#include "exceptions.h"
+#include "frames.h"
+#include "interpreter.h"
+#include "../internal/alloc.h"
+#include "../runtime.h"
+#include "../types/canonical.h"
+#include "../validate/function.h"
+#include "../values.h"
+#include <string.h>
 
 WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
     WASM_FREE(label->caught_values);
@@ -164,192 +175,4 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint
     }
 
     return WASM__ERR_EXCEPTION;
-}
-
-WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r) {
-    uint8_t lead = *r->ptr;
-
-    if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
-        if (lead == 0x40)
-            r->ptr++;
-        else
-            wasm__skip_valtype(r);
-        return;
-    }
-
-    (void)wasm__read_leb128_i32(r);
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_try_table_clause(wasm__reader_t* r,
-                                                wasm__try_table_clause_t* out_clause) {
-    if (!r || !out_clause) return WASM_ERR_MALFORMED;
-
-    memset(out_clause, 0, sizeof(*out_clause));
-    out_clause->kind = wasm__read_u8(r);
-    switch (out_clause->kind) {
-        case 0x00:
-        case 0x01:
-            out_clause->tag_index = wasm__read_leb128_u32(r);
-            out_clause->label_depth = wasm__read_leb128_u32(r);
-            break;
-        case 0x02:
-        case 0x03:
-            out_clause->label_depth = wasm__read_leb128_u32(r);
-            break;
-        default:
-            return WASM_ERR_MALFORMED;
-    }
-
-    if (r->malformed) return WASM_ERR_MALFORMED;
-    return WASM_OK;
-}
-
-WASM_PRIVATE void wasm__skip_try_table_immediates(wasm__reader_t* r) {
-    uint32_t count;
-
-    wasm__skip_blocktype(r);
-    count = wasm__read_leb128_u32(r);
-    while (count-- > 0 && r->ptr < r->end) {
-        wasm__try_table_clause_t clause;
-
-        if (wasm__read_try_table_clause(r, &clause) != WASM_OK) {
-            r->ptr = r->end;
-            r->malformed = 1;
-            return;
-        }
-    }
-}
-
-WASM_PRIVATE void wasm__skip_prefixed_immediates(wasm__reader_t* r) {
-    uint32_t subop = wasm__read_leb128_u32(r);
-
-    switch (subop) {
-        case 0x08:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x09:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0A:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0B:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0C:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0D:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0E:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x0F:
-        case 0x10:
-        case 0x11:
-            wasm__read_leb128_u32(r);
-            break;
-        default:
-            break;
-    }
-}
-
-WASM_PRIVATE void wasm__skip_gc_immediates(wasm__reader_t* r) {
-    uint32_t subop = wasm__read_leb128_u32(r);
-
-    switch (subop) {
-        case 0x00:
-        case 0x01:
-        case 0x06:
-        case 0x07:
-        case 0x0B:
-        case 0x0C:
-        case 0x0D:
-        case 0x0E:
-        case 0x10:
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x09:
-        case 0x0A:
-        case 0x11:
-        case 0x12:
-        case 0x13:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x08:
-            wasm__read_leb128_u32(r);
-            wasm__read_leb128_u32(r);
-            break;
-        case 0x14:
-        case 0x15:
-        case 0x16:
-        case 0x17:
-            wasm__skip_heaptype(r);
-            break;
-        case 0x18:
-        case 0x19:
-            if (r->ptr < r->end) r->ptr++;
-            wasm__read_leb128_u32(r);
-            wasm__skip_heaptype(r);
-            wasm__skip_heaptype(r);
-            break;
-        default:
-            break;
-    }
-}
-
-WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
-    uint8_t lead = *r->ptr;
-    wasm_error_t err;
-
-    blocktype->param_arity = 0;
-    blocktype->result_arity = 0;
-    blocktype->params = NULL;
-    blocktype->results = NULL;
-    blocktype->param_reftypes = NULL;
-    blocktype->result_reftypes = NULL;
-    blocktype->inline_result = WASM_TYPE_VOID;
-    wasm__clear_reftype(&blocktype->inline_result_reftype);
-
-    if (lead == 0x40) {
-        r->ptr++;
-        return WASM_OK;
-    }
-
-    if (wasm__is_valtype_byte(lead)) {
-        err = wasm__read_valtype(mod, r, &blocktype->inline_result, &blocktype->inline_result_reftype);
-        if (err != WASM_OK) return err;
-        blocktype->result_arity = 1;
-        blocktype->results = &blocktype->inline_result;
-        blocktype->result_reftypes = &blocktype->inline_result_reftype;
-        return WASM_OK;
-    }
-
-    {
-        int32_t type_idx = wasm__read_leb128_i32(r);
-        wasm_functype_t* ft;
-
-        if (wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE) != WASM_OK) return WASM_ERR_MALFORMED;
-        if (type_idx < 0 || (uint32_t)type_idx >= mod->num_types) return WASM_ERR_MALFORMED;
-        ft = wasm__module_functype(mod, (uint32_t)type_idx);
-        if (!ft) return WASM_ERR_MALFORMED;
-        blocktype->param_arity = ft->num_params;
-        blocktype->result_arity = ft->num_results;
-        blocktype->params = ft->params;
-        blocktype->results = ft->results;
-        blocktype->param_reftypes = ft->param_reftypes;
-        blocktype->result_reftypes = ft->result_reftypes;
-    }
-
-    return WASM_OK;
 }

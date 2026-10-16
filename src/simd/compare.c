@@ -1,4 +1,6 @@
-#include "../internal.h"
+#include "compare.h"
+#include "native.h"
+#include "lanes.h"
 
 WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
                                          const wasm_value_t* lhs,

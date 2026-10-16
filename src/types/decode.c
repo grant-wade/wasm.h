@@ -1,4 +1,10 @@
-#include "../internal.h"
+#include "decode.h"
+#include "../module.h"
+#include "../internal/alloc.h"
+#include "../portable.h"
+#include "../reader.h"
+#include "references.h"
+#include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
     uint32_t base;
@@ -46,7 +52,7 @@ WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t c
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
+static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
     uint32_t p;
 
     ft->num_params = wasm__read_leb128_u32(r);
@@ -78,7 +84,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
+static wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
                                             wasm__reader_t* r,
                                             wasm_storagetype_t* out_type) {
     uint8_t byte = wasm__read_u8(r);
@@ -96,7 +102,7 @@ WASM_PRIVATE wasm_error_t wasm__read_storage_type(wasm_module_t* mod,
     return wasm__read_unresolved_valtype(mod, r, &out_type->of.valtype, &out_type->ref_type);
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
+static wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
                                            wasm__reader_t* r,
                                            wasm_fieldtype_t* field) {
     uint8_t mutability;
@@ -109,7 +115,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_fieldtype(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
+static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
                                                wasm__reader_t* r,
                                                uint8_t opcode,
                                                wasm_comptype_t* type) {

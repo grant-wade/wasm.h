@@ -1,4 +1,12 @@
-#include "../internal.h"
+#include "wasi_state.h"
+#include "host.h"
+#include "../runtime.h"
+#include "../internal/alloc.h"
+#include "../portable.h"
+#include "../memory_internal.h"
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
 
 #if WASM_ENABLE_PLATFORM
 WASM_PRIVATE char* wasm__wasi_strdup(const char* text) {
@@ -21,7 +29,7 @@ WASM_PRIVATE int wasm__wasi_host_close(int fd) {
 #endif
 }
 
-WASM_PRIVATE int wasm__wasi_host_fileno(FILE* stream) {
+static int wasm__wasi_host_fileno(FILE* stream) {
 #if defined(_WIN32)
     return _fileno(stream);
 #else
@@ -79,7 +87,7 @@ WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
     rt->wasi_state = NULL;
 }
 
-WASM_PRIVATE void wasm__wasi_fd_entry_init_stdio(wasm__wasi_fd_entry_t* entry,
+static void wasm__wasi_fd_entry_init_stdio(wasm__wasi_fd_entry_t* entry,
                                            int host_fd,
                                            uint8_t filetype) {
     if (!entry) return;
@@ -174,7 +182,7 @@ WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint
     return &rt->wasi_state->fds[fd];
 }
 
-WASM_PRIVATE int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
+static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
                                        uint64_t mem_size,
                                        uint32_t ptr,
                                        uint32_t len,
@@ -383,7 +391,7 @@ WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out
     return 1;
 }
 
-WASM_PRIVATE void wasm__wasi_windows_normalize_slashes(char* text) {
+static void wasm__wasi_windows_normalize_slashes(char* text) {
     char* p;
 
     if (!text) return;
@@ -538,7 +546,7 @@ cleanup:
 #endif
 #endif
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE uint64_t wasm__wasi_stat_time_ns(const wasm__wasi_host_stat_t* st, int which) {
+static uint64_t wasm__wasi_stat_time_ns(const wasm__wasi_host_stat_t* st, int which) {
     if (!st) return 0u;
     if (which == 0) return (uint64_t)st->st_atime * 1000000000ull;
     if (which == 1) return (uint64_t)st->st_mtime * 1000000000ull;

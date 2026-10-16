@@ -1,4 +1,13 @@
-#include "../internal.h"
+#include "module.h"
+#include "../module.h"
+#include "../memory_internal.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../types/canonical.h"
+#include "../types/references.h"
+#include "../values.h"
+#include <stdio.h>
+#include <stdarg.h>
 
 WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
                                                uint32_t func_idx,
@@ -156,7 +165,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wasm_functype_t* ft) {
+static wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wasm_functype_t* ft) {
     uint32_t i;
 
     for (i = 0; i < ft->num_params; i++) {
@@ -172,7 +181,7 @@ WASM_PRIVATE wasm_error_t wasm__resolve_functype_reftypes(wasm_module_t* mod, wa
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__resolve_storagetype_reftype(wasm_module_t* mod, wasm_storagetype_t* storage) {
+static wasm_error_t wasm__resolve_storagetype_reftype(wasm_module_t* mod, wasm_storagetype_t* storage) {
     if (storage->kind != WASM_STORAGE_VALTYPE) return WASM_OK;
     return wasm__resolve_valtype_reftype(mod, &storage->of.valtype, &storage->ref_type);
 }

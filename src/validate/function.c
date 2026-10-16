@@ -1,6 +1,23 @@
-#include "../internal.h"
+#include "function.h"
+#include "../module.h"
+#include <stdio.h>
+#include "state.h"
+#include "../exec/control.h"
+#include "../instructions.h"
+#include "../internal/alloc.h"
+#include "../memory_internal.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../types/canonical.h"
+#include "../types/references.h"
+#include "gc.h"
+#include "module.h"
+#include "numeric.h"
+#include "simd.h"
+#include "stack.h"
+#include "../values.h"
 
-WASM_PRIVATE wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
+static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);

@@ -1,6 +1,18 @@
-#include "../internal.h"
+#include "references.h"
+#include <stdio.h>
+#include "../internal/alloc.h"
+#include "../internal/gc_types.h"
+#include "../memory_internal.h"
+#include "../module.h"
+#include "../portable.h"
+#include "../reader.h"
+#include "../runtime.h"
+#include "../support.h"
+#include "canonical.h"
+#include "../values.h"
+#include <string.h>
 
-WASM_PRIVATE wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
+static wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valtype_t type) {
     if (!mod) return WASM_OK;
     if (type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF)
         return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
@@ -23,7 +35,7 @@ WASM_PRIVATE void wasm__clear_reftype(wasm_reftype_t* reftype) {
     memset(reftype, 0, sizeof(*reftype));
 }
 
-WASM_PRIVATE int wasm__is_absheaptype_byte(uint8_t byte) {
+static int wasm__is_absheaptype_byte(uint8_t byte) {
     switch (byte) {
         case 0x69:
         case 0x6A:
@@ -43,11 +55,11 @@ WASM_PRIVATE int wasm__is_absheaptype_byte(uint8_t byte) {
     }
 }
 
-WASM_PRIVATE int wasm__is_reftype_lead_byte(uint8_t byte) {
+static int wasm__is_reftype_lead_byte(uint8_t byte) {
     return byte == 0x63 || byte == 0x64 || wasm__is_absheaptype_byte(byte);
 }
 
-WASM_PRIVATE wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
+static wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
     switch (byte) {
         case 0x74:
             return WASM_TYPE_NOEXN;
@@ -169,7 +181,7 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
     return (const wasm_gc_header_t*)value->of.gc_ref;
 }
 
-WASM_PRIVATE wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
+static wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
                                                        uintptr_t handle) {
     wasm__externref_box_t* box;
 
@@ -180,7 +192,7 @@ WASM_PRIVATE wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_
     return NULL;
 }
 
-WASM_PRIVATE int wasm__is_host_anyref_value(const wasm_module_t* mod,
+static int wasm__is_host_anyref_value(const wasm_module_t* mod,
                                       const wasm_value_t* value) {
     if (!value || value->type != WASM_TYPE_ANYREF || value->of.gc_ref == (uintptr_t)0) return 0;
     if ((value->of.gc_ref & WASM__GC_I31_TAG) != 0) return 0;
@@ -399,7 +411,7 @@ WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
     return wasm__reftype_is_subtype(mod, &effective_subtype, &effective_supertype);
 }
 
-WASM_PRIVATE int wasm__typed_valtype_equal(const wasm_module_t* mod,
+static int wasm__typed_valtype_equal(const wasm_module_t* mod,
                                      wasm_valtype_t lhs,
                                      const wasm_reftype_t* lhs_ref,
                                      wasm_valtype_t rhs,
@@ -457,7 +469,7 @@ WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
     return wasm__typed_valtype_is_subtype(mod, actual_type, actual_ref, expected_type, expected_ref);
 }
 
-WASM_PRIVATE int wasm__limits_match_import(uint64_t actual_min,
+static int wasm__limits_match_import(uint64_t actual_min,
                                      uint64_t actual_max,
                                      uint64_t expected_min,
                                      uint64_t expected_max) {
@@ -674,7 +686,7 @@ WASM_PRIVATE void wasm__skip_heaptype(wasm__reader_t* r) {
     (void)wasm__read_leb128_i64(r);
 }
 
-WASM_PRIVATE void wasm__skip_reftype(wasm__reader_t* r) {
+static void wasm__skip_reftype(wasm__reader_t* r) {
     if (r->ptr >= r->end) return;
     if (wasm__is_absheaptype_byte(*r->ptr)) {
         r->ptr++;
