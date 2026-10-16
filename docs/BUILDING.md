@@ -106,6 +106,41 @@ Useful configuration options:
 | `WASM_H_ENABLE_EMCC_TESTS` | `ON` | Enable Emscripten fixtures when `emcc` is available. |
 | `WASM_H_BUILD_FUZZER` | `OFF` | Build the Clang/libFuzzer module-loader harness. |
 
+## CI platform coverage
+
+Every push and pull request runs the matrix in
+[`ci.yml`](../.github/workflows/ci.yml); it can also be started manually.
+The matrix uses distinct standard [GitHub-hosted runner images](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+with explicit version and architecture labels:
+
+| Platform | Images / target architectures | Compilers |
+| --- | --- | --- |
+| Linux | Ubuntu 22.04, 24.04, 26.04; x64 and native ARM64 | GCC and Clang |
+| Linux 32-bit | Ubuntu 24.04 x64 host executing x86 binaries | GCC and Clang with multilib |
+| macOS | 14, 15, 26 on Apple Silicon; 15 and 26 on Intel | Apple Clang |
+| Windows | Server 2022 and Server 2025; x64 and executable Win32 targets | MSVC 2022 and 2026, respectively |
+| Windows ARM | Windows 11 on native ARM64 | MSVC 2026 |
+| Preview | Xcode 27 image on ARM64 | Apple Clang; non-blocking |
+
+The main native matrix tests Debug with platform bridges disabled and Release
+with bridges enabled. Ubuntu 24.04 x64 also retains platform-enabled Debug
+coverage with both compilers. The additional Linux x86 jobs use Release with
+bridges enabled. Every native job builds the modular library, standalone-header
+consumers, CLI, and wrapper generator, then runs the regression and specification
+suites. Native 64-bit matrix jobs also exercise CMake installation.
+
+The shared `setup-wasm-tools` action installs a pinned release matching the
+runner's OS and architecture and verifies both required subcommands, so missing
+tool support fails setup instead of silently dropping spec coverage. A 32-bit
+runtime uses the 64-bit host's `wasm-tools` executable.
+
+Separate x64 and ARM64 Linux jobs run ASan/LSan/UBSan and libFuzzer smoke tests.
+Header freshness remains a separate check. The workflow has 53 blocking jobs
+and one non-blocking preview job, with independent matrix failures and
+cancellation of superseded runs. Runner aliases and larger hardware tiers are
+not duplicated when they provide the same OS/architecture coverage. Emscripten
+fixtures remain available locally but are not enabled by this native matrix.
+
 ## Focused targets
 
 ```sh
