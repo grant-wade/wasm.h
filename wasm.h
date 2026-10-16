@@ -9359,6 +9359,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
 /* BEGIN src/simd/integer_small.c */
 
 
+/* Use unsigned NEON arithmetic for Wasm wrapping operations: GCC exposes
+ * some signed intrinsics as C vector operations instrumented by UBSan. */
+
 WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -9367,9 +9370,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_valu
 
         switch (subop) {
             case 0x60:
-                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vabsq_s8(s)));
+                return wasm__neon_store_u8x16(vbslq_u8(vcltq_s8(s, vdupq_n_s8(0)),
+                                                    vsubq_u8(vdupq_n_u8(0), u), u));
             case 0x61:
-                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vnegq_s8(s)));
+                return wasm__neon_store_u8x16(vsubq_u8(vdupq_n_u8(0), u));
             default:
                 return wasm__neon_store_u8x16(vcntq_u8(u));
         }
@@ -9610,10 +9614,14 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_valu
             if (subop == 0x89) return wasm__neon_store_u16x8(vmovl_u8(vget_low_u8(u8)));
             return wasm__neon_store_u16x8(vmovl_u8(vget_high_u8(u8)));
         }
-        case 0x80:
-            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vabsq_s16(wasm__neon_load_i16x8(value))));
+        case 0x80: {
+            int16x8_t s16 = wasm__neon_load_i16x8(value);
+            uint16x8_t u16 = vreinterpretq_u16_s16(s16);
+            return wasm__neon_store_u16x8(vbslq_u16(vcltq_s16(s16, vdupq_n_s16(0)),
+                                                  vsubq_u16(vdupq_n_u16(0), u16), u16));
+        }
         case 0x81:
-            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vnegq_s16(wasm__neon_load_i16x8(value))));
+            return wasm__neon_store_u16x8(vsubq_u16(vdupq_n_u16(0), wasm__neon_load_u16x8(value)));
         default:
             break;
     }
@@ -9762,7 +9770,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
             case 0x93:
                 return wasm__neon_store_u16x8(vqsubq_u16(a_u16, b_u16));
             case 0x95:
-                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmulq_s16(a_s16, b_s16)));
+                return wasm__neon_store_u16x8(vmulq_u16(a_u16, b_u16));
             case 0x96:
                 return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vminq_s16(a_s16, b_s16)));
             case 0x97:
@@ -9899,7 +9907,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
                 wasm__v128_set_u16(&result, lane, wasm__sat_u16((int32_t)ua - (int32_t)ub));
                 break;
             case 0x95:
-                wasm__v128_set_u16(&result, lane, (uint16_t)(ua * ub));
+                wasm__v128_set_u16(&result, lane, (uint16_t)((uint32_t)ua * (uint32_t)ub));
                 break;
             case 0x96:
                 wasm__v128_set_i16(&result, lane, (a < b) ? a : b);
@@ -9943,11 +9951,11 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_valu
         }
         case 0xA0: {
             int32x4_t s32 = wasm__neon_load_i32x4(value);
-            uint32x4_t neg = vreinterpretq_u32_s32(vnegq_s32(s32));
+            uint32x4_t neg = vsubq_u32(vdupq_n_u32(0), vreinterpretq_u32_s32(s32));
             return wasm__neon_store_u32x4(vbslq_u32(vcltq_s32(s32, vdupq_n_s32(0)), neg, vreinterpretq_u32_s32(s32)));
         }
         case 0xA1:
-            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vnegq_s32(wasm__neon_load_i32x4(value))));
+            return wasm__neon_store_u32x4(vsubq_u32(vdupq_n_u32(0), wasm__neon_load_u32x4(value)));
         default:
             break;
     }
@@ -10053,7 +10061,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
         case 0xBA: {
             int32x4_t lo = vmull_s16(vget_low_s16(wasm__neon_load_i16x8(lhs)), vget_low_s16(wasm__neon_load_i16x8(rhs)));
             int32x4_t hi = vmull_s16(vget_high_s16(wasm__neon_load_i16x8(lhs)), vget_high_s16(wasm__neon_load_i16x8(rhs)));
-            return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vpaddq_s32(lo, hi)));
+            return wasm__neon_store_u32x4(vpaddq_u32(vreinterpretq_u32_s32(lo), vreinterpretq_u32_s32(hi)));
         }
         case 0xBC:
             return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmull_s16(vget_low_s16(wasm__neon_load_i16x8(lhs)), vget_low_s16(wasm__neon_load_i16x8(rhs)))));
@@ -10078,7 +10086,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
             case 0xB1:
                 return wasm__neon_store_u32x4(vsubq_u32(a_u32, b_u32));
             case 0xB5:
-                return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vmulq_s32(a_s32, b_s32)));
+                return wasm__neon_store_u32x4(vmulq_u32(a_u32, b_u32));
             case 0xB6:
                 return wasm__neon_store_u32x4(vreinterpretq_u32_s32(vminq_s32(a_s32, b_s32)));
             case 0xB7:
@@ -10132,9 +10140,11 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
         case 0xBA:
             for (lane = 0; lane < 4; lane++) {
                 uint32_t base = lane * 2u;
-                int32_t dot = (int32_t)wasm__v128_get_i16(lhs, base) * (int32_t)wasm__v128_get_i16(rhs, base) +
-                              (int32_t)wasm__v128_get_i16(lhs, base + 1u) * (int32_t)wasm__v128_get_i16(rhs, base + 1u);
-                wasm__v128_set_i32(&result, lane, dot);
+                uint32_t lo = (uint32_t)((int32_t)wasm__v128_get_i16(lhs, base) *
+                                         (int32_t)wasm__v128_get_i16(rhs, base));
+                uint32_t hi = (uint32_t)((int32_t)wasm__v128_get_i16(lhs, base + 1u) *
+                                         (int32_t)wasm__v128_get_i16(rhs, base + 1u));
+                wasm__v128_set_u32(&result, lane, lo + hi);
             }
             return result;
         case 0xBC:
@@ -10209,11 +10219,11 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_valu
         }
         case 0xC0: {
             int64x2_t s64 = wasm__neon_load_i64x2(value);
-            uint64x2_t neg = vreinterpretq_u64_s64(vnegq_s64(s64));
+            uint64x2_t neg = vsubq_u64(vdupq_n_u64(0), vreinterpretq_u64_s64(s64));
             return wasm__neon_store_u64x2(vbslq_u64(vcltq_s64(s64, vdupq_n_s64(0)), neg, vreinterpretq_u64_s64(s64)));
         }
         case 0xC1:
-            return wasm__neon_store_u64x2(vreinterpretq_u64_s64(vnegq_s64(wasm__neon_load_i64x2(value))));
+            return wasm__neon_store_u64x2(vsubq_u64(vdupq_n_u64(0), wasm__neon_load_u64x2(value)));
         default:
             break;
     }

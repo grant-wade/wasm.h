@@ -207,15 +207,19 @@ jobs:
           -DCMAKE_BUILD_TYPE=Debug
           -DWASM_H_ENABLE_WERROR=OFF
           -DWASM_H_ENABLE_EMCC_TESTS=OFF
+          -DCMAKE_C_FLAGS_DEBUG='-O1 -g'
           -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
           -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
       - name: Build
-        run: cmake --build build --parallel 2
+        run: |
+          cmake --build build --parallel 2
+          cmake --build build --target wasm-spectest-build --parallel 2
       - name: Test with ASan, LSan, and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: cmake --build build --target check --parallel 2
+        # Build parallelism does not control CTest; bound individual tests too.
+        run: ctest --test-dir build --output-on-failure --parallel 2 --timeout 300
 
   fuzz-smoke:
     name: Fuzz smoke / ${{ matrix.runner }}

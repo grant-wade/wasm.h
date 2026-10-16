@@ -138,6 +138,10 @@ binary32/binary64 rounding. Standalone-header builds on those targets also need
 `-msse2 -mfpmath=sse`; x87 extended-precision arithmetic is not supported.
 
 Separate x64 and ARM64 Linux jobs run ASan/LSan/UBSan and libFuzzer smoke tests.
+The sanitizer jobs retain debug symbols and assertions with `-O1`, run two tests
+at a time, and fail individual tests that exceed five minutes. Both runtime
+build forms still run the full suite; matching spec cases share a CTest resource
+lock because their harnesses may write the same compiled text fixture.
 Header freshness remains a separate check. The workflow has 53 blocking jobs
 and one non-blocking preview job, with independent matrix failures and
 cancellation of superseded runs. Runner aliases and larger hardware tiers are

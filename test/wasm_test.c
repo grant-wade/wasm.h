@@ -10326,6 +10326,38 @@ WL_TEST(test_simd_helper_ops) {
     wasm_value_t vf64_b = wasm_test_v128_from_f64x2(f64_b);
     uint32_t index;
 
+    /* abs/neg preserve the minimum signed lane modulo its width. The dot
+     * products fit individually, but their pairwise sum wraps at 32 bits. */
+    {
+        wasm_value_t input = wasm_v128_zero();
+        wasm_value_t actual;
+        uint32_t lane;
+        for (lane = 0; lane < 16; lane++) wasm__v128_set_u8(&input, lane, 0x80u);
+        actual = wasm__simd_i8x16_unary(0x60, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.abs minimum");
+        actual = wasm__simd_i8x16_unary(0x61, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.neg minimum");
+        for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&input, lane, 0x8000u);
+        actual = wasm__simd_i16x8_unary(0x80, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.abs minimum");
+        actual = wasm__simd_i16x8_unary(0x81, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.neg minimum");
+        actual = wasm__simd_i32x4_binary(0xBA, &input, &input);
+        for (lane = 0; lane < 4; lane++) {
+            WL_CHECK_MSG(t, wasm__v128_get_u32(&actual, lane) == 0x80000000u, "%s", "i32x4.dot_i16x8_s wraps sum");
+            wasm__v128_set_u32(&input, lane, 0x80000000u);
+        }
+        actual = wasm__simd_i32x4_unary(0xA0, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.abs minimum");
+        actual = wasm__simd_i32x4_unary(0xA1, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.neg minimum");
+        for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&input, lane, UINT64_C(0x8000000000000000));
+        actual = wasm__simd_i64x2_unary(0xC0, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.abs minimum");
+        actual = wasm__simd_i64x2_unary(0xC1, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.neg minimum");
+    }
+
     {
         uint8_t bytes[16];
         uint8_t expected[16];

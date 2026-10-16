@@ -222,6 +222,12 @@ if(WL_WASM_TOOLS_JSON_FROM_WAST_AVAILABLE AND WL_WASM_TOOLS_PARSE_AVAILABLE)
             FIXTURES_REQUIRED "${WL_SPECTEST_FIXTURE}"
             SKIP_RETURN_CODE 125
         )
+        # Both runners can compile the same text fixture to the same output
+        # path. Serialize each pair while allowing different cases in parallel.
+        set_tests_properties("spectest.${WL_SPECTEST_NAME}"
+                             "spectest.modular.${WL_SPECTEST_NAME}" PROPERTIES
+            RESOURCE_LOCK "spectest_${WL_SPECTEST_ID}"
+        )
     endforeach()
 
     add_custom_target(wasm-spectest-build DEPENDS ${WL_SPECTEST_BUILD_TARGETS})

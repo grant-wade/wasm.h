@@ -1,5 +1,8 @@
 #include "../internal.h"
 
+/* Use unsigned NEON arithmetic for Wasm wrapping operations: GCC exposes
+ * some signed intrinsics as C vector operations instrumented by UBSan. */
+
 WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -8,9 +11,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_valu
 
         switch (subop) {
             case 0x60:
-                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vabsq_s8(s)));
+                return wasm__neon_store_u8x16(vbslq_u8(vcltq_s8(s, vdupq_n_s8(0)),
+                                                    vsubq_u8(vdupq_n_u8(0), u), u));
             case 0x61:
-                return wasm__neon_store_u8x16(vreinterpretq_u8_s8(vnegq_s8(s)));
+                return wasm__neon_store_u8x16(vsubq_u8(vdupq_n_u8(0), u));
             default:
                 return wasm__neon_store_u8x16(vcntq_u8(u));
         }
@@ -251,10 +255,14 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_valu
             if (subop == 0x89) return wasm__neon_store_u16x8(vmovl_u8(vget_low_u8(u8)));
             return wasm__neon_store_u16x8(vmovl_u8(vget_high_u8(u8)));
         }
-        case 0x80:
-            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vabsq_s16(wasm__neon_load_i16x8(value))));
+        case 0x80: {
+            int16x8_t s16 = wasm__neon_load_i16x8(value);
+            uint16x8_t u16 = vreinterpretq_u16_s16(s16);
+            return wasm__neon_store_u16x8(vbslq_u16(vcltq_s16(s16, vdupq_n_s16(0)),
+                                                  vsubq_u16(vdupq_n_u16(0), u16), u16));
+        }
         case 0x81:
-            return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vnegq_s16(wasm__neon_load_i16x8(value))));
+            return wasm__neon_store_u16x8(vsubq_u16(vdupq_n_u16(0), wasm__neon_load_u16x8(value)));
         default:
             break;
     }
@@ -403,7 +411,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
             case 0x93:
                 return wasm__neon_store_u16x8(vqsubq_u16(a_u16, b_u16));
             case 0x95:
-                return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vmulq_s16(a_s16, b_s16)));
+                return wasm__neon_store_u16x8(vmulq_u16(a_u16, b_u16));
             case 0x96:
                 return wasm__neon_store_u16x8(vreinterpretq_u16_s16(vminq_s16(a_s16, b_s16)));
             case 0x97:
@@ -540,7 +548,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
                 wasm__v128_set_u16(&result, lane, wasm__sat_u16((int32_t)ua - (int32_t)ub));
                 break;
             case 0x95:
-                wasm__v128_set_u16(&result, lane, (uint16_t)(ua * ub));
+                wasm__v128_set_u16(&result, lane, (uint16_t)((uint32_t)ua * (uint32_t)ub));
                 break;
             case 0x96:
                 wasm__v128_set_i16(&result, lane, (a < b) ? a : b);
