@@ -22,7 +22,7 @@ static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t entry_count = wasm__read_leb128_u32(r);
+    uint32_t entry_count = wasm__read_count(r);
     uint32_t entry_index;
 
     for (entry_index = 0; entry_index < entry_count; entry_index++) {
@@ -36,7 +36,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__re
         if (opcode == 0x4E) {
             err = wasm__require_feature(mod, WASM_FEATURE_GC);
             if (err != WASM_OK) return err;
-            group_size = wasm__read_leb128_u32(r);
+            group_size = wasm__read_count(r);
         }
 
         err = wasm__append_rec_groups(mod, 1, &group_index);
@@ -463,7 +463,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
+    uint32_t count = wasm__read_count(r);
     uint32_t i = 0;
 
     while (i < count) {
@@ -554,7 +554,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
+    uint32_t count = wasm__read_count(r);
 
     uint32_t base, i;
 
@@ -567,7 +567,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
 
     if (count > 0) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
@@ -584,7 +584,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__r
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
 
     if (wasm__append_memories(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     if (mod->num_memories > 1) {
@@ -601,7 +601,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_global_slots(mod, count, &base);
@@ -638,7 +638,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
 
     if (err != WASM_OK) return err;
@@ -655,7 +655,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__rea
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
+    uint32_t count = wasm__read_count(r), i;
     wasm_error_t err;
     mod->exports = (wasm_export_t*)WASM_CALLOC(count, sizeof(wasm_export_t));
     if (!mod->exports) return WASM_ERR_OOM;
@@ -677,7 +677,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_start_section(wasm_module_t* mod, wasm__r
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_elem_segments(mod, count, &base);
@@ -735,10 +735,10 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
             if (err != WASM_OK) return err;
         }
 
-        segment->num_elems = wasm__read_leb128_u32(r);
+        segment->num_elems = wasm__read_count(r);
         if (segment->num_elems == 0) continue;
 
-        segment->elems = (wasm_value_t*)WASM_MALLOC(segment->num_elems * sizeof(wasm_value_t));
+        segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
 
         for (j = 0; j < segment->num_elems; j++) {
@@ -770,7 +770,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
+    uint32_t count = wasm__read_count(r), i;
     mod->num_code_bodies = count;
     for (i = 0; i < count; i++) {
         uint32_t body_size = wasm__read_leb128_u32(r);
@@ -783,7 +783,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
         if (fidx >= mod->num_funcs) return WASM_ERR_MALFORMED;
         ft = wasm__module_functype(mod, mod->funcs[fidx].type_idx);
         if (!ft) return WASM_ERR_MALFORMED;
-        ndecls = wasm__read_leb128_u32(r);
+        ndecls = wasm__read_count(r);
         ls = r->ptr;
         for (d = 0; d < ndecls; d++) {
             uint32_t local_count;
@@ -806,7 +806,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
         }
         all_locals = ft->num_params + total_locals;
         mod->funcs[fidx].num_locals = all_locals;
-        mod->funcs[fidx].locals = (wasm_valtype_t*)WASM_MALLOC(all_locals * sizeof(wasm_valtype_t));
+        mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
         mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)WASM_CALLOC(all_locals, sizeof(wasm_reftype_t));
         if (!mod->funcs[fidx].locals || !mod->funcs[fidx].local_reftypes) return WASM_ERR_OOM;
         for (p = 0; p < ft->num_params; p++) {
@@ -840,7 +840,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_data_segments(mod, count, &base);

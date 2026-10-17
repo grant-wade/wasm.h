@@ -15,6 +15,9 @@ WASM_PRIVATE uint8_t wasm__read_u8(wasm__reader_t* r);
 
 WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r);
 
+/* Reads a vector length, rejecting lengths that exceed the remaining bytes since every entry occupies at least one. */
+WASM_PRIVATE uint32_t wasm__read_count(wasm__reader_t* r);
+
 WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r);
 
 WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);

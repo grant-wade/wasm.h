@@ -153,7 +153,11 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
             WASM__SET_ERR(rt, err, "section %u decode failed: %s",
                           (unsigned)sid, wasm_error_string(err));
         }
-        if (err == WASM_OK && (sr.malformed || sr.ptr != sr.end)) {
+        if (err == WASM_OK && sr.malformed) {
+            err = WASM_ERR_MALFORMED;
+            WASM__SET_ERR(rt, err, "section %u decode failed: %s", (unsigned)sid, wasm_error_string(err));
+        }
+        if (err == WASM_OK && sr.ptr != sr.end) {
             WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section %u has trailing bytes", (unsigned)sid);
             err = WASM_ERR_MALFORMED;
         }

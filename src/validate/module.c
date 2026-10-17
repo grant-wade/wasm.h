@@ -123,6 +123,11 @@ WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
                 break;
         }
 
+        if (type->num_supertypes > 1) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u has multiple supertypes",
+                                              (unsigned)i);
+        }
         for (j = 0; j < type->num_supertypes; j++) {
             uint32_t super_idx = type->supertypes[j];
             wasm_comptype_t* supertype;

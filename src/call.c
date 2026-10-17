@@ -206,7 +206,7 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
     out_type->num_params = num_params;
     out_type->num_results = num_results;
     if (num_params > 0) {
-        out_type->params = (wasm_valtype_t*)WASM_MALLOC(num_params * sizeof(wasm_valtype_t));
+        out_type->params = (wasm_valtype_t*)wasm__malloc_array(num_params, sizeof(wasm_valtype_t));
         out_type->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_params, sizeof(wasm_reftype_t));
         if (!out_type->params || !out_type->param_reftypes) {
             if (out_error) *out_error = "out of memory while parsing parameter types";
@@ -215,7 +215,7 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
         }
     }
     if (num_results > 0) {
-        out_type->results = (wasm_valtype_t*)WASM_MALLOC(num_results * sizeof(wasm_valtype_t));
+        out_type->results = (wasm_valtype_t*)wasm__malloc_array(num_results, sizeof(wasm_valtype_t));
         out_type->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_results, sizeof(wasm_reftype_t));
         if (!out_type->results || !out_type->result_reftypes) {
             if (out_error) *out_error = "out of memory while parsing result types";
@@ -300,15 +300,15 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     }
 
     if (parsed_type.num_params > 0) {
-        args = (wasm_value_t*)WASM_MALLOC(parsed_type.num_params * sizeof(wasm_value_t));
+        args = (wasm_value_t*)wasm__malloc_array(parsed_type.num_params, sizeof(wasm_value_t));
         if (!args) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "args");
             goto cleanup;
         }
     }
     if (parsed_type.num_results > 0) {
-        results = (wasm_value_t*)WASM_MALLOC(parsed_type.num_results * sizeof(wasm_value_t));
-        result_ptrs = (void**)WASM_MALLOC(parsed_type.num_results * sizeof(void*));
+        results = (wasm_value_t*)wasm__malloc_array(parsed_type.num_results, sizeof(wasm_value_t));
+        result_ptrs = (void**)wasm__malloc_array(parsed_type.num_results, sizeof(void*));
         if (!results || !result_ptrs) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "results");
             goto cleanup;

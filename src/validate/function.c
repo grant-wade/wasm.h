@@ -370,10 +370,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     wasm_reftype_t* merged_reftypes = NULL;
 
                     if (branch_count != 0) {
-                        merged_types = (wasm_valtype_t*)WASM_MALLOC(
-                            (size_t)branch_count * sizeof(*merged_types));
-                        merged_reftypes = (wasm_reftype_t*)WASM_MALLOC(
-                            (size_t)branch_count * sizeof(*merged_reftypes));
+                        merged_types = (wasm_valtype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_types));
+                        merged_reftypes = (wasm_reftype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_reftypes));
                         if (!merged_types || !merged_reftypes) {
                             WASM_FREE(merged_types);
                             WASM_FREE(merged_reftypes);

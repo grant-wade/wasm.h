@@ -301,7 +301,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 break;
             }
             alloc_count = (size_t)new_size;
-            new_elems = (wasm_value_t*)WASM_REALLOC(table->elems, alloc_count * sizeof(wasm_value_t));
+            new_elems = (wasm_value_t*)wasm__realloc_array(table->elems, alloc_count, sizeof(wasm_value_t));
             if (!new_elems) {
                 WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                 break;

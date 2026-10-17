@@ -363,7 +363,7 @@ WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out
     *out_wide = NULL;
     count = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
     if (count <= 0) return 0;
-    wide = (wchar_t*)WASM_MALLOC((size_t)count * sizeof(wchar_t));
+    wide = (wchar_t*)wasm__malloc_array((size_t)count, sizeof(wchar_t));
     if (!wide) return 0;
     if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, count) <= 0) {
         WASM_FREE(wide);

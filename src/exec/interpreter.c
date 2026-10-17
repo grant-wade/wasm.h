@@ -259,7 +259,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
                 if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (tag_type->num_params > 8) {
-                    payload = (wasm_value_t*)WASM_MALLOC(tag_type->num_params * sizeof(wasm_value_t));
+                    payload = (wasm_value_t*)wasm__malloc_array(tag_type->num_params, sizeof(wasm_value_t));
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = WASM__POP(rt);
@@ -370,14 +370,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -447,14 +447,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (!wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -498,14 +498,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -571,14 +571,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -641,14 +641,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -706,14 +706,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);

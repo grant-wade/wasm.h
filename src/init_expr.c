@@ -22,7 +22,7 @@ typedef struct wasm__init_expr_stack_t {
 static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
     if (stack->size >= stack->cap) {
         uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
+        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->values, new_cap, sizeof(wasm_value_t));
         if (!values) return WASM_ERR_OOM;
         stack->values = values;
         stack->cap = new_cap;

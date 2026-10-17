@@ -837,6 +837,10 @@ WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size);
 #define WASM_CALLOC(n, sz) wasm__calloc_fallback((n), (sz))
 #endif
 
+/* Return NULL when count * size overflows size_t instead of allocating a truncated block. */
+WASM_PRIVATE void* wasm__malloc_array(size_t count, size_t size);
+WASM_PRIVATE void* wasm__realloc_array(void* ptr, size_t count, size_t size);
+
 #endif /* WASM_INTERNAL_ALLOC_H */
 /* END src/internal/alloc.h */
 #include <string.h>
@@ -855,6 +859,17 @@ WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size) {
 }
 
 #endif
+
+WASM_PRIVATE void* wasm__malloc_array(size_t count, size_t size) {
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    return WASM_MALLOC(count * size);
+}
+
+WASM_PRIVATE void* wasm__realloc_array(void* ptr, size_t count, size_t size) {
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    return WASM_REALLOC(ptr, count * size);
+}
+
 WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
     return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
 }
@@ -2146,6 +2161,9 @@ WASM_PRIVATE uint8_t wasm__read_u8(wasm__reader_t* r);
 
 WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r);
 
+/* Reads a vector length, rejecting lengths that exceed the remaining bytes since every entry occupies at least one. */
+WASM_PRIVATE uint32_t wasm__read_count(wasm__reader_t* r);
+
 WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r);
 
 WASM_PRIVATE uint64_t wasm__read_leb128_u64(wasm__reader_t* r);
@@ -2365,6 +2383,17 @@ WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r) {
     r->ptr = r->end;
     r->malformed = 1;
     return 0;
+}
+
+WASM_PRIVATE uint32_t wasm__read_count(wasm__reader_t* r) {
+    uint32_t count = wasm__read_leb128_u32(r);
+
+    if (!r->malformed && count > (size_t)(r->end - r->ptr)) {
+        r->ptr = r->end;
+        r->malformed = 1;
+        return 0;
+    }
+    return count;
 }
 
 WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r) {
@@ -4426,7 +4455,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
     dst->num_results = src->num_results;
 
     if (src->num_params > 0) {
-        dst->params = (wasm_valtype_t*)WASM_MALLOC(src->num_params * sizeof(wasm_valtype_t));
+        dst->params = (wasm_valtype_t*)wasm__malloc_array(src->num_params, sizeof(wasm_valtype_t));
         dst->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_params, sizeof(wasm_reftype_t));
         if (!dst->params || !dst->param_reftypes) {
             wasm__free_functype(dst);
@@ -4441,7 +4470,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
     }
 
     if (src->num_results > 0) {
-        dst->results = (wasm_valtype_t*)WASM_MALLOC(src->num_results * sizeof(wasm_valtype_t));
+        dst->results = (wasm_valtype_t*)wasm__malloc_array(src->num_results, sizeof(wasm_valtype_t));
         dst->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_results, sizeof(wasm_reftype_t));
         if (!dst->results || !dst->result_reftypes) {
             wasm__free_functype(dst);
@@ -5005,7 +5034,7 @@ WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count,
 
     base = mod->num_types;
     new_count = (size_t)base + (size_t)count;
-    types = (wasm_comptype_t*)WASM_REALLOC(mod->types, new_count * sizeof(*types));
+    types = (wasm_comptype_t*)wasm__realloc_array(mod->types, new_count, sizeof(*types));
     if (!types) return WASM_ERR_OOM;
 
     mod->types = types;
@@ -5028,7 +5057,7 @@ WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t c
 
     base = mod->num_rec_groups;
     new_count = (size_t)base + (size_t)count;
-    groups = (wasm_recgroup_t*)WASM_REALLOC(mod->rec_groups, new_count * sizeof(*groups));
+    groups = (wasm_recgroup_t*)wasm__realloc_array(mod->rec_groups, new_count, sizeof(*groups));
     if (!groups) return WASM_ERR_OOM;
 
     mod->rec_groups = groups;
@@ -5041,9 +5070,9 @@ WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t c
 static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r, wasm_functype_t* ft) {
     uint32_t p;
 
-    ft->num_params = wasm__read_leb128_u32(r);
+    ft->num_params = wasm__read_count(r);
     if (ft->num_params > 0) {
-        ft->params = (wasm_valtype_t*)WASM_MALLOC(ft->num_params * sizeof(wasm_valtype_t));
+        ft->params = (wasm_valtype_t*)wasm__malloc_array(ft->num_params, sizeof(wasm_valtype_t));
         ft->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_params, sizeof(wasm_reftype_t));
         if (!ft->params || !ft->param_reftypes) return WASM_ERR_OOM;
     }
@@ -5052,13 +5081,13 @@ static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r,
         if (err != WASM_OK) return err;
     }
 
-    ft->num_results = wasm__read_leb128_u32(r);
+    ft->num_results = wasm__read_count(r);
     if (ft->num_results > 1) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MULTI_VALUE);
         if (err != WASM_OK) return err;
     }
     if (ft->num_results > 0) {
-        ft->results = (wasm_valtype_t*)WASM_MALLOC(ft->num_results * sizeof(wasm_valtype_t));
+        ft->results = (wasm_valtype_t*)wasm__malloc_array(ft->num_results, sizeof(wasm_valtype_t));
         ft->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_results, sizeof(wasm_reftype_t));
         if (!ft->results || !ft->result_reftypes) return WASM_ERR_OOM;
     }
@@ -5115,7 +5144,7 @@ static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
             if (err != WASM_OK) return err;
 
             type->kind = WASM_COMP_STRUCT;
-            type->of.struct_.num_fields = wasm__read_leb128_u32(r);
+            type->of.struct_.num_fields = wasm__read_count(r);
             if (type->of.struct_.num_fields > 0) {
                 type->of.struct_.fields = (wasm_fieldtype_t*)WASM_CALLOC(
                     type->of.struct_.num_fields, sizeof(wasm_fieldtype_t));
@@ -5154,9 +5183,9 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
         if (err != WASM_OK) return err;
 
         type->is_final = (opcode == 0x4F);
-        type->num_supertypes = wasm__read_leb128_u32(r);
+        type->num_supertypes = wasm__read_count(r);
         if (type->num_supertypes > 0) {
-            type->supertypes = (uint32_t*)WASM_MALLOC(type->num_supertypes * sizeof(uint32_t));
+            type->supertypes = (uint32_t*)wasm__malloc_array(type->num_supertypes, sizeof(uint32_t));
             if (!type->supertypes) return WASM_ERR_OOM;
         }
         for (i = 0; i < type->num_supertypes; i++)
@@ -5262,8 +5291,9 @@ WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count,
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    funcs = (wasm_func_t*)WASM_REALLOC(mod->funcs, (base + count) * sizeof(wasm_func_t));
+    funcs = (wasm_func_t*)wasm__realloc_array(mod->funcs, (size_t)base + count, sizeof(wasm_func_t));
     if (!funcs) return WASM_ERR_OOM;
 
     mod->funcs = funcs;
@@ -5287,8 +5317,9 @@ WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    infos = (wasm_import_info_t*)WASM_REALLOC(mod->imports, (base + count) * sizeof(wasm_import_info_t));
+    infos = (wasm_import_info_t*)wasm__realloc_array(mod->imports, (size_t)base + count, sizeof(wasm_import_info_t));
     if (!infos) return WASM_ERR_OOM;
 
     mod->imports = infos;
@@ -5303,8 +5334,9 @@ WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    globals = (wasm_global_t*)WASM_REALLOC(mod->globals, (base + count) * sizeof(wasm_global_t));
+    globals = (wasm_global_t*)wasm__realloc_array(mod->globals, (size_t)base + count, sizeof(wasm_global_t));
     if (!globals) return WASM_ERR_OOM;
 
     mod->globals = globals;
@@ -5327,7 +5359,7 @@ WASM_PRIVATE wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
 
     wasm__free_exception_state(ex);
     if (count > 0) {
-        copy = (wasm_value_t*)WASM_MALLOC(count * sizeof(wasm_value_t));
+        copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
         if (!copy) return WASM_ERR_OOM;
         memcpy(copy, values, count * sizeof(wasm_value_t));
     }
@@ -5365,7 +5397,7 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
     object->tag_identity = ex->tag_identity;
     object->num_values = ex->num_values;
     if (ex->num_values > 0) {
-        object->values = (wasm_value_t*)WASM_MALLOC(ex->num_values * sizeof(wasm_value_t));
+        object->values = (wasm_value_t*)wasm__malloc_array(ex->num_values, sizeof(wasm_value_t));
         if (!object->values) {
             WASM_FREE(object);
             return WASM_ERR_OOM;
@@ -5393,8 +5425,9 @@ WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, 
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    tags = (wasm_tag_t*)WASM_REALLOC(mod->tags, (base + count) * sizeof(wasm_tag_t));
+    tags = (wasm_tag_t*)wasm__realloc_array(mod->tags, (size_t)base + count, sizeof(wasm_tag_t));
     if (!tags) return WASM_ERR_OOM;
 
     mod->tags = tags;
@@ -5438,7 +5471,7 @@ static wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
     if (rt->num_func_refs >= rt->cap_func_refs) {
         uint32_t new_cap = rt->cap_func_refs ? rt->cap_func_refs * 2u : 64u;
         wasm_func_ref_t* refs =
-            (wasm_func_ref_t*)WASM_REALLOC(rt->func_refs, new_cap * sizeof(*rt->func_refs));
+            (wasm_func_ref_t*)wasm__realloc_array(rt->func_refs, new_cap, sizeof(*rt->func_refs));
 
         if (!refs) return WASM_ERR_OOM;
         rt->func_refs = refs;
@@ -5935,8 +5968,9 @@ WASM_PRIVATE wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    tables = (wasm_table_t*)WASM_REALLOC(mod->tables, (base + count) * sizeof(wasm_table_t));
+    tables = (wasm_table_t*)wasm__realloc_array(mod->tables, (size_t)base + count, sizeof(wasm_table_t));
     if (!tables) return WASM_ERR_OOM;
 
     mod->tables = tables;
@@ -5951,8 +5985,9 @@ WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t cou
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    memories = (wasm_memory_t*)WASM_REALLOC(mod->memories, (base + count) * sizeof(wasm_memory_t));
+    memories = (wasm_memory_t*)wasm__realloc_array(mod->memories, (size_t)base + count, sizeof(wasm_memory_t));
     if (!memories) return WASM_ERR_OOM;
 
     mod->memories = memories;
@@ -6073,7 +6108,7 @@ WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
     if ((uint64_t)elem_count * (uint64_t)sizeof(wasm_value_t) > (uint64_t)SIZE_MAX)
         return WASM_ERR_OOM;
 
-    table->elems = (wasm_value_t*)WASM_MALLOC(elem_count * sizeof(wasm_value_t));
+    table->elems = (wasm_value_t*)wasm__malloc_array(elem_count, sizeof(wasm_value_t));
     if (!table->elems) return WASM_ERR_OOM;
     for (i = 0; i < table->size; i++) table->elems[i] = table->default_value;
     return WASM_OK;
@@ -6085,8 +6120,9 @@ WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    segments = (wasm_data_segment_t*)WASM_REALLOC(mod->data_segments, (base + count) * sizeof(wasm_data_segment_t));
+    segments = (wasm_data_segment_t*)wasm__realloc_array(mod->data_segments, (size_t)base + count, sizeof(wasm_data_segment_t));
     if (!segments) return WASM_ERR_OOM;
 
     mod->data_segments = segments;
@@ -6106,9 +6142,9 @@ WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint3
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    sections = (wasm_custom_section_t*)WASM_REALLOC(mod->custom_sections,
-                                                    (base + count) * sizeof(wasm_custom_section_t));
+    sections = (wasm_custom_section_t*)wasm__realloc_array(mod->custom_sections, (size_t)base + count, sizeof(wasm_custom_section_t));
     if (!sections) return WASM_ERR_OOM;
 
     mod->custom_sections = sections;
@@ -6128,8 +6164,9 @@ WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_
 
     if (base_out) *base_out = base;
     if (count == 0) return WASM_OK;
+    if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    segments = (wasm_elem_segment_t*)WASM_REALLOC(mod->elem_segments, (base + count) * sizeof(wasm_elem_segment_t));
+    segments = (wasm_elem_segment_t*)wasm__realloc_array(mod->elem_segments, (size_t)base + count, sizeof(wasm_elem_segment_t));
     if (!segments) return WASM_ERR_OOM;
 
     mod->elem_segments = segments;
@@ -9373,7 +9410,7 @@ typedef struct wasm__init_expr_stack_t {
 static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
     if (stack->size >= stack->cap) {
         uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)WASM_REALLOC(stack->values, new_cap * sizeof(wasm_value_t));
+        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->values, new_cap, sizeof(wasm_value_t));
         if (!values) return WASM_ERR_OOM;
         stack->values = values;
         stack->cap = new_cap;
@@ -10353,7 +10390,7 @@ void wasm_config_default(wasm_config_t* config) {
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
-    rt->stack = (wasm_value_t*)WASM_MALLOC((size_t)max_stack * sizeof(*rt->stack));
+    rt->stack = (wasm_value_t*)wasm__malloc_array((size_t)max_stack, sizeof(*rt->stack));
     if (!rt->stack) return WASM_ERR_OOM;
 
     rt->max_stack = max_stack;
@@ -10371,10 +10408,10 @@ static void wasm__stack_destroy(wasm_runtime_t* rt) {
 static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
     if (max_depth == 0) return WASM_ERR_MALFORMED;
 
-    rt->backtrace_func_indices = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_func_indices));
+    rt->backtrace_func_indices = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_func_indices));
     if (!rt->backtrace_func_indices) return WASM_ERR_OOM;
 
-    rt->backtrace_offsets = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_offsets));
+    rt->backtrace_offsets = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_offsets));
     if (!rt->backtrace_offsets) {
         WASM_FREE(rt->backtrace_func_indices);
         rt->backtrace_func_indices = NULL;
@@ -10593,7 +10630,7 @@ WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
 
     if (rt->num_imports >= rt->cap_imports) {
         uint32_t new_cap = rt->cap_imports ? rt->cap_imports * 2 : 16;
-        wasm_import_t* a = (wasm_import_t*)WASM_REALLOC(rt->imports, new_cap * sizeof(wasm_import_t));
+        wasm_import_t* a = (wasm_import_t*)wasm__realloc_array(rt->imports, new_cap, sizeof(wasm_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->imports = a;
         rt->cap_imports = new_cap;
@@ -10640,7 +10677,7 @@ wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_i
     if (rt->num_global_imports >= rt->cap_global_imports) {
         uint32_t new_cap = rt->cap_global_imports ? rt->cap_global_imports * 2 : 16;
         wasm_global_import_t* a =
-            (wasm_global_import_t*)WASM_REALLOC(rt->global_imports, new_cap * sizeof(wasm_global_import_t));
+            (wasm_global_import_t*)wasm__realloc_array(rt->global_imports, new_cap, sizeof(wasm_global_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->global_imports = a;
         rt->cap_global_imports = new_cap;
@@ -10673,7 +10710,7 @@ wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_imp
     if (rt->num_table_imports >= rt->cap_table_imports) {
         uint32_t new_cap = rt->cap_table_imports ? rt->cap_table_imports * 2 : 16;
         wasm_table_import_t* a =
-            (wasm_table_import_t*)WASM_REALLOC(rt->table_imports, new_cap * sizeof(wasm_table_import_t));
+            (wasm_table_import_t*)wasm__realloc_array(rt->table_imports, new_cap, sizeof(wasm_table_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->table_imports = a;
         rt->cap_table_imports = new_cap;
@@ -10710,7 +10747,7 @@ wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_i
     if (rt->num_memory_imports >= rt->cap_memory_imports) {
         uint32_t new_cap = rt->cap_memory_imports ? rt->cap_memory_imports * 2 : 16;
         wasm_memory_import_t* a =
-            (wasm_memory_import_t*)WASM_REALLOC(rt->memory_imports, new_cap * sizeof(wasm_memory_import_t));
+            (wasm_memory_import_t*)wasm__realloc_array(rt->memory_imports, new_cap, sizeof(wasm_memory_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->memory_imports = a;
         rt->cap_memory_imports = new_cap;
@@ -10748,7 +10785,7 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
     if (rt->num_tag_imports >= rt->cap_tag_imports) {
         uint32_t new_cap = rt->cap_tag_imports ? rt->cap_tag_imports * 2 : 16;
         wasm_tag_import_t* a =
-            (wasm_tag_import_t*)WASM_REALLOC(rt->tag_imports, new_cap * sizeof(wasm_tag_import_t));
+            (wasm_tag_import_t*)wasm__realloc_array(rt->tag_imports, new_cap, sizeof(wasm_tag_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->tag_imports = a;
         rt->cap_tag_imports = new_cap;
@@ -10856,7 +10893,7 @@ static wasm_error_t wasm__read_elemkind(wasm__reader_t* r) {
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t entry_count = wasm__read_leb128_u32(r);
+    uint32_t entry_count = wasm__read_count(r);
     uint32_t entry_index;
 
     for (entry_index = 0; entry_index < entry_count; entry_index++) {
@@ -10870,7 +10907,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__re
         if (opcode == 0x4E) {
             err = wasm__require_feature(mod, WASM_FEATURE_GC);
             if (err != WASM_OK) return err;
-            group_size = wasm__read_leb128_u32(r);
+            group_size = wasm__read_count(r);
         }
 
         err = wasm__append_rec_groups(mod, 1, &group_index);
@@ -11297,7 +11334,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
+    uint32_t count = wasm__read_count(r);
     uint32_t i = 0;
 
     while (i < count) {
@@ -11388,7 +11425,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r);
+    uint32_t count = wasm__read_count(r);
 
     uint32_t base, i;
 
@@ -11401,7 +11438,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
 
     if (count > 0) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
@@ -11418,7 +11455,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__r
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
 
     if (wasm__append_memories(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     if (mod->num_memories > 1) {
@@ -11435,7 +11472,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_memory_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_global_slots(mod, count, &base);
@@ -11472,7 +11509,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
 
     if (err != WASM_OK) return err;
@@ -11489,7 +11526,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__rea
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
+    uint32_t count = wasm__read_count(r), i;
     wasm_error_t err;
     mod->exports = (wasm_export_t*)WASM_CALLOC(count, sizeof(wasm_export_t));
     if (!mod->exports) return WASM_ERR_OOM;
@@ -11511,7 +11548,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_start_section(wasm_module_t* mod, wasm__r
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_elem_segments(mod, count, &base);
@@ -11569,10 +11606,10 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
             if (err != WASM_OK) return err;
         }
 
-        segment->num_elems = wasm__read_leb128_u32(r);
+        segment->num_elems = wasm__read_count(r);
         if (segment->num_elems == 0) continue;
 
-        segment->elems = (wasm_value_t*)WASM_MALLOC(segment->num_elems * sizeof(wasm_value_t));
+        segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
 
         for (j = 0; j < segment->num_elems; j++) {
@@ -11604,7 +11641,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i;
+    uint32_t count = wasm__read_count(r), i;
     mod->num_code_bodies = count;
     for (i = 0; i < count; i++) {
         uint32_t body_size = wasm__read_leb128_u32(r);
@@ -11617,7 +11654,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
         if (fidx >= mod->num_funcs) return WASM_ERR_MALFORMED;
         ft = wasm__module_functype(mod, mod->funcs[fidx].type_idx);
         if (!ft) return WASM_ERR_MALFORMED;
-        ndecls = wasm__read_leb128_u32(r);
+        ndecls = wasm__read_count(r);
         ls = r->ptr;
         for (d = 0; d < ndecls; d++) {
             uint32_t local_count;
@@ -11640,7 +11677,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
         }
         all_locals = ft->num_params + total_locals;
         mod->funcs[fidx].num_locals = all_locals;
-        mod->funcs[fidx].locals = (wasm_valtype_t*)WASM_MALLOC(all_locals * sizeof(wasm_valtype_t));
+        mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
         mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)WASM_CALLOC(all_locals, sizeof(wasm_reftype_t));
         if (!mod->funcs[fidx].locals || !mod->funcs[fidx].local_reftypes) return WASM_ERR_OOM;
         for (p = 0; p < ft->num_params; p++) {
@@ -11674,7 +11711,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__reader_t* r) {
-    uint32_t count = wasm__read_leb128_u32(r), i, base;
+    uint32_t count = wasm__read_count(r), i, base;
     wasm_error_t err;
 
     err = wasm__append_data_segments(mod, count, &base);
@@ -11952,6 +11989,11 @@ WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
                 break;
         }
 
+        if (type->num_supertypes > 1) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u has multiple supertypes",
+                                              (unsigned)i);
+        }
         for (j = 0; j < type->num_supertypes; j++) {
             uint32_t super_idx = type->supertypes[j];
             wasm_comptype_t* supertype;
@@ -12633,12 +12675,12 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
 
     if (!rt->validator_stack) {
-        rt->validator_stack = (wasm_valtype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack));
+        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack));
         if (!rt->validator_stack) return WASM_ERR_OOM;
     }
     if (!rt->validator_stack_reftypes) {
         rt->validator_stack_reftypes =
-            (wasm_reftype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack_reftypes));
+            (wasm_reftype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
         if (!rt->validator_stack_reftypes) return WASM_ERR_OOM;
     }
     if (!rt->validator_frames) {
@@ -15023,10 +15065,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     wasm_reftype_t* merged_reftypes = NULL;
 
                     if (branch_count != 0) {
-                        merged_types = (wasm_valtype_t*)WASM_MALLOC(
-                            (size_t)branch_count * sizeof(*merged_types));
-                        merged_reftypes = (wasm_reftype_t*)WASM_MALLOC(
-                            (size_t)branch_count * sizeof(*merged_reftypes));
+                        merged_types = (wasm_valtype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_types));
+                        merged_reftypes = (wasm_reftype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_reftypes));
                         if (!merged_types || !merged_reftypes) {
                             WASM_FREE(merged_types);
                             WASM_FREE(merged_reftypes);
@@ -16284,7 +16324,11 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
             WASM__SET_ERR(rt, err, "section %u decode failed: %s",
                           (unsigned)sid, wasm_error_string(err));
         }
-        if (err == WASM_OK && (sr.malformed || sr.ptr != sr.end)) {
+        if (err == WASM_OK && sr.malformed) {
+            err = WASM_ERR_MALFORMED;
+            WASM__SET_ERR(rt, err, "section %u decode failed: %s", (unsigned)sid, wasm_error_string(err));
+        }
+        if (err == WASM_OK && sr.ptr != sr.end) {
             WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section %u has trailing bytes", (unsigned)sid);
             err = WASM_ERR_MALFORMED;
         }
@@ -17204,7 +17248,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     is_root = (rt->call_frame_sp == base_frame_sp + 1u);
 
     if (result_count > 8) {
-        result_values = (wasm_value_t*)WASM_MALLOC(result_count * sizeof(wasm_value_t));
+        result_values = (wasm_value_t*)wasm__malloc_array(result_count, sizeof(wasm_value_t));
         if (!result_values) return WASM_ERR_OOM;
     }
 
@@ -17305,11 +17349,11 @@ WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
     if (!func->code || func->code_len == 0) return WASM_OK;
     if (func->control_targets) return WASM_OK;
 
-    targets = (wasm__control_target_t*)WASM_MALLOC(func->code_len * sizeof(wasm__control_target_t));
+    targets = (wasm__control_target_t*)wasm__malloc_array(func->code_len, sizeof(wasm__control_target_t));
     if (!targets) return WASM_ERR_OOM;
 
     stack_capacity = func->max_label_depth ? func->max_label_depth : 1u;
-    stack = (wasm__control_frame_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*stack));
+    stack = (wasm__control_frame_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*stack));
     if (!stack) {
         WASM_FREE(targets);
         return WASM_ERR_OOM;
@@ -17467,7 +17511,7 @@ static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
 
     wasm__clear_label(label);
     if (ex->num_values > 0) {
-        copy = (wasm_value_t*)WASM_MALLOC(ex->num_values * sizeof(wasm_value_t));
+        copy = (wasm_value_t*)wasm__malloc_array(ex->num_values, sizeof(wasm_value_t));
         if (!copy) return WASM_ERR_OOM;
         memcpy(copy, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
@@ -17702,7 +17746,7 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
     uint32_t i;
 
     if (branch_arity > 8) {
-        branch_values = (wasm_value_t*)WASM_MALLOC(branch_arity * sizeof(wasm_value_t));
+        branch_values = (wasm_value_t*)wasm__malloc_array(branch_arity, sizeof(wasm_value_t));
         if (!branch_values) return WASM_ERR_OOM;
     }
 
@@ -17724,7 +17768,7 @@ WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__labe
     uint32_t i;
 
     if (label->arity > 8) {
-        result_values = (wasm_value_t*)WASM_MALLOC(label->arity * sizeof(wasm_value_t));
+        result_values = (wasm_value_t*)wasm__malloc_array(label->arity, sizeof(wasm_value_t));
         if (!result_values) return WASM_ERR_OOM;
     }
 
@@ -18623,7 +18667,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 break;
             }
             alloc_count = (size_t)new_size;
-            new_elems = (wasm_value_t*)WASM_REALLOC(table->elems, alloc_count * sizeof(wasm_value_t));
+            new_elems = (wasm_value_t*)wasm__realloc_array(table->elems, alloc_count, sizeof(wasm_value_t));
             if (!new_elems) {
                 WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                 break;
@@ -20585,7 +20629,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
                 if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (tag_type->num_params > 8) {
-                    payload = (wasm_value_t*)WASM_MALLOC(tag_type->num_params * sizeof(wasm_value_t));
+                    payload = (wasm_value_t*)wasm__malloc_array(tag_type->num_params, sizeof(wasm_value_t));
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = WASM__POP(rt);
@@ -20696,14 +20740,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -20773,14 +20817,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (!wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -20824,14 +20868,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
                 if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -20897,14 +20941,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -20967,14 +21011,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!call_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!call_results) {
                             if (call_args != tail_args_buf) WASM_FREE(call_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -21032,14 +21076,14 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
 
                 if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)WASM_MALLOC(cft->num_params * sizeof(wasm_value_t));
+                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
                     if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__POP(rt);
 
                 if (callee->is_import) {
                     if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)WASM_MALLOC(cft->num_results * sizeof(wasm_value_t));
+                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
                         if (!tail_results) {
                             if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                             WASM__TRAP(WASM_ERR_OOM);
@@ -21915,7 +21959,7 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
     out_type->num_params = num_params;
     out_type->num_results = num_results;
     if (num_params > 0) {
-        out_type->params = (wasm_valtype_t*)WASM_MALLOC(num_params * sizeof(wasm_valtype_t));
+        out_type->params = (wasm_valtype_t*)wasm__malloc_array(num_params, sizeof(wasm_valtype_t));
         out_type->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_params, sizeof(wasm_reftype_t));
         if (!out_type->params || !out_type->param_reftypes) {
             if (out_error) *out_error = "out of memory while parsing parameter types";
@@ -21924,7 +21968,7 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
         }
     }
     if (num_results > 0) {
-        out_type->results = (wasm_valtype_t*)WASM_MALLOC(num_results * sizeof(wasm_valtype_t));
+        out_type->results = (wasm_valtype_t*)wasm__malloc_array(num_results, sizeof(wasm_valtype_t));
         out_type->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_results, sizeof(wasm_reftype_t));
         if (!out_type->results || !out_type->result_reftypes) {
             if (out_error) *out_error = "out of memory while parsing result types";
@@ -22009,15 +22053,15 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     }
 
     if (parsed_type.num_params > 0) {
-        args = (wasm_value_t*)WASM_MALLOC(parsed_type.num_params * sizeof(wasm_value_t));
+        args = (wasm_value_t*)wasm__malloc_array(parsed_type.num_params, sizeof(wasm_value_t));
         if (!args) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "args");
             goto cleanup;
         }
     }
     if (parsed_type.num_results > 0) {
-        results = (wasm_value_t*)WASM_MALLOC(parsed_type.num_results * sizeof(wasm_value_t));
-        result_ptrs = (void**)WASM_MALLOC(parsed_type.num_results * sizeof(void*));
+        results = (wasm_value_t*)wasm__malloc_array(parsed_type.num_results, sizeof(wasm_value_t));
+        result_ptrs = (void**)wasm__malloc_array(parsed_type.num_results, sizeof(void*));
         if (!results || !result_ptrs) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "results");
             goto cleanup;
@@ -22517,7 +22561,7 @@ WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out
     *out_wide = NULL;
     count = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
     if (count <= 0) return 0;
-    wide = (wchar_t*)WASM_MALLOC((size_t)count * sizeof(wchar_t));
+    wide = (wchar_t*)wasm__malloc_array((size_t)count, sizeof(wchar_t));
     if (!wide) return 0;
     if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, count) <= 0) {
         WASM_FREE(wide);

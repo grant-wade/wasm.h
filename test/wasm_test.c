@@ -11525,6 +11525,66 @@ WL_TEST(test_gc_type_section_respects_feature_gate) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_decode_rejects_counts_beyond_section) {
+    static const uint8_t type_count[] = { 0x01, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F };
+    static const uint8_t rec_group_size[] = { 0x01, 0x07, 0x01, 0x4E, 0x80, 0x80, 0x80, 0x80, 0x04 };
+    static const uint8_t param_count[] = { 0x01, 0x08, 0x01, 0x60, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x00 };
+    static const uint8_t supertype_count[] = { 0x01, 0x09, 0x01, 0x50, 0x81, 0x80, 0x80, 0x80, 0x04, 0x5F, 0x00 };
+    static const uint8_t struct_field_count[] = { 0x01, 0x07, 0x01, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F };
+    static const uint8_t func_count[] = { 0x03, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F };
+    static const struct {
+        const char* name;
+        const uint8_t* section;
+        size_t len;
+    } cases[] = {
+        { "type count", type_count, sizeof(type_count) },
+        { "rec group size", rec_group_size, sizeof(rec_group_size) },
+        { "param count", param_count, sizeof(param_count) },
+        { "supertype count", supertype_count, sizeof(supertype_count) },
+        { "struct field count", struct_field_count, sizeof(struct_field_count) },
+        { "function count", func_count, sizeof(func_count) },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        wasm_builder_t mod = { 0 };
+        wasm_runtime_t rt;
+        wasm_module_t* m;
+
+        emit_header(&mod);
+        emit_bytes(&mod, cases[i].section, (uint32_t)cases[i].len);
+
+        wasm_init(&rt);
+        m = wasm_load(&rt, mod.buf, mod.len);
+        WL_CHECK_MSG(t, m == NULL, "expected oversized %s to be rejected", cases[i].name);
+        WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s: %s", cases[i].name, rt.error_msg);
+        if (m != NULL) wasm_free_module(m);
+        wasm_destroy(&rt);
+    }
+}
+
+WL_TEST(test_gc_rejects_multiple_supertypes) {
+    static const uint8_t types[] = {
+        0x01, 0x0F, 0x03,
+        0x50, 0x00, 0x5F, 0x00,
+        0x50, 0x00, 0x5F, 0x00,
+        0x50, 0x02, 0x00, 0x01, 0x5F, 0x00,
+    };
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+    emit_bytes(&mod, types, sizeof(types));
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected multiple supertypes to be rejected");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "multiple supertypes") != NULL, "%s", rt.error_msg);
+    if (m != NULL) wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -14521,6 +14581,8 @@ int main(void) {
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
         { "wasmgc: composite type sections parse rec/sub/struct/array forms", test_gc_type_section_parses_composite_types },
         { "wasmgc: GC type syntax is feature-gated", test_gc_type_section_respects_feature_gate },
+        { "decode: vector counts beyond the section are malformed", test_decode_rejects_counts_beyond_section },
+        { "wasmgc: subtypes may declare at most one supertype", test_gc_rejects_multiple_supertypes },
         { "wasmgc: concrete heaptype parsing preserves typed refs across sections", test_gc_heaptype_parsing_tracks_concrete_type_refs },
         { "wasmgc: ref.is_null works on abstract anyref nulls", test_gc_ref_is_null_on_abstract_anyref },
         { "wasmgc: typed select accepts eqref where anyref is expected", test_gc_typed_select_accepts_eqref_as_anyref },

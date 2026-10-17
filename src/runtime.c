@@ -274,7 +274,7 @@ void wasm_config_default(wasm_config_t* config) {
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
-    rt->stack = (wasm_value_t*)WASM_MALLOC((size_t)max_stack * sizeof(*rt->stack));
+    rt->stack = (wasm_value_t*)wasm__malloc_array((size_t)max_stack, sizeof(*rt->stack));
     if (!rt->stack) return WASM_ERR_OOM;
 
     rt->max_stack = max_stack;
@@ -292,10 +292,10 @@ static void wasm__stack_destroy(wasm_runtime_t* rt) {
 static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
     if (max_depth == 0) return WASM_ERR_MALFORMED;
 
-    rt->backtrace_func_indices = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_func_indices));
+    rt->backtrace_func_indices = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_func_indices));
     if (!rt->backtrace_func_indices) return WASM_ERR_OOM;
 
-    rt->backtrace_offsets = (uint32_t*)WASM_MALLOC((size_t)max_depth * sizeof(*rt->backtrace_offsets));
+    rt->backtrace_offsets = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_offsets));
     if (!rt->backtrace_offsets) {
         WASM_FREE(rt->backtrace_func_indices);
         rt->backtrace_func_indices = NULL;
@@ -514,7 +514,7 @@ WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
 
     if (rt->num_imports >= rt->cap_imports) {
         uint32_t new_cap = rt->cap_imports ? rt->cap_imports * 2 : 16;
-        wasm_import_t* a = (wasm_import_t*)WASM_REALLOC(rt->imports, new_cap * sizeof(wasm_import_t));
+        wasm_import_t* a = (wasm_import_t*)wasm__realloc_array(rt->imports, new_cap, sizeof(wasm_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->imports = a;
         rt->cap_imports = new_cap;
@@ -561,7 +561,7 @@ wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_i
     if (rt->num_global_imports >= rt->cap_global_imports) {
         uint32_t new_cap = rt->cap_global_imports ? rt->cap_global_imports * 2 : 16;
         wasm_global_import_t* a =
-            (wasm_global_import_t*)WASM_REALLOC(rt->global_imports, new_cap * sizeof(wasm_global_import_t));
+            (wasm_global_import_t*)wasm__realloc_array(rt->global_imports, new_cap, sizeof(wasm_global_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->global_imports = a;
         rt->cap_global_imports = new_cap;
@@ -594,7 +594,7 @@ wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_imp
     if (rt->num_table_imports >= rt->cap_table_imports) {
         uint32_t new_cap = rt->cap_table_imports ? rt->cap_table_imports * 2 : 16;
         wasm_table_import_t* a =
-            (wasm_table_import_t*)WASM_REALLOC(rt->table_imports, new_cap * sizeof(wasm_table_import_t));
+            (wasm_table_import_t*)wasm__realloc_array(rt->table_imports, new_cap, sizeof(wasm_table_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->table_imports = a;
         rt->cap_table_imports = new_cap;
@@ -631,7 +631,7 @@ wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_i
     if (rt->num_memory_imports >= rt->cap_memory_imports) {
         uint32_t new_cap = rt->cap_memory_imports ? rt->cap_memory_imports * 2 : 16;
         wasm_memory_import_t* a =
-            (wasm_memory_import_t*)WASM_REALLOC(rt->memory_imports, new_cap * sizeof(wasm_memory_import_t));
+            (wasm_memory_import_t*)wasm__realloc_array(rt->memory_imports, new_cap, sizeof(wasm_memory_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->memory_imports = a;
         rt->cap_memory_imports = new_cap;
@@ -669,7 +669,7 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
     if (rt->num_tag_imports >= rt->cap_tag_imports) {
         uint32_t new_cap = rt->cap_tag_imports ? rt->cap_tag_imports * 2 : 16;
         wasm_tag_import_t* a =
-            (wasm_tag_import_t*)WASM_REALLOC(rt->tag_imports, new_cap * sizeof(wasm_tag_import_t));
+            (wasm_tag_import_t*)wasm__realloc_array(rt->tag_imports, new_cap, sizeof(wasm_tag_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->tag_imports = a;
         rt->cap_tag_imports = new_cap;

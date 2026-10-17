@@ -36,4 +36,8 @@ WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size);
 #define WASM_CALLOC(n, sz) wasm__calloc_fallback((n), (sz))
 #endif
 
+/* Return NULL when count * size overflows size_t instead of allocating a truncated block. */
+WASM_PRIVATE void* wasm__malloc_array(size_t count, size_t size);
+WASM_PRIVATE void* wasm__realloc_array(void* ptr, size_t count, size_t size);
+
 #endif /* WASM_INTERNAL_ALLOC_H */

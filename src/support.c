@@ -16,6 +16,17 @@ WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size) {
 }
 
 #endif
+
+WASM_PRIVATE void* wasm__malloc_array(size_t count, size_t size) {
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    return WASM_MALLOC(count * size);
+}
+
+WASM_PRIVATE void* wasm__realloc_array(void* ptr, size_t count, size_t size) {
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    return WASM_REALLOC(ptr, count * size);
+}
+
 WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {
     return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_NOFUNC;
 }

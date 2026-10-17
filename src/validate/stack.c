@@ -108,12 +108,12 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
 
     if (!rt->validator_stack) {
-        rt->validator_stack = (wasm_valtype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack));
+        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack));
         if (!rt->validator_stack) return WASM_ERR_OOM;
     }
     if (!rt->validator_stack_reftypes) {
         rt->validator_stack_reftypes =
-            (wasm_reftype_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*rt->validator_stack_reftypes));
+            (wasm_reftype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
         if (!rt->validator_stack_reftypes) return WASM_ERR_OOM;
     }
     if (!rt->validator_frames) {

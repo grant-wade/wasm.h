@@ -130,7 +130,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     is_root = (rt->call_frame_sp == base_frame_sp + 1u);
 
     if (result_count > 8) {
-        result_values = (wasm_value_t*)WASM_MALLOC(result_count * sizeof(wasm_value_t));
+        result_values = (wasm_value_t*)wasm__malloc_array(result_count, sizeof(wasm_value_t));
         if (!result_values) return WASM_ERR_OOM;
     }
 

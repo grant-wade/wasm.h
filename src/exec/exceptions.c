@@ -16,7 +16,7 @@ static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
 
     wasm__clear_label(label);
     if (ex->num_values > 0) {
-        copy = (wasm_value_t*)WASM_MALLOC(ex->num_values * sizeof(wasm_value_t));
+        copy = (wasm_value_t*)wasm__malloc_array(ex->num_values, sizeof(wasm_value_t));
         if (!copy) return WASM_ERR_OOM;
         memcpy(copy, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
@@ -251,7 +251,7 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
     uint32_t i;
 
     if (branch_arity > 8) {
-        branch_values = (wasm_value_t*)WASM_MALLOC(branch_arity * sizeof(wasm_value_t));
+        branch_values = (wasm_value_t*)wasm__malloc_array(branch_arity, sizeof(wasm_value_t));
         if (!branch_values) return WASM_ERR_OOM;
     }
 
@@ -273,7 +273,7 @@ WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__labe
     uint32_t i;
 
     if (label->arity > 8) {
-        result_values = (wasm_value_t*)WASM_MALLOC(label->arity * sizeof(wasm_value_t));
+        result_values = (wasm_value_t*)wasm__malloc_array(label->arity, sizeof(wasm_value_t));
         if (!result_values) return WASM_ERR_OOM;
     }
 

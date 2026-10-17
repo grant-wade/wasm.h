@@ -43,6 +43,17 @@ WASM_PRIVATE uint32_t wasm__read_leb128_u32(wasm__reader_t* r) {
     return 0;
 }
 
+WASM_PRIVATE uint32_t wasm__read_count(wasm__reader_t* r) {
+    uint32_t count = wasm__read_leb128_u32(r);
+
+    if (!r->malformed && count > (size_t)(r->end - r->ptr)) {
+        r->ptr = r->end;
+        r->malformed = 1;
+        return 0;
+    }
+    return count;
+}
+
 WASM_PRIVATE int32_t wasm__read_leb128_i32(wasm__reader_t* r) {
     uint32_t result = 0;
     uint32_t shift = 0;

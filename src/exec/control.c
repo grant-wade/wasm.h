@@ -50,11 +50,11 @@ WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
     if (!func->code || func->code_len == 0) return WASM_OK;
     if (func->control_targets) return WASM_OK;
 
-    targets = (wasm__control_target_t*)WASM_MALLOC(func->code_len * sizeof(wasm__control_target_t));
+    targets = (wasm__control_target_t*)wasm__malloc_array(func->code_len, sizeof(wasm__control_target_t));
     if (!targets) return WASM_ERR_OOM;
 
     stack_capacity = func->max_label_depth ? func->max_label_depth : 1u;
-    stack = (wasm__control_frame_t*)WASM_MALLOC((size_t)stack_capacity * sizeof(*stack));
+    stack = (wasm__control_frame_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*stack));
     if (!stack) {
         WASM_FREE(targets);
         return WASM_ERR_OOM;
