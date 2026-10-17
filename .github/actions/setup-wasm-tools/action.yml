@@ -3,7 +3,7 @@ description: Install the pinned native wasm-tools release and verify spectest su
 inputs:
   version:
     description: wasm-tools release version
-    default: '1.253.0'
+    default: '1.262.0'
 runs:
   using: composite
   steps:

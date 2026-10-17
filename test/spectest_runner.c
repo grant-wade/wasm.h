@@ -1205,7 +1205,8 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "invalid literal") != NULL || strstr(actual_lower, "expected ") != NULL ||
          strstr(actual_lower, "found outside `legacytry` block") != NULL ||
          strstr(actual_lower, "found outside legacytry block") != NULL ||
-         strstr(actual_lower, "u64 constant out of range") != NULL))
+         strstr(actual_lower, "u64 constant out of range") != NULL ||
+         strstr(actual_lower, "invalid u8 number") != NULL))
         return 1;
     if (strcmp(expected_lower, "mismatching label") == 0 &&
         (strstr(actual_lower, "unexpected label") != NULL || strstr(actual_lower, "undefined label variable") != NULL))
@@ -1258,7 +1259,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "expected an instruction") != NULL ||
          strstr(actual_lower, "constant out of range") != NULL))
         return 1;
-    if (strcmp(expected_lower, "invalid lane length") == 0 &&
+    if (strcmp(expected_lower, "wrong number of lane indices") == 0 &&
         (strstr(actual_lower, "expected a natural number in range") != NULL ||
          strstr(actual_lower, "unexpected token") != NULL ||
          strstr(actual_lower, "expected a u8") != NULL ||

@@ -7224,7 +7224,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_
         uint32_t base = lane * 2u;
         int32_t dot = (int32_t)wasm__v128_get_i8(lhs, base) * (int32_t)wasm__v128_get_i8(rhs, base) +
                       (int32_t)wasm__v128_get_i8(lhs, base + 1u) * (int32_t)wasm__v128_get_i8(rhs, base + 1u);
-        wasm__v128_set_i16(&result, lane, wasm__sat_i16(dot));
+        wasm__v128_set_i16(&result, lane, dot);
     }
 
     return result;
