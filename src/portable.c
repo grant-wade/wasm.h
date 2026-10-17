@@ -187,6 +187,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "custom page sizes";
         case WASM_FEATURE_COMPACT_IMPORTS:
             return "compact imports";
+        case WASM_FEATURE_THREADS:
+            return "threads";
         default:
             return "unknown feature";
     }
@@ -215,6 +217,16 @@ WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t fla
         }
     }
 
+    return WASM_OK;
+}
+
+WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod) {
+    if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "multiple tables");
+        return WASM_ERR_MALFORMED;
+    }
+
+    mod->required_features |= WASM_FEATURE_REFERENCE_TYPES;
     return WASM_OK;
 }
 

@@ -215,6 +215,7 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
 #define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
 #define WASM_FEATURE_COMPACT_IMPORTS (1u << 15)
+#define WASM_FEATURE_THREADS (1u << 16)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -539,6 +540,8 @@ typedef struct wasm_memory_t {
     int is_import;
     struct wasm_memory_t* import_memory;
     uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
+    int is_shared;          /* shared memories never move and may be used by runtimes on other threads */
+    uint64_t reserved_bytes; /* shared memories: size of the fixed reservation backing data */
 } wasm_memory_t;
 
 typedef struct wasm_table_import_t {
@@ -660,6 +663,10 @@ uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint64_t wasm_memory_size(wasm_module_t* mod);
+/* Creates a shared memory (threads proposal) for hosts to register as an import in several runtimes,
+   each used by its own thread. It must outlive every module that imports it. */
+wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+void wasm_shared_memory_free(wasm_memory_t* memory);
 int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages);
 uint32_t wasm_table_count(wasm_module_t* mod);
 wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx);

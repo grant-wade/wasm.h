@@ -26,6 +26,55 @@
 
 #include "wl.h"
 
+#if WASM_ENABLE_PLATFORM && (defined(_WIN32) || defined(__unix__) || defined(__unix) || defined(__APPLE__))
+#define WASM_TEST_THREADS 1
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef HANDLE wasm_test_thread_t;
+#else
+#include <pthread.h>
+typedef pthread_t wasm_test_thread_t;
+#endif
+
+typedef struct wasm_test_thread_start_t {
+    void (*fn)(void*);
+    void* arg;
+} wasm_test_thread_start_t;
+
+#if defined(_WIN32)
+static DWORD WINAPI wasm_test_thread_main(LPVOID start) {
+    ((wasm_test_thread_start_t*)start)->fn(((wasm_test_thread_start_t*)start)->arg);
+    return 0;
+}
+#else
+static void* wasm_test_thread_main(void* start) {
+    ((wasm_test_thread_start_t*)start)->fn(((wasm_test_thread_start_t*)start)->arg);
+    return NULL;
+}
+#endif
+
+static int wasm_test_thread_spawn(wasm_test_thread_t* thread, wasm_test_thread_start_t* start) {
+#if defined(_WIN32)
+    *thread = CreateThread(NULL, 0, wasm_test_thread_main, start, 0, NULL);
+    return *thread != NULL;
+#else
+    return pthread_create(thread, NULL, wasm_test_thread_main, start) == 0;
+#endif
+}
+
+static void wasm_test_thread_join(wasm_test_thread_t thread) {
+#if defined(_WIN32)
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+#else
+    pthread_join(thread, NULL);
+#endif
+}
+#endif
+
 #ifdef WASM_TEST_MODULAR
 #include "wasm_test_alloc.h"
 #define WASM_TEST_ALLOC_LINKAGE
@@ -48,10 +97,54 @@ typedef struct wasm_test_alloc_stats {
 
 static wasm_test_alloc_stats g_wasm_test_alloc_stats;
 
+/* Counters change atomically because the threads test runs runtimes on several threads at once. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
+static size_t wasm_test_counter_cas(size_t* counter, size_t expected, size_t desired) {
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_compare_exchange_n(counter, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+#elif defined(_MSC_VER) && defined(_WIN64)
+    return (size_t)_InterlockedCompareExchange64((__int64 volatile*)counter, (__int64)desired, (__int64)expected);
+#elif defined(_MSC_VER)
+    return (size_t)_InterlockedCompareExchange((long volatile*)counter, (long)desired, (long)expected);
+#else
+    size_t current = *counter;
+    if (current == expected) *counter = desired;
+    return current;
+#endif
+}
+
+/* Applies update to the counter's value until no other thread changed it in between; returns the new value. */
+static size_t wasm_test_counter_update(size_t* counter, size_t (*update)(size_t)) {
+    size_t observed = wasm_test_counter_cas(counter, 0, 0);
+    for (;;) {
+        size_t desired = update(observed);
+        size_t previous = wasm_test_counter_cas(counter, observed, desired);
+        if (previous == observed) return desired;
+        observed = previous;
+    }
+}
+
+static size_t wasm_test_increment(size_t value) {
+    return value + 1u;
+}
+
+static size_t wasm_test_decrement_to_zero(size_t value) {
+    return value > 0 ? value - 1u : 0;
+}
+
 static void wasm_test_record_live_alloc(void) {
-    g_wasm_test_alloc_stats.live_blocks++;
-    if (g_wasm_test_alloc_stats.live_blocks > g_wasm_test_alloc_stats.peak_live_blocks)
-        g_wasm_test_alloc_stats.peak_live_blocks = g_wasm_test_alloc_stats.live_blocks;
+    size_t live = wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_increment);
+    size_t peak = wasm_test_counter_cas(&g_wasm_test_alloc_stats.peak_live_blocks, 0, 0);
+
+    while (live > peak) {
+        size_t previous = wasm_test_counter_cas(&g_wasm_test_alloc_stats.peak_live_blocks, peak, live);
+        if (previous == peak) break;
+        peak = previous;
+    }
 }
 
 static void* wasm_test_alloc_block(size_t size, int zero_fill) {
@@ -72,12 +165,12 @@ static void* wasm_test_alloc_block(size_t size, int zero_fill) {
 }
 
 WASM_TEST_ALLOC_LINKAGE void* wasm_test_malloc(size_t size) {
-    g_wasm_test_alloc_stats.malloc_calls++;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.malloc_calls, wasm_test_increment);
     return wasm_test_alloc_block(size, 0);
 }
 
 WASM_TEST_ALLOC_LINKAGE void* wasm_test_calloc(size_t count, size_t size) {
-    g_wasm_test_alloc_stats.calloc_calls++;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.calloc_calls, wasm_test_increment);
     if (size != 0 && count > ((size_t)-1) / size) return NULL;
     return wasm_test_alloc_block(count * size, 1);
 }
@@ -87,11 +180,11 @@ WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
     wasm_test_alloc_header* resized;
     size_t payload_size = size ? size : 1u;
 
-    g_wasm_test_alloc_stats.realloc_calls++;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.realloc_calls, wasm_test_increment);
     if (!ptr) return wasm_test_alloc_block(size, 0);
     if (size == 0) {
         free(((wasm_test_alloc_header*)ptr) - 1);
-        if (g_wasm_test_alloc_stats.live_blocks > 0) g_wasm_test_alloc_stats.live_blocks--;
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
         return NULL;
     }
     if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
@@ -105,11 +198,11 @@ WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
 }
 
 WASM_TEST_ALLOC_LINKAGE void wasm_test_free(void* ptr) {
-    g_wasm_test_alloc_stats.free_calls++;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.free_calls, wasm_test_increment);
     if (!ptr) return;
 
     free(((wasm_test_alloc_header*)ptr) - 1);
-    if (g_wasm_test_alloc_stats.live_blocks > 0) g_wasm_test_alloc_stats.live_blocks--;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
 }
 
 static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
@@ -11636,6 +11729,124 @@ WL_TEST(test_custom_page_sizes_is_opt_in) {
     wasm_destroy(&rt);
 }
 
+#if defined(WASM_TEST_THREADS)
+/* Imports env.mem as (memory 1 1 shared) and exports
+   add(n): n times i32.atomic.rmw.add at address 0,
+   wait(): memory.atomic.wait32 at address 8 expecting 0 with no timeout,
+   notify(): memory.atomic.notify at address 8 for one waiter. */
+static void wasm_test_emit_shared_counter_module(wasm_builder_t* mod) {
+    static const uint8_t sections[] = {
+        0x01, 0x09, 0x02, 0x60, 0x01, 0x7F, 0x00, 0x60, 0x00, 0x01, 0x7F,
+        0x02, 0x0D, 0x01, 0x03, 'e', 'n', 'v', 0x03, 'm', 'e', 'm', 0x02, 0x03, 0x01, 0x01,
+        0x03, 0x04, 0x03, 0x00, 0x01, 0x01,
+        0x07, 0x17, 0x03,
+        0x03, 'a', 'd', 'd', 0x00, 0x00,
+        0x04, 'w', 'a', 'i', 't', 0x00, 0x01,
+        0x06, 'n', 'o', 't', 'i', 'f', 'y', 0x00, 0x02,
+        0x0A, 0x39, 0x03,
+        0x1F, 0x00, 0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x45, 0x0D, 0x01, 0x41, 0x00, 0x41, 0x01,
+        0xFE, 0x1E, 0x02, 0x00, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x21, 0x00, 0x0C, 0x00, 0x0B, 0x0B, 0x0B,
+        0x0C, 0x00, 0x41, 0x08, 0x41, 0x00, 0x42, 0x7F, 0xFE, 0x01, 0x02, 0x00, 0x0B,
+        0x0A, 0x00, 0x41, 0x08, 0x41, 0x01, 0xFE, 0x00, 0x02, 0x00, 0x0B,
+    };
+
+    emit_header(mod);
+    emit_bytes(mod, sections, sizeof(sections));
+}
+
+typedef struct wasm_test_shared_worker_t {
+    wasm_runtime_t rt;
+    int initialized;
+    wasm_module_t* mod;
+    const char* export_name;
+    int32_t arg;
+    wasm_error_t err;
+    int32_t result;
+} wasm_test_shared_worker_t;
+
+static void wasm_test_shared_worker_run(void* arg) {
+    wasm_test_shared_worker_t* worker = (wasm_test_shared_worker_t*)arg;
+    wasm_value_t args[1];
+    wasm_value_t results[1];
+
+    args[0] = wasm_i32(worker->arg);
+    results[0] = wasm_i32(0);
+    if (strcmp(worker->export_name, "add") == 0) {
+        worker->err = wasm_call(worker->mod, "add", args, 1, NULL, 0);
+    } else {
+        worker->err = wasm_call(worker->mod, worker->export_name, NULL, 0, results, 1);
+        worker->result = results[0].of.i32;
+    }
+}
+
+/* Several runtimes are live at once, so they skip the one-runtime leak checks; the case-level check remains. */
+static wasm_module_t* wasm_test_load_shared_worker(wl_test_ctx* t, wasm_test_shared_worker_t* worker,
+                                                  wasm_memory_t* memory, const wasm_builder_t* mod) {
+    wasm_memory_import_t imp;
+
+    imp.module = "env";
+    imp.name = "mem";
+    imp.memory = memory;
+    WL_CHECK_MSG(t, wasm_test_init_raw(&worker->rt, NULL) == WASM_OK, "%s", worker->rt.error_msg);
+    worker->initialized = 1;
+    wasm_enable_feature(&worker->rt, WASM_FEATURE_THREADS);
+    WL_CHECK_MSG(t, wasm_register_memory_import(&worker->rt, &imp) == WASM_OK, "%s", worker->rt.error_msg);
+    worker->mod = wasm_load(&worker->rt, mod->buf, mod->len);
+    WL_CHECK_MSG(t, worker->mod != NULL, "%s", worker->rt.error_msg);
+    return worker->mod;
+}
+
+WL_TEST(test_threads_shared_memory_across_runtimes) {
+    enum { WORKERS = 4, ITERATIONS = 20000 };
+    wasm_builder_t mod = { 0 };
+    wasm_test_shared_worker_t workers[WORKERS + 1];
+    wasm_test_thread_start_t starts[WORKERS + 1];
+    wasm_test_thread_t threads[WORKERS + 1];
+    wasm_memory_t* memory = wasm_shared_memory_new(1, 1, 0);
+    wasm_test_shared_worker_t* waiter = &workers[WORKERS];
+    wasm_value_t results[1];
+    uint32_t counter;
+    int woken = 0;
+    int i;
+
+    WL_CHECK_MSG(t, memory != NULL, "%s", "expected shared memory allocation");
+    if (!memory) return;
+    memset(workers, 0, sizeof(workers));
+    wasm_test_emit_shared_counter_module(&mod);
+    for (i = 0; i <= WORKERS; i++) {
+        if (!wasm_test_load_shared_worker(t, &workers[i], memory, &mod)) goto cleanup;
+        workers[i].export_name = i < WORKERS ? "add" : "wait";
+        workers[i].arg = ITERATIONS;
+        starts[i].fn = wasm_test_shared_worker_run;
+        starts[i].arg = &workers[i];
+    }
+
+    WL_CHECK(t, wasm_test_thread_spawn(&threads[WORKERS], &starts[WORKERS]));
+    for (i = 0; i < WORKERS; i++) WL_CHECK(t, wasm_test_thread_spawn(&threads[i], &starts[i]));
+    for (i = 0; i < WORKERS; i++) wasm_test_thread_join(threads[i]);
+
+    /* The waiter may not have blocked yet, so keep notifying until it is woken. */
+    while (!woken) {
+        WL_CHECK(t, wasm_call(workers[0].mod, "notify", NULL, 0, results, 1) == WASM_OK);
+        woken = results[0].of.i32 == 1;
+    }
+    wasm_test_thread_join(threads[WORKERS]);
+
+    memcpy(&counter, memory->data, sizeof(counter));
+    WASM_CHECK_I32(t, (int32_t)counter, WORKERS * ITERATIONS);
+    for (i = 0; i < WORKERS; i++) WL_CHECK_MSG(t, workers[i].err == WASM_OK, "worker %d failed", i);
+    WL_CHECK_MSG(t, waiter->err == WASM_OK, "%s", waiter->rt.error_msg);
+    WASM_CHECK_I32(t, waiter->result, 0);
+
+cleanup:
+    for (i = 0; i <= WORKERS; i++) {
+        if (workers[i].mod) wasm_free_module(workers[i].mod);
+        if (workers[i].initialized) (wasm_destroy)(&workers[i].rt);
+    }
+    wasm_shared_memory_free(memory);
+}
+#endif
+
 WL_TEST(test_wide_arithmetic_is_opt_in) {
     static const uint8_t sections[] = {
         0x01, 0x08, 0x01, 0x60, 0x02, 0x7E, 0x7E, 0x02, 0x7E, 0x7E,
@@ -14673,6 +14884,9 @@ int main(void) {
         { "SIMD: execution path, memory ops, select, and feature gate", test_simd_execution_and_feature_gate },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "wide arithmetic: disabled by default, 128-bit products when enabled", test_wide_arithmetic_is_opt_in },
+#if defined(WASM_TEST_THREADS)
+        { "threads: runtimes on separate threads share atomics and wait/notify", test_threads_shared_memory_across_runtimes },
+#endif
         { "custom page sizes: disabled by default, byte-sized pages when enabled", test_custom_page_sizes_is_opt_in },
         { "compact imports: disabled by default, empty groups accepted when enabled", test_compact_imports_is_opt_in },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },

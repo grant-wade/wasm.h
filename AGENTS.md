@@ -51,5 +51,5 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - Platform helpers default ON for this repo build (`--no-platform` turns them off); `test/wl.h` and the runtime platform bridges may be compiled with them off.
 - If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
-- The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64.
+- The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64. Wide arithmetic, custom page sizes, compact imports, and threads are implemented behind opt-in feature flags (`WASM__PROPOSAL_FEATURES`). Atomic primitives live in `src/atomics.c`; thread blocking and shared-memory reservation live in `src/platform/threads.c`.
 - `wasm2api.c` currently generates wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported signatures are skipped with diagnostics.

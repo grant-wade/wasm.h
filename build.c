@@ -17,8 +17,10 @@
 #endif
 
 static const char* const wasm_runtime_sources[] = {
+    "src/atomics.c",
     "src/call.c",
     "src/decode.c",
+    "src/exec/atomic.c",
     "src/exec/calls.c",
     "src/exec/control.c",
     "src/exec/exceptions.c",
@@ -39,6 +41,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/platform/disabled.c",
     "src/platform/emscripten.c",
     "src/platform/host.c",
+    "src/platform/threads.c",
     "src/platform/wasi_bind.c",
     "src/platform/wasi_fd.c",
     "src/platform/wasi_io.c",
@@ -58,6 +61,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/types/cross_module.c",
     "src/types/decode.c",
     "src/types/references.c",
+    "src/validate/atomic.c",
     "src/validate/function.c",
     "src/validate/gc.c",
     "src/validate/module.c",
@@ -447,14 +451,25 @@ typedef struct {
     const char* support;
 } spec_env_t;
 
-/* Proposal directories under test/spec/proposals whose suites run by default. */
-static const char* const implemented_proposals[] = { "compact-import-section", "custom-page-sizes", "extended-name-section", "wide-arithmetic", NULL };
+/* Proposal directories under test/spec/proposals whose suites run by default, with the wasm-tools features
+   they need. Suites written before a later feature was standardized disable it ("-name"), and the runner
+   disables it in the runtime too. */
+static const struct {
+    const char* name;
+    const char* features;
+} implemented_proposals[] = {
+    { "compact-import-section", "all" },
+    { "custom-page-sizes", "all" },
+    { "extended-name-section", "all" },
+    { "threads", "all,-multi-memory,-reference-types" },
+    { "wide-arithmetic", "all" },
+};
 
-static int proposal_implemented(const char* proposal) {
-    for (int i = 0; implemented_proposals[i]; ++i) {
-        if (strcmp(implemented_proposals[i], proposal) == 0) return 1;
+static const char* proposal_features(const char* proposal) {
+    for (int i = 0; i < COUNT(implemented_proposals); ++i) {
+        if (strcmp(implemented_proposals[i].name, proposal) == 0) return implemented_proposals[i].features;
     }
-    return 0;
+    return NULL;
 }
 
 /* skip_status, when set, replaces the conversion status so the runner skips the test.
@@ -547,14 +562,15 @@ static void spectests(target_t* runner, target_t* modular_runner) {
         char* out_dir = fmt("%s/proposals/%s", spec_dir, proposal);
         char* test_name = fmt("proposal.%s.%s", proposal, stem);
         char* skip_status = NULL;
-        if (!proposal_implemented(proposal) && !opt.spec_proposals) {
+        const char* features = proposal_features(proposal);
+        if (!features && !opt.spec_proposals) {
             make_dirs(out_dir);
             skip_status = fmt("%s/not-implemented.status", out_dir);
             char* text = fmt("skip\nproposal %s is not implemented; pass --spec-proposals to run it\n", proposal);
             write_if_changed(skip_status, text);
             free(text);
         }
-        add_spectest(&env, proposal_wasts[i], out_dir, stem, test_name, skip_status, "all");
+        add_spectest(&env, proposal_wasts[i], out_dir, stem, test_name, skip_status, features ? features : "all");
         free(proposal);
         free(stem);
         free(test_name);

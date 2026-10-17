@@ -63,7 +63,7 @@ rt = wasm_runtime_new(&config);
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
 
-All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, and `WASM_FEATURE_COMPACT_IMPORTS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
+All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
 
 ## Calling exports
 
@@ -166,6 +166,25 @@ wasm_error_t err = wasm_memory_read(mod, 0, guest_offset,
 Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, null-terminated string extraction. The `*_at` accessors expose direct memory data, size, and growth for a selected memory. Reacquire direct data pointers after `wasm_memory_grow_at`, because growth may relocate storage.
 
 Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
+
+## Threads
+
+With `WASM_FEATURE_THREADS` enabled, modules can declare shared memories and use the atomic instructions. A runtime and the modules loaded into it belong to one thread at a time; shared memories are what threads have in common. To run Wasm on several threads, give each thread its own runtime, load the module into each, and import the same shared memory everywhere:
+
+```c
+wasm_memory_t* memory = wasm_shared_memory_new(1, 16, 0); /* pages, max pages, is_64 */
+wasm_memory_import_t imp = { "env", "memory", memory };
+
+/* On each thread: */
+wasm_runtime_t* rt = wasm_runtime_new(NULL);
+wasm_enable_feature(rt, WASM_FEATURE_THREADS);
+wasm_register_memory_import(rt, &imp);
+wasm_module_t* mod = wasm_load(rt, bytes, len);
+```
+
+A shared memory exported by one module can be imported the same way. Free it with `wasm_shared_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid.
+
+`memory.atomic.wait32`/`wait64` block and `memory.atomic.notify` wakes threads when the platform layer is compiled in (`WASM_ENABLE_PLATFORM`), using pthreads or Win32; link with `-pthread` on toolchains that need it. Without it, a wait that would block traps, because no other thread could wake it.
 
 ## Introspection
 

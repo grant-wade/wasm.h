@@ -8,6 +8,7 @@
 #include "gc.h"
 #include "numeric.h"
 #include "simd.h"
+#include "atomic.h"
 #include "../instructions.h"
 #include "../internal/alloc.h"
 #include "../memory_internal.h"
@@ -802,6 +803,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (err != WASM_OK) goto cleanup;
                 break;
 
+            case 0xFE:
+                err = wasm__exec_atomic(mod, cf);
+                if (err != WASM_OK) goto cleanup;
+                break;
+
             /* Parametric */
             case 0x1A: {
                 wasm_value_t tmp = WASM__POP(rt);
@@ -1113,8 +1119,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
 
                 if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                WASM__PUSH(rt, memory->is_64 ? wasm_i64((int64_t)memory->pages)
-                                             : wasm_i32((int32_t)memory->pages));
+                WASM__PUSH(rt, memory->is_64 ? wasm_i64((int64_t)wasm__memory_pages(memory))
+                                             : wasm_i32((int32_t)wasm__memory_pages(memory)));
                 break;
             }
             case 0x40: {

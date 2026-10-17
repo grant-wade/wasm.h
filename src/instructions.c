@@ -303,6 +303,15 @@ WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0xFD:
             wasm__skip_simd_immediates(r);
             break;
+        case 0xFE: {
+            uint32_t subop = wasm__read_leb128_u32(r);
+            wasm__memarg_t memarg;
+            if (subop == 0x03)
+                wasm__read_u8(r);
+            else if (wasm__read_memarg(r, &memarg) != WASM_OK)
+                r->malformed = 1;
+            break;
+        }
         case 0x19:
         default:
             break;
@@ -435,6 +444,21 @@ static void wasm__skip_simd_immediates(wasm__reader_t* r) {
         default:
             break;
     }
+}
+
+WASM_PRIVATE int wasm__atomic_access(uint32_t subop, uint32_t* out_size_log2, wasm_valtype_t* out_type) {
+    static const uint8_t size_log2[7] = { 2, 3, 0, 1, 0, 1, 2 };
+
+    if (subop == 0x00 || subop == 0x01 || subop == 0x02) {
+        *out_size_log2 = (subop == 0x02) ? 3u : 2u;
+        *out_type = (subop == 0x02) ? WASM_TYPE_I64 : WASM_TYPE_I32;
+        return 1;
+    }
+    if (subop < 0x10 || subop > 0x4E) return 0;
+    subop = (subop - 0x10u) % 7u;
+    *out_size_log2 = size_log2[subop];
+    *out_type = (subop == 0 || subop == 2 || subop == 3) ? WASM_TYPE_I32 : WASM_TYPE_I64;
+    return 1;
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg) {

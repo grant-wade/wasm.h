@@ -224,6 +224,7 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
 #define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
 #define WASM_FEATURE_COMPACT_IMPORTS (1u << 15)
+#define WASM_FEATURE_THREADS (1u << 16)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -548,6 +549,8 @@ typedef struct wasm_memory_t {
     int is_import;
     struct wasm_memory_t* import_memory;
     uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
+    int is_shared;          /* shared memories never move and may be used by runtimes on other threads */
+    uint64_t reserved_bytes; /* shared memories: size of the fixed reservation backing data */
 } wasm_memory_t;
 
 typedef struct wasm_table_import_t {
@@ -669,6 +672,10 @@ uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint64_t wasm_memory_size(wasm_module_t* mod);
+/* Creates a shared memory (threads proposal) for hosts to register as an import in several runtimes,
+   each used by its own thread. It must outlive every module that imports it. */
+wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+void wasm_shared_memory_free(wasm_memory_t* memory);
 int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages);
 uint32_t wasm_table_count(wasm_module_t* mod);
 wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx);
@@ -789,10 +796,11 @@ const char* wasm_error_string(wasm_error_t err);
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
      WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
      WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64 | WASM_FEATURE_WIDE_ARITHMETIC | \
-     WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS)
+     WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS | WASM_FEATURE_THREADS)
 
-#define WASM__PROPOSAL_FEATURES \
-    (WASM_FEATURE_WIDE_ARITHMETIC | WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS)
+#define WASM__PROPOSAL_FEATURES                                                                  \
+    (WASM_FEATURE_WIDE_ARITHMETIC | WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS | \
+     WASM_FEATURE_THREADS)
 
 #define WASM__DEFAULT_FEATURES (WASM__IMPLEMENTED_FEATURES & ~WASM__PROPOSAL_FEATURES)
 
@@ -1601,6 +1609,9 @@ WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t fla
 
 WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
 
+/* A single funcref table is MVP; further tables need reference types. */
+WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod);
+
 #endif /* WASM_PORTABLE_H */
 /* END src/portable.h */
 
@@ -2116,6 +2127,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "custom page sizes";
         case WASM_FEATURE_COMPACT_IMPORTS:
             return "compact imports";
+        case WASM_FEATURE_THREADS:
+            return "threads";
         default:
             return "unknown feature";
     }
@@ -2147,6 +2160,16 @@ WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t fla
     return WASM_OK;
 }
 
+WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod) {
+    if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "multiple tables");
+        return WASM_ERR_MALFORMED;
+    }
+
+    mod->required_features |= WASM_FEATURE_REFERENCE_TYPES;
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod) {
     if ((mod->rt->enabled_features & WASM_FEATURE_MULTI_MEMORY) == 0 ||
         (WASM__IMPLEMENTED_FEATURES & WASM_FEATURE_MULTI_MEMORY) == 0) {
@@ -2158,6 +2181,480 @@ WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod) {
     return WASM_OK;
 }
 /* END src/portable.c */
+
+/* BEGIN src/atomics.c */
+
+/* BEGIN src/atomics.h */
+#ifndef WASM_ATOMICS_H
+#define WASM_ATOMICS_H
+
+
+/* Sequentially consistent accesses to naturally aligned little-endian values of 1, 2, 4, or 8 bytes.
+   Values are passed zero-extended in host order. Compilers without atomic builtins get plain accesses,
+   which are only correct while a single thread uses the memory. */
+WASM_PRIVATE uint64_t wasm__atomic_load(const uint8_t* p, uint32_t size);
+
+WASM_PRIVATE void wasm__atomic_store(uint8_t* p, uint32_t size, uint64_t value);
+
+/* Stores desired if the current value equals expected; returns the value observed before the call. */
+WASM_PRIVATE uint64_t wasm__atomic_compare_exchange(uint8_t* p, uint32_t size, uint64_t expected, uint64_t desired);
+
+WASM_PRIVATE void wasm__atomic_fence(void);
+
+/* Host-order 64-bit counters shared between threads, such as a shared memory's page count. */
+WASM_PRIVATE uint64_t wasm__atomic_load_u64(const uint64_t* p);
+
+WASM_PRIVATE void wasm__atomic_store_u64(uint64_t* p, uint64_t value);
+
+#endif /* WASM_ATOMICS_H */
+/* END src/atomics.h */
+
+#include <string.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define WASM__ATOMICS_GNU 1
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define WASM__ATOMICS_MSVC 1
+#endif
+
+static uint64_t wasm__atomic_mask(uint32_t size) {
+    return size == 8u ? UINT64_MAX : ((UINT64_C(1) << (size * 8u)) - 1u);
+}
+
+/* Converts between a little-endian memory value and the host-order bits of the same bytes. */
+static uint64_t wasm__atomic_swap_order(uint64_t value, uint32_t size) {
+#if WASM__BIG_ENDIAN
+    uint64_t swapped = 0;
+    uint32_t i;
+    for (i = 0; i < size; i++) swapped |= ((value >> (i * 8u)) & 0xFFu) << ((size - 1u - i) * 8u);
+    return swapped;
+#else
+    (void)size;
+    return value;
+#endif
+}
+
+static uint64_t wasm__atomic_cas_raw(uint8_t* p, uint32_t size, uint64_t expected, uint64_t desired) {
+#if defined(WASM__ATOMICS_GNU)
+    switch (size) {
+        case 1: {
+            uint8_t e = (uint8_t)expected;
+            __atomic_compare_exchange_n((uint8_t*)p, &e, (uint8_t)desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            return e;
+        }
+        case 2: {
+            uint16_t e = (uint16_t)expected;
+            __atomic_compare_exchange_n((uint16_t*)(void*)p, &e, (uint16_t)desired, 0, __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST);
+            return e;
+        }
+        case 4: {
+            uint32_t e = (uint32_t)expected;
+            __atomic_compare_exchange_n((uint32_t*)(void*)p, &e, (uint32_t)desired, 0, __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST);
+            return e;
+        }
+        default: {
+            uint64_t e = expected;
+            __atomic_compare_exchange_n((uint64_t*)(void*)p, &e, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            return e;
+        }
+    }
+#elif defined(WASM__ATOMICS_MSVC)
+    switch (size) {
+        case 1:
+            return (uint8_t)_InterlockedCompareExchange8((char volatile*)p, (char)desired, (char)expected);
+        case 2:
+            return (uint16_t)_InterlockedCompareExchange16((short volatile*)(void*)p, (short)desired,
+                                                           (short)expected);
+        case 4:
+            return (uint32_t)_InterlockedCompareExchange((long volatile*)(void*)p, (long)desired, (long)expected);
+        default:
+            return (uint64_t)_InterlockedCompareExchange64((__int64 volatile*)(void*)p, (__int64)desired,
+                                                           (__int64)expected);
+    }
+#else
+    uint64_t current = 0;
+    memcpy(&current, p, size);
+    if (current == expected) memcpy(p, &desired, size);
+    return current;
+#endif
+}
+
+WASM_PRIVATE uint64_t wasm__atomic_load(const uint8_t* p, uint32_t size) {
+#if defined(WASM__ATOMICS_GNU)
+    uint64_t raw;
+    switch (size) {
+        case 1:
+            raw = __atomic_load_n(p, __ATOMIC_SEQ_CST);
+            break;
+        case 2:
+            raw = __atomic_load_n((const uint16_t*)(const void*)p, __ATOMIC_SEQ_CST);
+            break;
+        case 4:
+            raw = __atomic_load_n((const uint32_t*)(const void*)p, __ATOMIC_SEQ_CST);
+            break;
+        default:
+            raw = __atomic_load_n((const uint64_t*)(const void*)p, __ATOMIC_SEQ_CST);
+            break;
+    }
+    return wasm__atomic_swap_order(raw, size);
+#else
+    /* A compare-exchange of 0 with 0 reads atomically and leaves the value unchanged. */
+    return wasm__atomic_swap_order(wasm__atomic_cas_raw((uint8_t*)p, size, 0, 0), size);
+#endif
+}
+
+WASM_PRIVATE void wasm__atomic_store(uint8_t* p, uint32_t size, uint64_t value) {
+    uint64_t raw = wasm__atomic_swap_order(value & wasm__atomic_mask(size), size);
+#if defined(WASM__ATOMICS_GNU)
+    switch (size) {
+        case 1:
+            __atomic_store_n(p, (uint8_t)raw, __ATOMIC_SEQ_CST);
+            break;
+        case 2:
+            __atomic_store_n((uint16_t*)(void*)p, (uint16_t)raw, __ATOMIC_SEQ_CST);
+            break;
+        case 4:
+            __atomic_store_n((uint32_t*)(void*)p, (uint32_t)raw, __ATOMIC_SEQ_CST);
+            break;
+        default:
+            __atomic_store_n((uint64_t*)(void*)p, raw, __ATOMIC_SEQ_CST);
+            break;
+    }
+#else
+    uint64_t observed = wasm__atomic_cas_raw(p, size, 0, 0);
+    for (;;) {
+        uint64_t previous = wasm__atomic_cas_raw(p, size, observed, raw);
+        if (previous == observed) break;
+        observed = previous;
+    }
+#endif
+}
+
+WASM_PRIVATE uint64_t wasm__atomic_compare_exchange(uint8_t* p, uint32_t size, uint64_t expected, uint64_t desired) {
+    uint64_t mask = wasm__atomic_mask(size);
+    uint64_t observed = wasm__atomic_cas_raw(p, size, wasm__atomic_swap_order(expected & mask, size),
+                                             wasm__atomic_swap_order(desired & mask, size));
+    return wasm__atomic_swap_order(observed, size);
+}
+
+WASM_PRIVATE uint64_t wasm__atomic_load_u64(const uint64_t* p) {
+#if defined(WASM__ATOMICS_GNU)
+    return __atomic_load_n(p, __ATOMIC_SEQ_CST);
+#else
+    return wasm__atomic_cas_raw((uint8_t*)(uintptr_t)p, 8u, 0, 0);
+#endif
+}
+
+WASM_PRIVATE void wasm__atomic_store_u64(uint64_t* p, uint64_t value) {
+#if defined(WASM__ATOMICS_GNU)
+    __atomic_store_n(p, value, __ATOMIC_SEQ_CST);
+#else
+    uint64_t observed = wasm__atomic_cas_raw((uint8_t*)p, 8u, 0, 0);
+    for (;;) {
+        uint64_t previous = wasm__atomic_cas_raw((uint8_t*)p, 8u, observed, value);
+        if (previous == observed) break;
+        observed = previous;
+    }
+#endif
+}
+
+WASM_PRIVATE void wasm__atomic_fence(void) {
+#if defined(WASM__ATOMICS_GNU)
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#elif defined(WASM__ATOMICS_MSVC)
+    /* Interlocked operations are full barriers. */
+    long volatile barrier = 0;
+    _InterlockedExchange(&barrier, 0);
+#endif
+}
+/* END src/atomics.c */
+
+/* BEGIN src/platform/threads.c */
+
+/* BEGIN src/platform/threads.h */
+#ifndef WASM_PLATFORM_THREADS_H
+#define WASM_PLATFORM_THREADS_H
+
+
+/* Blocks until a notify at p or until timeout_ns elapses (negative waits forever), comparing the value
+   at p with expected first. Returns 0 when woken, 1 when the value differs, 2 on timeout, and -1 when
+   the wait would block but thread support is unavailable. */
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns);
+
+/* Wakes up to count waiters blocked at p and returns how many were woken. */
+WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count);
+
+/* Shared memory storage is reserved once so it never moves while other threads use it. The reservation
+   may be smaller than requested; out_bytes receives its size, which is never below min_bytes. */
+WASM_PRIVATE uint8_t* wasm__platform_shared_reserve(uint64_t min_bytes, uint64_t max_bytes, uint64_t* out_bytes);
+
+/* Makes the first bytes of a reservation usable; committed bytes read as zero until written. */
+WASM_PRIVATE int wasm__platform_shared_commit(uint8_t* base, uint64_t bytes);
+
+WASM_PRIVATE void wasm__platform_shared_release(uint8_t* base, uint64_t reserved_bytes);
+
+/* Serializes growth of shared memories across threads. */
+WASM_PRIVATE void wasm__platform_shared_grow_lock(void);
+
+WASM_PRIVATE void wasm__platform_shared_grow_unlock(void);
+
+#endif /* WASM_PLATFORM_THREADS_H */
+/* END src/platform/threads.h */
+
+
+
+#include <stdlib.h>
+#include <string.h>
+
+#if WASM_ENABLE_PLATFORM && WASM__PLATFORM_POSIX
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+#define WASM__THREADS_POSIX 1
+#elif WASM_ENABLE_PLATFORM && WASM__PLATFORM_WINDOWS
+#define WASM__THREADS_WINDOWS 1
+#endif
+
+#if defined(WASM__THREADS_POSIX) || defined(WASM__THREADS_WINDOWS)
+/* One node per blocked thread, linked in arrival order so notify wakes the oldest waiters first. */
+typedef struct wasm__waiter_t {
+    const uint8_t* address;
+    int notified;
+#if defined(WASM__THREADS_POSIX)
+    pthread_cond_t cond;
+#else
+    CONDITION_VARIABLE cond;
+#endif
+    struct wasm__waiter_t* next;
+} wasm__waiter_t;
+
+static wasm__waiter_t* wasm__waiters_head;
+static wasm__waiter_t* wasm__waiters_tail;
+
+#if defined(WASM__THREADS_POSIX)
+static pthread_mutex_t wasm__waiters_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t wasm__grow_lock = PTHREAD_MUTEX_INITIALIZER;
+#else
+static SRWLOCK wasm__waiters_lock = SRWLOCK_INIT;
+static SRWLOCK wasm__grow_lock = SRWLOCK_INIT;
+#endif
+
+static void wasm__waiters_remove(wasm__waiter_t* waiter) {
+    wasm__waiter_t* prev = NULL;
+    wasm__waiter_t* node = wasm__waiters_head;
+
+    while (node && node != waiter) {
+        prev = node;
+        node = node->next;
+    }
+    if (!node) return;
+    if (prev)
+        prev->next = node->next;
+    else
+        wasm__waiters_head = node->next;
+    if (wasm__waiters_tail == node) wasm__waiters_tail = prev;
+    node->next = NULL;
+}
+
+/* Timeouts beyond about 146 years are treated as infinite so deadline arithmetic cannot overflow. */
+#define WASM__WAIT_FOREVER_NS (INT64_C(1) << 62)
+
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns) {
+    wasm__waiter_t waiter;
+    int forever = timeout_ns < 0 || timeout_ns >= WASM__WAIT_FOREVER_NS;
+    int result = 0;
+#if defined(WASM__THREADS_POSIX)
+    struct timespec deadline;
+
+    if (!forever) {
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += (time_t)(timeout_ns / 1000000000);
+        deadline.tv_nsec += (long)(timeout_ns % 1000000000);
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+    pthread_mutex_lock(&wasm__waiters_lock);
+#else
+    ULONGLONG start = GetTickCount64();
+    ULONGLONG timeout_ms = forever ? 0 : (ULONGLONG)((timeout_ns + 999999) / 1000000);
+
+    AcquireSRWLockExclusive(&wasm__waiters_lock);
+#endif
+
+    if (wasm__atomic_load(p, size) != expected) {
+        result = 1;
+    } else if (!forever && timeout_ns == 0) {
+        result = 2;
+    } else {
+        memset(&waiter, 0, sizeof(waiter));
+        waiter.address = p;
+#if defined(WASM__THREADS_POSIX)
+        pthread_cond_init(&waiter.cond, NULL);
+#else
+        InitializeConditionVariable(&waiter.cond);
+#endif
+        if (wasm__waiters_tail)
+            wasm__waiters_tail->next = &waiter;
+        else
+            wasm__waiters_head = &waiter;
+        wasm__waiters_tail = &waiter;
+
+        while (!waiter.notified) {
+#if defined(WASM__THREADS_POSIX)
+            if (forever) {
+                pthread_cond_wait(&waiter.cond, &wasm__waiters_lock);
+            } else if (pthread_cond_timedwait(&waiter.cond, &wasm__waiters_lock, &deadline) == ETIMEDOUT &&
+                       !waiter.notified) {
+                result = 2;
+                break;
+            }
+#else
+            DWORD wait_ms = INFINITE;
+            if (!forever) {
+                ULONGLONG elapsed = GetTickCount64() - start;
+                if (elapsed >= timeout_ms) {
+                    result = 2;
+                    break;
+                }
+                wait_ms = (DWORD)((timeout_ms - elapsed) > 0xFFFFFFFEu ? 0xFFFFFFFEu : (timeout_ms - elapsed));
+            }
+            SleepConditionVariableSRW(&waiter.cond, &wasm__waiters_lock, wait_ms, 0);
+#endif
+        }
+        if (!waiter.notified) wasm__waiters_remove(&waiter);
+#if defined(WASM__THREADS_POSIX)
+        pthread_cond_destroy(&waiter.cond);
+#endif
+    }
+
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__waiters_lock);
+#else
+    ReleaseSRWLockExclusive(&wasm__waiters_lock);
+#endif
+    return result;
+}
+
+WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count) {
+    wasm__waiter_t* node;
+    uint32_t woken = 0;
+
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_lock(&wasm__waiters_lock);
+#else
+    AcquireSRWLockExclusive(&wasm__waiters_lock);
+#endif
+    node = wasm__waiters_head;
+    while (node && woken < count) {
+        wasm__waiter_t* next = node->next;
+        if (node->address == p) {
+            wasm__waiters_remove(node);
+            node->notified = 1;
+#if defined(WASM__THREADS_POSIX)
+            pthread_cond_signal(&node->cond);
+#else
+            WakeConditionVariable(&node->cond);
+#endif
+            woken++;
+        }
+        node = next;
+    }
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__waiters_lock);
+#else
+    ReleaseSRWLockExclusive(&wasm__waiters_lock);
+#endif
+    return woken;
+}
+
+WASM_PRIVATE void wasm__platform_shared_grow_lock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_lock(&wasm__grow_lock);
+#else
+    AcquireSRWLockExclusive(&wasm__grow_lock);
+#endif
+}
+
+WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__grow_lock);
+#else
+    ReleaseSRWLockExclusive(&wasm__grow_lock);
+#endif
+}
+
+#else
+
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns) {
+    if (wasm__atomic_load(p, size) != expected) return 1;
+    return timeout_ns == 0 ? 2 : -1;
+}
+
+WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count) {
+    (void)p;
+    (void)count;
+    return 0;
+}
+
+WASM_PRIVATE void wasm__platform_shared_grow_lock(void) {
+}
+
+WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
+}
+
+#endif
+
+/* Reservations halve from max_bytes until one succeeds, since growth may fail before the declared maximum.
+   Large calloc requests are lazily zero-filled mappings on POSIX hosts; Windows reserves address space and
+   commits it as memory grows. */
+WASM_PRIVATE uint8_t* wasm__platform_shared_reserve(uint64_t min_bytes, uint64_t max_bytes, uint64_t* out_bytes) {
+    uint64_t bytes = max_bytes;
+
+    if (bytes > (uint64_t)SIZE_MAX) bytes = (uint64_t)SIZE_MAX;
+    for (;;) {
+        void* base = NULL;
+        uint64_t request = bytes ? bytes : 1u;
+#if defined(WASM__THREADS_WINDOWS)
+        base = VirtualAlloc(NULL, (SIZE_T)request, MEM_RESERVE, PAGE_NOACCESS);
+#else
+        base = WASM_CALLOC(1u, (size_t)request);
+#endif
+        if (base) {
+            *out_bytes = bytes;
+            return (uint8_t*)base;
+        }
+        if (bytes / 2u < min_bytes || bytes == 0) return NULL;
+        bytes /= 2u;
+    }
+}
+
+WASM_PRIVATE int wasm__platform_shared_commit(uint8_t* base, uint64_t bytes) {
+#if defined(WASM__THREADS_WINDOWS)
+    if (bytes == 0) return 1;
+    return VirtualAlloc(base, (SIZE_T)bytes, MEM_COMMIT, PAGE_READWRITE) != NULL;
+#else
+    (void)base;
+    (void)bytes;
+    return 1;
+#endif
+}
+
+WASM_PRIVATE void wasm__platform_shared_release(uint8_t* base, uint64_t reserved_bytes) {
+    if (!base) return;
+#if defined(WASM__THREADS_WINDOWS)
+    (void)reserved_bytes;
+    VirtualFree(base, 0, MEM_RELEASE);
+#else
+    (void)reserved_bytes;
+    WASM_FREE(base);
+#endif
+}
+/* END src/platform/threads.c */
 
 /* BEGIN src/reader.c */
 
@@ -3615,6 +4112,9 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                                  uint32_t memory_index,
                                                  const wasm_memory_t* memory);
 
+/* Current page count; shared memories read it atomically since other threads may grow them. */
+WASM_PRIVATE uint64_t wasm__memory_pages(const wasm_memory_t* memory);
+
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory);
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size);
@@ -4148,6 +4648,7 @@ WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_mem
     actual_memory = wasm__memory_actual_const(actual_memory);
     if (!actual_memory) return 0;
     if (actual_memory->is_64 != expected_memory->is_64) return 0;
+    if ((actual_memory->is_shared != 0) != (expected_memory->is_shared != 0)) return 0;
     if (wasm__memory_page_size(actual_memory) != wasm__memory_page_size(expected_memory)) return 0;
     return wasm__limits_match_import(actual_memory->pages,
                                      actual_memory->max_pages,
@@ -5954,6 +6455,8 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod);
 
 
 
+
+
 #include <string.h>
 
 WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory) {
@@ -5974,7 +6477,12 @@ WASM_PRIVATE void wasm__free_table(wasm_table_t* table) {
 }
 
 WASM_PRIVATE void wasm__free_memory(wasm_memory_t* memory) {
-    if (!memory->is_import) WASM_FREE(memory->data);
+    if (!memory->is_import) {
+        if (memory->is_shared)
+            wasm__platform_shared_release(memory->data, memory->reserved_bytes);
+        else
+            WASM_FREE(memory->data);
+    }
     memset(memory, 0, sizeof(*memory));
 }
 
@@ -6077,8 +6585,13 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
     return WASM_OK;
 }
 
+WASM_PRIVATE uint64_t wasm__memory_pages(const wasm_memory_t* memory) {
+    if (!memory) return 0;
+    return memory->is_shared ? wasm__atomic_load_u64(&memory->pages) : memory->pages;
+}
+
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
-    return memory ? memory->pages * (uint64_t)wasm__memory_page_size(memory) : 0;
+    return memory ? wasm__memory_pages(memory) * (uint64_t)wasm__memory_page_size(memory) : 0;
 }
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size) {
@@ -6107,8 +6620,22 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
 
     memory = wasm__memory_actual(memory);
     if (!memory) return WASM_ERR_MALFORMED;
-    if (memory->pages == 0) return WASM_OK;
     if (memory->data) return WASM_OK;
+    if (memory->is_shared) {
+        uint64_t max_bytes = memory->max_pages * (uint64_t)wasm__memory_page_size(memory);
+        uint64_t min_bytes = wasm__memory_byte_size(memory);
+        if (memory->max_pages != 0 && max_bytes / memory->max_pages != wasm__memory_page_size(memory))
+            max_bytes = UINT64_MAX;
+        memory->data = wasm__platform_shared_reserve(min_bytes, max_bytes, &memory->reserved_bytes);
+        if (!memory->data) return WASM_ERR_OOM;
+        if (!wasm__platform_shared_commit(memory->data, min_bytes)) {
+            wasm__platform_shared_release(memory->data, memory->reserved_bytes);
+            memory->data = NULL;
+            return WASM_ERR_OOM;
+        }
+        return WASM_OK;
+    }
+    if (memory->pages == 0) return WASM_OK;
     if (!wasm__memory_byte_size_fits_host(memory, &byte_size)) return WASM_ERR_OOM;
 
     memory->data = (uint8_t*)WASM_CALLOC(1u, byte_size);
@@ -6249,6 +6776,10 @@ WASM_PRIVATE uint32_t wasm__simd_memory_align_log2(uint32_t subop);
 WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop);
 
 WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg);
+
+/* Width and value type of the memory access made by a 0xFE atomic subop; returns 0 for atomic.fence
+   and unknown subops. */
+WASM_PRIVATE int wasm__atomic_access(uint32_t subop, uint32_t* out_size_log2, wasm_valtype_t* out_type);
 
 WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
                                                       wasm__reader_t* r,
@@ -6561,6 +7092,15 @@ WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0xFD:
             wasm__skip_simd_immediates(r);
             break;
+        case 0xFE: {
+            uint32_t subop = wasm__read_leb128_u32(r);
+            wasm__memarg_t memarg;
+            if (subop == 0x03)
+                wasm__read_u8(r);
+            else if (wasm__read_memarg(r, &memarg) != WASM_OK)
+                r->malformed = 1;
+            break;
+        }
         case 0x19:
         default:
             break;
@@ -6693,6 +7233,21 @@ static void wasm__skip_simd_immediates(wasm__reader_t* r) {
         default:
             break;
     }
+}
+
+WASM_PRIVATE int wasm__atomic_access(uint32_t subop, uint32_t* out_size_log2, wasm_valtype_t* out_type) {
+    static const uint8_t size_log2[7] = { 2, 3, 0, 1, 0, 1, 2 };
+
+    if (subop == 0x00 || subop == 0x01 || subop == 0x02) {
+        *out_size_log2 = (subop == 0x02) ? 3u : 2u;
+        *out_type = (subop == 0x02) ? WASM_TYPE_I64 : WASM_TYPE_I32;
+        return 1;
+    }
+    if (subop < 0x10 || subop > 0x4E) return 0;
+    subop = (subop - 0x10u) % 7u;
+    *out_size_log2 = size_log2[subop];
+    *out_type = (subop == 0 || subop == 2 || subop == 3) ? WASM_TYPE_I32 : WASM_TYPE_I64;
+    return 1;
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg) {
@@ -10980,7 +11535,10 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     int has_custom_page_size = (flags & 0x08u) != 0;
 
     if ((flags & ~0x0Fu) != 0) return WASM_ERR_MALFORMED;
-    if (is_shared) return WASM_ERR_MALFORMED;
+    if (is_shared) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_THREADS);
+        if (err != WASM_OK) return err;
+    }
     if (is_64) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MEMORY64);
         if (err != WASM_OK) return err;
@@ -10992,6 +11550,7 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
 
     memset(memory, 0, sizeof(*memory));
     memory->is_64 = is_64;
+    memory->is_shared = is_shared;
     memory->pages = wasm__read_leb128_u64(r);
     if (has_max) memory->max_pages = wasm__read_leb128_u64(r);
     if (has_custom_page_size) {
@@ -11008,6 +11567,8 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     if (!has_max) memory->max_pages = wasm__memory_page_limit(memory);
 
     if (r->malformed) return WASM_ERR_MALFORMED;
+    if (is_shared && !has_max)
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "shared memory must have maximum");
     return WASM_OK;
 }
 
@@ -11031,6 +11592,11 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
         if (init_flags != 0x00u) return WASM_ERR_MALFORMED;
         err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
         if (err != WASM_OK) return err;
+        flags = wasm__read_u8(r);
+    } else if (leading == 0x70u) {
+        table->reftype = WASM_TYPE_FUNCREF;
+        table->reftype_info.type = WASM_TYPE_FUNCREF;
+        table->reftype_info.nullable = 1;
         flags = wasm__read_u8(r);
     } else {
         r->ptr--;
@@ -11150,9 +11716,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         wasm_table_t* table;
         wasm_table_import_t* timp;
         wasm_table_t* bound_table;
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
-        if (err != WASM_OK) return err;
+        wasm_error_t err;
         if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
+        if (mod->num_tables > 1) {
+            err = wasm__require_multi_table(mod);
+            if (err != WASM_OK) return err;
+        }
         table = &mod->tables[table_index];
         err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
@@ -11247,6 +11816,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         memory->max_pages = bound_memory->max_pages;
         memory->is_64 = bound_memory->is_64;
         memory->page_size = bound_memory->page_size;
+        memory->is_shared = bound_memory->is_shared;
         memory->data = bound_memory->data;
         info->index = memory_index;
     } else if (kind == 0x03) {
@@ -11512,12 +12082,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm
 WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_count(r), i, base;
 
-    if (count > 0) {
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+    if (wasm__append_tables(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
+    if (mod->num_tables > 1) {
+        wasm_error_t err = wasm__require_multi_table(mod);
         if (err != WASM_OK) return err;
     }
-
-    if (wasm__append_tables(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     for (i = 0; i < count; i++) {
         wasm_table_t* table = &mod->tables[base + i];
         wasm_error_t err = wasm__read_table_type(mod, r, table);
@@ -14745,6 +15314,84 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v
 }
 /* END src/validate/numeric.c */
 
+/* BEGIN src/validate/atomic.c */
+
+/* BEGIN src/validate/atomic.h */
+#ifndef WASM_SRC_VALIDATE_ATOMIC_H
+#define WASM_SRC_VALIDATE_ATOMIC_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_atomic(wasm__validator_t* v, const uint8_t* at);
+
+#endif /* WASM_SRC_VALIDATE_ATOMIC_H */
+/* END src/validate/atomic.h */
+
+
+
+
+
+
+WASM_PRIVATE wasm_error_t wasm__validator_validate_atomic(wasm__validator_t* v, const uint8_t* at) {
+    uint32_t subop = wasm__read_leb128_u32(&v->r);
+    uint32_t size_log2;
+    wasm_valtype_t type;
+    wasm_valtype_t index_type;
+    wasm__memarg_t memarg;
+    wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_THREADS);
+
+    if (err != WASM_OK) return err;
+    if (subop == 0x03) {
+        if (wasm__read_u8(&v->r) != 0x00) return wasm__validator_error(v, at, "%s", "malformed atomic.fence");
+        return WASM_OK;
+    }
+    if (!wasm__atomic_access(subop, &size_log2, &type))
+        return wasm__validator_error(v, at, "unknown prefixed opcode 0xFE 0x%X", (unsigned)subop);
+
+    err = wasm__validator_read_memarg(v, at, size_log2, &memarg);
+    if (err != WASM_OK) return err;
+    if (memarg.align_log2 != size_log2)
+        return wasm__validator_error(v, at, "%s", "atomic alignment must be natural");
+    index_type = wasm__memory_index_type(&v->mod->memories[memarg.memory_index]);
+
+    if (subop == 0x00) {
+        err = wasm__validator_pop_expect(v, at, WASM_TYPE_I32);
+        if (err != WASM_OK) return err;
+        err = wasm__validator_pop_expect(v, at, index_type);
+        if (err != WASM_OK) return err;
+        return wasm__validator_push(v, at, WASM_TYPE_I32);
+    }
+    if (subop == 0x01 || subop == 0x02) {
+        err = wasm__validator_pop_expect(v, at, WASM_TYPE_I64);
+        if (err != WASM_OK) return err;
+        err = wasm__validator_pop_expect(v, at, type);
+        if (err != WASM_OK) return err;
+        err = wasm__validator_pop_expect(v, at, index_type);
+        if (err != WASM_OK) return err;
+        return wasm__validator_push(v, at, WASM_TYPE_I32);
+    }
+    if (subop <= 0x16) {
+        err = wasm__validator_pop_expect(v, at, index_type);
+        if (err != WASM_OK) return err;
+        return wasm__validator_push(v, at, type);
+    }
+    if (subop <= 0x1D) {
+        err = wasm__validator_pop_expect(v, at, type);
+        if (err != WASM_OK) return err;
+        return wasm__validator_pop_expect(v, at, index_type);
+    }
+    if (subop >= 0x48) {
+        err = wasm__validator_pop_expect(v, at, type);
+        if (err != WASM_OK) return err;
+    }
+    err = wasm__validator_pop_expect(v, at, type);
+    if (err != WASM_OK) return err;
+    err = wasm__validator_pop_expect(v, at, index_type);
+    if (err != WASM_OK) return err;
+    return wasm__validator_push(v, at, type);
+}
+/* END src/validate/atomic.c */
+
 /* BEGIN src/validate/function.c */
 
 /* BEGIN src/validate/function.h */
@@ -14786,6 +15433,7 @@ WASM_PRIVATE wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,
 
 #endif /* WASM_SRC_EXEC_CONTROL_H */
 /* END src/exec/control.h */
+
 
 
 
@@ -16173,6 +16821,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 break;
             case 0xFD:
                 err = wasm__validator_validate_simd(&v, at);
+                if (err != WASM_OK) return err;
+                break;
+            case 0xFE:
+                err = wasm__validator_validate_atomic(&v, at);
                 if (err != WASM_OK) return err;
                 break;
             default:
@@ -20499,9 +21151,159 @@ cleanup:
 }
 /* END src/exec/numeric.c */
 
+/* BEGIN src/exec/atomic.c */
+
+/* BEGIN src/exec/atomic.h */
+#ifndef WASM_SRC_EXEC_ATOMIC_H
+#define WASM_SRC_EXEC_ATOMIC_H
+
+
+WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame_t* cf);
+
+#endif /* WASM_SRC_EXEC_ATOMIC_H */
+/* END src/exec/atomic.h */
+
+
+
+
+
+
+
+
+#include <stdio.h>
+
+static uint64_t wasm__atomic_operand(wasm_value_t value, wasm_valtype_t type) {
+    return type == WASM_TYPE_I32 ? (uint64_t)(uint32_t)value.of.i32 : (uint64_t)value.of.i64;
+}
+
+static wasm_value_t wasm__atomic_result(uint64_t value, wasm_valtype_t type) {
+    return type == WASM_TYPE_I32 ? wasm_i32((int32_t)(uint32_t)value) : wasm_i64((int64_t)value);
+}
+
+/* Applies a 0x1E-0x47 read-modify-write subop; the group of seven selects add, sub, and, or, xor, xchg. */
+static uint64_t wasm__atomic_rmw(uint8_t* p, uint32_t size, uint32_t subop, uint64_t operand) {
+    uint32_t group = (subop - 0x1Eu) / 7u;
+    uint64_t old = wasm__atomic_load(p, size);
+
+    for (;;) {
+        uint64_t desired;
+        uint64_t observed;
+
+        switch (group) {
+            case 0:
+                desired = old + operand;
+                break;
+            case 1:
+                desired = old - operand;
+                break;
+            case 2:
+                desired = old & operand;
+                break;
+            case 3:
+                desired = old | operand;
+                break;
+            case 4:
+                desired = old ^ operand;
+                break;
+            default:
+                desired = operand;
+                break;
+        }
+        observed = wasm__atomic_compare_exchange(p, size, old, desired);
+        if (observed == old) return old;
+        old = observed;
+    }
+}
+
+WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame_t* cf) {
+    wasm_runtime_t* rt = mod->rt;
+    wasm_error_t err = WASM_OK;
+    uint32_t subop = wasm__read_leb128_u32(&cf->r);
+    uint32_t size_log2;
+    uint32_t size;
+    wasm_valtype_t type;
+    wasm__memarg_t memarg;
+    wasm_value_t operand = wasm_i64(0);
+    wasm_value_t replacement = wasm_i64(0);
+    wasm_value_t base;
+    wasm_memory_t* memory;
+    uint64_t addr;
+    uint8_t* p;
+
+    if (subop == 0x03) {
+        wasm__read_u8(&cf->r);
+        wasm__atomic_fence();
+        return WASM_OK;
+    }
+    if (!wasm__atomic_access(subop, &size_log2, &type)) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFE 0x%X", (unsigned)subop);
+        return WASM_ERR_MALFORMED;
+    }
+    err = wasm__read_memarg(&cf->r, &memarg);
+    if (err != WASM_OK) return err;
+    size = 1u << size_log2;
+
+    if (subop == 0x01 || subop == 0x02) {
+        replacement = WASM__POP(rt);
+        operand = WASM__POP(rt);
+    } else if (subop >= 0x48) {
+        replacement = WASM__POP(rt);
+        operand = WASM__POP(rt);
+    } else if (subop == 0x00 || subop >= 0x17) {
+        operand = WASM__POP(rt);
+    }
+    base = WASM__POP(rt);
+
+    memory = wasm__memory_at(mod, memarg.memory_index);
+    if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
+    if (!wasm__memory_effective_addr(memory, &base, memarg.offset, &addr) ||
+        !wasm__memory_access_in_bounds(addr, size, wasm__memory_byte_size(memory)))
+        WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+    if ((addr & (size - 1u)) != 0) {
+        WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "unaligned atomic");
+        WASM__TRAP(WASM_ERR_TRAP);
+    }
+    p = memory->data + addr;
+
+    if (subop == 0x00) {
+        uint32_t count = (uint32_t)operand.of.i32;
+        uint32_t woken = memory->is_shared ? wasm__platform_atomic_notify(p, count) : 0u;
+        WASM__PUSH(rt, wasm_i32((int32_t)woken));
+    } else if (subop == 0x01 || subop == 0x02) {
+        int result;
+        if (!memory->is_shared) {
+            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "expected shared memory");
+            WASM__TRAP(WASM_ERR_TRAP);
+        }
+        result = wasm__platform_atomic_wait(p, size, wasm__atomic_operand(operand, type), replacement.of.i64);
+        if (result < 0) {
+            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "atomic wait would block without thread support");
+            WASM__TRAP(WASM_ERR_TRAP);
+        }
+        WASM__PUSH(rt, wasm_i32(result));
+    } else if (subop <= 0x16) {
+        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_load(p, size), type));
+    } else if (subop <= 0x1D) {
+        wasm__atomic_store(p, size, wasm__atomic_operand(operand, type));
+    } else if (subop <= 0x47) {
+        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_rmw(p, size, subop, wasm__atomic_operand(operand, type)), type));
+    } else {
+        uint64_t mask = size == 8u ? UINT64_MAX : ((UINT64_C(1) << (size * 8u)) - 1u);
+        uint64_t expected = wasm__atomic_operand(operand, type) & mask;
+        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_compare_exchange(p, size, expected,
+                                                                         wasm__atomic_operand(replacement, type)),
+                                           type));
+    }
+
+cleanup:
+    return err;
+}
+/* END src/exec/atomic.c */
+
 /* BEGIN src/exec/interpreter.c */
 
 #include <stdio.h>
+
 
 
 
@@ -21303,6 +22105,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 if (err != WASM_OK) goto cleanup;
                 break;
 
+            case 0xFE:
+                err = wasm__exec_atomic(mod, cf);
+                if (err != WASM_OK) goto cleanup;
+                break;
+
             /* Parametric */
             case 0x1A: {
                 wasm_value_t tmp = WASM__POP(rt);
@@ -21614,8 +22421,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                 wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
 
                 if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                WASM__PUSH(rt, memory->is_64 ? wasm_i64((int64_t)memory->pages)
-                                             : wasm_i32((int32_t)memory->pages));
+                WASM__PUSH(rt, memory->is_64 ? wasm_i64((int64_t)wasm__memory_pages(memory))
+                                             : wasm_i32((int32_t)wasm__memory_pages(memory)));
                 break;
             }
             case 0x40: {
@@ -26545,6 +27352,8 @@ wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
 
 
 
+
+
 #include <string.h>
 #include <stdio.h>
 
@@ -26675,6 +27484,25 @@ uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index) {
     return memory ? wasm__memory_byte_size(memory) : 0;
 }
 
+/* Shared memories grow in place within their reservation, so threads holding data pointers stay valid. */
+static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pages) {
+    uint64_t page_size = wasm__memory_page_size(memory);
+    uint64_t old;
+    uint64_t np;
+    int64_t result = -1;
+
+    wasm__platform_shared_grow_lock();
+    old = memory->pages;
+    np = old + delta_pages;
+    if (delta_pages <= UINT64_MAX - old && np <= memory->max_pages && np <= memory->reserved_bytes / page_size &&
+        wasm__platform_shared_commit(memory->data, np * page_size)) {
+        wasm__atomic_store_u64(&memory->pages, np);
+        result = (int64_t)old;
+    }
+    wasm__platform_shared_grow_unlock();
+    return result;
+}
+
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
     wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
     uint64_t old, np;
@@ -26683,6 +27511,7 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     uint8_t* nd;
 
     if (!memory) return -1;
+    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
 
     old = memory->pages;
     if (delta_pages > UINT64_MAX - old) return -1;
@@ -26993,6 +27822,29 @@ uint32_t wasm_tag_count(wasm_module_t* mod) {
 const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
     if (!mod || tag_idx >= mod->num_tags) return NULL;
     return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
+}
+
+wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
+    wasm_memory_t* memory;
+
+    if (pages > max_pages) return NULL;
+    memory = (wasm_memory_t*)WASM_CALLOC(1u, sizeof(*memory));
+    if (!memory) return NULL;
+    memory->pages = pages;
+    memory->max_pages = max_pages;
+    memory->is_64 = is_64 != 0;
+    memory->is_shared = 1;
+    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory) != WASM_OK) {
+        WASM_FREE(memory);
+        return NULL;
+    }
+    return memory;
+}
+
+void wasm_shared_memory_free(wasm_memory_t* memory) {
+    if (!memory) return;
+    wasm__free_memory(memory);
+    WASM_FREE(memory);
 }
 /* END src/memory.c */
 

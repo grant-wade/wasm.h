@@ -88,7 +88,10 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     int has_custom_page_size = (flags & 0x08u) != 0;
 
     if ((flags & ~0x0Fu) != 0) return WASM_ERR_MALFORMED;
-    if (is_shared) return WASM_ERR_MALFORMED;
+    if (is_shared) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_THREADS);
+        if (err != WASM_OK) return err;
+    }
     if (is_64) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MEMORY64);
         if (err != WASM_OK) return err;
@@ -100,6 +103,7 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
 
     memset(memory, 0, sizeof(*memory));
     memory->is_64 = is_64;
+    memory->is_shared = is_shared;
     memory->pages = wasm__read_leb128_u64(r);
     if (has_max) memory->max_pages = wasm__read_leb128_u64(r);
     if (has_custom_page_size) {
@@ -116,6 +120,8 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     if (!has_max) memory->max_pages = wasm__memory_page_limit(memory);
 
     if (r->malformed) return WASM_ERR_MALFORMED;
+    if (is_shared && !has_max)
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "shared memory must have maximum");
     return WASM_OK;
 }
 
@@ -139,6 +145,11 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
         if (init_flags != 0x00u) return WASM_ERR_MALFORMED;
         err = wasm__read_reftype(mod, r, &table->reftype, &table->reftype_info);
         if (err != WASM_OK) return err;
+        flags = wasm__read_u8(r);
+    } else if (leading == 0x70u) {
+        table->reftype = WASM_TYPE_FUNCREF;
+        table->reftype_info.type = WASM_TYPE_FUNCREF;
+        table->reftype_info.nullable = 1;
         flags = wasm__read_u8(r);
     } else {
         r->ptr--;
@@ -258,9 +269,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         wasm_table_t* table;
         wasm_table_import_t* timp;
         wasm_table_t* bound_table;
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
-        if (err != WASM_OK) return err;
+        wasm_error_t err;
         if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
+        if (mod->num_tables > 1) {
+            err = wasm__require_multi_table(mod);
+            if (err != WASM_OK) return err;
+        }
         table = &mod->tables[table_index];
         err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
@@ -355,6 +369,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         memory->max_pages = bound_memory->max_pages;
         memory->is_64 = bound_memory->is_64;
         memory->page_size = bound_memory->page_size;
+        memory->is_shared = bound_memory->is_shared;
         memory->data = bound_memory->data;
         info->index = memory_index;
     } else if (kind == 0x03) {
@@ -620,12 +635,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_function_section(wasm_module_t* mod, wasm
 WASM_PRIVATE wasm_error_t wasm__decode_table_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_count(r), i, base;
 
-    if (count > 0) {
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
+    if (wasm__append_tables(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
+    if (mod->num_tables > 1) {
+        wasm_error_t err = wasm__require_multi_table(mod);
         if (err != WASM_OK) return err;
     }
-
-    if (wasm__append_tables(mod, count, &base) != WASM_OK) return WASM_ERR_OOM;
     for (i = 0; i < count; i++) {
         wasm_table_t* table = &mod->tables[base + i];
         wasm_error_t err = wasm__read_table_type(mod, r, table);

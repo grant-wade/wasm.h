@@ -41,6 +41,10 @@ WASM_PRIVATE uint32_t wasm__simd_lane_limit(uint32_t subop);
 
 WASM_PRIVATE wasm_error_t wasm__read_memarg(wasm__reader_t* r, wasm__memarg_t* out_memarg);
 
+/* Width and value type of the memory access made by a 0xFE atomic subop; returns 0 for atomic.fence
+   and unknown subops. */
+WASM_PRIVATE int wasm__atomic_access(uint32_t subop, uint32_t* out_size_log2, wasm_valtype_t* out_type);
+
 WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
                                                       wasm__reader_t* r,
                                                       wasm_valtype_t* out_type,

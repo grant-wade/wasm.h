@@ -6,6 +6,8 @@
 #include "types/references.h"
 #include "runtime.h"
 #include "internal/alloc.h"
+#include "atomics.h"
+#include "platform/threads.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -136,6 +138,25 @@ uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index) {
     return memory ? wasm__memory_byte_size(memory) : 0;
 }
 
+/* Shared memories grow in place within their reservation, so threads holding data pointers stay valid. */
+static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pages) {
+    uint64_t page_size = wasm__memory_page_size(memory);
+    uint64_t old;
+    uint64_t np;
+    int64_t result = -1;
+
+    wasm__platform_shared_grow_lock();
+    old = memory->pages;
+    np = old + delta_pages;
+    if (delta_pages <= UINT64_MAX - old && np <= memory->max_pages && np <= memory->reserved_bytes / page_size &&
+        wasm__platform_shared_commit(memory->data, np * page_size)) {
+        wasm__atomic_store_u64(&memory->pages, np);
+        result = (int64_t)old;
+    }
+    wasm__platform_shared_grow_unlock();
+    return result;
+}
+
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
     wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
     uint64_t old, np;
@@ -144,6 +165,7 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     uint8_t* nd;
 
     if (!memory) return -1;
+    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
 
     old = memory->pages;
     if (delta_pages > UINT64_MAX - old) return -1;
@@ -454,4 +476,27 @@ uint32_t wasm_tag_count(wasm_module_t* mod) {
 const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
     if (!mod || tag_idx >= mod->num_tags) return NULL;
     return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
+}
+
+wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
+    wasm_memory_t* memory;
+
+    if (pages > max_pages) return NULL;
+    memory = (wasm_memory_t*)WASM_CALLOC(1u, sizeof(*memory));
+    if (!memory) return NULL;
+    memory->pages = pages;
+    memory->max_pages = max_pages;
+    memory->is_64 = is_64 != 0;
+    memory->is_shared = 1;
+    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory) != WASM_OK) {
+        WASM_FREE(memory);
+        return NULL;
+    }
+    return memory;
+}
+
+void wasm_shared_memory_free(wasm_memory_t* memory) {
+    if (!memory) return;
+    wasm__free_memory(memory);
+    WASM_FREE(memory);
 }

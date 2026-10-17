@@ -192,6 +192,7 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Wide Arithmetic | Implemented, opt-in (`WASM_FEATURE_WIDE_ARITHMETIC`) |
 | Custom Page Sizes | Implemented, opt-in (`WASM_FEATURE_CUSTOM_PAGE_SIZES`) |
 | Compact Import Section | Implemented, opt-in (`WASM_FEATURE_COMPACT_IMPORTS`) |
+| Threads | Implemented, opt-in (`WASM_FEATURE_THREADS`); see [Threads](docs/EMBEDDING.md#threads) |
 | Extended Name Section | Not applicable: name sections are ignored, so malformed ones never reject a module |
 | Branch Hinting | Not implemented |
 

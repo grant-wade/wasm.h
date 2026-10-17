@@ -6,6 +6,8 @@
 #include "runtime.h"
 #include "internal/config.h"
 #include "internal/alloc.h"
+#include "atomics.h"
+#include "platform/threads.h"
 #include <string.h>
 
 WASM_PRIVATE wasm_memory_t* wasm__memory_actual(wasm_memory_t* memory) {
@@ -26,7 +28,12 @@ WASM_PRIVATE void wasm__free_table(wasm_table_t* table) {
 }
 
 WASM_PRIVATE void wasm__free_memory(wasm_memory_t* memory) {
-    if (!memory->is_import) WASM_FREE(memory->data);
+    if (!memory->is_import) {
+        if (memory->is_shared)
+            wasm__platform_shared_release(memory->data, memory->reserved_bytes);
+        else
+            WASM_FREE(memory->data);
+    }
     memset(memory, 0, sizeof(*memory));
 }
 
@@ -129,8 +136,13 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
     return WASM_OK;
 }
 
+WASM_PRIVATE uint64_t wasm__memory_pages(const wasm_memory_t* memory) {
+    if (!memory) return 0;
+    return memory->is_shared ? wasm__atomic_load_u64(&memory->pages) : memory->pages;
+}
+
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
-    return memory ? memory->pages * (uint64_t)wasm__memory_page_size(memory) : 0;
+    return memory ? wasm__memory_pages(memory) * (uint64_t)wasm__memory_page_size(memory) : 0;
 }
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size) {
@@ -159,8 +171,22 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
 
     memory = wasm__memory_actual(memory);
     if (!memory) return WASM_ERR_MALFORMED;
-    if (memory->pages == 0) return WASM_OK;
     if (memory->data) return WASM_OK;
+    if (memory->is_shared) {
+        uint64_t max_bytes = memory->max_pages * (uint64_t)wasm__memory_page_size(memory);
+        uint64_t min_bytes = wasm__memory_byte_size(memory);
+        if (memory->max_pages != 0 && max_bytes / memory->max_pages != wasm__memory_page_size(memory))
+            max_bytes = UINT64_MAX;
+        memory->data = wasm__platform_shared_reserve(min_bytes, max_bytes, &memory->reserved_bytes);
+        if (!memory->data) return WASM_ERR_OOM;
+        if (!wasm__platform_shared_commit(memory->data, min_bytes)) {
+            wasm__platform_shared_release(memory->data, memory->reserved_bytes);
+            memory->data = NULL;
+            return WASM_ERR_OOM;
+        }
+        return WASM_OK;
+    }
+    if (memory->pages == 0) return WASM_OK;
     if (!wasm__memory_byte_size_fits_host(memory, &byte_size)) return WASM_ERR_OOM;
 
     memory->data = (uint8_t*)WASM_CALLOC(1u, byte_size);

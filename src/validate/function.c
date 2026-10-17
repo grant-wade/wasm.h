@@ -16,6 +16,7 @@
 #include "simd.h"
 #include "stack.h"
 #include "../values.h"
+#include "atomic.h"
 
 static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
@@ -1390,6 +1391,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 break;
             case 0xFD:
                 err = wasm__validator_validate_simd(&v, at);
+                if (err != WASM_OK) return err;
+                break;
+            case 0xFE:
+                err = wasm__validator_validate_atomic(&v, at);
                 if (err != WASM_OK) return err;
                 break;
             default:

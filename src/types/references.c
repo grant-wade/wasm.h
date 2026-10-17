@@ -506,6 +506,7 @@ WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_mem
     actual_memory = wasm__memory_actual_const(actual_memory);
     if (!actual_memory) return 0;
     if (actual_memory->is_64 != expected_memory->is_64) return 0;
+    if ((actual_memory->is_shared != 0) != (expected_memory->is_shared != 0)) return 0;
     if (wasm__memory_page_size(actual_memory) != wasm__memory_page_size(expected_memory)) return 0;
     return wasm__limits_match_import(actual_memory->pages,
                                      actual_memory->max_pages,

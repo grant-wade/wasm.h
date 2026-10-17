@@ -3340,6 +3340,33 @@ cleanup:
     return ok;
 }
 
+/* Proposal suites written before later features were standardized turn them off with "-name" entries in
+   the wasm-tools feature list; the runtime gets the same restriction. */
+static void spec_disable_runtime_features(wasm_runtime_t* rt, const char* features) {
+    static const struct {
+        const char* name;
+        uint32_t flag;
+    } names[] = {
+        { "multi-memory", WASM_FEATURE_MULTI_MEMORY },
+        { "reference-types", WASM_FEATURE_REFERENCE_TYPES },
+    };
+    const char* entry = features;
+
+    while (entry && *entry) {
+        const char* end = strchr(entry, ',');
+        size_t len = end ? (size_t)(end - entry) : strlen(entry);
+        size_t i;
+
+        if (len > 1 && entry[0] == '-') {
+            for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                if (strlen(names[i].name) == len - 1 && strncmp(entry + 1, names[i].name, len - 1) == 0)
+                    wasm_disable_feature(rt, names[i].flag);
+            }
+        }
+        entry = end ? end + 1 : NULL;
+    }
+}
+
 static void spec_print_usage(const char* argv0) {
     fprintf(stderr,
             "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> [conversion.status [wasm-tools-features]]\n",
@@ -3381,7 +3408,10 @@ int main(int argc, char** argv) {
         spec_harness_destroy(&harness);
         return 1;
     }
-    if (argc == 6) harness.wasm_tools_features = argv[5];
+    if (argc == 6) {
+        harness.wasm_tools_features = argv[5];
+        spec_disable_runtime_features(&harness.runtime, argv[5]);
+    }
 
     if (spec_run_file(&harness)) exit_code = 0;
 

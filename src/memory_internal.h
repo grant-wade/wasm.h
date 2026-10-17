@@ -38,6 +38,9 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                                  uint32_t memory_index,
                                                  const wasm_memory_t* memory);
 
+/* Current page count; shared memories read it atomically since other threads may grow them. */
+WASM_PRIVATE uint64_t wasm__memory_pages(const wasm_memory_t* memory);
+
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory);
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size);

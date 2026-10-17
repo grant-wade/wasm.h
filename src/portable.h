@@ -50,4 +50,7 @@ WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t fla
 
 WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
 
+/* A single funcref table is MVP; further tables need reference types. */
+WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod);
+
 #endif /* WASM_PORTABLE_H */
