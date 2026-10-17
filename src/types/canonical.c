@@ -87,7 +87,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
 
     if (src->num_params > 0) {
         dst->params = (wasm_valtype_t*)wasm__malloc_array(src->num_params, sizeof(wasm_valtype_t));
-        dst->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_params, sizeof(wasm_reftype_t));
+        if (dst->params) dst->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_params, sizeof(wasm_reftype_t));
         if (!dst->params || !dst->param_reftypes) {
             wasm__free_functype(dst);
             return WASM_ERR_OOM;
@@ -102,7 +102,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
 
     if (src->num_results > 0) {
         dst->results = (wasm_valtype_t*)wasm__malloc_array(src->num_results, sizeof(wasm_valtype_t));
-        dst->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_results, sizeof(wasm_reftype_t));
+        if (dst->results) dst->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_results, sizeof(wasm_reftype_t));
         if (!dst->results || !dst->result_reftypes) {
             wasm__free_functype(dst);
             return WASM_ERR_OOM;

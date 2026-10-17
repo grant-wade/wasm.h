@@ -150,7 +150,8 @@ static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pa
     np = old + delta_pages;
     if (delta_pages <= UINT64_MAX - old && np <= memory->max_pages && np <= memory->reserved_bytes / page_size &&
         wasm__platform_shared_commit(memory->data, np * page_size)) {
-        wasm__atomic_store_u64(&memory->pages, np);
+        memory->pages = np;
+        wasm__atomic_store_size(&memory->shared_size, (size_t)(np * page_size));
         result = (int64_t)old;
     }
     wasm__platform_shared_grow_unlock();

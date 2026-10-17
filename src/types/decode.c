@@ -58,7 +58,7 @@ static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r,
     ft->num_params = wasm__read_count(r);
     if (ft->num_params > 0) {
         ft->params = (wasm_valtype_t*)wasm__malloc_array(ft->num_params, sizeof(wasm_valtype_t));
-        ft->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_params, sizeof(wasm_reftype_t));
+        if (ft->params) ft->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_params, sizeof(wasm_reftype_t));
         if (!ft->params || !ft->param_reftypes) return WASM_ERR_OOM;
     }
     for (p = 0; p < ft->num_params; p++) {
@@ -73,7 +73,7 @@ static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r,
     }
     if (ft->num_results > 0) {
         ft->results = (wasm_valtype_t*)wasm__malloc_array(ft->num_results, sizeof(wasm_valtype_t));
-        ft->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_results, sizeof(wasm_reftype_t));
+        if (ft->results) ft->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_results, sizeof(wasm_reftype_t));
         if (!ft->results || !ft->result_reftypes) return WASM_ERR_OOM;
     }
     for (p = 0; p < ft->num_results; p++) {

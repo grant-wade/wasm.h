@@ -4,6 +4,9 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define WASM__ATOMICS_GNU 1
+/* Wasm atomics trap unless naturally aligned, but 32-bit ABIs only promise 4-byte alignment for uint64_t,
+   so 8-byte accesses use a type that states the real alignment. */
+typedef uint64_t wasm__atomic_u64 __attribute__((aligned(8)));
 #elif defined(_MSC_VER)
 #include <intrin.h>
 #define WASM__ATOMICS_MSVC 1
@@ -48,7 +51,7 @@ static uint64_t wasm__atomic_cas_raw(uint8_t* p, uint32_t size, uint64_t expecte
         }
         default: {
             uint64_t e = expected;
-            __atomic_compare_exchange_n((uint64_t*)(void*)p, &e, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            __atomic_compare_exchange_n((wasm__atomic_u64*)(void*)p, &e, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
             return e;
         }
     }
@@ -87,7 +90,7 @@ WASM_PRIVATE uint64_t wasm__atomic_load(const uint8_t* p, uint32_t size) {
             raw = __atomic_load_n((const uint32_t*)(const void*)p, __ATOMIC_SEQ_CST);
             break;
         default:
-            raw = __atomic_load_n((const uint64_t*)(const void*)p, __ATOMIC_SEQ_CST);
+            raw = __atomic_load_n((const wasm__atomic_u64*)(const void*)p, __ATOMIC_SEQ_CST);
             break;
     }
     return wasm__atomic_swap_order(raw, size);
@@ -111,7 +114,7 @@ WASM_PRIVATE void wasm__atomic_store(uint8_t* p, uint32_t size, uint64_t value) 
             __atomic_store_n((uint32_t*)(void*)p, (uint32_t)raw, __ATOMIC_SEQ_CST);
             break;
         default:
-            __atomic_store_n((uint64_t*)(void*)p, raw, __ATOMIC_SEQ_CST);
+            __atomic_store_n((wasm__atomic_u64*)(void*)p, raw, __ATOMIC_SEQ_CST);
             break;
     }
 #else
@@ -131,21 +134,21 @@ WASM_PRIVATE uint64_t wasm__atomic_compare_exchange(uint8_t* p, uint32_t size, u
     return wasm__atomic_swap_order(observed, size);
 }
 
-WASM_PRIVATE uint64_t wasm__atomic_load_u64(const uint64_t* p) {
+WASM_PRIVATE size_t wasm__atomic_load_size(const size_t* p) {
 #if defined(WASM__ATOMICS_GNU)
     return __atomic_load_n(p, __ATOMIC_SEQ_CST);
 #else
-    return wasm__atomic_cas_raw((uint8_t*)(uintptr_t)p, 8u, 0, 0);
+    return (size_t)wasm__atomic_cas_raw((uint8_t*)(uintptr_t)p, (uint32_t)sizeof(size_t), 0, 0);
 #endif
 }
 
-WASM_PRIVATE void wasm__atomic_store_u64(uint64_t* p, uint64_t value) {
+WASM_PRIVATE void wasm__atomic_store_size(size_t* p, size_t value) {
 #if defined(WASM__ATOMICS_GNU)
     __atomic_store_n(p, value, __ATOMIC_SEQ_CST);
 #else
-    uint64_t observed = wasm__atomic_cas_raw((uint8_t*)p, 8u, 0, 0);
+    uint64_t observed = wasm__atomic_cas_raw((uint8_t*)p, (uint32_t)sizeof(size_t), 0, 0);
     for (;;) {
-        uint64_t previous = wasm__atomic_cas_raw((uint8_t*)p, 8u, observed, value);
+        uint64_t previous = wasm__atomic_cas_raw((uint8_t*)p, (uint32_t)sizeof(size_t), observed, value);
         if (previous == observed) break;
         observed = previous;
     }

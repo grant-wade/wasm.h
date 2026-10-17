@@ -15,9 +15,10 @@ WASM_PRIVATE uint64_t wasm__atomic_compare_exchange(uint8_t* p, uint32_t size, u
 
 WASM_PRIVATE void wasm__atomic_fence(void);
 
-/* Host-order 64-bit counters shared between threads, such as a shared memory's page count. */
-WASM_PRIVATE uint64_t wasm__atomic_load_u64(const uint64_t* p);
+/* Host-order counters shared between threads, such as a shared memory's size. size_t is used because it is
+   naturally aligned and lock-free on every host, unlike uint64_t on 32-bit x86. */
+WASM_PRIVATE size_t wasm__atomic_load_size(const size_t* p);
 
-WASM_PRIVATE void wasm__atomic_store_u64(uint64_t* p, uint64_t value);
+WASM_PRIVATE void wasm__atomic_store_size(size_t* p, size_t value);
 
 #endif /* WASM_ATOMICS_H */

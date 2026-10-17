@@ -138,11 +138,13 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
 
 WASM_PRIVATE uint64_t wasm__memory_pages(const wasm_memory_t* memory) {
     if (!memory) return 0;
-    return memory->is_shared ? wasm__atomic_load_u64(&memory->pages) : memory->pages;
+    if (!memory->is_shared) return memory->pages;
+    return wasm__atomic_load_size(&memory->shared_size) / wasm__memory_page_size(memory);
 }
 
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
-    return memory ? wasm__memory_pages(memory) * (uint64_t)wasm__memory_page_size(memory) : 0;
+    if (memory && memory->is_shared) return wasm__atomic_load_size(&memory->shared_size);
+    return memory ? memory->pages * (uint64_t)wasm__memory_page_size(memory) : 0;
 }
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size) {
@@ -174,7 +176,7 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
     if (memory->data) return WASM_OK;
     if (memory->is_shared) {
         uint64_t max_bytes = memory->max_pages * (uint64_t)wasm__memory_page_size(memory);
-        uint64_t min_bytes = wasm__memory_byte_size(memory);
+        uint64_t min_bytes = memory->pages * (uint64_t)wasm__memory_page_size(memory);
         if (memory->max_pages != 0 && max_bytes / memory->max_pages != wasm__memory_page_size(memory))
             max_bytes = UINT64_MAX;
         memory->data = wasm__platform_shared_reserve(min_bytes, max_bytes, &memory->reserved_bytes);
@@ -184,6 +186,7 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
             memory->data = NULL;
             return WASM_ERR_OOM;
         }
+        memory->shared_size = (size_t)min_bytes;
         return WASM_OK;
     }
     if (memory->pages == 0) return WASM_OK;

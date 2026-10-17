@@ -542,6 +542,7 @@ typedef struct wasm_memory_t {
     uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
     int is_shared;          /* shared memories never move and may be used by runtimes on other threads */
     uint64_t reserved_bytes; /* shared memories: size of the fixed reservation backing data */
+    size_t shared_size;      /* shared memories: current size in bytes, read atomically while others grow it */
 } wasm_memory_t;
 
 typedef struct wasm_table_import_t {

@@ -365,7 +365,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         memory->is_import = 1;
         memory->import_memory = bound_memory;
-        memory->pages = bound_memory->pages;
+        memory->pages = wasm__memory_pages(bound_memory);
         memory->max_pages = bound_memory->max_pages;
         memory->is_64 = bound_memory->is_64;
         memory->page_size = bound_memory->page_size;
@@ -872,7 +872,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
         all_locals = ft->num_params + total_locals;
         mod->funcs[fidx].num_locals = all_locals;
         mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
-        mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)WASM_CALLOC(all_locals, sizeof(wasm_reftype_t));
+        if (mod->funcs[fidx].locals)
+            mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)WASM_CALLOC(all_locals, sizeof(wasm_reftype_t));
         if (!mod->funcs[fidx].locals || !mod->funcs[fidx].local_reftypes) return WASM_ERR_OOM;
         for (p = 0; p < ft->num_params; p++) {
             mod->funcs[fidx].locals[p] = ft->params[p];
