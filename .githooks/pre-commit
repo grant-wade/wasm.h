@@ -1,0 +1,14 @@
+#!/bin/sh
+# Opt in with: git config core.hooksPath .githooks
+# Validate the index, including partially staged files, without changing it.
+set -eu
+root=$(git rev-parse --show-toplevel)
+snapshot=$(mktemp -d "${TMPDIR:-/tmp}/wasm-header-index.XXXXXX")
+trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
+git -C "$root" checkout-index --all --prefix="$snapshot/"
+if ! cmake -DWASM_AMALGAMATE_CHECK=ON -P "$snapshot/cmake/Amalgamate.cmake"; then
+    echo >&2 'Staged wasm.h must match the staged src/ tree and generator.'
+    echo >&2 'Run: cmake -P cmake/Amalgamate.cmake'
+    echo >&2 'Then stage wasm.h and the intended source/generator changes, and retry.'
+    exit 1
+fi

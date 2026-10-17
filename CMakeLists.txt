@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(wasm_h VERSION 1.0.0 LANGUAGES C)
 
 include(CheckLibraryExists)
+include(CheckCSourceCompiles)
 include(CMakePackageConfigHelpers)
 include(CTest)
 include(GNUInstallDirs)
@@ -10,6 +11,21 @@ include(GNUInstallDirs)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+# Wasm arithmetic needs binary32/binary64 rounding, rather than x87's
+# extended-precision intermediates. Probe the compiler target so this also
+# applies to -m32 builds on a 64-bit host, without affecting 32-bit ARM.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
+    check_c_source_compiles("
+        #ifndef __i386__
+        #error Not a 32-bit x86 target
+        #endif
+        int main(void) { return 0; }
+    " WASM_H_TARGET_X86_32)
+    if(WASM_H_TARGET_X86_32)
+        add_compile_options(-msse2 -mfpmath=sse)
+    endif()
+endif()
 
 # Honor the pre-release WL_* option names for existing build directories.
 if(DEFINED WL_ENABLE_PLATFORM AND NOT DEFINED WASM_H_ENABLE_PLATFORM)
@@ -42,7 +58,21 @@ else()
 endif()
 set(WL_ENABLE_PLATFORM_VALUE "${WASM_H_ENABLE_PLATFORM_VALUE}")
 
+set(WASM_HEADER_STAMP "${PROJECT_BINARY_DIR}/wasm-header.stamp")
+add_custom_target(wasm-header ALL
+    COMMAND ${CMAKE_COMMAND} -DWASM_AMALGAMATE_STAMP=${WASM_HEADER_STAMP}
+            -P ${PROJECT_SOURCE_DIR}/cmake/Amalgamate.cmake
+    BYPRODUCTS "${WASM_HEADER_STAMP}"
+    COMMENT "Generating distribution wasm.h"
+    VERBATIM
+)
+add_custom_target(wasm-header-check
+    COMMAND ${CMAKE_COMMAND} -DWASM_AMALGAMATE_CHECK=ON -P ${PROJECT_SOURCE_DIR}/cmake/Amalgamate.cmake
+    VERBATIM
+)
+
 add_library(wasm_h INTERFACE)
+add_dependencies(wasm_h wasm-header)
 add_library(wasm_h::wasm_h ALIAS wasm_h)
 target_include_directories(wasm_h INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
@@ -82,6 +112,70 @@ if(WL_HAVE_LIBM)
     target_link_libraries(wasm_h INTERFACE m)
 endif()
 
+# The modular library compiles the same implementation as independent C99 units.
+set(WASM_RUNTIME_SOURCES
+    src/call.c
+    src/decode.c
+    src/exec/calls.c
+    src/exec/control.c
+    src/exec/exceptions.c
+    src/exec/frames.c
+    src/exec/gc.c
+    src/exec/bulk.c
+    src/exec/simd.c
+    src/exec/numeric.c
+    src/exec/interpreter.c
+    src/gc.c
+    src/init_expr.c
+    src/instructions.c
+    src/inspect.c
+    src/load.c
+    src/memory.c
+    src/memory_internal.c
+    src/module.c
+    src/platform/disabled.c
+    src/platform/emscripten.c
+    src/platform/host.c
+    src/platform/wasi_bind.c
+    src/platform/wasi_fd.c
+    src/platform/wasi_io.c
+    src/platform/wasi_path.c
+    src/platform/wasi_state.c
+    src/portable.c
+    src/reader.c
+    src/runtime.c
+    src/simd/compare.c
+    src/simd/float.c
+    src/simd/integer_small.c
+    src/simd/integer_wide.c
+    src/simd/lanes.c
+    src/simd/native.c
+    src/support.c
+    src/types/canonical.c
+    src/types/cross_module.c
+    src/types/decode.c
+    src/types/references.c
+    src/validate/function.c
+    src/validate/gc.c
+    src/validate/module.c
+    src/validate/numeric.c
+    src/validate/simd.c
+    src/validate/stack.c
+    src/values.c
+)
+add_library(wasm_runtime STATIC ${WASM_RUNTIME_SOURCES})
+add_library(wasm_h::runtime ALIAS wasm_runtime)
+target_include_directories(wasm_runtime PUBLIC ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(wasm_runtime PRIVATE wl_project_options PUBLIC wl_math)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wasm_runtime PRIVATE -Wmissing-prototypes)
+endif()
+if(MSVC)
+    # Match the single-header implementation's scoped warning policy: SIMD
+    # fast paths and platform branches retain unreachable portable fallbacks.
+    target_compile_options(wasm_runtime PRIVATE /wd4702)
+endif()
+
 get_property(WL_GENERATOR_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 set(WL_BUILD_CONFIG_ARGS)
 set(WL_CTEST_CONFIG_ARGS)
@@ -92,6 +186,8 @@ endif()
 
 function(wl_add_native_executable target)
     add_executable(${target} ${ARGN})
+    add_dependencies(${target} wasm-header)
+    set_property(SOURCE ${ARGN} APPEND PROPERTY OBJECT_DEPENDS "${WASM_HEADER_STAMP}")
     target_link_libraries(${target} PRIVATE wl_project_options wl_math)
 endfunction()
 
@@ -103,7 +199,7 @@ add_subdirectory(examples)
 if(BUILD_TESTING)
     add_subdirectory(test)
 
-    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_core_test)
+    set(WL_CHECK_TARGET_DEPS wl_test wasm_test wasm_modular_test wasm_core_test wasm_modular_core_test spectest_runner spectest_modular_runner wasm_private_header_check)
     if(TARGET session_math_demo)
         list(APPEND WL_CHECK_TARGET_DEPS session_math_demo)
     endif()
@@ -126,6 +222,8 @@ if(WASM_H_BUILD_FUZZER)
         message(FATAL_ERROR "WASM_H_BUILD_FUZZER requires Clang with libFuzzer support.")
     endif()
     add_executable(wasm_load_fuzzer test/fuzz_wasm_load.c)
+    add_dependencies(wasm_load_fuzzer wasm-header)
+    set_property(SOURCE test/fuzz_wasm_load.c APPEND PROPERTY OBJECT_DEPENDS "${WASM_HEADER_STAMP}")
     target_include_directories(wasm_load_fuzzer PRIVATE ${PROJECT_SOURCE_DIR})
     target_compile_options(wasm_load_fuzzer PRIVATE
         -fsanitize=fuzzer,address,undefined

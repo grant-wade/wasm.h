@@ -6,6 +6,7 @@
 
 #define WL_IMPL
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,6 +25,13 @@
 #endif
 
 #include "wl.h"
+
+#ifdef WASM_TEST_MODULAR
+#include "wasm_test_alloc.h"
+#define WASM_TEST_ALLOC_LINKAGE
+#else
+#define WASM_TEST_ALLOC_LINKAGE static
+#endif
 
 typedef struct wasm_test_alloc_header {
     size_t size;
@@ -63,18 +71,18 @@ static void* wasm_test_alloc_block(size_t size, int zero_fill) {
     return (void*)(header + 1);
 }
 
-static void* wasm_test_malloc(size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_malloc(size_t size) {
     g_wasm_test_alloc_stats.malloc_calls++;
     return wasm_test_alloc_block(size, 0);
 }
 
-static void* wasm_test_calloc(size_t count, size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_calloc(size_t count, size_t size) {
     g_wasm_test_alloc_stats.calloc_calls++;
     if (size != 0 && count > ((size_t)-1) / size) return NULL;
     return wasm_test_alloc_block(count * size, 1);
 }
 
-static void* wasm_test_realloc(void* ptr, size_t size) {
+WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
     wasm_test_alloc_header* header;
     wasm_test_alloc_header* resized;
     size_t payload_size = size ? size : 1u;
@@ -96,7 +104,7 @@ static void* wasm_test_realloc(void* ptr, size_t size) {
     return (void*)(resized + 1);
 }
 
-static void wasm_test_free(void* ptr) {
+WASM_TEST_ALLOC_LINKAGE void wasm_test_free(void* ptr) {
     g_wasm_test_alloc_stats.free_calls++;
     if (!ptr) return;
 
@@ -108,6 +116,7 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
     return g_wasm_test_alloc_stats;
 }
 
+#ifndef WASM_TEST_MODULAR
 #define WASM_MALLOC(sz) wasm_test_malloc(sz)
 #define WASM_REALLOC(p, sz) wasm_test_realloc((p), (sz))
 #define WASM_FREE(p) wasm_test_free(p)
@@ -115,6 +124,22 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
 
 #define WASM_IMPL
 #include "wasm.h"
+#else
+#include "../src/module.h"
+#include "../src/runtime.h"
+#include "../src/values.h"
+#include "../src/portable.h"
+#include "../src/types/canonical.h"
+#include "../src/types/references.h"
+#include "../src/exec/frames.h"
+#include "../src/exec/state.h"
+#include "../src/platform/wasi_state.h"
+#include "../src/simd/compare.h"
+#include "../src/simd/float.h"
+#include "../src/simd/integer_small.h"
+#include "../src/simd/integer_wide.h"
+#include "../src/simd/lanes.h"
+#endif
 
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
     return wasm_init(rt, config);
@@ -9755,6 +9780,56 @@ WL_TEST(test_public_global_helpers) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_float_signaling_nan_bits) {
+    static const uint8_t code[][16] = {
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0x8B, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0x7F, 0x8C, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xFD, 0x13, 0xFD, 0x1F, 0, 0xBC },
+        { 0x43, 0x10, 0x32, 0xA0, 0xFF, 0xFD, 0x13, 0xFD, 0xE0, 1, 0xFD, 0x1F, 0, 0xBC }
+    };
+    static const uint32_t lengths[] = { 6, 7, 7, 11, 14 };
+    static const uint32_t expected[] = { 0xFFA03210u, 0x7FA03210u, 0xFFA03210u, 0xFFA03210u, 0x7FA03210u };
+    uint32_t i;
+    for (i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        wasm_builder_t mod = { 0 }, sec = { 0 }, body = { 0 };
+        wasm_runtime_t rt;
+        wasm_module_t* m;
+        wasm_value_t result;
+        wasm_error_t err;
+        static const uint8_t type[] = { 1, 0x60, 0, 1, 0x7F };
+        static const uint8_t funcs[] = { 1, 0 };
+        emit_header(&mod);
+        emit_section(&mod, 1, type, sizeof(type));
+        emit_section(&mod, 3, funcs, sizeof(funcs));
+        emit(&sec, 1);
+        emit_export_func(&sec, "bits", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
+        sec.len = 0;
+        emit(&body, 0);
+        emit_bytes(&body, code[i], lengths[i]);
+        emit(&body, 0x0B);
+        emit(&sec, 1);
+        emit_leb128_u32(&sec, body.len);
+        emit_bytes(&sec, body.buf, body.len);
+        emit_section(&mod, 10, sec.buf, sec.len);
+        wasm_init(&rt);
+        wasm_enable_all_features(&rt);
+        m = wasm_load(&rt, mod.buf, mod.len);
+        WL_CHECK_MSG(t, m != NULL, "case %u: %s", i, rt.error_msg);
+        if (m) {
+            err = wasm_call(m, "bits", NULL, 0, &result, 1);
+            WASM_CHECK_OK(t, err);
+            if (err == WASM_OK) {
+                WL_CHECK_MSG(t, (uint32_t)result.of.i32 == expected[i],
+                             "case %u: signaling NaN bits changed", i);
+            }
+            wasm_free_module(m);
+        }
+        wasm_destroy(&rt);
+    }
+}
+
 WL_TEST(test_float_min_max_semantics) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -10264,6 +10339,38 @@ WL_TEST(test_simd_helper_ops) {
     wasm_value_t vf64_a = wasm_test_v128_from_f64x2(f64_a);
     wasm_value_t vf64_b = wasm_test_v128_from_f64x2(f64_b);
     uint32_t index;
+
+    /* abs/neg preserve the minimum signed lane modulo its width. The dot
+     * products fit individually, but their pairwise sum wraps at 32 bits. */
+    {
+        wasm_value_t input = wasm_v128_zero();
+        wasm_value_t actual;
+        uint32_t lane;
+        for (lane = 0; lane < 16; lane++) wasm__v128_set_u8(&input, lane, 0x80u);
+        actual = wasm__simd_i8x16_unary(0x60, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.abs minimum");
+        actual = wasm__simd_i8x16_unary(0x61, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.neg minimum");
+        for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&input, lane, 0x8000u);
+        actual = wasm__simd_i16x8_unary(0x80, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.abs minimum");
+        actual = wasm__simd_i16x8_unary(0x81, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.neg minimum");
+        actual = wasm__simd_i32x4_binary(0xBA, &input, &input);
+        for (lane = 0; lane < 4; lane++) {
+            WL_CHECK_MSG(t, wasm__v128_get_u32(&actual, lane) == 0x80000000u, "%s", "i32x4.dot_i16x8_s wraps sum");
+            wasm__v128_set_u32(&input, lane, 0x80000000u);
+        }
+        actual = wasm__simd_i32x4_unary(0xA0, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.abs minimum");
+        actual = wasm__simd_i32x4_unary(0xA1, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.neg minimum");
+        for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&input, lane, UINT64_C(0x8000000000000000));
+        actual = wasm__simd_i64x2_unary(0xC0, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.abs minimum");
+        actual = wasm__simd_i64x2_unary(0xC1, &input);
+        WL_CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.neg minimum");
+    }
 
     {
         uint8_t bytes[16];
@@ -14401,6 +14508,7 @@ int main(void) {
         { "multivalue if: type-index block returns two values", test_multivalue_if_block },
         { "multivalue br: block branch preserves two results", test_multivalue_branch_block },
         { "multivalue loop: br 0 preserves loop params", test_multivalue_loop_params },
+        { "float copies/sign: signaling NaN payloads", test_float_signaling_nan_bits },
         { "float min/max: NaN propagation and signed zero semantics", test_float_min_max_semantics },
         { "float trunc: trapping conversions reject NaN and overflow", test_trapping_float_to_int_conversions },
         { "float trunc: fractional lower-edge values still convert", test_trunc_allows_fractional_lower_edges },

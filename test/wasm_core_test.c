@@ -1,4 +1,6 @@
+#ifndef WASM_TEST_MODULAR
 #define WASM_IMPL
+#endif
 #include "wasm.h"
 
 static const uint8_t wasm_core_test_bytes[] = {

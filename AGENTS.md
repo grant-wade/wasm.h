@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssembly runtime. `test/wl.h` is a local support library used by native tests, not the main product.
+This repo is a C99 WebAssembly runtime developed in `src/` and distributed as the generated single header `wasm.h`. `test/wl.h` is a local support library used by native tests, not the main product.
 
 ## Source Of Truth
 
@@ -12,7 +12,10 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 ## Important Files
 
-- `wasm.h`: main runtime, validator, interpreter, public embedding API.
+- `src/`: independently compiled runtime implementation and shared private headers; edit these sources.
+- `src/wasm.h`: public embedding API declarations.
+- `src/amalgamation.h`: assembly order for the single-header distribution.
+- `wasm.h`: generated distribution; regenerate with `cmake -P cmake/Amalgamate.cmake`.
 - `test/wasm_test.c`: primary regression coverage for the runtime.
 - `wasm.c`: CLI runner and inspection tool built on top of `wasm.h`.
 - `wasm2api.c`: generator for typed C wrappers around Wasm exports and imports.
@@ -27,6 +30,9 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 
 - Configure: `cmake -S . -B build`
 - Main validation pass: `cmake --build build --target check`
+- Generate the root header: `cmake -P cmake/Amalgamate.cmake` or build target `wasm-header`.
+- Check generation without modifying files: `cmake -DWASM_AMALGAMATE_CHECK=ON -P cmake/Amalgamate.cmake`.
+- Modular library: `wasm_runtime`; `check` exercises both modular and single-header builds.
 - Focused native targets: `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` when enabled
 - Emscripten fixtures: `wasm-emcc-build`, `wasm-emcc-run`, `wasm-emcc-run-strict`
 - Spectest targets exist only when system `wasm-tools` provides both `json-from-wast` and `parse`.
@@ -34,7 +40,11 @@ This repo is a small C99 codebase centered on `wasm.h`, a single-header WebAssem
 ## Agent Notes
 
 - Keep changes C99-compatible. The project builds with warnings-as-errors by default.
-- For `wasm.h`, remember the single-header split: public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`.
+- Keep `.c` files independently compilable. Add new units to `WASM_RUNTIME_SOURCES` and `src/amalgamation.h`.
+- Private function declarations belong in a header beside their owning `.c` file, and only functions used by another translation unit belong there. Keep file-local helpers `static`; public API declarations remain in `src/wasm.h`.
+- Include a source file's own header first, then the interfaces it uses directly. Headers must be self-contained and their include graph acyclic. Shared layouts belong in focused owner/state headers; do not introduce umbrella internal headers.
+- Keep OS dependencies in `src/platform/` and SIMD intrinsics in `src/simd/native.h`. `check` compiles each source header independently and checks missing prototypes in modular runtime builds.
+- For generated `wasm.h`, public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`. Internal linkage uses `WASM_PRIVATE`/`WASM_PRIVATE_INLINE` to support both build forms.
 - `WASM_H_ENABLE_PLATFORM` is a CMake option that defaults ON for this repo build; `test/wl.h` and the runtime platform bridges may be compiled with it off.
 - If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
