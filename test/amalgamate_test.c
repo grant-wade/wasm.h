@@ -149,7 +149,11 @@ int main(int argc, char** argv) {
     char* generated = read_text("wasm.h");
     char* fingerprint = read_text("header.stamp");
     CHECK(generated && fingerprint && *fingerprint, "Generator wrote no header or stamp");
-    if (!generated || !fingerprint) return 1;
+    if (!generated || !fingerprint) {
+        free(generated);
+        free(fingerprint);
+        return 1;
+    }
 
     static const char* const kept[] = {
         "#include <stdint.h>", "int first;", "int runtime;", "#define VALUES a; b; c", "#define CONTINUED \\\n  42",
@@ -194,6 +198,12 @@ int main(int argc, char** argv) {
     free(two);
     CHECK(run_tool(0) != 0, "Missing include was accepted");
 
+    free(generated);
+    free(fingerprint);
+    free(same_fingerprint);
+    free(checked);
+    free(checked_fingerprint);
+    free(changed_fingerprint);
     if (failures) fprintf(stderr, "%d amalgamation check(s) failed\n", failures);
     return failures ? 1 : 0;
 }

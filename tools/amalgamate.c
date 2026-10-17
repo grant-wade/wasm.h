@@ -72,6 +72,13 @@ static void list_push(list_t* l, const char* s) {
     l->count++;
 }
 
+static void list_free(list_t* l) {
+    for (int i = 0; i < l->count; ++i) free(l->items[i]);
+    free(l->items);
+    l->items = NULL;
+    l->count = l->cap = 0;
+}
+
 static int list_has(const list_t* l, const char* s) {
     for (int i = 0; i < l->count; ++i) {
         if (strcmp(l->items[i], s) == 0) return 1;
@@ -275,11 +282,11 @@ int main(int argc, char** argv) {
     int have_existing = read_file(destination, &existing);
     int same = have_existing && existing.len == generated.len &&
                memcmp(existing.data, generated.data, generated.len) == 0;
-    if (!same) {
-        if (check) {
-            fprintf(stderr, "amalgamate: wasm.h is stale. Run: ./cbuild -t wasm-header\n");
-            return 1;
-        }
+    int rc = 0;
+    if (!same && check) {
+        fprintf(stderr, "amalgamate: wasm.h is stale. Run: ./cbuild -t wasm-header\n");
+        rc = 1;
+    } else if (!same) {
         write_file(destination, generated.data, generated.len);
         printf("amalgamate: wrote wasm.h\n");
     }
@@ -289,5 +296,11 @@ int main(int argc, char** argv) {
         snprintf(text, sizeof(text), "%016llx\n", fingerprint(generated.data, generated.len));
         write_file(stamp, text, strlen(text));
     }
-    return 0;
+
+    free(existing.data);
+    free(destination);
+    free(generated.data);
+    list_free(&stack);
+    list_free(&included);
+    return rc;
 }
