@@ -344,13 +344,11 @@ void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_
  * way, target is built before the test runs. Exit code 0 passes. */
 test_t* cbuild_add_test(cbuild_context_t* ctx, const char* name, target_t* target,
                         const char* const* args, int argc);
-/* Build another target before the test runs (a generated input, for example). */
+/* Build target before the test runs. */
 void cbuild_test_add_dependency(cbuild_context_t* ctx, test_t* test, target_t* target);
-/* Labels group tests for --test-label. */
 void cbuild_test_add_label(cbuild_context_t* ctx, test_t* test, const char* label);
-/* Treat this exit code as a skip rather than a failure. */
 void cbuild_test_set_skip_code(cbuild_context_t* ctx, test_t* test, int exit_code);
-/* Fail the test if it runs longer than this many seconds (0 = no limit). */
+/* 0 = no limit. */
 void cbuild_test_set_timeout(cbuild_context_t* ctx, test_t* test, int seconds);
 /* Tests that share a lock name never run at the same time. */
 void cbuild_test_set_lock(cbuild_context_t* ctx, test_t* test, const char* lock);
@@ -384,7 +382,7 @@ void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char
 // *** Argument Parsing Helpers *** //
 int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name);
 /* Value of the last --long_name=VALUE, --long_name VALUE, -xVALUE, or -x VALUE
- * before any "--", or NULL. Lets a build read options before defining targets. */
+ * before any "--", or NULL. */
 const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name);
 
 // *** Process Helpers *** //
@@ -1296,7 +1294,6 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     }
 }
 
-/* Append sorted copies of items so the command, and so its signature, is stable. */
 static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int count, const char* prefix) {
     if (count <= 0) return;
     char** tmp = (char**)malloc(sizeof(char*) * count);
@@ -1313,8 +1310,7 @@ static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int co
     free(tmp);
 }
 
-/* Build the archiver or linker argv for a target. The link step and its rebuild
- * signature both go through here so they cannot drift. obj_files must be sorted. */
+/* Shared by the link and its signature so they cannot drift. obj_files must be sorted. */
 static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_files, int obj_count,
                               cbuild_argv_t* argv) {
     if (t->type == TARGET_STATIC_LIB) {
@@ -1358,8 +1354,7 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
     }
     cbuild__argv_append_sorted(argv, t->exposed_libs, t->exposed_lib_count, NULL);
 
-    /* Our own libraries come before system libraries, so single-pass linkers
-     * can resolve their references (for example to libm) further along. */
+    /* Before system libraries, so single-pass linkers resolve their references. */
     for (int i = 0; i < t->dep_count; ++i) {
         target_t* dep = t->dependencies[i];
         if (dep->type == TARGET_STATIC_LIB) {
@@ -1428,7 +1423,6 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
     }
 }
 
-/* Everything that must stay the same for a linked output to be reusable. */
 static char* cbuild__link_signature(cbuild_argv_t* argv) {
     char* sig = NULL;
     for (int i = 0; i < argv->count; ++i) {
@@ -4266,7 +4260,7 @@ const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, 
 }
 
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
-    /* One log call per line: the logger formats into a fixed-size buffer. */
+    /* One call per line: the logger formats into a fixed-size buffer. */
     cbuild__log(ctx, CBUILD_LOG_INFO, "Usage: %s [flags] [subcommand]\n\nFlags:", ctx->argv0_for_help);
     const char* phase_names[] = { "Pre-parse", "Before build", "After build" };
     for (int ph = CBUILD_FLAG_PRE; ph <= CBUILD_FLAG_AFTER_BUILD; ++ph) {
@@ -4294,8 +4288,7 @@ CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
     }
 }
 
-/* The handler registered for a flag token in any phase, or NULL. For a short
-   cluster, the first letter decides. */
+/* For a short cluster, the first letter decides. */
 static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, const char* arg) {
     if (arg[1] == '-') {
         const char* name = arg + 2;
@@ -4312,15 +4305,13 @@ static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, cons
     return NULL;
 }
 
-/* Whether a flag token takes the following argument as its value. */
 static int cbuild__flag_uses_next(cbuild_flag_handler_t* fh, const char* arg) {
     if (!fh->takes_value) return 0;
     if (arg[1] == '-') return strchr(arg, '=') == NULL;
     return arg[2] == '\0';
 }
 
-/* Counts the arguments that are not flags (or flag values) left for a later
-   phase, storing the index of the first in *first (-1 if none). */
+/* Skips flags left for later phases and their values; *first is -1 if none remain. */
 CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first) {
     int count = 0;
     int stop = 0;
@@ -4370,7 +4361,6 @@ CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_f
             continue;
         }
 
-        /* Another phase's flag waits for that phase's dispatch. */
         cbuild_flag_handler_t* other = cbuild__find_any_phase(ctx, arg);
         if (other && other->phase != phase) {
             av[write++] = av[read];
@@ -4638,8 +4628,7 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     *files = NULL;
     *file_count = 0;
 
-    /* Search from the deepest directory named before the first wildcard, so
-     * wildcards in directory names, recursive ones included, can match. */
+    /* Start at the deepest directory before the first wildcard, so directory names can match. */
     const char* wild = strpbrk(pattern, "*?");
     const char* separator = NULL;
     for (const char* p = pattern; *p && (!wild || p < wild); ++p) {
@@ -4664,7 +4653,6 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files,
                                                   file_count, &capacity);
 
-    /* Directory order varies between machines and runs; sorting keeps builds reproducible. */
     if (result == 0 && *file_count > 1) {
         qsort(*files, *file_count, sizeof(char*), cbuild__strcmp_wrapper);
     }
@@ -4708,8 +4696,7 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
     int recursive_search = 0;
 
     if (strncmp(pattern, "**", 2) == 0) {
-        /* "**" spans zero or more directories: the rest of the pattern applies
-         * here, and the whole pattern again in every subdirectory below. */
+        /* Zero directories here, then the whole pattern again in each subdirectory. */
         const char* rest = pattern + 2;
         if (*rest == '/' || *rest == '\\') rest++;
         if (cbuild_expand_wildcard_recursive(dir_path, *rest ? rest : "*", files, file_count, capacity) != 0)
@@ -6523,8 +6510,6 @@ CBUILD_INTERNAL void cbuild__free_tests(cbuild_context_t* ctx) {
     ctx->test_timeout = 0;
 }
 
-/* Selected when it has one of the requested labels (if any), matches one of
- * the name filters (if any), and matches no exclusion. */
 static int cbuild__test_selected(cbuild_context_t* ctx, test_t* test) {
     if (ctx->test_label_count > 0) {
         int found = 0;
@@ -6583,8 +6568,6 @@ CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx) {
     }
     if (shown == 0) cbuild__log(ctx, CBUILD_LOG_INFO, "  (no tests)");
 }
-
-/* ---------------- Running one test ---------------- */
 
 static double cbuild__now_seconds(void) {
 #ifdef _WIN32
@@ -6825,7 +6808,7 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     free(log_path);
 }
 
-/* Next pending test whose lock no running test holds, or -1. Caller holds the mutex. */
+/* Caller holds the mutex. */
 static int cbuild__next_runnable_test(cbuild_test_run_t* run) {
     for (int i = 0; i < run->count; ++i) {
         if (run->state[i] != CBUILD_TEST_PENDING) continue;
@@ -6861,7 +6844,7 @@ static void* cbuild__test_worker(void* arg) {
         }
         cbuild__test_run_unlock(run);
         if (index < 0) {
-            cbuild__sleep_ms(5);  /* everything left waits on a lock */
+            cbuild__sleep_ms(5);
             continue;
         }
         cbuild__run_one_test(run, index);
@@ -6873,7 +6856,6 @@ static void* cbuild__test_worker(void* arg) {
 #endif
 }
 
-/* Builds what the selected tests need, then runs them. Returns 0 when nothing failed. */
 CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     cbuild_test_run_t run;
     memset(&run, 0, sizeof(run));
@@ -6888,7 +6870,6 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
         return 0;
     }
 
-    /* Build first: a test can only start once everything it needs exists. */
     int error_flag = 0;
     free(ctx->visited);
     free(ctx->in_stack);
@@ -6974,7 +6955,6 @@ int cbuild_run_tests(cbuild_context_t* ctx, const char* label, const char* patte
     cbuild_init(ctx);
     cbuild__resolve_target_paths(ctx);
 
-    /* Narrow the selection for this call only. */
     int added_label = 0, added_filter = 0;
     if (label && *label) {
         ensure_capacity_charpp(ctx, &ctx->test_labels, &ctx->test_label_count, &ctx->test_label_cap);

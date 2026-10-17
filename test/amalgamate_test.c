@@ -1,7 +1,4 @@
-/* Exercises tools/amalgamate.c against a scratch source tree.
- *
- * Usage: wasm_amalgamate_test <amalgamate executable> <scratch directory>
- */
+/* Usage: wasm_amalgamate_test <amalgamate executable> <scratch directory> */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,7 +72,7 @@ static long modified_time(const char* relative) {
     return result;
 }
 
-/* Backdates a file so an unwanted rewrite would visibly change its timestamp. */
+/* An unwanted rewrite then visibly changes the timestamp. */
 static void backdate(const char* relative) {
     char* path = path_of(relative);
 #if defined(_WIN32)
@@ -90,7 +87,6 @@ static void backdate(const char* relative) {
     free(path);
 }
 
-/* Runs the generator on the fixture; returns its exit status. */
 static int run_tool(int check) {
     char* stamp = path_of("header.stamp");
     const char* argv[7];

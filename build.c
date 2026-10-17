@@ -1,16 +1,4 @@
-/* build.c - the wasm.h build and test graph, written against cbuild.h.
- *
- * Bootstrap once with the system compiler; afterwards ./cbuild rebuilds itself
- * whenever build.c or cbuild.h changes:
- *
- *   cc -o cbuild build.c                  (Windows: cl /nologo /Fe:cbuild.exe build.c)
- *   ./cbuild                              build the runtime, tools, and tests
- *   ./cbuild --test                       build what the tests need and run them
- *   ./cbuild --help                       every option
- *
- * Options that shape the graph (--release, --no-platform, ...) are read before
- * any target is defined, so pass the same ones to every invocation.
- */
+/* Bootstrap once with: cc -o cbuild build.c (Windows: cl /nologo /Fe:cbuild.exe build.c) */
 #define CBUILD_IMPLEMENTATION
 #include "cbuild.h"
 
@@ -28,8 +16,6 @@
 #define PATH_LIST_SEPARATOR ':'
 #endif
 
-/* The modular library compiles the same implementation as independent C99
- * units. New units also belong in src/amalgamation.h. */
 static const char* const wasm_runtime_sources[] = {
     "src/call.c",
     "src/decode.c",
@@ -81,7 +67,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/values.c",
 };
 
-/* Emscripten fixtures: test/fixtures/<name>.c, fixture_runner arguments, emcc flags. */
+/* test/fixtures/<name>.c, fixture_runner arguments, and emcc flags. */
 typedef struct {
     const char* name;
     const char* runner_args[4];
@@ -104,27 +90,23 @@ static const emcc_case_t emcc_cases[] = {
 
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
-/* ---------------- Options ---------------- */
-
 typedef struct {
     int release;
     int platform;
     int werror;
     int emcc;
     int fuzzer;
-    int announce; /* say which optional suites are unavailable */
+    int announce; /* report missing optional tools */
     int msvc;
     int x86_32;
     const char* cc;
     const char* build_dir;
-    char* cflags;  /* $CFLAGS then --cflags, applied after every other compile flag */
+    char* cflags;  /* $CFLAGS then --cflags */
     char* ldflags; /* $LDFLAGS then --ldflags */
 } options_t;
 
 static options_t opt;
 static cbuild_context_t* ctx;
-
-/* ---------------- Small helpers ---------------- */
 
 static char* fmt(const char* format, ...) {
     va_list args;
@@ -192,14 +174,12 @@ static int write_file(const char* path, const char* text) {
     return fclose(f) == 0 && ok ? 0 : -1;
 }
 
-/* Rewrites path only when its content changes, so its timestamp stays put. */
 static void write_if_changed(const char* path, const char* text) {
     char* old = read_file(path);
     if (!old || strcmp(old, text) != 0) write_file(path, text);
     free(old);
 }
 
-/* Splits a flag string on blanks into argv entries (no quoting). */
 static int split_flags(const char* flags, const char** argv, int max) {
     int n = 0;
     if (!flags) return 0;
@@ -214,7 +194,6 @@ static int split_flags(const char* flags, const char** argv, int max) {
     return n;
 }
 
-/* Like cbuild's own detection: clang drivers are GCC-style, other "cl"s are MSVC. */
 static int is_msvc_compiler(const char* cc) {
     const char* base = cc;
     for (const char* p = cc; *p && *p != ' '; ++p) {
@@ -224,7 +203,6 @@ static int is_msvc_compiler(const char* cc) {
     return strncmp(base, "cl", 2) == 0 && (base[2] == '\0' || base[2] == ' ' || base[2] == '.');
 }
 
-/* Searches the hint directories, then PATH, for the first of names. */
 static char* find_program(const char* const* names, int name_count, const char* const* hints, int hint_count) {
     static const char* const suffixes[] = {
 #ifdef _WIN32
@@ -278,9 +256,8 @@ static int program_succeeds(const char* const* argv, int argc) {
     return rc == 0;
 }
 
-/* Wasm arithmetic needs binary32/binary64 rounding rather than x87's extended
- * intermediates. Probe the compiler's target, so -m32 on a 64-bit host counts
- * but 32-bit ARM does not. */
+/* Wasm needs binary32/binary64 rounding, not x87 extended precision. Probe the
+ * target so -m32 on a 64-bit host counts but 32-bit ARM does not. */
 static int compiler_targets_x86_32(void) {
     if (opt.msvc) return 0;
     char* dir = out_path("probe");
@@ -298,12 +275,9 @@ static int compiler_targets_x86_32(void) {
     return program_succeeds(argv, argc);
 }
 
-/* ---------------- Target flavors ---------------- */
-
 static target_t* native_targets[64];
 static int native_target_count;
 
-/* Every compiled target: language level and build type. */
 static void base_options(target_t* t) {
     native_targets[native_target_count++] = t;
     if (opt.msvc) {
@@ -324,7 +298,6 @@ static void warning_options(target_t* t) {
     }
 }
 
-/* Definitions and warnings shared by the project's own code. */
 static void project_options(target_t* t) {
     base_options(t);
     warning_options(t);
@@ -338,15 +311,13 @@ static void project_options(target_t* t) {
     }
 }
 
-/* The independently compiled runtime units. */
 static target_t* runtime_library(const char* name) {
     target_t* t = cbuild_static_library(ctx, name);
     for (int i = 0; i < COUNT(wasm_runtime_sources); ++i) cbuild_add_source(ctx, t, wasm_runtime_sources[i]);
     project_options(t);
     cbuild_add_include_dir(ctx, t, "src");
     if (opt.msvc) {
-        /* Match the single-header implementation's scoped warning policy: SIMD
-         * fast paths and platform branches retain unreachable portable fallbacks. */
+        /* SIMD fast paths and platform branches keep unreachable portable fallbacks. */
         cbuild_add_cflags(ctx, t, "/wd4702");
     } else {
         cbuild_add_cflags(ctx, t, "-Wmissing-prototypes");
@@ -354,7 +325,6 @@ static target_t* runtime_library(const char* name) {
     return t;
 }
 
-/* An executable built on the generated single header. */
 static target_t* native_executable(const char* name, const char* source, target_t* header) {
     target_t* t = cbuild_executable(ctx, name);
     cbuild_add_source(ctx, t, source);
@@ -370,8 +340,6 @@ static test_t* add_test(const char* name, target_t* target, const char* const* a
     if (label2) cbuild_test_add_label(ctx, test, label2);
     return test;
 }
-
-/* ---------------- Command callbacks ---------------- */
 
 typedef struct {
     const char* from;
@@ -419,8 +387,7 @@ typedef struct {
     const char* dir;
 } wast_job_t;
 
-/* Converts one .wast file. A failed conversion is not a build failure: it
- * leaves an empty command list and a status the runner reports as a skip. */
+/* A failed conversion leaves an empty command list and a status the runner reports as a skip. */
 static void json_from_wast(void* user_data) {
     wast_job_t* job = (wast_job_t*)user_data;
     make_dirs(job->dir);
@@ -442,10 +409,7 @@ static void json_from_wast(void* user_data) {
     free(output);
 }
 
-/* ---------------- Graph sections ---------------- */
-
-/* Compile each source header on its own so transitive includes cannot hide
- * missing prerequisites. The amalgamation manifest is not an interface header. */
+/* Each header compiles alone, so transitive includes cannot hide missing prerequisites. */
 static void private_header_check(void) {
     target_t* t = cbuild_static_library(ctx, "wasm_private_header_check");
     char* dir = out_path("header-check");
@@ -518,8 +482,7 @@ static void spectests(target_t* runner, target_t* modular_runner) {
         cbuild_target_add_command(ctx, json,
                                   cbuild_command_function(ctx, fmt("json-from-wast %s", base), json_from_wast, job));
 
-        /* Both runners can compile the same text fixture to the same output
-         * path, so each pair shares a lock while different cases run in parallel. */
+        /* Both runners compile the same text fixtures to the same paths. */
         const char* args[] = { job->json, wasm_tools, support, job->status };
         char* lock = fmt("spectest_%s", name);
         test_t* single = add_test(fmt("spectest.%s", name), runner, args, 4, "spectest", NULL);
@@ -574,7 +537,6 @@ static void emcc_fixtures(const char* emcc, target_t* runner) {
     }
 }
 
-/* The wasm2api example: an Emscripten module and its regenerated wrappers. */
 static void session_math_example(const char* emcc, target_t* wasm2api, target_t* header) {
     char* dir = out_path("examples");
     char* wasm = fmt("%s/session_math.wasm", dir);
@@ -594,8 +556,7 @@ static void session_math_example(const char* emcc, target_t* wasm2api, target_t*
     cbuild_target_add_command(ctx, module, cbuild_command_argv(ctx, "emcc session_math_wasm.c", emcc_argv,
                                                                COUNT(emcc_argv)));
 
-    /* The wrappers are committed sources, so a build-tree stamp stands in for
-     * them: cleaning removes the stamp, never examples/session_math.[ch]. */
+    /* The wrappers are committed, so a stamp stands in for them and --clean leaves them alone. */
     char* generate_argv[] = {
         exe_path("wasm2api"), "--singleton", "--embed", "--init-func", "init_state", wasm, "examples/session_math",
     };
@@ -612,8 +573,6 @@ static void session_math_example(const char* emcc, target_t* wasm2api, target_t*
     cbuild_add_link_target(ctx, demo, generate);
     add_test("session_math_demo", demo, NULL, 0, "unit", NULL);
 }
-
-/* ---------------- Main ---------------- */
 
 static void read_options(int argc, char** argv) {
     opt.release = cbuild_has_flag(argc, argv, "release", 0);
@@ -637,7 +596,7 @@ static void read_options(int argc, char** argv) {
     opt.cflags = join_flags(getenv("CFLAGS"), cbuild_get_flag_value(argc, argv, "cflags", 0));
     opt.ldflags = join_flags(getenv("LDFLAGS"), cbuild_get_flag_value(argc, argv, "ldflags", 0));
 
-    /* Registered too, so cbuild_run accepts them and --help lists them. */
+    /* Registered so cbuild_run accepts them; the values were read above. */
     static int bound_bool;
     static const char* bound_str;
     cbuild_register_flag_bool(ctx, "release", 0, CBUILD_FLAG_PRE,
@@ -677,7 +636,6 @@ int main(int argc, char** argv) {
         if (*c == '\\') *c = '/';
     }
 
-    /* The distribution header, regenerated from src/ whenever it changes. */
     target_t* amalgamate = cbuild_executable(ctx, "amalgamate");
     cbuild_add_source(ctx, amalgamate, "tools/amalgamate.c");
     base_options(amalgamate);
@@ -688,25 +646,20 @@ int main(int argc, char** argv) {
     cbuild_add_source(ctx, header, "src/**/*.h");
     cbuild_add_source(ctx, header, "src/**/*.c");
     cbuild_add_source(ctx, header, "src/**/*.inc");
-    cbuild_add_source(ctx, header, "wasm.h"); /* so an edited or checked-out header is regenerated */
+    cbuild_add_source(ctx, header, "wasm.h"); /* regenerate a header edited or checked out by hand */
     cbuild_add_link_target(ctx, header, amalgamate);
     char* amalgamate_argv[] = { exe_path("amalgamate"), "--stamp", header_stamp };
     cbuild_target_add_command(ctx, header, cbuild_command_argv(ctx, "generate wasm.h", amalgamate_argv, 3));
 
-    /* Libraries. */
     target_t* runtime = runtime_library("wasm_runtime");
     target_t* test_runtime = runtime_library("wasm_test_runtime");
-    /* Use the same allocator instrumentation in every independent runtime unit.
-     * GCC and Clang look for -include files from the working directory; MSVC
-     * finds /FI files through the "." include directory. */
+    /* GCC and Clang resolve -include from the working directory; MSVC finds /FI through -I. */
     cbuild_add_cflags(ctx, test_runtime, opt.msvc ? "/FItest/wasm_test_alloc.h" : "-include test/wasm_test_alloc.h");
     private_header_check();
 
-    /* Tools. */
     target_t* wasm2api = native_executable("wasm2api", "wasm2api.c", header);
     native_executable("wasm", "wasm.c", header);
 
-    /* Native tests. */
     target_t* wl_test = native_executable("wl_test", "test/wl_test.c", header);
     target_t* wasm_test = native_executable("wasm_test", "test/wasm_test.c", header);
     target_t* wasm_modular_test = native_executable("wasm_modular_test", "test/wasm_test.c", header);
@@ -720,8 +673,7 @@ int main(int argc, char** argv) {
     cbuild_add_include_dir(ctx, spectest_modular_runner, "src");
     cbuild_add_link_target(ctx, spectest_modular_runner, runtime);
 
-    /* Keep the core tests free of the platform feature definitions carried by
-     * project_options, so strict C99 compilation exercises the core alone. */
+    /* No project_options: strict C99 without platform feature definitions. */
     target_t* core_test = cbuild_executable(ctx, "wasm_core_test");
     cbuild_add_source(ctx, core_test, "test/wasm_core_test.c");
     base_options(core_test);
@@ -757,9 +709,7 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    /* Exercise command capture without requiring wasm-tools or the spec
-     * submodule. Copy each runner into a path with spaces to exercise shell
-     * quoting even when the checkout and build paths contain none. */
+    /* A copy under a path with spaces exercises the runners' shell quoting. */
     target_t* runners[] = { spectest_runner, spectest_modular_runner };
     const char* runner_names[] = { "spectest_runner", "spectest_modular_runner" };
     const char* capture_tests[] = { "spectest_capture", "spectest_modular_capture" };
@@ -779,7 +729,6 @@ int main(int argc, char** argv) {
 
     spectests(spectest_runner, spectest_modular_runner);
 
-    /* The fixtures need the platform helpers; the wrapper example only needs emcc. */
     char* emcc = find_emcc();
     if (emcc) {
         if (opt.emcc && opt.platform) emcc_fixtures(emcc, runner);
@@ -798,7 +747,7 @@ int main(int argc, char** argv) {
         cbuild_add_link_target(ctx, fuzzer, header);
     }
 
-    /* Caller-supplied flags come last so they can override the build type. */
+    /* Last, so caller flags override the build type. */
     for (int i = 0; i < native_target_count; ++i) {
         if (opt.cflags) cbuild_add_cflags(ctx, native_targets[i], opt.cflags);
         if (opt.ldflags) cbuild_add_ldflags(ctx, native_targets[i], opt.ldflags);

@@ -1,19 +1,8 @@
-/* amalgamate.c - generate the distribution wasm.h from src/amalgamation.h.
- *
- * Usage: amalgamate [--check] [--root DIR] [--stamp FILE]
- *
- * Starting at src/amalgamation.h, every quoted #include is replaced by the
- * named file, recursively, so wasm.h needs nothing but system headers. Each
- * local file is emitted once, between BEGIN and END markers; later includes of
- * it expand to nothing. Local includes must name .h, .inc, or .c files under
- * src/. The header is only rewritten when its content changes.
+/* Usage: amalgamate [--check] [--root DIR] [--stamp FILE]
  *
  *   --check   exit 1 if wasm.h is stale instead of rewriting it
  *   --root    repository root (default: the current directory)
- *   --stamp   also write FILE on every run, holding a fingerprint of the
- *             generated text, so build tools can tell when generation ran
- *
- * Needs only a C99 compiler: cc tools/amalgamate.c -o amalgamate
+ *   --stamp   write a fingerprint of the generated text to FILE on every run
  */
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
@@ -96,7 +85,6 @@ static char* join_root(const char* relative) {
     return path;
 }
 
-/* Reads a whole file as bytes; returns 0 if it cannot be opened. */
 static int read_file(const char* path, buffer_t* out) {
     FILE* f = fopen(path, "rb");
     if (!f) return 0;
@@ -114,9 +102,8 @@ static void write_file(const char* path, const char* data, size_t len) {
     if (!f || fwrite(data, 1, len, f) != len || fclose(f) != 0) fail("cannot write %s", path);
 }
 
-/* Lexically resolves include (relative to the directory of the root-relative
- * path from) to a root-relative path with "." and ".." segments removed. A
- * result outside the root keeps its leading "../" segments. */
+/* Resolves include against the directory of the root-relative path from,
+ * lexically. A result outside the root keeps its leading "../" segments. */
 static char* resolve(const char* from, const char* include) {
     size_t dir_len = 0;
     const char* slash = strrchr(from, '/');
@@ -185,9 +172,7 @@ static int match_directive(const char* s, size_t len, size_t i, size_t* name, si
     return 1;
 }
 
-/* Finds the leftmost (^|\n)<directive> in s, as a regular expression would:
- * at offset 0 the directive may start immediately, elsewhere it starts after a
- * newline that belongs to the match. */
+/* Leftmost (^|\n)<directive>; *start is the newline that belongs to the match, if any. */
 static int find_directive(const char* s, size_t len, size_t* start, size_t* name, size_t* name_len,
                           size_t* end) {
     for (size_t p = 0; p < len; ++p) {
@@ -208,7 +193,6 @@ static int has_suffix(const char* s, const char* suffix) {
     return n >= m && strcmp(s + n - m, suffix) == 0;
 }
 
-/* Appends the expansion of the root-relative path label to out. */
 static void expand(const char* label, list_t* stack, buffer_t* out) {
     if (list_has(stack, label)) fail("Recursive local include: %s", label);
     if (list_has(&included, label)) return;
@@ -256,7 +240,6 @@ static void expand(const char* label, list_t* stack, buffer_t* out) {
     free(text.data);
 }
 
-/* FNV-1a, enough to tell generated headers apart. */
 static unsigned long long fingerprint(const char* data, size_t len) {
     unsigned long long h = 14695981039346656037ULL;
     for (size_t i = 0; i < len; ++i) {
