@@ -11,6 +11,7 @@
 #include "portable.h"
 #include "init_expr.h"
 #include "types/cross_module.h"
+#include "validate/module.h"
 #include "internal/config.h"
 #include "internal/alloc.h"
 #include <string.h>
@@ -85,26 +86,34 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     int is_shared = (flags & 0x02u) != 0;
     int is_64 = (flags & 0x04u) != 0;
     int has_custom_page_size = (flags & 0x08u) != 0;
-    int use_u64_counts;
 
     if ((flags & ~0x0Fu) != 0) return WASM_ERR_MALFORMED;
-    if (is_shared || has_custom_page_size) return WASM_ERR_MALFORMED;
+    if (is_shared) return WASM_ERR_MALFORMED;
     if (is_64) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MEMORY64);
         if (err != WASM_OK) return err;
     }
-
-    use_u64_counts = (is_64 != 0);
+    if (has_custom_page_size) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_PAGE_SIZES);
+        if (err != WASM_OK) return err;
+    }
 
     memset(memory, 0, sizeof(*memory));
     memory->is_64 = is_64;
-    if (use_u64_counts) {
-        memory->pages = wasm__read_leb128_u64(r);
-        memory->max_pages = has_max ? wasm__read_leb128_u64(r) : wasm__memory_page_limit(memory);
-    } else {
-        memory->pages = wasm__read_leb128_u32(r);
-        memory->max_pages = has_max ? wasm__read_leb128_u32(r) : wasm__memory_page_limit(memory);
+    memory->pages = wasm__read_leb128_u64(r);
+    if (has_max) memory->max_pages = wasm__read_leb128_u64(r);
+    if (has_custom_page_size) {
+        uint32_t page_size_log2 = wasm__read_leb128_u32(r);
+        if (r->malformed) return WASM_ERR_MALFORMED;
+        if (page_size_log2 >= 64u) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid custom page size");
+            return WASM_ERR_MALFORMED;
+        }
+        if (page_size_log2 != 0u && page_size_log2 != 16u)
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "invalid custom page size");
+        memory->page_size = 1u << page_size_log2;
     }
+    if (!has_max) memory->max_pages = wasm__memory_page_limit(memory);
 
     if (r->malformed) return WASM_ERR_MALFORMED;
     return WASM_OK;
@@ -334,10 +343,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         bound_memory = wasm__memory_actual(mimp->memory);
         if (!bound_memory) return WASM_ERR_MALFORMED;
-        if (!wasm__memorytype_matches_import(bound_memory,
-                                             memory->pages,
-                                             memory->max_pages,
-                                             memory->is_64)) {
+        if (!wasm__memorytype_matches_import(bound_memory, memory)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                           "memory import type mismatch: %.64s.%.64s",
                           info->module, info->name);
@@ -348,6 +354,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         memory->pages = bound_memory->pages;
         memory->max_pages = bound_memory->max_pages;
         memory->is_64 = bound_memory->is_64;
+        memory->page_size = bound_memory->page_size;
         memory->data = bound_memory->data;
         info->index = memory_index;
     } else if (kind == 0x03) {

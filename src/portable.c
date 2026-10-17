@@ -183,6 +183,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "Memory64";
         case WASM_FEATURE_WIDE_ARITHMETIC:
             return "wide arithmetic";
+        case WASM_FEATURE_CUSTOM_PAGE_SIZES:
+            return "custom page sizes";
         default:
             return "unknown feature";
     }

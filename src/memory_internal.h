@@ -30,6 +30,8 @@ WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const w
 
 WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value);
 
+WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory);
+
 WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory);
 
 WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,

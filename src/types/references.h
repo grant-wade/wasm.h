@@ -77,9 +77,7 @@ WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
                                           int expected_is_64);
 
 WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
-                                           uint64_t expected_min,
-                                           uint64_t expected_max,
-                                           int expected_is_64);
+                                           const wasm_memory_t* expected_memory);
 
 WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
                                         wasm__reader_t* r,

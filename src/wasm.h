@@ -213,6 +213,7 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_MEMORY64 (1u << 12)
 /* Proposals not yet standardized are implemented but disabled by default. */
 #define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
+#define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -536,6 +537,7 @@ typedef struct wasm_memory_t {
     int is_64;
     int is_import;
     struct wasm_memory_t* import_memory;
+    uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
 } wasm_memory_t;
 
 typedef struct wasm_table_import_t {

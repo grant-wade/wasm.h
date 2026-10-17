@@ -190,6 +190,7 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Exception Handling | Implemented |
 | Memory64 | Implemented |
 | Wide Arithmetic | Implemented, opt-in (`WASM_FEATURE_WIDE_ARITHMETIC`) |
+| Custom Page Sizes | Implemented, opt-in (`WASM_FEATURE_CUSTOM_PAGE_SIZES`) |
 | Branch Hinting | Not implemented |
 
 Opt-in proposals have not been standardized yet; enable them with `wasm_enable_feature` or `wasm_enable_all_features`.

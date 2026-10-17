@@ -502,16 +502,15 @@ WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
 }
 
 WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
-                                           uint64_t expected_min,
-                                           uint64_t expected_max,
-                                           int expected_is_64) {
+                                           const wasm_memory_t* expected_memory) {
     actual_memory = wasm__memory_actual_const(actual_memory);
     if (!actual_memory) return 0;
-    if (actual_memory->is_64 != expected_is_64) return 0;
+    if (actual_memory->is_64 != expected_memory->is_64) return 0;
+    if (wasm__memory_page_size(actual_memory) != wasm__memory_page_size(expected_memory)) return 0;
     return wasm__limits_match_import(actual_memory->pages,
                                      actual_memory->max_pages,
-                                     expected_min,
-                                     expected_max);
+                                     expected_memory->pages,
+                                     expected_memory->max_pages);
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,

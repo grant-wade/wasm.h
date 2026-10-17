@@ -11585,6 +11585,35 @@ WL_TEST(test_gc_rejects_multiple_supertypes) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_custom_page_sizes_is_opt_in) {
+    static const uint8_t memory_section[] = { 0x05, 0x04, 0x01, 0x08, 0x03, 0x00 };
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    emit_header(&mod);
+    emit_bytes(&mod, memory_section, sizeof(memory_section));
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected custom page sizes to be disabled by default");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "custom page sizes") != NULL, "%s", rt.error_msg);
+    if (m != NULL) wasm_free_module(m);
+
+    wasm_enable_feature(&rt, WASM_FEATURE_CUSTOM_PAGE_SIZES);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) {
+        int64_t old_pages;
+        WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), 3);
+        old_pages = wasm_memory_grow_at(m, 0, 5);
+        WASM_CHECK_I64(t, old_pages, 3);
+        WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), 8);
+        wasm_free_module(m);
+    }
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_wide_arithmetic_is_opt_in) {
     static const uint8_t sections[] = {
         0x01, 0x08, 0x01, 0x60, 0x02, 0x7E, 0x7E, 0x02, 0x7E, 0x7E,
@@ -14622,6 +14651,7 @@ int main(void) {
         { "SIMD: execution path, memory ops, select, and feature gate", test_simd_execution_and_feature_gate },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
         { "wide arithmetic: disabled by default, 128-bit products when enabled", test_wide_arithmetic_is_opt_in },
+        { "custom page sizes: disabled by default, byte-sized pages when enabled", test_custom_page_sizes_is_opt_in },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },

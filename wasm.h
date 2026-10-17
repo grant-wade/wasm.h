@@ -222,6 +222,7 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_MEMORY64 (1u << 12)
 /* Proposals not yet standardized are implemented but disabled by default. */
 #define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
+#define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -545,6 +546,7 @@ typedef struct wasm_memory_t {
     int is_64;
     int is_import;
     struct wasm_memory_t* import_memory;
+    uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
 } wasm_memory_t;
 
 typedef struct wasm_table_import_t {
@@ -785,9 +787,10 @@ const char* wasm_error_string(wasm_error_t err);
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
      WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64 | WASM_FEATURE_WIDE_ARITHMETIC)
+     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64 | WASM_FEATURE_WIDE_ARITHMETIC | \
+     WASM_FEATURE_CUSTOM_PAGE_SIZES)
 
-#define WASM__PROPOSAL_FEATURES (WASM_FEATURE_WIDE_ARITHMETIC)
+#define WASM__PROPOSAL_FEATURES (WASM_FEATURE_WIDE_ARITHMETIC | WASM_FEATURE_CUSTOM_PAGE_SIZES)
 
 #define WASM__DEFAULT_FEATURES (WASM__IMPLEMENTED_FEATURES & ~WASM__PROPOSAL_FEATURES)
 
@@ -2107,6 +2110,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "Memory64";
         case WASM_FEATURE_WIDE_ARITHMETIC:
             return "wide arithmetic";
+        case WASM_FEATURE_CUSTOM_PAGE_SIZES:
+            return "custom page sizes";
         default:
             return "unknown feature";
     }
@@ -2734,9 +2739,7 @@ WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
                                           int expected_is_64);
 
 WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
-                                           uint64_t expected_min,
-                                           uint64_t expected_max,
-                                           int expected_is_64);
+                                           const wasm_memory_t* expected_memory);
 
 WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
                                         wasm__reader_t* r,
@@ -3600,6 +3603,8 @@ WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const w
 
 WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value);
 
+WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory);
+
 WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory);
 
 WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
@@ -4135,16 +4140,15 @@ WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
 }
 
 WASM_PRIVATE int wasm__memorytype_matches_import(const wasm_memory_t* actual_memory,
-                                           uint64_t expected_min,
-                                           uint64_t expected_max,
-                                           int expected_is_64) {
+                                           const wasm_memory_t* expected_memory) {
     actual_memory = wasm__memory_actual_const(actual_memory);
     if (!actual_memory) return 0;
-    if (actual_memory->is_64 != expected_is_64) return 0;
+    if (actual_memory->is_64 != expected_memory->is_64) return 0;
+    if (wasm__memory_page_size(actual_memory) != wasm__memory_page_size(expected_memory)) return 0;
     return wasm__limits_match_import(actual_memory->pages,
                                      actual_memory->max_pages,
-                                     expected_min,
-                                     expected_max);
+                                     expected_memory->pages,
+                                     expected_memory->max_pages);
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
@@ -6038,7 +6042,13 @@ WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, ui
     return wasm_i32((int32_t)value);
 }
 
+WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory) {
+    return (memory && memory->page_size) ? memory->page_size : WASM_PAGE_SIZE;
+}
+
+/* The largest page count whose byte size fits the address space: 2^32 or 2^64 bytes, less one for byte pages. */
 WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory) {
+    if (wasm__memory_page_size(memory) == 1u) return (memory && memory->is_64) ? UINT64_MAX : UINT32_MAX;
     return (memory && memory->is_64) ? WASM_MEMORY64_MAX_PAGES : (uint64_t)WASM_MEMORY32_MAX_PAGES;
 }
 
@@ -6047,6 +6057,12 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                                  const wasm_memory_t* memory) {
     if (!mod || !mod->rt || !memory) return WASM_ERR_MALFORMED;
 
+    if (memory->pages > wasm__memory_page_limit(memory) || memory->max_pages > wasm__memory_page_limit(memory)) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "memory size must be at most %llu pages (memory %u)",
+                                          (unsigned long long)wasm__memory_page_limit(memory),
+                                          (unsigned)memory_index);
+    }
     if (memory->pages > memory->max_pages) {
         return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                           "memory %u min %llu exceeds max %llu",
@@ -6054,18 +6070,11 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                           (unsigned long long)memory->pages,
                                           (unsigned long long)memory->max_pages);
     }
-    if (memory->max_pages > wasm__memory_page_limit(memory)) {
-        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                          "memory %u max %llu exceeds %s page limit",
-                                          (unsigned)memory_index,
-                                          (unsigned long long)memory->max_pages,
-                                          memory->is_64 ? "Memory64" : "MVP");
-    }
     return WASM_OK;
 }
 
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
-    return memory ? memory->pages * (uint64_t)WASM_PAGE_SIZE : 0;
+    return memory ? memory->pages * (uint64_t)wasm__memory_page_size(memory) : 0;
 }
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size) {
@@ -10892,6 +10901,7 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod);
 
 
 
+
 #include <string.h>
 #include <stdio.h>
 
@@ -10964,26 +10974,34 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     int is_shared = (flags & 0x02u) != 0;
     int is_64 = (flags & 0x04u) != 0;
     int has_custom_page_size = (flags & 0x08u) != 0;
-    int use_u64_counts;
 
     if ((flags & ~0x0Fu) != 0) return WASM_ERR_MALFORMED;
-    if (is_shared || has_custom_page_size) return WASM_ERR_MALFORMED;
+    if (is_shared) return WASM_ERR_MALFORMED;
     if (is_64) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_MEMORY64);
         if (err != WASM_OK) return err;
     }
-
-    use_u64_counts = (is_64 != 0);
+    if (has_custom_page_size) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_PAGE_SIZES);
+        if (err != WASM_OK) return err;
+    }
 
     memset(memory, 0, sizeof(*memory));
     memory->is_64 = is_64;
-    if (use_u64_counts) {
-        memory->pages = wasm__read_leb128_u64(r);
-        memory->max_pages = has_max ? wasm__read_leb128_u64(r) : wasm__memory_page_limit(memory);
-    } else {
-        memory->pages = wasm__read_leb128_u32(r);
-        memory->max_pages = has_max ? wasm__read_leb128_u32(r) : wasm__memory_page_limit(memory);
+    memory->pages = wasm__read_leb128_u64(r);
+    if (has_max) memory->max_pages = wasm__read_leb128_u64(r);
+    if (has_custom_page_size) {
+        uint32_t page_size_log2 = wasm__read_leb128_u32(r);
+        if (r->malformed) return WASM_ERR_MALFORMED;
+        if (page_size_log2 >= 64u) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid custom page size");
+            return WASM_ERR_MALFORMED;
+        }
+        if (page_size_log2 != 0u && page_size_log2 != 16u)
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "invalid custom page size");
+        memory->page_size = 1u << page_size_log2;
     }
+    if (!has_max) memory->max_pages = wasm__memory_page_limit(memory);
 
     if (r->malformed) return WASM_ERR_MALFORMED;
     return WASM_OK;
@@ -11213,10 +11231,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
         bound_memory = wasm__memory_actual(mimp->memory);
         if (!bound_memory) return WASM_ERR_MALFORMED;
-        if (!wasm__memorytype_matches_import(bound_memory,
-                                             memory->pages,
-                                             memory->max_pages,
-                                             memory->is_64)) {
+        if (!wasm__memorytype_matches_import(bound_memory, memory)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                           "memory import type mismatch: %.64s.%.64s",
                           info->module, info->name);
@@ -11227,6 +11242,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         memory->pages = bound_memory->pages;
         memory->max_pages = bound_memory->max_pages;
         memory->is_64 = bound_memory->is_64;
+        memory->page_size = bound_memory->page_size;
         memory->data = bound_memory->data;
         info->index = memory_index;
     } else if (kind == 0x03) {

@@ -1250,7 +1250,8 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "memory size") != NULL))
         return 1;
     if (strcmp(expected_lower, "memory size must be at most 65536 pages (4gib)") == 0 &&
-        (strstr(actual_lower, "exceeds max 65536") != NULL ||
+        (strstr(actual_lower, "memory size must be at most 65536 pages") != NULL ||
+         strstr(actual_lower, "exceeds max 65536") != NULL ||
          strstr(actual_lower, "exceeds mvp page limit") != NULL))
         return 1;
     if (strcmp(expected_lower, "wrong number of lane literals") == 0 &&

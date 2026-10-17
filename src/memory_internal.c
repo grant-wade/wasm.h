@@ -98,7 +98,13 @@ WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, ui
     return wasm_i32((int32_t)value);
 }
 
+WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory) {
+    return (memory && memory->page_size) ? memory->page_size : WASM_PAGE_SIZE;
+}
+
+/* The largest page count whose byte size fits the address space: 2^32 or 2^64 bytes, less one for byte pages. */
 WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory) {
+    if (wasm__memory_page_size(memory) == 1u) return (memory && memory->is_64) ? UINT64_MAX : UINT32_MAX;
     return (memory && memory->is_64) ? WASM_MEMORY64_MAX_PAGES : (uint64_t)WASM_MEMORY32_MAX_PAGES;
 }
 
@@ -107,6 +113,12 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                                  const wasm_memory_t* memory) {
     if (!mod || !mod->rt || !memory) return WASM_ERR_MALFORMED;
 
+    if (memory->pages > wasm__memory_page_limit(memory) || memory->max_pages > wasm__memory_page_limit(memory)) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "memory size must be at most %llu pages (memory %u)",
+                                          (unsigned long long)wasm__memory_page_limit(memory),
+                                          (unsigned)memory_index);
+    }
     if (memory->pages > memory->max_pages) {
         return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                           "memory %u min %llu exceeds max %llu",
@@ -114,18 +126,11 @@ WASM_PRIVATE wasm_error_t wasm__validate_memory_limits(wasm_module_t* mod,
                                           (unsigned long long)memory->pages,
                                           (unsigned long long)memory->max_pages);
     }
-    if (memory->max_pages > wasm__memory_page_limit(memory)) {
-        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                          "memory %u max %llu exceeds %s page limit",
-                                          (unsigned)memory_index,
-                                          (unsigned long long)memory->max_pages,
-                                          memory->is_64 ? "Memory64" : "MVP");
-    }
     return WASM_OK;
 }
 
 WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory) {
-    return memory ? memory->pages * (uint64_t)WASM_PAGE_SIZE : 0;
+    return memory ? memory->pages * (uint64_t)wasm__memory_page_size(memory) : 0;
 }
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size) {
