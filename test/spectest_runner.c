@@ -2725,6 +2725,67 @@ static int spec_execute_action(spec_harness_t* harness,
     return out_result->err == WASM_OK;
 }
 
+/* Custom section errors are not fatal, and the runtime ignores the name section, so a module whose
+   custom section is malformed or invalid must still load. A text module that wasm-tools rejects has no
+   binary for the runtime to check, and loading stops at an unresolved import before custom sections. */
+static int spec_run_custom_section_module(spec_harness_t* harness,
+                                          const char* json,
+                                          const spec_json_token_t* tokens,
+                                          int command_index,
+                                          char* error_text,
+                                          size_t error_size) {
+    int file_index = spec_object_get(json, tokens, command_index, "filename");
+    int module_type_index = spec_object_get(json, tokens, command_index, "module_type");
+    char* file_name;
+    char* module_type;
+    char* path;
+    char* wasm_path = NULL;
+    int ok = 0;
+
+    if (file_index < 0) {
+        spec_set_error(error_text, error_size, "missing custom section test filename");
+        return 0;
+    }
+    file_name = spec_strdup_token(json, &tokens[file_index]);
+    module_type = module_type_index >= 0 ? spec_strdup_token(json, &tokens[module_type_index]) : NULL;
+    path = spec_path_join(harness->json_dir, file_name);
+    if (!path) {
+        spec_set_error(error_text, error_size, "out of memory resolving module path");
+        goto done;
+    }
+
+    if (module_type && strcmp(module_type, "text") == 0) {
+        char* compiler_output = NULL;
+        int compiler_exit = -1;
+
+        wasm_path = (char*)malloc(strlen(path) + 6u);
+        if (!wasm_path) {
+            spec_set_error(error_text, error_size, "out of memory preparing temporary wasm path");
+            goto done;
+        }
+        sprintf(wasm_path, "%s.wasm", path);
+        if (!spec_compile_wat(harness, path, wasm_path, &compiler_output, &compiler_exit)) {
+            spec_set_error(error_text, error_size, "failed to invoke wasm-tools parse");
+            goto done;
+        }
+        free(compiler_output);
+        if (compiler_exit != 0) {
+            ok = 1;
+            goto done;
+        }
+    }
+
+    ok = spec_load_module_file(harness, wasm_path ? wasm_path : path, NULL, 0, error_text, error_size) != NULL ||
+         harness->runtime.last_error == WASM_ERR_UNKNOWN_IMPORT;
+
+done:
+    free(wasm_path);
+    free(path);
+    free(file_name);
+    free(module_type);
+    return ok;
+}
+
 static int spec_run_negative_module(spec_harness_t* harness,
                                     const char* json,
                                     const spec_json_token_t* tokens,
@@ -3111,6 +3172,8 @@ static int spec_run_command(spec_harness_t* harness,
         ok = spec_run_negative_module(harness, json, tokens, command_index, text_field,
                                       strcmp(type_text, "assert_malformed") == 0,
                                       command_error, sizeof(command_error));
+    } else if (strcmp(type_text, "assert_malformed_custom") == 0 || strcmp(type_text, "assert_invalid_custom") == 0) {
+        ok = spec_run_custom_section_module(harness, json, tokens, command_index, command_error, sizeof(command_error));
     } else {
         spec_set_error(command_error, sizeof(command_error), "unsupported command type '%s'", type_text);
     }
