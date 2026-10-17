@@ -63,7 +63,7 @@ rt = wasm_runtime_new(&config);
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
 
-All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC` and `WASM_FEATURE_CUSTOM_PAGE_SIZES`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
+All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, and `WASM_FEATURE_COMPACT_IMPORTS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
 
 ## Calling exports
 

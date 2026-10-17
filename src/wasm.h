@@ -214,6 +214,7 @@ typedef enum wasm_error_t {
 /* Proposals not yet standardized are implemented but disabled by default. */
 #define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
 #define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
+#define WASM_FEATURE_COMPACT_IMPORTS (1u << 15)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {

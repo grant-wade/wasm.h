@@ -185,6 +185,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "wide arithmetic";
         case WASM_FEATURE_CUSTOM_PAGE_SIZES:
             return "custom page sizes";
+        case WASM_FEATURE_COMPACT_IMPORTS:
+            return "compact imports";
         default:
             return "unknown feature";
     }

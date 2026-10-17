@@ -469,92 +469,136 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
     return WASM_OK;
 }
 
+/* Parses an import description into temporaries so a shared compact-import type can be re-read per item. */
+static wasm_error_t wasm__skip_import_desc(wasm_module_t* mod, wasm__reader_t* r, uint8_t kind) {
+    switch (kind) {
+        case 0x00:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0x01: {
+            wasm_table_t table;
+            wasm_error_t err = wasm__read_table_type(mod, r, &table);
+            if (err != WASM_OK) return err;
+            break;
+        }
+        case 0x02: {
+            wasm_memory_t memory;
+            wasm_error_t err = wasm__read_memory_type(mod, r, &memory);
+            if (err != WASM_OK) return err;
+            break;
+        }
+        case 0x03: {
+            wasm_valtype_t type;
+            wasm_reftype_t ref_type;
+            wasm_error_t err = wasm__read_valtype(mod, r, &type, &ref_type);
+            if (err != WASM_OK) return err;
+            wasm__read_u8(r);
+            break;
+        }
+        case 0x04:
+            wasm__read_u8(r);
+            wasm__read_leb128_u32(r);
+            break;
+        default:
+            return WASM_ERR_MALFORMED;
+    }
+    return r->malformed ? WASM_ERR_MALFORMED : WASM_OK;
+}
+
+/* A compact group shares one module name: encoding 0x7F gives each item a name and type,
+   0x7E gives one type followed by the item names. */
+static wasm_error_t wasm__decode_compact_imports(wasm_module_t* mod,
+                                                 wasm__reader_t* r,
+                                                 const char* module_name,
+                                                 uint8_t encoding) {
+    const uint8_t* shared_desc = NULL;
+    uint8_t shared_kind = 0;
+    uint32_t count;
+    uint32_t i;
+    wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_COMPACT_IMPORTS);
+
+    if (err != WASM_OK) return err;
+    if (encoding == 0x7E) {
+        shared_kind = wasm__read_u8(r);
+        shared_desc = r->ptr;
+        err = wasm__skip_import_desc(mod, r, shared_kind);
+        if (err != WASM_OK) return err;
+    }
+
+    count = wasm__read_count(r);
+    for (i = 0; i < count; i++) {
+        uint32_t import_index;
+        wasm_import_info_t* info;
+
+        err = wasm__append_import_infos(mod, 1, &import_index);
+        if (err != WASM_OK) return err;
+        info = &mod->imports[import_index];
+        info->type_index = UINT32_MAX;
+        info->module = wasm__strdup(module_name);
+        if (!info->module) return WASM_ERR_OOM;
+        err = wasm__read_name_owned(r, &info->name);
+        if (err != WASM_OK) return err;
+
+        if (encoding == 0x7F) {
+            uint8_t kind = wasm__read_u8(r);
+            info->kind = (wasm_import_kind_t)kind;
+            err = wasm__decode_import_desc(mod, r, info, kind);
+        } else {
+            wasm__reader_t desc;
+            desc.ptr = shared_desc;
+            desc.end = r->end;
+            desc.malformed = 0;
+            info->kind = (wasm_import_kind_t)shared_kind;
+            err = wasm__decode_import_desc(mod, &desc, info, shared_kind);
+        }
+        if (err != WASM_OK) return err;
+    }
+    return r->malformed ? WASM_ERR_MALFORMED : WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_count(r);
-    uint32_t i = 0;
+    uint32_t i;
 
-    while (i < count) {
+    for (i = 0; i < count; i++) {
         char* module_name = NULL;
         char* field_name = NULL;
+        uint32_t field_len = 0;
+        uint32_t import_index;
+        wasm_import_info_t* info;
         wasm_error_t err;
         uint8_t kind;
 
         err = wasm__read_name_owned(r, &module_name);
         if (err != WASM_OK) return err;
-        err = wasm__read_name_owned(r, &field_name);
+        err = wasm__read_name_owned_len(r, &field_name, &field_len);
         if (err != WASM_OK) {
             WASM_FREE(module_name);
             return err;
         }
         kind = wasm__read_u8(r);
 
-        if (field_name[0] == '\0' && (kind == 0x7F || kind == 0x7E)) {
-            uint32_t compact_count;
-            uint8_t compact_kind = kind;
-            uint32_t j;
-
+        if (field_len == 0 && (kind == 0x7F || kind == 0x7E)) {
             WASM_FREE(field_name);
-            field_name = NULL;
-            if (compact_kind == 0x7E) compact_kind = wasm__read_u8(r);
-            compact_count = wasm__read_leb128_u32(r);
-            if (compact_count == 0 || compact_count > count - i) {
-                WASM_FREE(module_name);
-                return WASM_ERR_MALFORMED;
-            }
-
-            for (j = 0; j < compact_count; j++, i++) {
-                uint32_t import_index;
-                wasm_import_info_t* info;
-                uint8_t entry_kind = compact_kind;
-                wasm_error_t append_err = wasm__append_import_infos(mod, 1, &import_index);
-                if (append_err != WASM_OK) {
-                    WASM_FREE(module_name);
-                    return append_err;
-                }
-                info = &mod->imports[import_index];
-                info->type_index = UINT32_MAX;
-                info->module = wasm__strdup(module_name);
-                if (!info->module) {
-                    WASM_FREE(module_name);
-                    return WASM_ERR_OOM;
-                }
-                err = wasm__read_name_owned(r, &info->name);
-                if (err != WASM_OK) {
-                    WASM_FREE(module_name);
-                    return err;
-                }
-                if (kind == 0x7F) entry_kind = wasm__read_u8(r);
-                info->kind = (wasm_import_kind_t)entry_kind;
-                err = wasm__decode_import_desc(mod, r, info, entry_kind);
-                if (err != WASM_OK) {
-                    WASM_FREE(module_name);
-                    return err;
-                }
-            }
+            err = wasm__decode_compact_imports(mod, r, module_name, kind);
             WASM_FREE(module_name);
+            if (err != WASM_OK) return err;
             continue;
         }
 
-        {
-            uint32_t import_index;
-            wasm_import_info_t* info;
-            wasm_error_t append_err = wasm__append_import_infos(mod, 1, &import_index);
-
-            if (append_err != WASM_OK) {
-                WASM_FREE(module_name);
-                WASM_FREE(field_name);
-                return append_err;
-            }
-
-            info = &mod->imports[import_index];
-            info->type_index = UINT32_MAX;
-            info->module = module_name;
-            info->name = field_name;
-            info->kind = (wasm_import_kind_t)kind;
-            err = wasm__decode_import_desc(mod, r, info, kind);
-            if (err != WASM_OK) return err;
-            i++;
+        err = wasm__append_import_infos(mod, 1, &import_index);
+        if (err != WASM_OK) {
+            WASM_FREE(module_name);
+            WASM_FREE(field_name);
+            return err;
         }
+        info = &mod->imports[import_index];
+        info->type_index = UINT32_MAX;
+        info->module = module_name;
+        info->name = field_name;
+        info->kind = (wasm_import_kind_t)kind;
+        err = wasm__decode_import_desc(mod, r, info, kind);
+        if (err != WASM_OK) return err;
     }
 
     return WASM_OK;
