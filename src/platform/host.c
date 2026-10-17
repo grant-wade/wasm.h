@@ -137,7 +137,7 @@ static int wasm__platform_posix_clock_time_get(uint32_t clock_id, uint64_t* out_
 #endif
 #if WASM_ENABLE_PLATFORM
 #if defined(WASM__WASI_NEEDS_RANDOM_FALLBACK)
-#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
+#if WASM__PLATFORM_WINDOWS
 WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     unsigned char* bytes = (unsigned char*)dst;
     size_t i;
@@ -161,7 +161,7 @@ WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len) {
 #endif
 #if WASM_ENABLE_PLATFORM
 #if defined(WASM__WASI_NEEDS_RANDOM_FALLBACK)
-#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
+#if WASM__PLATFORM_WINDOWS
 #elif WASM__PLATFORM_POSIX
 WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len) {
     unsigned char* bytes = (unsigned char*)dst;
@@ -183,7 +183,7 @@ WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len) {
 #endif
 #if WASM_ENABLE_PLATFORM
 #if defined(WASM__WASI_NEEDS_RANDOM_FALLBACK)
-#if WASM__PLATFORM_WINDOWS && defined(_MSC_VER)
+#if WASM__PLATFORM_WINDOWS
 #elif WASM__PLATFORM_POSIX
 #else
 WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len) {
