@@ -1,61 +1,87 @@
 # Building and Testing
 
-Requires CMake 3.20+ and a C99 compiler. Copying `wasm.h` into an application does not require CMake.
+The build is [`build.c`](../build.c), a C program written against the vendored [`cbuild.h`](../cbuild.h). It needs only a C99 compiler. Copying `wasm.h` into an application needs no build system at all.
 
 ## Build and test
 
 ```sh
 git submodule update --init --recursive
-cmake -S . -B build
-cmake --build build
-cmake --build build --target check
+cc -o cbuild build.c        # once; Windows: cl /nologo /Fe:cbuild.exe build.c
+./cbuild                    # runtime, CLI, wrapper generator, and test programs
+./cbuild --test             # build what the tests need, then run them
 ```
 
-For multi-configuration generators such as Visual Studio, add `--config Release` to build commands.
+You only compile the build program by hand once: it rebuilds itself when `build.c` or `cbuild.h` changes. On Windows, run it from a Developer Command Prompt so `cl` is on `PATH`.
 
-`check` runs the native tests and available specification tests against both the single header and modular library. Optional tools must be available during configuration:
+`--test` runs the native tests and every available specification test against both the single header and the modular library, in parallel, and exits non-zero if any fail. The output of a failed test is printed, and every test's output is kept in `build/<config>/tests/<name>.log`. Optional tools are detected each run:
 
 - `wasm-tools` with `json-from-wast` and `parse`: specification tests.
-- `emcc`: Emscripten fixtures and the `session_math` example.
+- `emcc` (on `PATH`, or under `EMSDK` or `EMSCRIPTEN`): Emscripten fixtures and the `session_math` example.
+
+Pick tests with `--test-label` (`unit`, `modular`, `spectest`, `emcc`), `--test-filter`, and `--test-exclude`, which take wildcards on test names. `--list-tests` shows what is selected. `-j` sets compile and test parallelism; `--test-timeout=SECONDS` limits each test.
+
+```sh
+./cbuild --test --test-label=unit
+./cbuild --test --test-filter='spectest.*simd*'
+./cbuild --test --test-label=spectest --test-exclude='spectest.modular.*'
+```
+
+## Options
+
+The build has no cache: options that shape it are read on every run, so pass the same ones each time. Each configuration builds into its own directory by default.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `BUILD_TESTING` | `ON` | Enable tests and the `check` target. |
-| `WASM_H_ENABLE_PLATFORM` | `ON` | Enable runtime and test platform helpers. |
-| `WASM_H_ENABLE_WERROR` | `ON` | Treat compiler warnings as errors. |
-| `WASM_H_ENABLE_EMCC_TESTS` | `ON` | Enable Emscripten fixtures when `emcc` is available; requires platform helpers. |
-| `WASM_H_BUILD_FUZZER` | `OFF` | Build the Clang/libFuzzer module-loader harness. |
+| `--release` | off | Optimized build (`-O3 -DNDEBUG`, or `/O2`) in `build/release` instead of a debug build in `build/debug`. |
+| `--build-dir=DIR` | `build/debug` or `build/release` | Output directory. |
+| `--cc=COMPILER` | `$CC`, else `cc` or `cl` | C compiler; GCC, Clang, and MSVC are supported. |
+| `--cflags=FLAGS`, `--ldflags=FLAGS` | `$CFLAGS`, `$LDFLAGS` | Extra flags, applied after all built-in ones. |
+| `--no-platform` | off | Build without platform-backed runtime and test helpers. |
+| `--no-werror` | off | Do not treat compiler warnings as errors. |
+| `--no-emcc` | off | Skip the Emscripten fixture tests even when `emcc` is available. |
+| `--fuzzer` | off | Also build the Clang/libFuzzer module-loader harness. |
 
-Build individual targets with `cmake --build build --target <target>`:
+`./cbuild --help` lists these with cbuild's own options. For example, the CI sanitizer configuration is:
+
+```sh
+CC=gcc ./cbuild --test --no-werror --build-dir=build/asan \
+  --cflags='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all' \
+  --ldflags='-fsanitize=address,undefined'
+```
+
+## Targets
+
+Build individual targets with `./cbuild -t <target>`; `./cbuild --list` shows them all.
 
 | Target | Purpose |
 | --- | --- |
 | `wasm`, `wasm2api` | CLI and wrapper generator. |
 | `wasm_runtime` | Modular static library. |
+| `wasm-header` | Regenerate the root `wasm.h` from `src/`. |
 | `wasm_test`, `wasm_modular_test`, `wl_test` | Native regression executables. |
 | `session_math_demo` | Wrapper example; requires `emcc`. |
-| `wasm-spectest-build`, `wasm-emcc-build` | Prepare specification tests or Emscripten fixtures. |
-| `wasm-spectest-run-strict`, `wasm-emcc-run-strict` | Run a suite and fail on test failures. |
+| `wasm_load_fuzzer` | libFuzzer harness; requires `--fuzzer`. |
 
-The corresponding `*-run` targets report failures but return success. `check` is strict. See [test/README.md](../test/README.md) for fixture development and specification-test skips.
+`./cbuild --clean` removes the current configuration's build directory. `./cbuild --compile-commands` writes `compile_commands.json` there for clangd and similar tools. See [test/README.md](../test/README.md) for fixture development and specification-test skips.
 
 ## Runtime sources
 
-Edit `src/`; its `.c` files compile independently. `src/wasm.h` contains the public declarations. Regenerate and commit the root `wasm.h` after source changes:
+Edit `src/`; its `.c` files compile independently. `src/wasm.h` contains the public declarations. Every build regenerates the root `wasm.h` when `src/` changes; to do only that:
 
 ```sh
-cmake -P cmake/Amalgamate.cmake
+./cbuild -t wasm-header
 ```
 
-Normal builds regenerate it automatically. Add new implementation files to both `src/amalgamation.h` and `WASM_RUNTIME_SOURCES` in `CMakeLists.txt`.
+Commit the regenerated `wasm.h` with the source change. Add new implementation files to both `src/amalgamation.h` and `wasm_runtime_sources` in `build.c`.
 
-Check freshness without modifying the header:
+The generator, [`tools/amalgamate.c`](../tools/amalgamate.c), also builds on its own. To check freshness without modifying the header:
 
 ```sh
-cmake -DWASM_AMALGAMATE_CHECK=ON -P cmake/Amalgamate.cmake
+cc -o amalgamate tools/amalgamate.c
+./amalgamate --check
 ```
 
-The equivalent build targets are `wasm-header` and `wasm-header-check`. To check staged sources and header before commits:
+To check staged sources and header before commits:
 
 ```sh
 git config core.hooksPath .githooks
@@ -65,11 +91,11 @@ If using a hook manager, call `.githooks/pre-commit` from the existing hook inst
 
 ## Modular library
 
-With `add_subdirectory`, link `wasm_h::runtime` and include `wasm.h` without defining `WASM_IMPL`. The target supplies the public include path and math-library dependency.
+`./cbuild -t wasm_runtime` builds `build/<config>/libwasm_runtime.a` (`wasm_runtime.lib` with MSVC). Link it, add `src/` to the application's include path, link the math library where it is separate (`-lm`), and include `wasm.h` without defining `WASM_IMPL`.
 
-For a manual build, compile every `.c` file under `src/`, link the objects, and add `src/` to the application's include path. Apply platform and allocator definitions consistently to every runtime translation unit.
+To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform and allocator definitions consistently to every runtime translation unit.
 
-## Standalone header and installation
+## Standalone header
 
 Compile one application translation unit with `WASM_IMPL` defined before including `wasm.h`:
 
@@ -77,15 +103,9 @@ Compile one application translation unit with `WASM_IMPL` defined before includi
 cc -std=c99 -O2 application.c -lm -o application
 ```
 
-32-bit x86 GCC/Clang builds require `-msse2 -mfpmath=sse` to preserve Wasm floating-point rounding. CMake supplies these flags automatically.
+32-bit x86 GCC/Clang builds require `-msse2 -mfpmath=sse` to preserve Wasm floating-point rounding. `build.c` detects such targets and adds these flags automatically.
 
-Install the standalone header and its CMake package:
-
-```sh
-cmake --install build --prefix /desired/prefix
-```
-
-Consumers use `find_package(wasm_h CONFIG REQUIRED)` and link `wasm_h::wasm_h`; they still define `WASM_IMPL` in one translation unit. The modular library is not installed.
+To install, copy `wasm.h` into the application or an include directory.
 
 ## CI and fuzzing
 
@@ -94,8 +114,6 @@ Consumers use `find_package(wasm_h CONFIG REQUIRED)` and link `wasm_h::wasm_h`; 
 To fuzz the module loader with Clang and ASan/UBSan:
 
 ```sh
-CC=clang cmake -S . -B build-fuzz \
-  -DBUILD_TESTING=OFF -DWASM_H_BUILD_FUZZER=ON
-cmake --build build-fuzz --target wasm_load_fuzzer
-./build-fuzz/wasm_load_fuzzer -runs=10000 -max_len=65536
+./cbuild --fuzzer --cc=clang -t wasm_load_fuzzer
+./build/debug/wasm_load_fuzzer -runs=10000 -max_len=65536
 ```

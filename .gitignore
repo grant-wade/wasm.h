@@ -8,4 +8,9 @@ build-*/
 test/build/
 test/out/
 *.dSYM/
-.idea/
+.idea/# Build program bootstrapped from build.c (and its self-rebuild leftovers)
+/cbuild
+/cbuild.exe
+/cbuild.old
+/cbuild.exe.old
+/build.obj

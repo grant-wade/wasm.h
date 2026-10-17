@@ -11,17 +11,18 @@ See the [build guide](../docs/BUILDING.md) for setup and test commands.
 | `spectest_runner.c` | Replays `wasm-tools json-from-wast` commands. |
 | `spectest_support.wat` | Shared specification-test imports. |
 | `fixtures/*.c`, `fixture_runner.c` | Emscripten fixtures and native runner. |
+| `amalgamate_test.c`, `amalgamate_hook_test.sh` | Header generator and pre-commit hook tests. |
 
 ## Specification tests
 
-CMake requires `wasm-tools` with both `json-from-wast` and `parse`. Each top-level `.wast` file registers `spectest.<name>` and `spectest.modular.<name>` tests. CTest prepares their shared fixtures before execution.
+The build requires `wasm-tools` on `PATH` with both `json-from-wast` and `parse`. Each top-level `.wast` file registers `spectest.<name>` and `spectest.modular.<name>` tests (label `spectest`). `./cbuild --test` converts the files it needs before running them, and reconverts only when a `.wast` changes.
 
-Failed `.wast` conversions are recorded as skipped tests; runtime failures fail the strict targets and `check`.
+Failed `.wast` conversions are recorded as skipped tests; runtime failures fail `./cbuild --test`.
 
 ## Adding an Emscripten fixture
 
 1. Add `fixtures/<name>.c` with a zero-argument export named `wl_case`.
-2. Add a `wl_add_emcc_case(...)` entry in [CMakeLists.txt](CMakeLists.txt) with runner arguments and any required `emcc` flags.
+2. Add an entry to `emcc_cases` in [build.c](../build.c) with runner arguments and any required `emcc` flags. It runs as the `emcc.<name>` test.
 
 Runner modes:
 

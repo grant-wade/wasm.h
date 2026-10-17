@@ -6,9 +6,11 @@ root=$(git rev-parse --show-toplevel)
 snapshot=$(mktemp -d "${TMPDIR:-/tmp}/wasm-header-index.XXXXXX")
 trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
 git -C "$root" checkout-index --all --prefix="$snapshot/"
-if ! cmake -DWASM_AMALGAMATE_CHECK=ON -P "$snapshot/cmake/Amalgamate.cmake"; then
+# Build the generator from the staged tree too, so its own changes are checked.
+${CC:-cc} -o "$snapshot/amalgamate" "$snapshot/tools/amalgamate.c"
+if ! "$snapshot/amalgamate" --check --root "$snapshot"; then
     echo >&2 'Staged wasm.h must match the staged src/ tree and generator.'
-    echo >&2 'Run: cmake -P cmake/Amalgamate.cmake'
+    echo >&2 'Run: ./cbuild -t wasm-header'
     echo >&2 'Then stage wasm.h and the intended source/generator changes, and retry.'
     exit 1
 fi

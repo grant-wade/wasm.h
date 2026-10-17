@@ -5,9 +5,9 @@ Contributions are welcome. By submitting a contribution, you agree that it may b
 ## Development
 
 1. Initialize submodules: `git submodule update --init --recursive`.
-2. Configure: `cmake -S . -B build`.
-3. Run the strict suite: `cmake --build build --target check`.
-4. For runtime changes, also run a Release build and the sanitizer configuration in [ci.yml](.github/workflows/ci.yml).
+2. Bootstrap the build program: `cc -o cbuild build.c`.
+3. Run the strict suite: `./cbuild --test`.
+4. For runtime changes, also run `./cbuild --release --test` and the sanitizer configuration in [docs/BUILDING.md](docs/BUILDING.md).
 
 Keep the runtime C99-compatible and warning-free. Add focused regression tests for behavior changes. Changes to validation or execution semantics should pass the applicable official WebAssembly specification tests.
 

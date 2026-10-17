@@ -151,7 +151,7 @@ wasm_bind_emscripten_stubs(rt);
 
 These bindings are partial. WASI exposes standard I/O but preopens no directories; path operations requiring directory capabilities return `BADF`. Emscripten forwards some filesystem operations to the host: bind it only for trusted modules.
 
-Strict C99 POSIX builds may need `_POSIX_C_SOURCE=200809L`; CMake supplies it automatically.
+Strict C99 POSIX builds may need `_POSIX_C_SOURCE=200809L`; the repository build supplies it automatically.
 
 ## Linear memory and globals
 

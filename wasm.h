@@ -1,5 +1,5 @@
 /* Generated from src/amalgamation.h. Do not edit directly.
- * Regenerate: cmake -P cmake/Amalgamate.cmake
+ * Regenerate: ./cbuild -t wasm-header
  */
 /* BEGIN src/amalgamation.h */
 /* Assembly order for the single-header distribution. */

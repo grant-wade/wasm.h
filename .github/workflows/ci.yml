@@ -26,7 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check committed header matches sources
-        run: cmake -DWASM_AMALGAMATE_CHECK=ON -P cmake/Amalgamate.cmake
+        run: |
+          cc -o amalgamate tools/amalgamate.c
+          ./amalgamate --check
 
   linux:
     name: Linux / ${{ matrix.runner }} / ${{ matrix.compiler }} / ${{ matrix.config.build_type }} / platform=${{ matrix.config.platform }}
@@ -38,41 +40,34 @@ jobs:
         runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm]
         compiler: [gcc, clang]
         config:
-          - {build_type: Debug, platform: 'OFF'}
-          - {build_type: Release, platform: 'ON'}
+          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - {build_type: Release, platform: 'ON', flags: '--release'}
         # Preserve the original platform-enabled Debug coverage too.
         include:
           - runner: ubuntu-24.04
             compiler: gcc
-            config: {build_type: Debug, platform: 'ON'}
+            config: {build_type: Debug, platform: 'ON', flags: ''}
           - runner: ubuntu-24.04
             compiler: clang
-            config: {build_type: Debug, platform: 'ON'}
+            config: {build_type: Debug, platform: 'ON', flags: ''}
+    env:
+      CC: ${{ matrix.compiler }}
+      BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install build tools
-        env:
-          CI_COMPILER: ${{ matrix.compiler }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake curl "$CI_COMPILER"
+          sudo apt-get install -y curl "$CC"
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure
-        env:
-          CC: ${{ matrix.compiler }}
-        run: >-
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=${{ matrix.config.build_type }}
-          -DWASM_H_ENABLE_PLATFORM=${{ matrix.config.platform }}
-          -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build runtime, CLI, and wrapper generator
-        run: cmake --build build --parallel 2
+        run: ./cbuild $BUILD_FLAGS
       - name: Run native and specification tests
-        run: cmake --build build --target check --parallel 2
-      - name: Verify install package
-        run: cmake --install build --prefix "$RUNNER_TEMP/wasm-h-install"
+        run: ./cbuild $BUILD_FLAGS --test
 
   linux-32:
     name: Linux / x86 (32-bit) / ${{ matrix.compiler }}
@@ -82,6 +77,9 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler }}
+      BUILD_FLAGS: --release --no-emcc --cflags=-m32 --ldflags=-m32
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,20 +87,15 @@ jobs:
       - name: Install multilib compilers
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake curl gcc-multilib libc6-dev-i386 clang
-      # wasm-tools runs on the x64 host; the runtime and tests below are x86.
+          sudo apt-get install -y curl gcc-multilib libc6-dev-i386 clang
+      # wasm-tools and the build program run on the x64 host; the runtime and tests are x86.
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure 32-bit runtime
-        env:
-          CC: ${{ matrix.compiler }}
-        run: >-
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32
-          -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build
-        run: cmake --build build --parallel 2
+        run: ./cbuild $BUILD_FLAGS
       - name: Execute 32-bit native and specification tests
-        run: cmake --build build --target check --parallel 2
+        run: ./cbuild $BUILD_FLAGS --test
 
   macos:
     name: macOS / ${{ matrix.runner }} / ${{ matrix.config.build_type }} / platform=${{ matrix.config.platform }}
@@ -114,27 +107,22 @@ jobs:
         # Unsuffixed macOS labels are native Apple Silicon; Intel is explicit.
         runner: [macos-14, macos-15, macos-26, macos-15-intel, macos-26-intel]
         config:
-          - {build_type: Debug, platform: 'OFF'}
-          - {build_type: Release, platform: 'ON'}
+          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - {build_type: Release, platform: 'ON', flags: '--release'}
+    env:
+      CC: clang
+      BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure Apple Clang
-        env:
-          CC: clang
-        run: >-
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=${{ matrix.config.build_type }}
-          -DWASM_H_ENABLE_PLATFORM=${{ matrix.config.platform }}
-          -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build
-        run: cmake --build build --parallel 2
+        run: ./cbuild $BUILD_FLAGS
       - name: Run native and specification tests
-        run: cmake --build build --target check --parallel 2
-      - name: Verify install package
-        run: cmake --install build --prefix "$RUNNER_TEMP/wasm-h-install"
+        run: ./cbuild $BUILD_FLAGS --test
 
   windows:
     name: Windows / ${{ matrix.target.runner }} / ${{ matrix.target.arch }} / ${{ matrix.config.build_type }} / platform=${{ matrix.config.platform }}
@@ -144,31 +132,38 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - {runner: windows-2022, generator: 'Visual Studio 17 2022', arch: x64}
-          - {runner: windows-2022, generator: 'Visual Studio 17 2022', arch: Win32}
-          - {runner: windows-2025-vs2026, generator: 'Visual Studio 18 2026', arch: x64}
-          - {runner: windows-2025-vs2026, generator: 'Visual Studio 18 2026', arch: Win32}
-          - {runner: windows-11-vs2026-arm, generator: 'Visual Studio 18 2026', arch: ARM64}
+          - {runner: windows-2022, arch: x64, vs_arch: x64, vs_host: x64}
+          - {runner: windows-2022, arch: Win32, vs_arch: x86, vs_host: x64}
+          - {runner: windows-2025-vs2026, arch: x64, vs_arch: x64, vs_host: x64}
+          - {runner: windows-2025-vs2026, arch: Win32, vs_arch: x86, vs_host: x64}
+          - {runner: windows-11-vs2026-arm, arch: ARM64, vs_arch: arm64, vs_host: arm64}
         config:
-          - {build_type: Debug, platform: 'OFF'}
-          - {build_type: Release, platform: 'ON'}
+          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - {build_type: Release, platform: 'ON', flags: '--release'}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure MSVC for the target architecture
-        run: >-
-          cmake -S . -B build
-          -G "${{ matrix.target.generator }}" -A ${{ matrix.target.arch }}
-          -DWASM_H_ENABLE_PLATFORM=${{ matrix.config.platform }}
-          -DWASM_H_ENABLE_EMCC_TESTS=OFF
-      - name: Build
-        run: cmake --build build --config ${{ matrix.config.build_type }} --parallel 2
-      - name: Run native and specification tests
-        run: cmake --build build --config ${{ matrix.config.build_type }} --target check --parallel 2
-      - name: Verify install package
-        run: cmake --install build --config ${{ matrix.config.build_type }} --prefix "$env:RUNNER_TEMP/wasm-h-install"
+      - name: Build and run native and specification tests with MSVC
+        shell: cmd
+        env:
+          VS_ARCH: ${{ matrix.target.vs_arch }}
+          VS_HOST: ${{ matrix.target.vs_host }}
+          BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do set "VS_PATH=%%i"
+          if not defined VS_PATH (
+            echo Visual Studio was not found.
+            exit /b 1
+          )
+          call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=%VS_ARCH% -host_arch=%VS_HOST%
+          if errorlevel 1 exit /b 1
+          cl /nologo /Fe:cbuild.exe build.c
+          if errorlevel 1 exit /b 1
+          cbuild.exe %BUILD_FLAGS%
+          if errorlevel 1 exit /b 1
+          cbuild.exe %BUILD_FLAGS% --test
 
   macos-preview:
     name: macOS / Xcode 27 preview / ARM64
@@ -176,17 +171,19 @@ jobs:
     timeout-minutes: 30
     # Preview image availability/toolchain regressions do not block stable CI.
     continue-on-error: true
+    env:
+      BUILD_FLAGS: --release --no-emcc
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWASM_H_ENABLE_EMCC_TESTS=OFF
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build
-        run: cmake --build build --parallel 2
+        run: ./cbuild $BUILD_FLAGS
       - name: Run native and specification tests
-        run: cmake --build build --target check --parallel 2
+        run: ./cbuild $BUILD_FLAGS --test
 
   sanitizers:
     name: Sanitizers / ${{ matrix.runner }}
@@ -196,6 +193,12 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    env:
+      CC: gcc
+      # build.c appends these after its own flags, so -O1 replaces the Debug default.
+      CFLAGS: -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+      LDFLAGS: -fsanitize=address,undefined
+      BUILD_FLAGS: --no-werror --no-emcc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -203,34 +206,25 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake curl gcc
+          sudo apt-get install -y curl gcc
       - uses: ./.github/actions/setup-wasm-tools
-      - name: Configure
-        env:
-          CC: gcc
-        run: >-
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Debug
-          -DWASM_H_ENABLE_WERROR=OFF
-          -DWASM_H_ENABLE_EMCC_TESTS=OFF
-          -DCMAKE_C_FLAGS_DEBUG='-O1 -g'
-          -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
-          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build
-        run: |
-          cmake --build build --parallel 2
-          cmake --build build --target wasm-spectest-build --parallel 2
+        run: ./cbuild $BUILD_FLAGS
       - name: Test with ASan, LSan, and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        # Build parallelism does not control CTest; bound individual tests too.
+        # -j bounds test parallelism too; also bound individual tests.
         run: |
-          ctest_args=()
+          test_args=(-j2 --test-timeout=300)
           if [ "$RUNNER_ARCH" = ARM64 ]; then
-            ctest_args+=(-E '^spectest[.]modular[.]return_call(_indirect|_ref)?$')
+            for name in return_call return_call_indirect return_call_ref; do
+              test_args+=("--test-exclude=spectest.modular.$name")
+            done
           fi
-          ctest --test-dir build --output-on-failure --parallel 2 --timeout 300 "${ctest_args[@]}"
+          ./cbuild $BUILD_FLAGS --test "${test_args[@]}"
 
   fuzz-smoke:
     name: Fuzz smoke / ${{ matrix.runner }}
@@ -245,13 +239,11 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake
-      - name: Configure libFuzzer harness
-        env:
-          CC: clang
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=OFF -DWASM_H_BUILD_FUZZER=ON
+          sudo apt-get install -y clang
+      - name: Bootstrap the build program
+        run: cc -o cbuild build.c
       - name: Build and smoke-test fuzzer
         run: |
-          cmake --build build --target wasm_load_fuzzer --parallel 2
+          ./cbuild --fuzzer --cc=clang -t wasm_load_fuzzer
           ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1 \
-            ./build/wasm_load_fuzzer -runs=2000 -max_len=65536 -rss_limit_mb=2048
+            ./build/debug/wasm_load_fuzzer -runs=2000 -max_len=65536 -rss_limit_mb=2048

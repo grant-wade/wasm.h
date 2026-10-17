@@ -97,14 +97,16 @@ Bind them explicitly before loading a module. `wasm_bind_wasi_stubs(rt)` exposes
 
 ## Build and test
 
+The build is [`build.c`](build.c), written against [cbuild](https://github.com/grant-wade/cbuild); it needs only a C compiler.
+
 ```sh
-cmake -S . -B build
-cmake --build build --target check
+cc -o cbuild build.c
+./cbuild --test
 ```
 
-Edit the independently compiled sources in `src/`; the root `wasm.h` is generated. Builds regenerate it automatically, or run `cmake -P cmake/Amalgamate.cmake`.
+Edit the independently compiled sources in `src/`; the root `wasm.h` is generated. Builds regenerate it automatically, or run `./cbuild -t wasm-header`.
 
-See the [build guide](docs/BUILDING.md) for dependencies, modular linking, test targets, installation, and the optional commit hook.
+See the [build guide](docs/BUILDING.md) for options, dependencies, modular linking, test selection, and the optional commit hook.
 
 ## CLI
 
@@ -165,7 +167,7 @@ Wrappers cache export indices and own a runtime by default. Use `*_init_options_
 
 Non-singleton output also provides `*_api_t` with `ctx`, `owns_ctx`, and `vtable`. `*_api_init` and `*_api_init_embedded` create owned contexts; `*_api_from_ctx` borrows one. `*_api_free` frees only owned contexts. Call through `api.vtable->method(&api, ...)` or the flat `*_func(ctx, ...)` API.
 
-With `emcc` installed, `session_math_wasm` builds [the example module](examples/session_math_wasm.c), `session_math_generate` refreshes its wrappers, and `session_math_demo` builds the native demo. Run the demo through `check` or CTest.
+With `emcc` installed, `session_math_wasm` builds [the example module](examples/session_math_wasm.c), `session_math_generate` refreshes its wrappers, and `session_math_demo` builds the native demo. `./cbuild --test` runs the demo.
 
 ## Proposal support
 
@@ -205,7 +207,8 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `src/wasm.h` | Public declarations for the modular runtime. |
 | `src/` | Runtime source, including validation, interpretation, SIMD, and platform bridges. |
 | `src/amalgamation.h` | Assembly order for the generated header. |
-| `cmake/Amalgamate.cmake` | Deterministic header generator and freshness check. |
+| `build.c`, `cbuild.h` | Build and test graph, and the vendored cbuild single header it uses. |
+| `tools/amalgamate.c` | Deterministic header generator and freshness check. |
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |
 | `examples/` | Demo code. |
