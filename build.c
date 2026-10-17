@@ -96,6 +96,7 @@ typedef struct {
     int werror;
     int emcc;
     int fuzzer;
+    int spec_proposals; /* also run proposal suites the runtime does not implement */
     int announce; /* report missing optional tools */
     int msvc;
     int x86_32;
@@ -438,6 +439,61 @@ static void private_header_check(void) {
     cbuild_add_include_dir(ctx, t, "src");
 }
 
+typedef struct {
+    target_t* runner;
+    target_t* modular_runner;
+    target_t* support_build;
+    const char* wasm_tools;
+    const char* support;
+} spec_env_t;
+
+/* Proposal directories under test/spec/proposals whose suites run by default. */
+static const char* const implemented_proposals[] = { NULL };
+
+static int proposal_implemented(const char* proposal) {
+    for (int i = 0; implemented_proposals[i]; ++i) {
+        if (strcmp(implemented_proposals[i], proposal) == 0) return 1;
+    }
+    return 0;
+}
+
+/* skip_status, when set, replaces the conversion status so the runner skips the test.
+   features, when set, is passed to wasm-tools validate. */
+static void add_spectest(const spec_env_t* env, const char* wast, const char* out_dir, const char* stem,
+                         const char* test_name, const char* skip_status, const char* features) {
+    wast_job_t* job = (wast_job_t*)calloc(1, sizeof(*job));
+    job->wasm_tools = env->wasm_tools;
+    job->wast = wast;
+    job->json = fmt("%s/%s.json", out_dir, stem);
+    job->status = fmt("%s/%s.status", out_dir, stem);
+    job->log = fmt("%s/%s.json-from-wast.log", out_dir, stem);
+    job->dir = out_dir;
+
+    target_t* json = cbuild_file_dep_target(ctx, fmt("spectest-json.%s", test_name), job->json);
+    cbuild_add_source(ctx, json, wast);
+    cbuild_target_add_command(ctx, json,
+                              cbuild_command_function(ctx, fmt("json-from-wast %s", wast), json_from_wast, job));
+
+    /* Both runners compile the same text fixtures to the same paths. */
+    const char* args[] = { job->json, env->wasm_tools, env->support, skip_status ? skip_status : job->status,
+                           features };
+    int argc = features ? 5 : 4;
+    const char* label2 = strncmp(test_name, "proposal.", 9) == 0 ? "proposal" : NULL;
+    char* lock = fmt("spectest_%s", test_name);
+    test_t* single = add_test(fmt("spectest.%s", test_name), env->runner, args, argc, "spectest", label2);
+    test_t* modular = add_test(fmt("spectest.modular.%s", test_name), env->modular_runner, args, argc, "spectest",
+                               "modular");
+    if (label2) cbuild_test_add_label(ctx, modular, label2);
+    test_t* pair[] = { single, modular };
+    for (int p = 0; p < 2; ++p) {
+        if (!skip_status) cbuild_test_add_dependency(ctx, pair[p], json);
+        cbuild_test_add_dependency(ctx, pair[p], env->support_build);
+        cbuild_test_set_skip_code(ctx, pair[p], 125);
+        cbuild_test_set_lock(ctx, pair[p], lock);
+    }
+    free(lock);
+}
+
 static void spectests(target_t* runner, target_t* modular_runner) {
     static const char* const names[] = { "wasm-tools" };
     char* wasm_tools = find_program(names, 1, NULL, 0);
@@ -462,41 +518,48 @@ static void spectests(target_t* runner, target_t* modular_runner) {
     cbuild_target_add_command(ctx, support_build, cbuild_command_argv(ctx, "wasm-tools parse spectest_support.wat",
                                                                       parse_argv, COUNT(parse_argv)));
 
+    spec_env_t env = { runner, modular_runner, support_build, wasm_tools, support };
     char* spec_dir = out_path("spec");
     char** wasts = NULL;
     int wast_count = 0;
     cbuild_expand_wildcard("test/spec/*.wast", &wasts, &wast_count);
     for (int i = 0; i < wast_count; ++i) {
         const char* base = strrchr(wasts[i], '/') + 1;
-        char* name = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
-        wast_job_t* job = (wast_job_t*)calloc(1, sizeof(*job));
-        job->wasm_tools = wasm_tools;
-        job->wast = wasts[i];
-        job->json = fmt("%s/%s.json", spec_dir, name);
-        job->status = fmt("%s/%s.status", spec_dir, name);
-        job->log = fmt("%s/%s.json-from-wast.log", spec_dir, name);
-        job->dir = spec_dir;
-
-        target_t* json = cbuild_file_dep_target(ctx, fmt("spectest-json.%s", name), job->json);
-        cbuild_add_source(ctx, json, wasts[i]);
-        cbuild_target_add_command(ctx, json,
-                                  cbuild_command_function(ctx, fmt("json-from-wast %s", base), json_from_wast, job));
-
-        /* Both runners compile the same text fixtures to the same paths. */
-        const char* args[] = { job->json, wasm_tools, support, job->status };
-        char* lock = fmt("spectest_%s", name);
-        test_t* single = add_test(fmt("spectest.%s", name), runner, args, 4, "spectest", NULL);
-        test_t* modular = add_test(fmt("spectest.modular.%s", name), modular_runner, args, 4, "spectest", "modular");
-        test_t* pair[] = { single, modular };
-        for (int p = 0; p < 2; ++p) {
-            cbuild_test_add_dependency(ctx, pair[p], json);
-            cbuild_test_add_dependency(ctx, pair[p], support_build);
-            cbuild_test_set_skip_code(ctx, pair[p], 125);
-            cbuild_test_set_lock(ctx, pair[p], lock);
-        }
-        free(name);
-        free(lock);
+        char* stem = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
+        add_spectest(&env, wasts[i], spec_dir, stem, stem, NULL, NULL);
+        free(stem);
     }
+    free(wasts);
+
+    const char* proposals_root = "test/spec/proposals/";
+    char** proposal_wasts = NULL;
+    int proposal_count = 0;
+    cbuild_expand_wildcard("test/spec/proposals/**/*.wast", &proposal_wasts, &proposal_count);
+    for (int i = 0; i < proposal_count; ++i) {
+        const char* relative = proposal_wasts[i] + strlen(proposals_root);
+        const char* slash = strchr(relative, '/');
+        if (strncmp(proposal_wasts[i], proposals_root, strlen(proposals_root)) != 0 || !slash) continue;
+        char* proposal = fmt("%.*s", (int)(slash - relative), relative);
+        char* stem = fmt("%.*s", (int)(strlen(slash + 1) - strlen(".wast")), slash + 1);
+        for (char* c = stem; *c; ++c) {
+            if (*c == '/') *c = '.';
+        }
+        char* out_dir = fmt("%s/proposals/%s", spec_dir, proposal);
+        char* test_name = fmt("proposal.%s.%s", proposal, stem);
+        char* skip_status = NULL;
+        if (!proposal_implemented(proposal) && !opt.spec_proposals) {
+            make_dirs(out_dir);
+            skip_status = fmt("%s/not-implemented.status", out_dir);
+            char* text = fmt("skip\nproposal %s is not implemented; pass --spec-proposals to run it\n", proposal);
+            write_if_changed(skip_status, text);
+            free(text);
+        }
+        add_spectest(&env, proposal_wasts[i], out_dir, stem, test_name, skip_status, "all");
+        free(proposal);
+        free(stem);
+        free(test_name);
+    }
+    free(proposal_wasts);
 }
 
 static char* find_emcc(void) {
@@ -580,6 +643,7 @@ static void read_options(int argc, char** argv) {
     opt.werror = !cbuild_has_flag(argc, argv, "no-werror", 0);
     opt.emcc = !cbuild_has_flag(argc, argv, "no-emcc", 0);
     opt.fuzzer = cbuild_has_flag(argc, argv, "fuzzer", 0);
+    opt.spec_proposals = cbuild_has_flag(argc, argv, "spec-proposals", 0);
     opt.announce = cbuild_has_flag(argc, argv, "test", 0) || cbuild_has_flag(argc, argv, "list-tests", 0);
 
     opt.cc = cbuild_get_flag_value(argc, argv, "cc", 0);
@@ -614,6 +678,9 @@ static void read_options(int argc, char** argv) {
                               "Skip the Emscripten fixture tests even when emcc is available", &bound_bool);
     cbuild_register_flag_bool(ctx, "fuzzer", 0, CBUILD_FLAG_PRE,
                               "Also build the libFuzzer harness wasm_load_fuzzer (Clang)", &bound_bool);
+    cbuild_register_flag_bool(ctx, "spec-proposals", 0, CBUILD_FLAG_PRE,
+                              "Run spec proposal suites the runtime does not implement instead of skipping them",
+                              &bound_bool);
 }
 
 int main(int argc, char** argv) {

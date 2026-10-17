@@ -127,6 +127,7 @@ typedef struct spec_harness_t {
     wasm_module_t* last_module;
     const char* json_path;
     const char* wasm_tools_path;
+    const char* wasm_tools_features;
     const char* support_wasm;
     char* json_dir;
     const char* source_filename;
@@ -2291,14 +2292,18 @@ static int spec_validate_wasm(spec_harness_t* harness,
                               const char* wasm_path,
                               char** validator_output,
                               int* exit_code) {
+    const char* features = harness->wasm_tools_features ? harness->wasm_tools_features : "";
     char* command;
     int ok;
 
-    command = (char*)malloc(strlen(harness->wasm_tools_path) + strlen(wasm_path) + 40u);
+    command = (char*)malloc(strlen(harness->wasm_tools_path) + strlen(features) + strlen(wasm_path) + 60u);
     if (!command) {
         return 0;
     }
-    sprintf(command, "\"%s\" validate \"%s\"", harness->wasm_tools_path, wasm_path);
+    if (*features)
+        sprintf(command, "\"%s\" validate --features \"%s\" \"%s\"", harness->wasm_tools_path, features, wasm_path);
+    else
+        sprintf(command, "\"%s\" validate \"%s\"", harness->wasm_tools_path, wasm_path);
     ok = spec_run_command_capture(command, validator_output, exit_code);
     free(command);
     return ok;
@@ -3272,7 +3277,9 @@ cleanup:
 }
 
 static void spec_print_usage(const char* argv0) {
-    fprintf(stderr, "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> [conversion.status]\n", argv0);
+    fprintf(stderr,
+            "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> [conversion.status [wasm-tools-features]]\n",
+            argv0);
 }
 
 int main(int argc, char** argv) {
@@ -3292,12 +3299,12 @@ int main(int argc, char** argv) {
         return 7;
     }
 
-    if (argc != 4 && argc != 5) {
+    if (argc < 4 || argc > 6) {
         spec_print_usage(argv[0]);
         return 2;
     }
 
-    if (argc == 5 && spec_status_requests_skip(argv[4], error_text, sizeof(error_text))) {
+    if (argc >= 5 && spec_status_requests_skip(argv[4], error_text, sizeof(error_text))) {
         fprintf(stderr, "skipped: %s\n", error_text[0] ? error_text : "spectest JSON conversion failed for this spec file");
         return 125;
     }
@@ -3310,6 +3317,7 @@ int main(int argc, char** argv) {
         spec_harness_destroy(&harness);
         return 1;
     }
+    if (argc == 6) harness.wasm_tools_features = argv[5];
 
     if (spec_run_file(&harness)) exit_code = 0;
 

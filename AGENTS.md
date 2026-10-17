@@ -36,7 +36,8 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - Check generation without modifying files: `cc -o amalgamate tools/amalgamate.c && ./amalgamate --check`.
 - Modular library: `wasm_runtime`; `--test` exercises both modular and single-header builds.
 - Focused native targets (`./cbuild -t <name>`): `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` with `--fuzzer`.
-- Test selection: `--test-label=unit|modular|spectest|emcc`, `--test-filter=GLOB`, `--test-exclude=GLOB`, `--list-tests`. Logs land in `build/<config>/tests/`.
+- Test selection: `--test-label=unit|modular|spectest|proposal|emcc`, `--test-filter=GLOB`, `--test-exclude=GLOB`, `--list-tests`. Logs land in `build/<config>/tests/`.
+- Proposal suites (`test/spec/proposals/`) skip unless listed in `implemented_proposals` in `build.c`; `--spec-proposals` runs them all.
 - Spectests exist only when `wasm-tools` on `PATH` provides both `json-from-wast` and `parse`; Emscripten fixtures only when `emcc` is found.
 
 ## Agent Notes
