@@ -17,10 +17,11 @@ You only compile the build program by hand once: it rebuilds itself when `build.
 
 - `wasm-tools` with `json-from-wast` and `parse`: specification tests.
 - `emcc` (on `PATH`, or under `EMSDK` or `EMSCRIPTEN`): Emscripten fixtures and the `session_math` example.
+- `zig` 0.17 on `PATH`: the `zig` test, which runs `zig build test` with matching `--release`, `--no-platform`, and `--no-werror` settings. See the [Zig guide](ZIG.md).
 
 Suites under `test/spec/proposals/` run as `spectest.proposal.<proposal>.<file>` and also carry the `proposal` label. Proposals listed in `implemented_proposals` in `build.c` run by default; the rest are reported as skipped unless `--spec-proposals` is given.
 
-Pick tests with `--test-label` (`unit`, `modular`, `spectest`, `proposal`, `emcc`), `--test-filter`, and `--test-exclude`, which take wildcards on test names. `--list-tests` shows what is selected. `-j` sets compile and test parallelism; `--test-timeout=SECONDS` limits each test.
+Pick tests with `--test-label` (`unit`, `modular`, `spectest`, `proposal`, `emcc`, `zig`), `--test-filter`, and `--test-exclude`, which take wildcards on test names. `--list-tests` shows what is selected. `-j` sets compile and test parallelism; `--test-timeout=SECONDS` limits each test.
 
 ```sh
 ./cbuild --test --test-label=unit
@@ -41,6 +42,7 @@ The build has no cache: options that shape it are read on every run, so pass the
 | `--no-platform` | off | Build without platform-backed runtime and test helpers. |
 | `--no-werror` | off | Do not treat compiler warnings as errors. |
 | `--no-emcc` | off | Skip the Emscripten fixture tests even when `emcc` is available. |
+| `--no-zig` | off | Skip the Zig package tests even when `zig` 0.17 is available. |
 | `--fuzzer` | off | Also build the Clang/libFuzzer module-loader harness. |
 | `--spec-proposals` | off | Run specification proposal suites the runtime does not implement instead of skipping them. |
 
@@ -112,7 +114,7 @@ To install, copy `wasm.h` into the application or an include directory.
 
 ## CI and fuzzing
 
-[ci.yml](../.github/workflows/ci.yml) defines the OS, architecture, and compiler matrix, header freshness check, ASan/LSan/UBSan runs, and libFuzzer smoke tests. Emscripten fixtures run locally.
+[ci.yml](../.github/workflows/ci.yml) defines the OS, architecture, and compiler matrix, header freshness check, ASan/LSan/UBSan runs, libFuzzer smoke tests, and the Zig package tests and cross-compilation. Emscripten fixtures run locally.
 
 To fuzz the module loader with Clang and ASan/UBSan:
 

@@ -108,6 +108,21 @@ Edit the independently compiled sources in `src/`; the root `wasm.h` is generate
 
 See the [build guide](docs/BUILDING.md) for options, dependencies, modular linking, test selection, and the optional commit hook.
 
+## Zig
+
+The repository is also a Zig 0.17 package. It builds the runtime with Zig's C compiler and provides a `wasm` module with typed calls and host functions:
+
+```zig
+const rt = try wasm.Runtime.init(.{});
+defer rt.deinit();
+const mod = try rt.load(bytes);
+defer mod.deinit();
+const add = try mod.func("add", fn (i32, i32) i32);
+const sum = try add.call(.{ 2, 40 });
+```
+
+See the [Zig guide](docs/ZIG.md) for installation, host imports, memory, and threads.
+
 ## CLI
 
 `wasm.c` builds a command-line tool for inspection and execution:
@@ -215,6 +230,8 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `src/` | Runtime source, including validation, interpretation, SIMD, and platform bridges. |
 | `src/amalgamation.h` | Assembly order for the generated header. |
 | `build.c`, `cbuild.h` | Build and test graph, and the vendored cbuild single header it uses. |
+| `build.zig`, `build.zig.zon` | Zig package: runtime library, Zig module, and its tests. |
+| `zig/` | Zig bindings (`wasm.zig`) and their tests. |
 | `tools/amalgamate.c` | Deterministic header generator and freshness check. |
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |

@@ -21,6 +21,8 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - `test/wasm_test.c`: primary regression coverage for the runtime.
 - `wasm.c`: CLI runner and inspection tool built on top of `wasm.h`.
 - `wasm2api.c`: generator for typed C wrappers around Wasm exports and imports.
+- `build.zig`, `build.zig.zon`: Zig 0.17 package; it compiles every `.c` file under `src/`, so new units need no change there.
+- `zig/wasm.zig`: Zig bindings over the C API; `zig/wasm_test.zig` tests them.
 - `test/wl.h`: local test support/platform layer.
 - `test/wl_test.c`: tests for `test/wl.h`.
 - `test/fixture_runner.c`: runner for emcc-generated Wasm fixtures.
@@ -38,7 +40,8 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - Focused native targets (`./cbuild -t <name>`): `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` with `--fuzzer`.
 - Test selection: `--test-label=unit|modular|spectest|proposal|emcc`, `--test-filter=GLOB`, `--test-exclude=GLOB`, `--list-tests`. Logs land in `build/<config>/tests/`.
 - Proposal suites (`test/spec/proposals/`) skip unless listed in `implemented_proposals` in `build.c`; `--spec-proposals` runs them all.
-- Spectests exist only when `wasm-tools` on `PATH` provides both `json-from-wast` and `parse`; Emscripten fixtures only when `emcc` is found.
+- Spectests exist only when `wasm-tools` on `PATH` provides both `json-from-wast` and `parse`; Emscripten fixtures only when `emcc` is found; the `zig` test only when `zig` 0.17 is found.
+- Zig package: `zig build test` (wrapper and modular C tests), `zig build cross` (compile for the targets in `cross_targets`). Public API changes in `src/wasm.h` usually need matching changes in `zig/wasm.zig`.
 
 ## Agent Notes
 

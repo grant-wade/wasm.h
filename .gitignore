@@ -14,3 +14,7 @@ test/out/
 /cbuild.old
 /cbuild.exe.old
 /build.obj
+
+# Zig build outputs
+.zig-cache/
+zig-out/

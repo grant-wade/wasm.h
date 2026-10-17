@@ -247,3 +247,34 @@ jobs:
           ./cbuild --fuzzer --cc=clang -t wasm_load_fuzzer
           ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1 \
             ./build/debug/wasm_load_fuzzer -runs=2000 -max_len=65536 -rss_limit_mb=2048
+
+  zig:
+    name: Zig 0.17 / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: grant-wade/zig-setup@v1.0.1
+        with:
+          version: 0.17.0
+          # x64 and arm64 Ubuntu runners share an OS, so the runner keeps their caches apart.
+          cache-key: ${{ matrix.runner }}
+      - name: Test the Zig package
+        run: |
+          zig build test -Dwerror=true
+          zig build test -Dwerror=true -Doptimize=safe -Dplatform=false
+      - name: Run the Zig package tests through the build program
+        if: runner.os != 'Windows'
+        run: |
+          cc -o cbuild build.c
+          ./cbuild --release --test --test-label=zig
+      - name: Cross-compile the runtime and Zig wrapper
+        if: matrix.runner == 'ubuntu-24.04'
+        run: zig build cross -Dwerror=true -Doptimize=fast

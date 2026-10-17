@@ -961,7 +961,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
             if (used + record_size > buf_len) break;
             memset(memory->data + buf_ptr + used, 0, 24u);
             wasm__store_le64(memory->data + buf_ptr + used + 0u, index);
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+            /* The BSDs hide d_ino under strict POSIX feature macros; d_fileno is always declared. */
+            wasm__store_le64(memory->data + buf_ptr + used + 8u, (uint64_t)host_ent->d_fileno);
+#else
             wasm__store_le64(memory->data + buf_ptr + used + 8u, (uint64_t)host_ent->d_ino);
+#endif
             wasm__store_le32(memory->data + buf_ptr + used + 16u, (uint32_t)name_len);
 #ifdef DT_DIR
             switch (host_ent->d_type) {

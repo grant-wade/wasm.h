@@ -52,6 +52,15 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (!wasm__runtime_value_matches_type(mod, &args[i], ft->params[i],
+                                             ft->param_reftypes ? &ft->param_reftypes[i] : NULL)) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "argument %u does not match the function parameter type", (unsigned)i);
+            return WASM_ERR_TYPE_MISMATCH;
+        }
+    }
+
     {
         wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
         if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);

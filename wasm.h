@@ -151,9 +151,9 @@
 #endif
 
 #define WASM_H_VERSION_MAJOR 1
-#define WASM_H_VERSION_MINOR 0
+#define WASM_H_VERSION_MINOR 1
 #define WASM_H_VERSION_PATCH 0
-#define WASM_H_VERSION_STRING "1.0.0"
+#define WASM_H_VERSION_STRING "1.1.0"
 
 #ifndef UINT32_MAX
 #define UINT32_MAX 0xFFFFFFFFu
@@ -22752,6 +22752,15 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (!wasm__runtime_value_matches_type(mod, &args[i], ft->params[i],
+                                             ft->param_reftypes ? &ft->param_reftypes[i] : NULL)) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "argument %u does not match the function parameter type", (unsigned)i);
+            return WASM_ERR_TYPE_MISMATCH;
+        }
+    }
+
     {
         wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
         if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
@@ -26244,7 +26253,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
             if (used + record_size > buf_len) break;
             memset(memory->data + buf_ptr + used, 0, 24u);
             wasm__store_le64(memory->data + buf_ptr + used + 0u, index);
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+            /* The BSDs hide d_ino under strict POSIX feature macros; d_fileno is always declared. */
+            wasm__store_le64(memory->data + buf_ptr + used + 8u, (uint64_t)host_ent->d_fileno);
+#else
             wasm__store_le64(memory->data + buf_ptr + used + 8u, (uint64_t)host_ent->d_ino);
+#endif
             wasm__store_le32(memory->data + buf_ptr + used + 16u, (uint32_t)name_len);
 #ifdef DT_DIR
             switch (host_ent->d_type) {

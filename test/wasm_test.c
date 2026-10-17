@@ -871,6 +871,22 @@ WL_TEST(test_add) {
         WASM_CHECK_I32(t, result.of.i32, 10);
     }
 
+    args[0] = wasm_f32(1.0f);
+    result = wasm_i32(99);
+    err = wasm_call(m, "add", args, 2, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected argument type mismatch rejection");
+    WASM_CHECK_I32(t, result.of.i32, 99);
+
+    args[0] = wasm_i32(3);
+    args[1] = wasm_i64(7);
+    err = wasm_call_index(m, 0, args, 2, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected indexed argument type mismatch rejection");
+
+    args[1] = wasm_i32(7);
+    err = wasm_call_index(m, 0, args, 2, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 10);
+
     wasm_free_module(m);
     wasm_destroy(&rt);
 

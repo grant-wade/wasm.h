@@ -99,6 +99,7 @@ typedef struct {
     int platform;
     int werror;
     int emcc;
+    int zig;
     int fuzzer;
     int spec_proposals; /* also run proposal suites the runtime does not implement */
     int announce; /* report missing optional tools */
@@ -653,11 +654,40 @@ static void session_math_example(const char* emcc, target_t* wasm2api, target_t*
     add_test("session_math_demo", demo, NULL, 0, "unit", NULL);
 }
 
+/* build.zig targets one Zig release; other versions would fail on build API changes, not on the runtime. */
+static void zig_package_tests(void) {
+    static const char* const names[] = { "zig" };
+    char* zig = find_program(names, 1, NULL, 0);
+    if (!zig) {
+        if (opt.announce) printf("zig not found; skipping the Zig package tests.\n");
+        return;
+    }
+    const char* version_argv[] = { zig, "version" };
+    char* version = NULL;
+    int supported = cbuild_spawn(ctx, version_argv, 2, &version) == 0 && version && strncmp(version, "0.17.", 5) == 0;
+    if (!supported && opt.announce) {
+        printf("zig %s is not 0.17; skipping the Zig package tests.\n", version ? strtok(version, "\r\n") : "?");
+    }
+    free(version);
+    if (!supported) return;
+
+    const char* args[] = {
+        zig, "build", "test", "--summary", "none",
+        "--cache-dir", out_path("zig-cache"),
+        "--prefix", out_path("zig-out"),
+        opt.release ? "-Doptimize=fast" : "-Doptimize=debug",
+        opt.platform ? "-Dplatform=true" : "-Dplatform=false",
+        opt.werror ? "-Dwerror=true" : "-Dwerror=false",
+    };
+    add_test("zig", NULL, args, COUNT(args), "zig", NULL);
+}
+
 static void read_options(int argc, char** argv) {
     opt.release = cbuild_has_flag(argc, argv, "release", 0);
     opt.platform = !cbuild_has_flag(argc, argv, "no-platform", 0);
     opt.werror = !cbuild_has_flag(argc, argv, "no-werror", 0);
     opt.emcc = !cbuild_has_flag(argc, argv, "no-emcc", 0);
+    opt.zig = !cbuild_has_flag(argc, argv, "no-zig", 0);
     opt.fuzzer = cbuild_has_flag(argc, argv, "fuzzer", 0);
     opt.spec_proposals = cbuild_has_flag(argc, argv, "spec-proposals", 0);
     opt.announce = cbuild_has_flag(argc, argv, "test", 0) || cbuild_has_flag(argc, argv, "list-tests", 0);
@@ -692,6 +722,8 @@ static void read_options(int argc, char** argv) {
     cbuild_register_flag_bool(ctx, "no-werror", 0, CBUILD_FLAG_PRE, "Do not treat warnings as errors", &bound_bool);
     cbuild_register_flag_bool(ctx, "no-emcc", 0, CBUILD_FLAG_PRE,
                               "Skip the Emscripten fixture tests even when emcc is available", &bound_bool);
+    cbuild_register_flag_bool(ctx, "no-zig", 0, CBUILD_FLAG_PRE,
+                              "Skip the Zig package tests even when zig 0.17 is available", &bound_bool);
     cbuild_register_flag_bool(ctx, "fuzzer", 0, CBUILD_FLAG_PRE,
                               "Also build the libFuzzer harness wasm_load_fuzzer (Clang)", &bound_bool);
     cbuild_register_flag_bool(ctx, "spec-proposals", 0, CBUILD_FLAG_PRE,
@@ -819,6 +851,8 @@ int main(int argc, char** argv) {
     } else if (opt.announce) {
         printf("emcc not found; skipping Emscripten fixtures and the session_math example.\n");
     }
+
+    if (opt.zig) zig_package_tests();
 
     if (opt.fuzzer) {
         target_t* fuzzer = cbuild_executable(ctx, "wasm_load_fuzzer");
