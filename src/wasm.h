@@ -211,6 +211,8 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_SIMD (1u << 10)
 #define WASM_FEATURE_GC (1u << 11)
 #define WASM_FEATURE_MEMORY64 (1u << 12)
+/* Proposals not yet standardized are implemented but disabled by default. */
+#define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {

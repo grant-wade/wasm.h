@@ -11585,6 +11585,51 @@ WL_TEST(test_gc_rejects_multiple_supertypes) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_wide_arithmetic_is_opt_in) {
+    static const uint8_t sections[] = {
+        0x01, 0x08, 0x01, 0x60, 0x02, 0x7E, 0x7E, 0x02, 0x7E, 0x7E,
+        0x03, 0x02, 0x01, 0x00,
+        0x07, 0x07, 0x01, 0x03, 'm', 'u', 'l', 0x00, 0x00,
+        0x0A, 0x0A, 0x01, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0xFC, 0x15, 0x0B,
+    };
+    wasm_builder_t mod = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t results[2];
+    wasm_error_t err;
+
+    emit_header(&mod);
+    emit_bytes(&mod, sections, sizeof(sections));
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m == NULL, "%s", "expected wide arithmetic to be disabled by default");
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "wide arithmetic") != NULL, "%s", rt.error_msg);
+    if (m != NULL) wasm_free_module(m);
+
+    wasm_enable_feature(&rt, WASM_FEATURE_WIDE_ARITHMETIC);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) {
+        args[0] = wasm_i64(-3);
+        args[1] = wasm_i64(5);
+        err = wasm_call(m, "mul", args, 2, results, 2);
+        WL_CHECK_MSG(t, err == WASM_OK, "%s", rt.error_msg);
+        WASM_CHECK_I64(t, results[0].of.i64, -15);
+        WASM_CHECK_I64(t, results[1].of.i64, -1);
+
+        args[0] = wasm_i64(INT64_MIN);
+        args[1] = wasm_i64(INT64_MIN);
+        err = wasm_call(m, "mul", args, 2, results, 2);
+        WL_CHECK_MSG(t, err == WASM_OK, "%s", rt.error_msg);
+        WASM_CHECK_I64(t, results[0].of.i64, 0);
+        WASM_CHECK_I64(t, results[1].of.i64, INT64_C(0x4000000000000000));
+        wasm_free_module(m);
+    }
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -14576,6 +14621,7 @@ int main(void) {
         { "SIMD helpers: arithmetic, compare, shuffle, and conversions", test_simd_helper_ops },
         { "SIMD: execution path, memory ops, select, and feature gate", test_simd_execution_and_feature_gate },
         { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
+        { "wide arithmetic: disabled by default, 128-bit products when enabled", test_wide_arithmetic_is_opt_in },
         { "tail call: self-recursive return_call reuses the frame", test_tail_call_self_recursion },
         { "tail call: return_call_indirect dispatches through a table", test_tail_call_indirect },
         { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },

@@ -303,6 +303,22 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v
             if (err != WASM_OK) return err;
             return wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
         }
+        case 0x13:
+        case 0x14:
+        case 0x15:
+        case 0x16: {
+            uint32_t operands = (subop <= 0x14) ? 4u : 2u;
+            uint32_t i;
+            wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_WIDE_ARITHMETIC);
+            if (err != WASM_OK) return err;
+            for (i = 0; i < operands; i++) {
+                err = wasm__validator_pop_expect(v, at, WASM_TYPE_I64);
+                if (err != WASM_OK) return err;
+            }
+            err = wasm__validator_push(v, at, WASM_TYPE_I64);
+            if (err != WASM_OK) return err;
+            return wasm__validator_push(v, at, WASM_TYPE_I64);
+        }
         default:
             return wasm__validator_error(v, at, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
     }

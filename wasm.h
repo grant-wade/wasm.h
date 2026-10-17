@@ -220,6 +220,8 @@ typedef enum wasm_error_t {
 #define WASM_FEATURE_SIMD (1u << 10)
 #define WASM_FEATURE_GC (1u << 11)
 #define WASM_FEATURE_MEMORY64 (1u << 12)
+/* Proposals not yet standardized are implemented but disabled by default. */
+#define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -783,7 +785,11 @@ const char* wasm_error_string(wasm_error_t err);
      WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
      WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
      WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
+     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64 | WASM_FEATURE_WIDE_ARITHMETIC)
+
+#define WASM__PROPOSAL_FEATURES (WASM_FEATURE_WIDE_ARITHMETIC)
+
+#define WASM__DEFAULT_FEATURES (WASM__IMPLEMENTED_FEATURES & ~WASM__PROPOSAL_FEATURES)
 
 #endif /* WASM_INTERNAL_CONFIG_H */
 /* END src/internal/config.h */
@@ -2099,6 +2105,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "garbage collection";
         case WASM_FEATURE_MEMORY64:
             return "Memory64";
+        case WASM_FEATURE_WIDE_ARITHMETIC:
+            return "wide arithmetic";
         default:
             return "unknown feature";
     }
@@ -10463,7 +10471,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
         return WASM_ERR_MALFORMED;
     }
 
-    rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
+    rt->enabled_features = WASM__DEFAULT_FEATURES;
     rt->max_call_frames = cfg.max_call_depth;
     rt->max_labels = cfg.max_labels;
     rt->lazy_validation = cfg.lazy_validation != 0;
@@ -14651,6 +14659,22 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v
             if (err != WASM_OK) return err;
             return wasm__validator_pop_expect(v, at, wasm__table_index_type(table));
         }
+        case 0x13:
+        case 0x14:
+        case 0x15:
+        case 0x16: {
+            uint32_t operands = (subop <= 0x14) ? 4u : 2u;
+            uint32_t i;
+            wasm_error_t err = wasm__validator_require_feature(v, at, WASM_FEATURE_WIDE_ARITHMETIC);
+            if (err != WASM_OK) return err;
+            for (i = 0; i < operands; i++) {
+                err = wasm__validator_pop_expect(v, at, WASM_TYPE_I64);
+                if (err != WASM_OK) return err;
+            }
+            err = wasm__validator_push(v, at, WASM_TYPE_I64);
+            if (err != WASM_OK) return err;
+            return wasm__validator_push(v, at, WASM_TYPE_I64);
+        }
         default:
             return wasm__validator_error(v, at, "unknown prefixed opcode 0xFC 0x%X", (unsigned)subop);
     }
@@ -18376,6 +18400,17 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
 
 #include <string.h>
 
+/* Full 128-bit product of two unsigned 64-bit values, built from 32-bit partial products. */
+static void wasm__mul_wide_u64(uint64_t a, uint64_t b, uint64_t* lo, uint64_t* hi) {
+    uint64_t a_lo = a & 0xFFFFFFFFu, a_hi = a >> 32;
+    uint64_t b_lo = b & 0xFFFFFFFFu, b_hi = b >> 32;
+    uint64_t ll = a_lo * b_lo, lh = a_lo * b_hi, hl = a_hi * b_lo, hh = a_hi * b_hi;
+    uint64_t mid = (ll >> 32) + (lh & 0xFFFFFFFFu) + (hl & 0xFFFFFFFFu);
+
+    *lo = (mid << 32) | (ll & 0xFFFFFFFFu);
+    *hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+
 WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
     wasm_error_t err = WASM_OK;
@@ -18713,6 +18748,38 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 for (j = 0; j < len; j++) table->elems[dst_offset + j] = value;
             }
+            break;
+        }
+        case 0x13:
+        case 0x14: {
+            uint64_t rhs_hi = (uint64_t)WASM__POP(rt).of.i64;
+            uint64_t rhs_lo = (uint64_t)WASM__POP(rt).of.i64;
+            uint64_t lhs_hi = (uint64_t)WASM__POP(rt).of.i64;
+            uint64_t lhs_lo = (uint64_t)WASM__POP(rt).of.i64;
+            uint64_t lo, hi;
+            if (subop == 0x13) {
+                lo = lhs_lo + rhs_lo;
+                hi = lhs_hi + rhs_hi + (lo < lhs_lo ? 1u : 0u);
+            } else {
+                lo = lhs_lo - rhs_lo;
+                hi = lhs_hi - rhs_hi - (lhs_lo < rhs_lo ? 1u : 0u);
+            }
+            WASM__PUSH(rt, wasm_i64((int64_t)lo));
+            WASM__PUSH(rt, wasm_i64((int64_t)hi));
+            break;
+        }
+        case 0x15:
+        case 0x16: {
+            int64_t rhs = WASM__POP(rt).of.i64;
+            int64_t lhs = WASM__POP(rt).of.i64;
+            uint64_t lo, hi;
+            wasm__mul_wide_u64((uint64_t)lhs, (uint64_t)rhs, &lo, &hi);
+            if (subop == 0x15) {
+                if (lhs < 0) hi -= (uint64_t)rhs;
+                if (rhs < 0) hi -= (uint64_t)lhs;
+            }
+            WASM__PUSH(rt, wasm_i64((int64_t)lo));
+            WASM__PUSH(rt, wasm_i64((int64_t)hi));
             break;
         }
         default:

@@ -448,7 +448,7 @@ typedef struct {
 } spec_env_t;
 
 /* Proposal directories under test/spec/proposals whose suites run by default. */
-static const char* const implemented_proposals[] = { NULL };
+static const char* const implemented_proposals[] = { "wide-arithmetic", NULL };
 
 static int proposal_implemented(const char* proposal) {
     for (int i = 0; implemented_proposals[i]; ++i) {

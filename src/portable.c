@@ -181,6 +181,8 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "garbage collection";
         case WASM_FEATURE_MEMORY64:
             return "Memory64";
+        case WASM_FEATURE_WIDE_ARITHMETIC:
+            return "wide arithmetic";
         default:
             return "unknown feature";
     }

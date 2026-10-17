@@ -189,7 +189,10 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Garbage Collection | Implemented |
 | Exception Handling | Implemented |
 | Memory64 | Implemented |
+| Wide Arithmetic | Implemented, opt-in (`WASM_FEATURE_WIDE_ARITHMETIC`) |
 | Branch Hinting | Not implemented |
+
+Opt-in proposals have not been standardized yet; enable them with `wasm_enable_feature` or `wasm_enable_all_features`.
 
 SIMD execution includes ARM NEON and x86_64 SSE2 fast paths where the platform instructions preserve Wasm semantics exactly.
 

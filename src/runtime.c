@@ -347,7 +347,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
         return WASM_ERR_MALFORMED;
     }
 
-    rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
+    rt->enabled_features = WASM__DEFAULT_FEATURES;
     rt->max_call_frames = cfg.max_call_depth;
     rt->max_labels = cfg.max_labels;
     rt->lazy_validation = cfg.lazy_validation != 0;
