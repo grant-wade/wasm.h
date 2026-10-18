@@ -288,6 +288,8 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x42 && o[1] == 0x7C) return WASM__OP_J_ADD;
         if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
         if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
+        if (o[0] == 0x41 && o[1] == 0x21) return WASM__OP_C_S;
+        if (o[0] == 0x22 && o[1] == 0x21) return WASM__OP_T_S;
         if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
         if (o[0] == 0x20 && wasm__x_is_load32(o[1])) return WASM__OP_L_LOAD32;
         if (o[0] == 0x20 && wasm__x_is_load64(o[1])) return WASM__OP_L_LOAD64;
@@ -316,6 +318,7 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
             return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
         return 0;
     }
+    if (o[0] == 0x20 && o[1] == 0x21 && o[2] == 0x20 && o[3] == 0x21) return WASM__OP_L_S_L_S;
     if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load32(o[3])) return WASM__OP_LC_LOAD32;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load64(o[3])) return WASM__OP_LC_LOAD64;

@@ -67,6 +67,9 @@
     X(LJ_SHR_U, 0x20, 3, 5)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
+    X(L_S_L_S, 0x20, 4, 6)          \
+    X(C_S, 0x41, 2, 2)              \
+    X(T_S, 0x22, 2, 2)              \
     X(L_T, 0x20, 2, 2)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,

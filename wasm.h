@@ -16864,6 +16864,9 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     X(LJ_SHR_U, 0x20, 3, 5)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
+    X(L_S_L_S, 0x20, 4, 6)          \
+    X(C_S, 0x41, 2, 2)              \
+    X(T_S, 0x22, 2, 2)              \
     X(L_T, 0x20, 2, 2)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
@@ -20363,6 +20366,8 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x42 && o[1] == 0x7C) return WASM__OP_J_ADD;
         if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
         if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
+        if (o[0] == 0x41 && o[1] == 0x21) return WASM__OP_C_S;
+        if (o[0] == 0x22 && o[1] == 0x21) return WASM__OP_T_S;
         if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
         if (o[0] == 0x20 && wasm__x_is_load32(o[1])) return WASM__OP_L_LOAD32;
         if (o[0] == 0x20 && wasm__x_is_load64(o[1])) return WASM__OP_L_LOAD64;
@@ -20391,6 +20396,7 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
             return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
         return 0;
     }
+    if (o[0] == 0x20 && o[1] == 0x21 && o[2] == 0x20 && o[3] == 0x21) return WASM__OP_L_S_L_S;
     if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load32(o[3])) return WASM__OP_LC_LOAD32;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load64(o[3])) return WASM__OP_LC_LOAD64;
@@ -25161,6 +25167,20 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__NEXT();
             WASM__CASE(WASM__OP_L_S):
                 locals[pc[2]] = locals[pc[0]];
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_S_L_S):
+                locals[pc[2]] = locals[pc[0]];
+                locals[pc[6]] = locals[pc[4]];
+                pc += 7;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_S):
+                wasm__slot_set_u32(locals + pc[2], pc[0]);
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_T_S):
+                locals[pc[0]] = sp[-1];
+                locals[pc[2]] = *--sp;
                 pc += 3;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_L_T):

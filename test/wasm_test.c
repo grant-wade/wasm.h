@@ -17736,7 +17736,7 @@ WL_TEST(test_fused_ops_match_unfused_execution) {
     static const uint64_t f64_consts[] = { UINT64_C(0x7FF8000000000001), UINT64_C(0x8000000000000000),
                                            UINT64_C(0x3FF8000000000000), UINT64_C(0x7FF0000000000000),
                                            UINT64_C(0xFFF4000000000002) };
-    static const uint8_t i32_locals[] = { 1, 2, 0x7F };
+    static const uint8_t i32_locals[] = { 1, 3, 0x7F };
     static const uint8_t i64_locals[] = { 1, 2, 0x7E };
     static const uint8_t f64_locals[] = { 2, 1, 0x7E, 3, 0x7C };
     wasm_value_t values[6];
@@ -17789,6 +17789,29 @@ WL_TEST(test_fused_ops_match_unfused_execution) {
         wasm_test_emit_local_op(&code, 0x21, 3);
         wasm_test_emit_local_op(&code, 0x20, 3);
         wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_i32_const(&code, consts[2]);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        emit(&code, op);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 2);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_local_op(&code, 0x21, 2);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 2);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        emit(&code, op);
+        wasm_test_emit_local_op(&code, 0x22, 3);
+        wasm_test_emit_local_op(&code, 0x21, 4);
+        wasm_test_emit_i32_const(&code, 5);
+        emit(&code, 0x6A);
+        wasm_test_emit_local_op(&code, 0x20, 4);
+        emit(&code, 0x6A);
+        wasm_test_emit_local_op(&code, 0x21, 2);
     }
     wasm_test_emit_local_op(&code, 0x20, 2);
     wasm_test_emit_fused_module(&mod, 0x7F, 0x7F, i32_locals, sizeof(i32_locals), &code);
