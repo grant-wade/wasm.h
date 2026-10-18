@@ -14766,6 +14766,55 @@ WL_TEST(test_gc_heap_growth_respects_max_gc_heap_bytes) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_collection_skips_host_externrefs_converted_to_anyref) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x13, 0x04, 0x5f, 0x01, 0x7e, 0x00, 0x60, 0x01, 0x6f,
+        0x00, 0x60, 0x02, 0x6f, 0x7f, 0x01, 0x6f, 0x60, 0x00, 0x01, 0x6f, 0x03, 0x05, 0x04, 0x01, 0x02, 0x03, 0x03,
+        0x04, 0x04, 0x01, 0x6e, 0x00, 0x01, 0x06, 0x06, 0x01, 0x6e, 0x01, 0xd0, 0x6e, 0x0b, 0x07, 0x21, 0x04, 0x04,
+        0x6b, 0x65, 0x65, 0x70, 0x00, 0x00, 0x05, 0x63, 0x68, 0x75, 0x72, 0x6e, 0x00, 0x01, 0x06, 0x67, 0x6c, 0x6f,
+        0x62, 0x61, 0x6c, 0x00, 0x02, 0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x00, 0x03, 0x0a, 0x46, 0x04, 0x10, 0x00,
+        0x20, 0x00, 0xfb, 0x1a, 0x24, 0x00, 0x41, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0x26, 0x00, 0x0b, 0x23, 0x01, 0x01,
+        0x6e, 0x20, 0x00, 0xfb, 0x1a, 0x21, 0x02, 0x03, 0x40, 0x20, 0x01, 0xad, 0xfb, 0x00, 0x00, 0x1a, 0x20, 0x01,
+        0x41, 0x01, 0x6b, 0x21, 0x01, 0x20, 0x01, 0x0d, 0x00, 0x0b, 0x20, 0x02, 0xfb, 0x1b, 0x0b, 0x06, 0x00, 0x23,
+        0x00, 0xfb, 0x1b, 0x0b, 0x08, 0x00, 0x41, 0x00, 0x25, 0x00, 0xfb, 0x1b, 0x0b,
+    };
+    static int host_object;
+    const uintptr_t handles[] = { (uintptr_t)0x1234u, (uintptr_t)&host_object };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    size_t i;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    for (i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) {
+        wasm_value_t args[2];
+        wasm_value_t result = wasm_i32(0);
+
+        args[0] = wasm_externref(handles[i]);
+        args[1] = wasm_i32(5000);
+        WASM_CHECK_OK(t, wasm_call(m, "keep", args, 1, NULL, 0));
+        WASM_CHECK_OK(t, wasm_call(m, "churn", args, 2, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        wasm_gc_collect(&rt);
+        WASM_CHECK_OK(t, wasm_call(m, "global", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        WASM_CHECK_OK(t, wasm_call(m, "table", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+    }
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -16657,6 +16706,7 @@ int main(void) {
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
         { "gc: the heap grows to fit live data and keeps objects intact", test_gc_heap_grows_with_live_data },
         { "gc: heap growth stops at max_gc_heap_bytes with WASM_ERR_OOM", test_gc_heap_growth_respects_max_gc_heap_bytes },
+        { "gc: collections skip host externrefs converted to anyref", test_gc_collection_skips_host_externrefs_converted_to_anyref },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
         { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },
         { "wasmgc: runtime executes segment-backed array ops", test_gc_runtime_executes_segment_backed_array_ops },

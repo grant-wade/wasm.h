@@ -51,6 +51,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
 - Calls that trap set `wasm_runtime_last_error` and `wasm_runtime_error_message`, which reported `ok` after a trap.
 - The GC heap grows to hold live objects and allocations larger than its initial size, which failed with `WASM_ERR_OOM` once about 4 MiB was live.
+- A collection skips anyref values made by `any.convert_extern` from host `externref` values, which it dereferenced as GC objects and crashed on.
 
 ## [1.2.0] - 2026-10-17
 
