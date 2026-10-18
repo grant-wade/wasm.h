@@ -706,13 +706,16 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
 }
 
 void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag) {
+    if (!rt) return;
     rt->enabled_features |= flag;
 }
 
 void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag) {
+    if (!rt) return;
     rt->enabled_features &= ~flag;
 }
 
 void wasm_enable_all_features(wasm_runtime_t* rt) {
+    if (!rt) return;
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
 }

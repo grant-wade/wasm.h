@@ -17,8 +17,9 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
     uint32_t idx;
     wasm_export_kind_t kind;
 
-    if (!wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
-        WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name);
+    if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    if (!func_name || !wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name ? func_name : "");
         return WASM_ERR_UNDEFINED_EXPORT;
     }
     return wasm_call_index(mod, idx, args, num_args, results, num_results);
@@ -29,7 +30,8 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              wasm_value_t* results, uint32_t num_results) {
     wasm_functype_t* ft;
 
-    if (mod && mod->rt) wasm__clear_backtrace(mod->rt);
+    if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm__clear_backtrace(mod->rt);
 
     if (func_idx >= mod->num_funcs) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);

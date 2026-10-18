@@ -8365,6 +8365,120 @@ WL_TEST(test_canonicalization_dedupes_many_types) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_public_api_tolerates_null_handles) {
+    wasm_value_t value = wasm_i32(0);
+    wasm_export_kind_t kind;
+    uint32_t index = 0;
+    uint32_t out_u32 = 0;
+    size_t out_len = 0;
+    uint8_t byte = 0;
+    char text[16];
+    wasm_import_t imp;
+    wasm_global_import_t global_imp;
+    wasm_table_import_t table_imp;
+    wasm_memory_import_t memory_imp;
+    wasm_tag_import_t tag_imp;
+
+    memset(&imp, 0, sizeof(imp));
+    memset(&global_imp, 0, sizeof(global_imp));
+    memset(&table_imp, 0, sizeof(table_imp));
+    memset(&memory_imp, 0, sizeof(memory_imp));
+    memset(&tag_imp, 0, sizeof(tag_imp));
+
+    WL_CHECK(t, wasm_runtime_last_error(NULL) != WASM_OK || 1);
+    (void)wasm_runtime_error_message(NULL);
+    wasm_runtime_clear_error(NULL);
+    wasm_runtime_set_error(NULL, WASM_ERR_TRAP, "x");
+    wasm_runtime_set_enabled_features(NULL, 0);
+    (void)wasm_runtime_enabled_features(NULL);
+    WL_CHECK(t, wasm_runtime_exit_code(NULL) == 0);
+    WL_CHECK(t, wasm_register_import(NULL, &imp) != WASM_OK);
+    WL_CHECK(t, wasm_register_global_import(NULL, &global_imp) != WASM_OK);
+    WL_CHECK(t, wasm_register_table_import(NULL, &table_imp) != WASM_OK);
+    WL_CHECK(t, wasm_register_memory_import(NULL, &memory_imp) != WASM_OK);
+    WL_CHECK(t, wasm_register_tag_import(NULL, &tag_imp) != WASM_OK);
+    wasm_enable_feature(NULL, WASM_FEATURE_SIMD);
+    wasm_disable_feature(NULL, WASM_FEATURE_SIMD);
+    wasm_enable_all_features(NULL);
+    wasm_gc_collect(NULL);
+    WL_CHECK(t, wasm_load(NULL, &byte, 1) == NULL);
+    wasm_free_module(NULL);
+    WL_CHECK(t, wasm_call(NULL, "f", NULL, 0, NULL, 0) != WASM_OK);
+    WL_CHECK(t, wasm_call_index(NULL, 0, NULL, 0, NULL, 0) != WASM_OK);
+    WL_CHECK(t, wasm_call_fmt(NULL, "f", "v()") != WASM_OK);
+    WL_CHECK(t, wasm_bind_host_func(NULL, "m", "f", "v()", NULL, NULL) != WASM_OK);
+    WL_CHECK(t, wasm_memory_count(NULL) == 0);
+    WL_CHECK(t, wasm_memory_read(NULL, 0, 0, &byte, 1) != WASM_OK);
+    WL_CHECK(t, wasm_memory_write(NULL, 0, 0, &byte, 1) != WASM_OK);
+    WL_CHECK(t, wasm_memory_get_string(NULL, 0, 0, text, sizeof(text)) != WASM_OK);
+    WL_CHECK(t, wasm_memory_ref_at(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_memory_data_at(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_memory_size_at(NULL, 0) == 0);
+    WL_CHECK(t, wasm_memory_grow_at(NULL, 0, 1) < 0);
+    WL_CHECK(t, wasm_memory_data(NULL) == NULL);
+    WL_CHECK(t, wasm_memory_size(NULL) == 0);
+    WL_CHECK(t, wasm_memory_grow(NULL, 1) < 0);
+    wasm_shared_memory_free(NULL);
+    WL_CHECK(t, wasm_table_count(NULL) == 0);
+    WL_CHECK(t, wasm_table_ref_at(NULL, 0) == NULL);
+    (void)wasm_table_type(NULL, 0);
+    WL_CHECK(t, wasm_table_reftype(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_global_count(NULL) == 0);
+    (void)wasm_global_type(NULL, 0);
+    WL_CHECK(t, wasm_global_reftype(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_global_is_mutable(NULL, 0) == 0);
+    WL_CHECK(t, wasm_global_value_ref_at(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_global_get(NULL, "g", &value) != WASM_OK);
+    WL_CHECK(t, wasm_global_set(NULL, "g", value) != WASM_OK);
+    WL_CHECK(t, wasm_import_count(NULL) == 0);
+    WL_CHECK(t, wasm_import_info(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_export_count(NULL) == 0);
+    WL_CHECK(t, wasm_export_name(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_export_name_bytes(NULL, 0, &out_len) == NULL);
+    (void)wasm_export_kind(NULL, 0);
+    (void)wasm_export_index(NULL, 0);
+    WL_CHECK(t, !wasm_find_export(NULL, "f", &kind, &index));
+    WL_CHECK(t, !wasm_find_export_bytes(NULL, &byte, 1, &kind, &index));
+    WL_CHECK(t, wasm_custom_section_count(NULL) == 0);
+    WL_CHECK(t, wasm_custom_section_name(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_custom_section_data(NULL, 0, &out_len) == NULL);
+    WL_CHECK(t, wasm_custom_section_find(NULL, "name", &out_len) == NULL);
+    WL_CHECK(t, wasm_type_count(NULL) == 0);
+    (void)wasm_type_kind(NULL, 0);
+    WL_CHECK(t, wasm_type_functype(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_struct_type_field_count(NULL, 0) == 0);
+    WL_CHECK(t, wasm_struct_type_field(NULL, 0, 0) == NULL);
+    WL_CHECK(t, wasm_array_type_field(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_func_count(NULL) == 0);
+    WL_CHECK(t, wasm_func_functype(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_func_param_count(NULL, 0) == 0);
+    WL_CHECK(t, wasm_func_result_count(NULL, 0) == 0);
+    (void)wasm_func_param_type(NULL, 0, 0);
+    (void)wasm_func_result_type(NULL, 0, 0);
+    WL_CHECK(t, wasm_tag_count(NULL) == 0);
+    WL_CHECK(t, wasm_tag_functype(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_struct_new(NULL, 0, NULL, 0, &value) != WASM_OK);
+    WL_CHECK(t, wasm_array_new(NULL, 0, NULL, 0, &value) != WASM_OK);
+    WL_CHECK(t, wasm_struct_get_field(NULL, value, 0, &value) != WASM_OK);
+    WL_CHECK(t, wasm_struct_set_field(NULL, value, 0, value) != WASM_OK);
+    WL_CHECK(t, wasm_array_length(NULL, value, &out_u32) != WASM_OK);
+    WL_CHECK(t, wasm_array_get_elem(NULL, value, 0, &value) != WASM_OK);
+    WL_CHECK(t, wasm_array_set_elem(NULL, value, 0, value) != WASM_OK);
+    wasm_dump_backtrace(NULL, text, sizeof(text));
+    WL_CHECK(t, wasm_get_call_stack_depth(NULL) == 0);
+    WL_CHECK(t, wasm_get_call_frame_info(NULL, 0, &index, &out_u32) != WASM_OK);
+    wasm_set_fuel(NULL, 1);
+    WL_CHECK(t, wasm_get_fuel(NULL) == 0);
+    WL_CHECK(t, wasm_module_runtime(NULL) == NULL);
+    wasm_module_set_userdata(NULL, NULL);
+    WL_CHECK(t, wasm_module_get_userdata(NULL) == NULL);
+#if WASM_ENABLE_PLATFORM
+    WL_CHECK(t, wasm_bind_wasi_stubs(NULL) != WASM_OK);
+    WL_CHECK(t, wasm_bind_emscripten_stubs(NULL) != WASM_OK);
+#endif
+    wasm_runtime_free(NULL);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15303,6 +15417,7 @@ int main(void) {
         { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
         { "load: function locals are limited by config", test_load_limits_function_locals },
         { "types: canonicalization dedupes thousands of types", test_canonicalization_dedupes_many_types },
+        { "public api: NULL handles are rejected without crashing", test_public_api_tolerates_null_handles },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

@@ -12,11 +12,13 @@
 #define wasm__snprintf snprintf
 #endif
 
-#define WASM__SET_ERR(rt, code, ...)                             \
-    do {                                                         \
-        (rt)->last_error = (code);                               \
-        wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
-                       __VA_ARGS__);                             \
+#define WASM__SET_ERR(rt, code, ...)                                 \
+    do {                                                             \
+        if (rt) {                                                    \
+            (rt)->last_error = (code);                               \
+            wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
+                           __VA_ARGS__);                             \
+        }                                                            \
     } while (0)
 
 struct wasm_func_ref_t {

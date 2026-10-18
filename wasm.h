@@ -1827,11 +1827,13 @@ struct wasm__externref_box_t {
 #define wasm__snprintf snprintf
 #endif
 
-#define WASM__SET_ERR(rt, code, ...)                             \
-    do {                                                         \
-        (rt)->last_error = (code);                               \
-        wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
-                       __VA_ARGS__);                             \
+#define WASM__SET_ERR(rt, code, ...)                                 \
+    do {                                                             \
+        if (rt) {                                                    \
+            (rt)->last_error = (code);                               \
+            wasm__snprintf((rt)->error_msg, sizeof((rt)->error_msg), \
+                           __VA_ARGS__);                             \
+        }                                                            \
     } while (0)
 
 struct wasm_func_ref_t {
@@ -11566,14 +11568,17 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
 }
 
 void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag) {
+    if (!rt) return;
     rt->enabled_features |= flag;
 }
 
 void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag) {
+    if (!rt) return;
     rt->enabled_features &= ~flag;
 }
 
 void wasm_enable_all_features(wasm_runtime_t* rt) {
+    if (!rt) return;
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
 }
 /* END src/runtime.c */
@@ -22914,8 +22919,9 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
     uint32_t idx;
     wasm_export_kind_t kind;
 
-    if (!wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
-        WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name);
+    if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    if (!func_name || !wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name ? func_name : "");
         return WASM_ERR_UNDEFINED_EXPORT;
     }
     return wasm_call_index(mod, idx, args, num_args, results, num_results);
@@ -22926,7 +22932,8 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              wasm_value_t* results, uint32_t num_results) {
     wasm_functype_t* ft;
 
-    if (mod && mod->rt) wasm__clear_backtrace(mod->rt);
+    if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm__clear_backtrace(mod->rt);
 
     if (func_idx >= mod->num_funcs) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);
