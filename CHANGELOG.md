@@ -24,7 +24,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
-- A module that repeats a section is malformed. A second export section replaced the first and leaked it; the execution fuzzer found it.
+- Modules whose sections repeat or appear out of the binary format's order are malformed. A second export section replaced the first and leaked it; the execution fuzzer found it.
 - wasm2api inspects modules with `wasm_compile`. It bound the Emscripten stubs, which reach the host filesystem, and ran the module's start function while generating code, and it failed on modules that import memories or tables.
 - `wasm_load` clears the previous error first, so a failure no longer reports a stale message from an earlier one.
 - WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.

@@ -3453,17 +3453,6 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
     }
 
     {
-        static const uint8_t data_bytes[] = { 'a', 'b' };
-        wasm_builder_t sec = { 0 };
-
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
-        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
-        emit_section(&mod, 11, sec.buf, sec.len);
-    }
-
-    {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_section(&mod, 12, sec.buf, sec.len);
@@ -3542,6 +3531,17 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
         emit_leb128_u32(&sec, body.len);
         emit_bytes(&sec, body.buf, body.len);
         emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 'a', 'b' };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
     }
 
     wasm_init(&rt);
@@ -3887,18 +3887,6 @@ WL_TEST(test_bulk_memory_ops) {
         emit_section(&mod, 7, sec.buf, sec.len);
     }
 
-    /* Data: one passive segment containing "ABCDE" */
-    {
-        static const uint8_t data_bytes[] = { 'A', 'B', 'C', 'D', 'E' };
-        wasm_builder_t sec = { 0 };
-
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
-        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
-        emit_section(&mod, 11, sec.buf, sec.len);
-    }
-
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
@@ -3994,6 +3982,18 @@ WL_TEST(test_bulk_memory_ops) {
         emit_bytes(&sec, reuse_body.buf, reuse_body.len);
 
         emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    /* Data: one passive segment containing "ABCDE" */
+    {
+        static const uint8_t data_bytes[] = { 'A', 'B', 'C', 'D', 'E' };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
     }
 
     wasm_init(&rt);
@@ -4329,17 +4329,6 @@ WL_TEST(test_bulk_memory_oob_traps) {
     }
 
     {
-        static const uint8_t data_bytes[] = { 'X', 'Y' };
-        wasm_builder_t sec = { 0 };
-
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
-        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
-        emit_section(&mod, 11, sec.buf, sec.len);
-    }
-
-    {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_section(&mod, 12, sec.buf, sec.len);
@@ -4387,6 +4376,17 @@ WL_TEST(test_bulk_memory_oob_traps) {
         emit_bytes(&sec, body.buf, body.len);
 
         emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 'X', 'Y' };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
     }
 
     wasm_init(&rt);
@@ -5632,12 +5632,22 @@ WL_TEST(test_prefixed_opcode_in_dead_branch) {
         emit(&sec, 0x7F);
         emit_section(&mod, 1, sec.buf, sec.len);
     }
+
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 3, sec.buf, sec.len);
     }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
+    }
+
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
@@ -5650,13 +5660,7 @@ WL_TEST(test_prefixed_opcode_in_dead_branch) {
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 7, sec.buf, sec.len);
     }
-    {
-        wasm_builder_t sec = { 0 };
-        emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x00);
-        emit_leb128_u32(&sec, 1);
-        emit_section(&mod, 5, sec.buf, sec.len);
-    }
+
     {
         wasm_builder_t sec = { 0 };
         wasm_builder_t body = { 0 };
@@ -6716,14 +6720,14 @@ WL_TEST(test_exception_try_catch_payload) {
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
-    emit_single_tag_section(&mod, 1);
-
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 3, sec.buf, sec.len);
     }
+
+    emit_single_tag_section(&mod, 1);
 
     {
         wasm_builder_t sec = { 0 };
@@ -6822,14 +6826,14 @@ WL_TEST(test_exception_catch_all) {
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
-    emit_single_tag_section(&mod, 1);
-
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 3, sec.buf, sec.len);
     }
+
+    emit_single_tag_section(&mod, 1);
 
     {
         wasm_builder_t sec = { 0 };
@@ -6907,14 +6911,14 @@ WL_TEST(test_exception_rethrow) {
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
-    emit_single_tag_section(&mod, 1);
-
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 3, sec.buf, sec.len);
     }
+
+    emit_single_tag_section(&mod, 1);
 
     {
         wasm_builder_t sec = { 0 };
@@ -7007,14 +7011,14 @@ WL_TEST(test_exception_delegate) {
         emit_section(&mod, 1, sec.buf, sec.len);
     }
 
-    emit_single_tag_section(&mod, 1);
-
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 0);
         emit_section(&mod, 3, sec.buf, sec.len);
     }
+
+    emit_single_tag_section(&mod, 1);
 
     {
         wasm_builder_t sec = { 0 };
@@ -8013,17 +8017,6 @@ WL_TEST(test_validation_requires_data_count_for_memory_init) {
     }
 
     {
-        static const uint8_t data_bytes[] = { 1 };
-        wasm_builder_t sec = { 0 };
-
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_bytes(&sec, data_bytes, 1);
-        emit_section(&mod, 11, sec.buf, sec.len);
-    }
-
-    {
         wasm_builder_t sec = { 0 };
         wasm_builder_t body = { 0 };
 
@@ -8043,6 +8036,17 @@ WL_TEST(test_validation_requires_data_count_for_memory_init) {
         emit_leb128_u32(&sec, body.len);
         emit_bytes(&sec, body.buf, body.len);
         emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 1 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_bytes(&sec, data_bytes, 1);
+        emit_section(&mod, 11, sec.buf, sec.len);
     }
 
     wasm_init(&rt);
@@ -8156,17 +8160,17 @@ WL_TEST(test_validation_rejects_call_indirect_on_externref_table) {
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x6F);
-        emit(&sec, 0x00);
-        emit_leb128_u32(&sec, 1);
-        emit_section(&mod, 4, sec.buf, sec.len);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
     }
 
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 0);
-        emit_section(&mod, 3, sec.buf, sec.len);
+        emit(&sec, 0x6F);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
     }
 
     {
@@ -8812,23 +8816,42 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     wasm_destroy(&rt);
 }
 
-WL_TEST(test_load_rejects_repeated_sections) {
+WL_TEST(test_load_rejects_misordered_sections) {
     /* Two export sections; the second used to replace the first and leak it. */
     static const uint8_t module_bytes[] = {
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
         0x00, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00, 0x00, 0x01, 0x62, 0x00, 0x01, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00,
         0x00, 0x01, 0x62, 0x00, 0x01, 0x0a, 0x07, 0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b,
     };
+    wasm_builder_t late_types = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
 
     wasm_init(&rt);
     m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
-    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "repeated"),
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "section 7 is repeated"),
                  "expected a repeated export section to be malformed, got: %s", rt.error_msg);
     wasm_free_module(m);
     m = wasm_compile(&rt, module_bytes, sizeof(module_bytes));
     WL_CHECK(t, m == NULL);
+    wasm_free_module(m);
+
+    emit_header(&late_types);
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 0);
+        emit_section(&late_types, 3, sec.buf, sec.len);
+    }
+    {
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 0);
+        emit_section(&late_types, 1, sec.buf, sec.len);
+    }
+    m = wasm_load(&rt, late_types.buf, late_types.len);
+    WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "section out of order: section 1 must come earlier"),
+                 "expected a type section after the function section to be malformed, got: %s", rt.error_msg);
     wasm_free_module(m);
     wasm_destroy(&rt);
 }
@@ -11788,19 +11811,19 @@ WL_TEST(test_simd_execution_and_feature_gate) {
 
     {
         wasm_builder_t sec = { 0 };
-        emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x00);
-        emit_leb128_u32(&sec, 1);
-        emit_section(&mod, 5, sec.buf, sec.len);
-    }
-
-    {
-        wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 3);
         emit_leb128_u32(&sec, 0);
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&sec, 2);
         emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 5, sec.buf, sec.len);
     }
 
     {
@@ -12681,6 +12704,13 @@ WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 2);
+        emit_section(&mod, 3, sec.buf, sec.len);
+    }
+
+    {
+        wasm_builder_t sec = { 0 };
+        emit_leb128_u32(&sec, 1);
         emit(&sec, 0x63);
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x00);
@@ -12698,13 +12728,6 @@ WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
         emit_leb128_u32(&sec, 0);
         emit(&sec, 0x0B);
         emit_section(&mod, 6, sec.buf, sec.len);
-    }
-
-    {
-        wasm_builder_t sec = { 0 };
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 2);
-        emit_section(&mod, 3, sec.buf, sec.len);
     }
 
     {
@@ -12975,17 +12998,17 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit(&sec, 0x6E);
-        emit(&sec, 0x00);
-        emit_leb128_u32(&sec, 1);
-        emit_section(&mod, 4, sec.buf, sec.len);
+        emit_leb128_u32(&sec, 0);
+        emit_section(&mod, 3, sec.buf, sec.len);
     }
 
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 0);
-        emit_section(&mod, 3, sec.buf, sec.len);
+        emit(&sec, 0x6E);
+        emit(&sec, 0x00);
+        emit_leb128_u32(&sec, 1);
+        emit_section(&mod, 4, sec.buf, sec.len);
     }
 
     {
@@ -14758,20 +14781,17 @@ WL_TEST(test_gc_runtime_executes_segment_backed_array_ops) {
     }
 
     {
-        static const uint8_t data_bytes[] = { 0x80, 0x7F, 0x05 };
         wasm_builder_t sec = { 0 };
-
         emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
-        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
-        emit_section(&mod, 11, sec.buf, sec.len);
+        emit_leb128_u32(&sec, 3);
+        emit_section(&mod, 3, sec.buf, sec.len);
     }
 
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit_section(&mod, 12, sec.buf, sec.len);
+        emit_export_func(&sec, "run", 0);
+        emit_section(&mod, 7, sec.buf, sec.len);
     }
 
     {
@@ -14798,15 +14818,7 @@ WL_TEST(test_gc_runtime_executes_segment_backed_array_ops) {
     {
         wasm_builder_t sec = { 0 };
         emit_leb128_u32(&sec, 1);
-        emit_leb128_u32(&sec, 3);
-        emit_section(&mod, 3, sec.buf, sec.len);
-    }
-
-    {
-        wasm_builder_t sec = { 0 };
-        emit_leb128_u32(&sec, 1);
-        emit_export_func(&sec, "run", 0);
-        emit_section(&mod, 7, sec.buf, sec.len);
+        emit_section(&mod, 12, sec.buf, sec.len);
     }
 
     {
@@ -14971,6 +14983,17 @@ WL_TEST(test_gc_runtime_executes_segment_backed_array_ops) {
         emit_leb128_u32(&sec, body.len);
         emit_bytes(&sec, body.buf, body.len);
         emit_section(&mod, 10, sec.buf, sec.len);
+    }
+
+    {
+        static const uint8_t data_bytes[] = { 0x80, 0x7F, 0x05 };
+        wasm_builder_t sec = { 0 };
+
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, 1);
+        emit_leb128_u32(&sec, (uint32_t)sizeof(data_bytes));
+        emit_bytes(&sec, data_bytes, (uint32_t)sizeof(data_bytes));
+        emit_section(&mod, 11, sec.buf, sec.len);
     }
 
     wasm_init(&rt);
@@ -15778,7 +15801,7 @@ int main(void) {
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
-        { "load: repeated sections are malformed", test_load_rejects_repeated_sections },
+        { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

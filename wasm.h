@@ -17196,6 +17196,14 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 
 /* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
    instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
+/* Position of each known non-custom section in the order the binary format requires: tags follow
+   memories and the data count precedes code. Custom and unknown ids rank 0. */
+static uint32_t wasm__section_rank(uint8_t sid) {
+    static const uint8_t ranks[14] = { 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 11, 6 };
+
+    return sid < 14u ? ranks[sid] : 0u;
+}
+
 static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const uint8_t* bytes,
                                         size_t len,
@@ -17203,7 +17211,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const wasm_module_t* compiled) {
     wasm__reader_t r;
     uint32_t version;
-    uint32_t seen_sections = 0;
+    uint32_t last_rank = 0;
     wasm_module_t* mod;
     wasm_error_t err = WASM_OK;
 
@@ -17291,14 +17299,14 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         sr.ptr = r.ptr;
         sr.end = se;
         sr.malformed = 0;
-        /* A repeated section would replace what the first one decoded. */
-        if (sid != 0 && sid < 32u) {
-            if (seen_sections & (1u << sid)) {
-                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section %u out of order: repeated", (unsigned)sid);
+        if (wasm__section_rank(sid) != 0u) {
+            if (wasm__section_rank(sid) <= last_rank) {
+                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section out of order: section %u %s", (unsigned)sid,
+                              wasm__section_rank(sid) == last_rank ? "is repeated" : "must come earlier");
                 err = WASM_ERR_MALFORMED;
                 break;
             }
-            seen_sections |= 1u << sid;
+            last_rank = wasm__section_rank(sid);
         }
         switch (sid) {
             case 0:
