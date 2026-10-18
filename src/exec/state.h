@@ -4,17 +4,14 @@
 #include "../reader.h"
 #include "../runtime.h"
 
+/* A try or try_table block that is running: the only blocks that keep a label at run time. */
 typedef struct wasm__label_t {
-    const uint8_t* continuation;
-    const uint8_t* handler_ptr;
+    const uint32_t* handler; /* its clause table in the translated body */
     uint32_t sp_base;
-    uint32_t param_arity;
-    uint32_t arity;
     uint32_t caught_tag;
     uint64_t caught_tag_identity;
     uint32_t caught_count;
     wasm_value_t* caught_values;
-    uint32_t delegate_depth;
     uint8_t opcode;
     uint8_t active_catch;
 } wasm__label_t;
@@ -26,13 +23,14 @@ struct wasm__call_frame_t {
     wasm__label_t* labels;
     uint32_t lsp;
     uint32_t max_labels;
-    wasm__reader_t r;
+    const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
+    const uint32_t* op_at; /* the instruction it is running, for backtraces */
+    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates */
     wasm_func_t* func;
     wasm_functype_t* ft;
     wasm_value_t* results_dst;
     uint32_t num_results;
     wasm__arena_mark_t arena_saved;
-    uint32_t current_offset;
 };
 #define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
 #define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)

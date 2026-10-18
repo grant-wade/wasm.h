@@ -90,8 +90,6 @@ WASM_PRIVATE int wasm__is_null_ref(const wasm_value_t* value);
 
 WASM_PRIVATE int wasm__is_heap_gc_ref_value(const wasm_value_t* value);
 
-WASM_PRIVATE int wasm__value_matches_type(const wasm_value_t* value, wasm_valtype_t type);
-
 WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
                                          const wasm_reftype_t* reftype);
 

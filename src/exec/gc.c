@@ -488,50 +488,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             WASM__PUSH(rt, wasm__runtime_cast_success_value(&target_ref, value));
             break;
         }
-        case 0x18:
-        case 0x19: {
-            uint8_t flags = wasm__read_u8(&cf->r);
-            uint32_t depth = wasm__read_leb128_u32(&cf->r);
-            wasm_reftype_t source_ref;
-            wasm_reftype_t target_ref;
-            wasm_value_t value;
-            int matches;
-
-            if ((flags & ~0x03u) != 0 || depth >= cf->lsp) WASM__TRAP(WASM_ERR_MALFORMED);
-            err = wasm__runtime_read_heap_reftype(mod, &cf->r, (flags & 0x01u) != 0, &source_ref);
-            if (err != WASM_OK) goto cleanup;
-            err = wasm__runtime_read_heap_reftype(mod, &cf->r, (flags & 0x02u) != 0, &target_ref);
-            if (err != WASM_OK) goto cleanup;
-
-            value = WASM__PEEK(rt);
-            matches = wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref);
-            if (matches) {
-                rt->stack[rt->sp - 1] = wasm__runtime_cast_success_value(&target_ref, value);
-                if (subop == 0x18) {
-                    err = wasm__do_branch(rt,
-                                          cf->labels,
-                                          &cf->labels[cf->lsp - 1 - depth],
-                                          &cf->r,
-                                          &cf->lsp,
-                                          depth);
-                    if (err != WASM_OK) goto cleanup;
-                }
-            } else {
-                rt->stack[rt->sp - 1] = wasm__runtime_cast_difference_value(&source_ref,
-                                                                            &target_ref,
-                                                                            value);
-                if (subop == 0x19) {
-                    err = wasm__do_branch(rt,
-                                          cf->labels,
-                                          &cf->labels[cf->lsp - 1 - depth],
-                                          &cf->r,
-                                          &cf->lsp,
-                                          depth);
-                    if (err != WASM_OK) goto cleanup;
-                }
-            }
-            break;
-        }
         case 0x1A:
         case 0x1B: {
             wasm_value_t value;
@@ -575,4 +531,37 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
 cleanup:
     return err;
+}
+
+WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
+                                          uint32_t subop,
+                                          const uint8_t* flags_at,
+                                          const uint8_t* code_end,
+                                          wasm_value_t* value,
+                                          int* out_branch) {
+    wasm__reader_t r;
+    wasm_reftype_t source_ref;
+    wasm_reftype_t target_ref;
+    wasm_error_t err;
+    uint8_t flags;
+
+    r.ptr = flags_at;
+    r.end = code_end;
+    r.malformed = 0;
+    flags = wasm__read_u8(&r);
+    (void)wasm__read_leb128_u32(&r);
+    if ((flags & ~0x03u) != 0 || r.malformed) return WASM_ERR_MALFORMED;
+    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x01u) != 0, &source_ref);
+    if (err != WASM_OK) return err;
+    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x02u) != 0, &target_ref);
+    if (err != WASM_OK) return err;
+
+    if (wasm__runtime_value_matches_type(mod, value, target_ref.type, &target_ref)) {
+        *value = wasm__runtime_cast_success_value(&target_ref, *value);
+        *out_branch = subop == 0x18;
+    } else {
+        *value = wasm__runtime_cast_difference_value(&source_ref, &target_ref, *value);
+        *out_branch = subop == 0x19;
+    }
+    return WASM_OK;
 }

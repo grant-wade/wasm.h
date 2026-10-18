@@ -450,10 +450,6 @@ WASM_PRIVATE int wasm__is_heap_gc_ref_value(const wasm_value_t* value) {
     return (value->of.gc_ref & WASM__GC_I31_TAG) == 0;
 }
 
-WASM_PRIVATE int wasm__value_matches_type(const wasm_value_t* value, wasm_valtype_t type) {
-    return wasm__is_valtype_subtype(NULL, value->type, type);
-}
-
 WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
                                          const wasm_reftype_t* reftype) {
     wasm_valtype_t null_type = type;

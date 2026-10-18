@@ -19,7 +19,6 @@ WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
     label->caught_tag_identity = 0;
     label->caught_count = 0;
     label->active_catch = 0;
-    label->delegate_depth = UINT32_MAX;
 }
 
 WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf) {
@@ -59,7 +58,7 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_ERR_MALFORMED;
-    if (!func->control_targets) {
+    if (!func->ops) {
         err = wasm__prepare_function(mod, func_idx);
         if (err != WASM_OK) return err;
     }
@@ -85,8 +84,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
         }
     }
 
-    labels = (wasm__label_t*)wasm__arena_alloc(rt, max_labels * sizeof(wasm__label_t));
-    if (!labels) {
+    labels = NULL;
+    if (func->max_handlers > 0)
+        labels = (wasm__label_t*)wasm__arena_alloc(rt, func->max_handlers * sizeof(wasm__label_t));
+    if (func->max_handlers > 0 && !labels) {
         wasm__arena_reset(rt, arena_saved);
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame labels");
         return WASM_ERR_OOM;
@@ -98,8 +99,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     cf->sp_base = rt->sp;
     cf->locals = locals;
     cf->labels = labels;
-    cf->lsp = 1;
-    cf->max_labels = max_labels;
+    cf->lsp = 0;
+    cf->max_labels = func->max_handlers;
+    cf->pc = func->ops;
+    cf->op_at = func->ops;
     cf->r.ptr = func->code;
     cf->r.end = func->code + func->code_len;
     cf->r.malformed = 0;
@@ -108,20 +111,6 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     cf->results_dst = results_dst;
     cf->num_results = num_results;
     cf->arena_saved = arena_saved;
-    cf->current_offset = 0;
-
-    labels[0].continuation = cf->r.end;
-    labels[0].handler_ptr = NULL;
-    labels[0].sp_base = cf->sp_base;
-    labels[0].param_arity = 0;
-    labels[0].arity = ft->num_results;
-    labels[0].caught_tag = UINT32_MAX;
-    labels[0].caught_tag_identity = 0;
-    labels[0].caught_count = 0;
-    labels[0].caught_values = NULL;
-    labels[0].delegate_depth = UINT32_MAX;
-    labels[0].opcode = 0x02;
-    labels[0].active_catch = 0;
 
     for (i = 0; i < ft->num_params && i < num_args; i++) {
         locals[i] = wasm__is_numeric_valtype(ft->params[i])
@@ -189,7 +178,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
         wasm_error_t err;
 
-        err = wasm__handle_exception_in_frame(cf->module, cf->labels, &cf->lsp, &cf->r, cf->sp_base);
+        err = wasm__handle_exception_in_frame(cf);
         if (err == WASM_OK) return WASM_OK;
         if (err != WASM__ERR_EXCEPTION) return err;
 

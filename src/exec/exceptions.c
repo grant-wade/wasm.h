@@ -1,11 +1,9 @@
 #include "exceptions.h"
 #include <stdio.h>
 #include "calls.h"
-#include "control.h"
-#include "../instructions.h"
+#include "translate.h"
 #include "../internal/alloc.h"
 #include "../module.h"
-#include "../reader.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
 #include <string.h>
@@ -35,231 +33,165 @@ WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     return WASM_ERR_TRAP;
 }
 
-WASM_PRIVATE int wasm__find_rethrow_label(const wasm__label_t* labels,
-                                    uint32_t lsp,
-                                    uint32_t depth,
-                                    uint32_t* out_index) {
+/* Takes a try_table's branch descriptor from a frame outside the interpreter loop. */
+static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc) {
+    wasm_runtime_t* rt = cf->module->rt;
+    uint32_t arity = desc[1];
+    uint32_t pops = desc[3] >> WASM__BRANCH_POPS_SHIFT;
+    uint32_t dst = cf->sp_base + desc[2];
+
+    if (desc[3] & WASM__BRANCH_RETURN) {
+        cf->pc = NULL;
+        return WASM_OK;
+    }
+    if ((desc[3] & WASM__BRANCH_LOOP) && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
+    if (arity > 0 && rt->sp - arity != dst)
+        memmove(&rt->stack[dst], &rt->stack[rt->sp - arity], arity * sizeof(wasm_value_t));
+    rt->sp = dst + arity;
+    while (pops-- > 0 && cf->lsp > 0) {
+        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        cf->lsp--;
+    }
+    cf->pc = cf->func->ops + desc[0];
+    return WASM_OK;
+}
+
+static void wasm__unwind_labels(wasm__call_frame_t* cf, uint32_t keep) {
+    while (cf->lsp > keep) {
+        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        cf->lsp--;
+    }
+}
+
+static int wasm__tag_matches(const wasm_module_t* mod, uint32_t tag_index, const wasm__exception_state_t* ex) {
+    return tag_index < mod->num_tags && mod->tags[tag_index].identity == ex->tag_identity;
+}
+
+/* A legacy try that is already running one of its catch clauses no longer handles exceptions. */
+static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegated, uint32_t* next_idx,
+                              wasm_error_t* out_err) {
+    wasm_module_t* mod = cf->module;
+    wasm_runtime_t* rt = mod->rt;
+    wasm__label_t* label = &cf->labels[idx - 1];
+    const uint32_t* clause = label->handler + 1;
+    uint32_t count = label->handler[0];
     uint32_t i;
 
-    for (i = lsp; i > 0; i--) {
-        const wasm__label_t* label = &labels[i - 1];
+    for (i = 0; i < count; i++, clause += 3) {
+        uint32_t j;
 
-        if (label->opcode == 0x06 && label->active_catch) {
-            if (depth == 0) {
-                *out_index = i - 1;
+        if (clause[0] == WASM__CLAUSE_DELEGATE) {
+            uint32_t skip = clause[1];
+
+            wasm__clear_label(label);
+            idx--;
+            while (skip > 0 && idx > 0) {
+                wasm__clear_label(&cf->labels[idx - 1]);
+                idx--;
+                skip--;
+            }
+            *delegated = 1;
+            *next_idx = idx;
+            return 0;
+        }
+        if (clause[0] == WASM__CLAUSE_CATCH && !wasm__tag_matches(mod, clause[1], &rt->pending_exception)) continue;
+
+        wasm__unwind_labels(cf, idx);
+        rt->sp = label->sp_base;
+        *out_err = wasm__copy_exception_to_label(label, &rt->pending_exception);
+        if (*out_err != WASM_OK) return 1;
+        if (clause[0] == WASM__CLAUSE_CATCH) {
+            if (rt->sp + label->caught_count > rt->max_stack) {
+                *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
-            depth--;
+            for (j = 0; j < label->caught_count; j++) rt->stack[rt->sp++] = label->caught_values[j];
         }
+        wasm__free_exception_state(&rt->pending_exception);
+        cf->pc = cf->func->ops + clause[2];
+        *out_err = WASM_OK;
+        return 1;
     }
-
     return 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
-                                                    wasm__label_t* labels,
-                                                    uint32_t* label_sp,
-                                                    wasm__reader_t* r,
-                                                    uint32_t sp_base) {
+static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_error_t* out_err) {
+    wasm_module_t* mod = cf->module;
     wasm_runtime_t* rt = mod->rt;
-    wasm_error_t err;
-    uint32_t idx = *label_sp;
+    wasm__label_t* label = &cf->labels[idx - 1];
+    const uint32_t* clause = label->handler + 1;
+    uint32_t count = label->handler[0];
+    uint32_t i;
 
-    while (idx > 0) {
-        wasm__label_t* label = &labels[idx - 1];
-        int delegated = 0;
+    for (i = 0; i < count; i++, clause += 6) {
+        wasm_functype_t* tag_type = NULL;
+        wasm_value_t exnref_value;
+        uint32_t j;
 
-        if (label->opcode == 0x06 && label->handler_ptr) {
-            const uint8_t* clause_ptr = label->handler_ptr;
-
-            while (clause_ptr && clause_ptr < label->continuation) {
-                wasm__try_clause_t clause;
-
-                if (wasm__read_try_clause(clause_ptr, label->continuation, &clause) != WASM_OK)
-                    return WASM_ERR_MALFORMED;
-
-                if (clause.opcode == 0x07 && clause.immediate < mod->num_tags &&
-                    mod->tags[clause.immediate].identity == rt->pending_exception.tag_identity) {
-                    uint32_t i;
-
-                    while (*label_sp > idx) {
-                        wasm__clear_label(&labels[*label_sp - 1]);
-                        rt->sp = labels[*label_sp - 1].sp_base;
-                        (*label_sp)--;
-                    }
-                    rt->sp = label->sp_base;
-                    err = wasm__copy_exception_to_label(label, &rt->pending_exception);
-                    if (err != WASM_OK) return err;
-                    if (rt->sp + label->caught_count > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
-                    for (i = 0; i < label->caught_count; i++) rt->stack[rt->sp++] = label->caught_values[i];
-                    wasm__free_exception_state(&rt->pending_exception);
-                    *label_sp = idx;
-                    r->ptr = clause.body_start;
-                    return WASM_OK;
-                }
-
-                if (clause.opcode == 0x19) {
-                    while (*label_sp > idx) {
-                        wasm__clear_label(&labels[*label_sp - 1]);
-                        rt->sp = labels[*label_sp - 1].sp_base;
-                        (*label_sp)--;
-                    }
-                    rt->sp = label->sp_base;
-                    err = wasm__copy_exception_to_label(label, &rt->pending_exception);
-                    if (err != WASM_OK) return err;
-                    wasm__free_exception_state(&rt->pending_exception);
-                    *label_sp = idx;
-                    r->ptr = clause.body_start;
-                    return WASM_OK;
-                }
-
-                if (clause.opcode == 0x18) {
-                    uint32_t extra = clause.immediate;
-
-                    wasm__clear_label(label);
-                    rt->sp = label->sp_base;
-                    idx--;
-                    while (extra > 0 && idx > 0) {
-                        wasm__clear_label(&labels[idx - 1]);
-                        rt->sp = labels[idx - 1].sp_base;
-                        idx--;
-                        extra--;
-                    }
-                    delegated = 1;
-                    break;
-                }
-
-                if (clause.next_clause >= label->continuation || *clause.next_clause == 0x0B) break;
-                clause_ptr = clause.next_clause;
+        if (clause[0] == 0x00 || clause[0] == 0x01) {
+            if (!wasm__tag_matches(mod, clause[1], &rt->pending_exception)) continue;
+            tag_type = wasm__module_functype(mod, mod->tags[clause[1]].type_idx);
+            if (!tag_type) {
+                *out_err = WASM_ERR_MALFORMED;
+                return 1;
             }
-        } else if (label->opcode == 0x1F && label->handler_ptr) {
-            wasm__reader_t clause_reader;
-            uint32_t clause_count;
-            uint32_t clause_index;
-
-            clause_reader.ptr = label->handler_ptr;
-            clause_reader.end = label->continuation;
-            clause_reader.malformed = 0;
-            wasm__skip_blocktype(&clause_reader);
-            clause_count = wasm__read_leb128_u32(&clause_reader);
-            if (clause_reader.malformed) return WASM_ERR_MALFORMED;
-
-            for (clause_index = 0; clause_index < clause_count; clause_index++) {
-                wasm__try_table_clause_t clause;
-                int matches = 0;
-                uint32_t branch_depth;
-                wasm__label_t* target;
-                wasm_functype_t* tag_type = NULL;
-                uint32_t i;
-
-                if (wasm__read_try_table_clause(&clause_reader, &clause) != WASM_OK)
-                    return WASM_ERR_MALFORMED;
-
-                switch (clause.kind) {
-                    case 0x00:
-                        matches = (clause.tag_index < mod->num_tags &&
-                                   mod->tags[clause.tag_index].identity == rt->pending_exception.tag_identity);
-                        if (matches) {
-                            if (clause.tag_index >= mod->num_tags) return WASM_ERR_MALFORMED;
-                            tag_type = wasm__module_functype(mod, mod->tags[clause.tag_index].type_idx);
-                            if (!tag_type) return WASM_ERR_MALFORMED;
-                        }
-                        break;
-                    case 0x02:
-                        matches = 1;
-                        break;
-                    case 0x01:
-                        matches = (clause.tag_index < mod->num_tags &&
-                                   mod->tags[clause.tag_index].identity == rt->pending_exception.tag_identity);
-                        if (matches) {
-                            if (clause.tag_index >= mod->num_tags) return WASM_ERR_MALFORMED;
-                            tag_type = wasm__module_functype(mod, mod->tags[clause.tag_index].type_idx);
-                            if (!tag_type) return WASM_ERR_MALFORMED;
-                        }
-                        break;
-                    case 0x03:
-                        matches = 1;
-                        break;
-                    default:
-                        return WASM_ERR_MALFORMED;
-                }
-
-                if (!matches) continue;
-                if (clause.label_depth >= idx - 1) return WASM_ERR_MALFORMED;
-
-                while (*label_sp > idx) {
-                    wasm__clear_label(&labels[*label_sp - 1]);
-                    rt->sp = labels[*label_sp - 1].sp_base;
-                    (*label_sp)--;
-                }
-
-                rt->sp = label->sp_base;
-                if (clause.kind == 0x01) {
-                    wasm_value_t exnref_value;
-
-                    if (!tag_type) return WASM_ERR_MALFORMED;
-                    if (rt->sp + tag_type->num_params + 1u > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
-                    for (i = 0; i < tag_type->num_params; i++)
-                        rt->stack[rt->sp++] = rt->pending_exception.values[i];
-                    wasm__gc_collect_handles_if_needed(rt);
-                    err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
-                    if (err != WASM_OK) return err;
-                    rt->stack[rt->sp++] = exnref_value;
-                } else if (clause.kind == 0x03) {
-                    wasm_value_t exnref_value;
-
-                    wasm__gc_collect_handles_if_needed(rt);
-                    err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
-                    if (err != WASM_OK) return err;
-                    if (rt->sp >= rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
-                    rt->stack[rt->sp++] = exnref_value;
-                } else if (tag_type) {
-                    if (rt->sp + tag_type->num_params > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
-                    for (i = 0; i < tag_type->num_params; i++)
-                        rt->stack[rt->sp++] = rt->pending_exception.values[i];
-                }
-
-                branch_depth = clause.label_depth + 1;
-                target = &labels[idx - 1 - branch_depth];
-                wasm__free_exception_state(&rt->pending_exception);
-                err = wasm__do_branch(rt, labels, target, r, label_sp, branch_depth);
-                if (err != WASM_OK) return err;
-                return WASM_OK;
-            }
+        } else if (clause[0] != 0x02 && clause[0] != 0x03) {
+            *out_err = WASM_ERR_MALFORMED;
+            return 1;
         }
 
-        if (delegated) continue;
+        wasm__unwind_labels(cf, idx - 1);
+        rt->sp = label->sp_base;
+        if (tag_type) {
+            if (rt->sp + tag_type->num_params + 1u > rt->max_stack) {
+                *out_err = WASM_ERR_STACK_OVERFLOW;
+                return 1;
+            }
+            for (j = 0; j < tag_type->num_params; j++) rt->stack[rt->sp++] = rt->pending_exception.values[j];
+        }
+        if (clause[0] == 0x01 || clause[0] == 0x03) {
+            wasm__gc_collect_handles_if_needed(rt);
+            *out_err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
+            if (*out_err != WASM_OK) return 1;
+            if (rt->sp >= rt->max_stack) {
+                *out_err = WASM_ERR_STACK_OVERFLOW;
+                return 1;
+            }
+            rt->stack[rt->sp++] = exnref_value;
+        }
+        wasm__free_exception_state(&rt->pending_exception);
+        *out_err = wasm__branch_frame(cf, clause + 2);
+        return 1;
+    }
+    return 0;
+}
 
+WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf) {
+    wasm_runtime_t* rt = cf->module->rt;
+    wasm_error_t err = WASM_OK;
+    uint32_t idx = cf->lsp;
+
+    while (idx > 0) {
+        wasm__label_t* label = &cf->labels[idx - 1];
+
+        if (label->opcode == 0x06 && !label->active_catch) {
+            int delegated = 0;
+            uint32_t next_idx = idx;
+
+            if (wasm__catch_legacy(cf, idx, &delegated, &next_idx, &err)) return err;
+            if (delegated) {
+                idx = next_idx;
+                continue;
+            }
+        } else if (label->opcode == 0x1F) {
+            if (wasm__catch_try_table(cf, idx, &err)) return err;
+        }
         wasm__clear_label(label);
         rt->sp = label->sp_base;
         idx--;
     }
 
-    *label_sp = 0;
-    rt->sp = sp_base;
-    return (wasm_error_t)-1;
+    cf->lsp = 0;
+    rt->sp = cf->sp_base;
+    return WASM__ERR_EXCEPTION;
 }
-
-WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
-                                    wasm__label_t* labels,
-                                    wasm__label_t* target,
-                                    wasm__reader_t* r,
-                                    uint32_t* label_sp,
-                                    uint32_t depth_l) {
-    uint32_t branch_arity = (target->opcode == 0x03) ? target->param_arity : target->arity;
-    uint32_t pop_count = (target->opcode == 0x03) ? depth_l : depth_l + 1;
-    uint32_t i;
-
-    if (target->opcode == 0x03 && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
-
-    if (rt->sp - branch_arity != target->sp_base && branch_arity > 0)
-        memmove(&rt->stack[target->sp_base], &rt->stack[rt->sp - branch_arity], branch_arity * sizeof(wasm_value_t));
-    rt->sp = target->sp_base + branch_arity;
-    r->ptr = target->continuation;
-
-    for (i = 0; i < pop_count; i++) wasm__clear_label(&labels[*label_sp - 1 - i]);
-    *label_sp -= pop_count;
-
-    return WASM_OK;
-}
-

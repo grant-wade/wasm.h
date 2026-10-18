@@ -1,6 +1,7 @@
 #include "frames.h"
 #include "../module.h"
 #include "state.h"
+#include "translate.h"
 #include <stdio.h>
 #include "../internal/alloc.h"
 #include "../runtime.h"
@@ -25,15 +26,8 @@ WASM_PRIVATE void wasm__clear_backtrace(wasm_runtime_t* rt) {
 }
 
 static uint32_t wasm__call_frame_offset(const wasm__call_frame_t* cf) {
-    ptrdiff_t offset;
-
-    if (!cf || !cf->func || !cf->func->code) return 0;
-    if (cf->current_offset <= cf->func->code_len) return cf->current_offset;
-    if (!cf->r.ptr || cf->r.ptr < cf->func->code) return 0;
-    offset = cf->r.ptr - cf->func->code;
-    if (offset < 0) return 0;
-    if ((uint32_t)offset > cf->func->code_len) return cf->func->code_len;
-    return (uint32_t)offset;
+    if (!cf || !cf->func) return 0;
+    return wasm__translated_offset(cf->func, cf->op_at);
 }
 
 WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_frame_sp) {

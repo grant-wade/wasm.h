@@ -4,7 +4,7 @@
 #include "reader.h"
 #include "decode.h"
 #include "module.h"
-#include "exec/control.h"
+#include "exec/translate.h"
 #include "runtime.h"
 #include "init_expr.h"
 #include "types/canonical.h"
@@ -218,8 +218,11 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     if (compiled && compiled->num_funcs == mod->num_funcs && compiled->loaded_features == mod->loaded_features) {
         uint32_t fi;
 
-        for (fi = mod->num_func_imports; fi < mod->num_funcs; fi++)
+        for (fi = mod->num_func_imports; fi < mod->num_funcs; fi++) {
+            err = wasm__copy_translation(&mod->funcs[fi], &compiled->funcs[fi]);
+            if (err != WASM_OK) WASM__LOAD_FAIL("copy_translation");
             mod->funcs[fi].max_label_depth = compiled->funcs[fi].max_label_depth;
+        }
     }
 
     err = wasm__validate_code(mod);
@@ -228,13 +231,6 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     }
 
     if (compile_only) return mod;
-
-    if (!rt->lazy_validation) {
-        err = wasm__build_module_control_targets(mod);
-        if (err != WASM_OK) {
-            WASM__LOAD_FAIL("build_control_targets");
-        }
-    }
 
     err = wasm__check_unresolved_function_imports(mod);
     if (err != WASM_OK) {
@@ -349,7 +345,7 @@ void wasm_free_module(wasm_module_t* mod) {
     for (i = 0; i < mod->num_funcs; i++) {
         WASM_FREE(mod->funcs[i].locals);
         WASM_FREE(mod->funcs[i].local_reftypes);
-        WASM_FREE(mod->funcs[i].control_targets);
+        wasm__free_translation(&mod->funcs[i]);
     }
     WASM_FREE(mod->funcs);
     for (i = 0; i < mod->num_imports; i++) wasm__free_import_info(&mod->imports[i]);

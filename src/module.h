@@ -3,11 +3,6 @@
 
 #include "internal/config.h"
 
-typedef struct wasm__control_target_t {
-    uint32_t end_offset;
-    uint32_t aux_offset;
-} wasm__control_target_t;
-
 struct wasm_func_t {
     uint32_t type_idx;
     uint32_t num_locals;
@@ -15,7 +10,11 @@ struct wasm_func_t {
     wasm_reftype_t* local_reftypes;
     const uint8_t* code;
     uint32_t code_len;
-    wasm__control_target_t* control_targets;
+    uint32_t* ops;        /* translated body (exec/translate.h), built once the body validates */
+    uint32_t num_ops;
+    uint32_t* op_offsets; /* for each translated instruction, its index in ops and bytecode offset */
+    uint32_t num_op_offsets;
+    uint32_t max_handlers; /* deepest nesting of try and try_table blocks */
     uint32_t max_label_depth;
     uint32_t funcref_id;
     int is_declared_ref;

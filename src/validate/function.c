@@ -2,7 +2,7 @@
 #include "../module.h"
 #include <stdio.h>
 #include "state.h"
-#include "../exec/control.h"
+#include "../exec/translate.h"
 #include "../instructions.h"
 #include "../internal/alloc.h"
 #include "../memory_internal.h"
@@ -20,6 +20,7 @@
 
 static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
+    uint32_t* heights;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
     wasm_error_t err;
@@ -56,11 +57,23 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     v.fp = 1;
     v.max_fp = 1;
 
+    if (mod->rt->validator_heights_capacity < func->code_len) {
+        heights = (uint32_t*)wasm__realloc_array(mod->rt->validator_heights, func->code_len, sizeof(uint32_t));
+        if (!heights) {
+            wasm__validator_destroy(&v);
+            return wasm__set_validation_error(mod->rt, func_idx, 0, "failed to allocate validator state");
+        }
+        mod->rt->validator_heights = heights;
+        mod->rt->validator_heights_capacity = func->code_len;
+    }
+    heights = mod->rt->validator_heights;
+
     while (v.r.ptr < v.r.end) {
         const uint8_t* at = v.r.ptr;
         uint8_t op = wasm__read_u8(&v.r);
 
         err = WASM_OK;
+        heights[at - v.body_start] = v.sp;
 
         switch (op) {
             case 0x00:
@@ -1418,8 +1431,15 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                     (unsigned)ft->num_results);
         goto done;
     }
+    err = wasm__translate_function(mod, func_idx, heights);
+    if (err != WASM_OK) {
+        if (err == WASM_ERR_OOM)
+            WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate translated code");
+        else
+            err = wasm__validator_error(&v, v.r.end, "%s", "failed to translate function body");
+        goto done;
+    }
     func->max_label_depth = v.max_fp;
-    err = WASM_OK;
 
 done:
     wasm__validator_destroy(&v);
@@ -1454,7 +1474,7 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_OK;
 
-    if (func->max_label_depth == 0) {
+    if (func->max_label_depth == 0 || !func->ops) {
         err = wasm__validate_function(mod, func_idx);
         if (err != WASM_OK) return err;
     }
@@ -1463,19 +1483,5 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
         return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                           "data count section is required when memory.init or data.drop is used");
     }
-
-    if (func->control_targets) return WASM_OK;
-
-    err = wasm__build_control_targets(func);
-    if (err == WASM_OK) return WASM_OK;
-
-    if (mod->rt && mod->rt->last_error == WASM_OK) {
-        if (err == WASM_ERR_OOM)
-            WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate control targets");
-        else
-            (void)wasm__set_validation_error(mod->rt, func_idx, 0,
-                                             "failed to build control targets");
-    }
-
-    return err;
+    return WASM_OK;
 }

@@ -585,6 +585,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->validator_frames);
     WASM_FREE(rt->validator_local_init_bits);
     WASM_FREE(rt->validator_local_init_entry_bits);
+    WASM_FREE(rt->validator_heights);
     wasm__free_exception_state(&rt->pending_exception);
     wasm__backtrace_destroy(rt);
     wasm__call_frame_stack_destroy(rt);

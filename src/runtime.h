@@ -120,6 +120,8 @@ struct wasm_runtime_t {
     uint64_t* validator_local_init_bits;
     uint64_t* validator_local_init_entry_bits;
     size_t validator_local_init_capacity;
+    uint32_t* validator_heights; /* stack height before each byte offset of the body being validated */
+    uint32_t validator_heights_capacity;
     uint32_t backtrace_depth;
     uint32_t max_labels;
     uint32_t* backtrace_func_indices;

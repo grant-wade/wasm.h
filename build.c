@@ -22,7 +22,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/decode.c",
     "src/exec/atomic.c",
     "src/exec/calls.c",
-    "src/exec/control.c",
+    "src/exec/translate.c",
     "src/exec/exceptions.c",
     "src/exec/frames.c",
     "src/exec/gc.c",

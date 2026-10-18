@@ -45,7 +45,7 @@
 #include "exec/frames.c"
 #include "gc.c"
 #include "exec/calls.c"
-#include "exec/control.c"
+#include "exec/translate.c"
 #include "exec/exceptions.c"
 #include "exec/gc.c"
 #include "exec/bulk.c"
