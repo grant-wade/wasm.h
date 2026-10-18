@@ -528,6 +528,12 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 #include <limits.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#ifdef __FreeBSD__
+#include <sys/sysctl.h>
+#ifdef __clang__
+#pragma comment(lib, "pthread")
+#endif
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
 /* Avoid <sys/sysctl.h>: strict POSIX feature modes hide BSD u_int types
@@ -3854,10 +3860,15 @@ CBUILD_INTERNAL void cbuild_init(cbuild_context_t* ctx) {
         SYSTEM_INFO sysinfo;
         GetSystemInfo(&sysinfo);
         n = sysinfo.dwNumberOfProcessors;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
         int logical_cpus = 0;
         size_t logical_cpus_size = sizeof(logical_cpus);
-        if (sysctlbyname("hw.logicalcpu", &logical_cpus, &logical_cpus_size,
+#ifdef __APPLE__
+        const char* cpu_key = "hw.logicalcpu";
+#else
+        const char* cpu_key = "hw.ncpu";
+#endif
+        if (sysctlbyname(cpu_key, &logical_cpus, &logical_cpus_size,
                          NULL, 0) == 0 && logical_cpus > 0) {
             n = logical_cpus;
         }
@@ -5728,7 +5739,7 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, 
                  exe_path, build_src);
 #else
         snprintf(cmd, sizeof(cmd),
-                 "cc -o \"%s\" \"%s\" -I. -Iinclude",
+                 "cc -pthread -o \"%s\" \"%s\" -I. -Iinclude",
                  exe_path, build_src);
 #endif
         int rc = system(cmd);

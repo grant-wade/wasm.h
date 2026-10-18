@@ -312,6 +312,12 @@ static void project_options(target_t* t) {
     cbuild_add_define(ctx, t, "_POSIX_C_SOURCE=200809L");
     cbuild_add_define(ctx, t, opt.platform ? "WASM_ENABLE_PLATFORM=1" : "WASM_ENABLE_PLATFORM=0");
     cbuild_add_define(ctx, t, opt.platform ? "WL_ENABLE_PLATFORM=1" : "WL_ENABLE_PLATFORM=0");
+#ifndef _WIN32
+    if (opt.platform) {
+        cbuild_add_cflags(ctx, t, "-pthread");
+        cbuild_add_ldflags(ctx, t, "-pthread");
+    }
+#endif
     if (opt.msvc) {
         cbuild_add_define(ctx, t, "_CRT_SECURE_NO_WARNINGS");
         cbuild_add_define(ctx, t, "_CRT_RAND_S");

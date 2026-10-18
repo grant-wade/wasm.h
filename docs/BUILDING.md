@@ -11,7 +11,7 @@ cc -o cbuild build.c        # once; Windows: cl /nologo /Fe:cbuild.exe build.c
 ./cbuild --test             # build what the tests need, then run them
 ```
 
-You only compile the build program by hand once: it rebuilds itself when `build.c` or `cbuild.h` changes. On Windows, run it from a Developer Command Prompt so `cl` is on `PATH`.
+Compile the build program once; it rebuilds itself when `build.c` or `cbuild.h` changes. On Windows, use a Developer Command Prompt with `cl` on `PATH`. On FreeBSD, use the base system's Clang `cc`.
 
 `--test` runs the native tests and every available specification test against both the single header and the modular library, in parallel, and exits non-zero if any fail. The output of a failed test is printed, and every test's output is kept in `build/<config>/tests/<name>.log`. Optional tools are detected each run:
 
@@ -100,11 +100,11 @@ If using a hook manager, call `.githooks/pre-commit` from the existing hook inst
 
 `./cbuild -t wasm_runtime` builds `build/<config>/libwasm_runtime.a` (`wasm_runtime.lib` with MSVC). Link it, add `src/` to the application's include path, link the math library where it is separate (`-lm`), and include `wasm.h` without defining `WASM_IMPL`.
 
-To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform and allocator definitions consistently to every runtime translation unit.
+To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform and allocator definitions consistently to every runtime translation unit. For platform-enabled POSIX builds, compile and link with `-pthread`.
 
 ## Standalone header
 
-Compile one application translation unit with `WASM_IMPL` defined before including `wasm.h`:
+Compile one application translation unit with `WASM_IMPL` defined before including `wasm.h`. For `WASM_ENABLE_PLATFORM=1` on POSIX systems, add `-D_POSIX_C_SOURCE=200809L -pthread`:
 
 ```sh
 cc -std=c99 -O2 application.c -lm -o application

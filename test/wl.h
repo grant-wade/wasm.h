@@ -61,6 +61,11 @@ In exactly one translation unit:
 #define WL_PLATFORM_LINUX 0
 #define WL_PLATFORM_WINDOWS 1
 #define WL_PLATFORM_POSIX 0
+#elif defined(__unix__) || defined(__unix)
+#define WL_PLATFORM_MACOS 0
+#define WL_PLATFORM_LINUX 0
+#define WL_PLATFORM_WINDOWS 0
+#define WL_PLATFORM_POSIX 1
 #else
 #define WL_PLATFORM_MACOS 0
 #define WL_PLATFORM_LINUX 0
