@@ -53,6 +53,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
 - Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
 - A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
+- Interpreter instructions read and write operand stack slots in place; `wasm_bench` takes about 1.3 s, down from 3.4 s.
 
 ### Fixed
 

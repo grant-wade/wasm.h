@@ -25,22 +25,6 @@ WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits) {
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value) {
-    wasm_value_t result = { 0 };
-
-    result.type = WASM_TYPE_I32;
-    memcpy(&result.of.i32, &value, sizeof(value));
-    return result;
-}
-
-WASM_PRIVATE wasm_value_t wasm__u64_bits(uint64_t value) {
-    wasm_value_t result = { 0 };
-
-    result.type = WASM_TYPE_I64;
-    memcpy(&result.of.i64, &value, sizeof(value));
-    return result;
-}
-
 WASM_PRIVATE uintptr_t wasm__gc_i31_encode(int32_t value) {
     return ((((uintptr_t)((uint32_t)value & 0x7FFFFFFFu))) << 1) | WASM__GC_I31_TAG;
 }
@@ -530,33 +514,33 @@ WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type) {
     }
 }
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_s(double value) {
-    if (isnan(value)) return wasm_i32(0);
-    if (value <= -2147483648.0) return wasm_i32(INT32_MIN);
-    if (value >= 2147483648.0) return wasm_i32(INT32_MAX);
-    return wasm_i32((int32_t)value);
+WASM_PRIVATE int32_t wasm__trunc_sat_i32_s(double value) {
+    if (isnan(value)) return 0;
+    if (value <= -2147483648.0) return INT32_MIN;
+    if (value >= 2147483648.0) return INT32_MAX;
+    return (int32_t)value;
 }
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_u(double value) {
-    if (isnan(value) || value <= 0.0) return wasm__u32_bits(0);
-    if (value >= 4294967296.0) return wasm__u32_bits(UINT32_MAX);
-    return wasm__u32_bits((uint32_t)value);
+WASM_PRIVATE uint32_t wasm__trunc_sat_i32_u(double value) {
+    if (isnan(value) || value <= 0.0) return 0;
+    if (value >= 4294967296.0) return UINT32_MAX;
+    return (uint32_t)value;
 }
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_s(double value) {
-    if (isnan(value)) return wasm_i64(0);
-    if (value <= -9223372036854775808.0) return wasm_i64(INT64_MIN);
-    if (value >= 9223372036854775808.0) return wasm_i64(INT64_MAX);
-    return wasm_i64((int64_t)value);
+WASM_PRIVATE int64_t wasm__trunc_sat_i64_s(double value) {
+    if (isnan(value)) return 0;
+    if (value <= -9223372036854775808.0) return INT64_MIN;
+    if (value >= 9223372036854775808.0) return INT64_MAX;
+    return (int64_t)value;
 }
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_u(double value) {
-    if (isnan(value) || value <= 0.0) return wasm__u64_bits(0);
-    if (value >= 18446744073709551616.0) return wasm__u64_bits(UINT64_MAX);
-    return wasm__u64_bits((uint64_t)value);
+WASM_PRIVATE uint64_t wasm__trunc_sat_i64_u(double value) {
+    if (isnan(value) || value <= 0.0) return 0;
+    if (value >= 18446744073709551616.0) return UINT64_MAX;
+    return (uint64_t)value;
 }
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, wasm_value_t* out_value) {
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, int32_t* out_value) {
     double truncated;
 
     if (isnan(value))
@@ -564,11 +548,11 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, wasm_value_t* out_valu
     truncated = trunc(value);
     if (truncated < -2147483648.0 || truncated >= 2147483648.0)
         return WASM_ERR_INVALID_CONVERSION;
-    *out_value = wasm_i32((int32_t)truncated);
+    *out_value = (int32_t)truncated;
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, wasm_value_t* out_value) {
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, uint32_t* out_value) {
     double truncated;
 
     if (isnan(value))
@@ -576,11 +560,11 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, wasm_value_t* out_valu
     truncated = trunc(value);
     if (truncated < 0.0 || truncated >= 4294967296.0)
         return WASM_ERR_INVALID_CONVERSION;
-    *out_value = wasm__u32_bits((uint32_t)truncated);
+    *out_value = (uint32_t)truncated;
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, wasm_value_t* out_value) {
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, int64_t* out_value) {
     double truncated;
 
     if (isnan(value))
@@ -588,11 +572,11 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, wasm_value_t* out_valu
     truncated = trunc(value);
     if (truncated < -9223372036854775808.0 || truncated >= 9223372036854775808.0)
         return WASM_ERR_INVALID_CONVERSION;
-    *out_value = wasm_i64((int64_t)truncated);
+    *out_value = (int64_t)truncated;
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_value) {
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, uint64_t* out_value) {
     double truncated;
 
     if (isnan(value))
@@ -600,7 +584,7 @@ WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_valu
     truncated = trunc(value);
     if (truncated < 0.0 || truncated >= 18446744073709551616.0)
         return WASM_ERR_INVALID_CONVERSION;
-    *out_value = wasm__u64_bits((uint64_t)truncated);
+    *out_value = (uint64_t)truncated;
     return WASM_OK;
 }
 

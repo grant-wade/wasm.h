@@ -376,8 +376,8 @@ static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
     if (sizeof(*rt->stack) > SIZE_MAX / (size_t)max_stack) return WASM_ERR_OOM;
-    rt->stack = (wasm_value_t*)wasm__alloc_sized(&rt->allocator, (size_t)max_stack * sizeof(*rt->stack),
-                                                 WASM__ALIGNOF(wasm_value_t));
+    rt->stack = (wasm__slot_t*)wasm__alloc_sized(&rt->allocator, (size_t)max_stack * sizeof(*rt->stack),
+                                                 WASM__ALIGNOF(wasm__slot_t));
     if (!rt->stack) return WASM_ERR_OOM;
 
     rt->max_stack = max_stack;
@@ -386,7 +386,7 @@ static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
 }
 
 static void wasm__stack_destroy(wasm_runtime_t* rt) {
-    wasm__free_sized(&rt->allocator, rt->stack, (size_t)rt->max_stack * sizeof(*rt->stack), WASM__ALIGNOF(wasm_value_t));
+    wasm__free_sized(&rt->allocator, rt->stack, (size_t)rt->max_stack * sizeof(*rt->stack), WASM__ALIGNOF(wasm__slot_t));
     rt->stack = NULL;
     rt->max_stack = 0;
     rt->sp = 0;

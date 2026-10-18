@@ -105,11 +105,6 @@ WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const w
     return (uint64_t)(uint32_t)value->of.i32;
 }
 
-WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value) {
-    if (table && table->is_64) return wasm_i64((int64_t)value);
-    return wasm_i32((int32_t)value);
-}
-
 WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory) {
     return (memory && memory->page_size) ? memory->page_size : WASM_PAGE_SIZE;
 }
@@ -161,13 +156,10 @@ WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, s
 }
 
 WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
-                                       const wasm_value_t* base,
+                                       uint64_t base_addr,
                                        uint64_t offset,
                                        uint64_t* out_addr) {
-    uint64_t base_addr;
-
-    if (!memory || !base || !out_addr) return 0;
-    base_addr = memory->is_64 ? (uint64_t)base->of.i64 : (uint64_t)(uint32_t)base->of.i32;
+    if (!memory || !out_addr) return 0;
     if (offset > UINT64_MAX - base_addr) return 0;
     *out_addr = base_addr + offset;
     return 1;

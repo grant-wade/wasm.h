@@ -4,6 +4,7 @@
 #include "internal/config.h"
 #include <stdio.h>
 #include "internal/gc_types.h"
+#include "internal/slot.h"
 #include "handles.h"
 
 /* ── Portable snprintf ────────────────────────────────────────────── */
@@ -89,7 +90,7 @@ struct wasm_runtime_t {
     uint32_t num_tag_imports;
     uint32_t cap_tag_imports;
     uint64_t next_tag_identity;
-    wasm_value_t* stack;
+    wasm__slot_t* stack;
     uint32_t max_stack;
     uint32_t sp;
     uint64_t fuel;

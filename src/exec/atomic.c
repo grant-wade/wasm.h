@@ -9,13 +9,6 @@
 #include "../runtime.h"
 #include <stdio.h>
 
-static uint64_t wasm__atomic_operand(wasm_value_t value, wasm_valtype_t type) {
-    return type == WASM_TYPE_I32 ? (uint64_t)(uint32_t)value.of.i32 : (uint64_t)value.of.i64;
-}
-
-static wasm_value_t wasm__atomic_result(uint64_t value, wasm_valtype_t type) {
-    return type == WASM_TYPE_I32 ? wasm_i32((int32_t)(uint32_t)value) : wasm_i64((int64_t)value);
-}
 
 /* Applies a 0x1E-0x47 read-modify-write subop; the group of seven selects add, sub, and, or, xor, xchg. */
 static uint64_t wasm__atomic_rmw(uint8_t* p, uint32_t size, uint32_t subop, uint64_t operand) {
@@ -60,9 +53,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame
     uint32_t size;
     wasm_valtype_t type;
     wasm__memarg_t memarg;
-    wasm_value_t operand = wasm_i64(0);
-    wasm_value_t replacement = wasm_i64(0);
-    wasm_value_t base;
+    uint64_t operand = 0;
+    uint64_t replacement = 0;
+    uint64_t base;
+    int is_64;
     wasm_memory_t* memory;
     uint64_t addr;
     uint8_t* p;
@@ -79,21 +73,27 @@ WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame
     err = wasm__read_memarg(&cf->r, &memarg);
     if (err != WASM_OK) return err;
     size = 1u << size_log2;
-
-    if (subop == 0x01 || subop == 0x02) {
-        replacement = WASM__POP(rt);
-        operand = WASM__POP(rt);
-    } else if (subop >= 0x48) {
-        replacement = WASM__POP(rt);
-        operand = WASM__POP(rt);
-    } else if (subop == 0x00 || subop >= 0x17) {
-        operand = WASM__POP(rt);
-    }
-    base = WASM__POP(rt);
-
+    is_64 = type == WASM_TYPE_I64;
     memory = wasm__memory_at(mod, memarg.memory_index);
-    if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-    if (!wasm__memory_effective_addr(memory, &base, memarg.offset, &addr) ||
+    if (!memory) return WASM_ERR_MALFORMED;
+
+    if (subop == 0x01) {
+        replacement = wasm__slot_u64(WASM__POP(rt));
+        operand = wasm__slot_u32(WASM__POP(rt));
+    } else if (subop == 0x02) {
+        replacement = wasm__slot_u64(WASM__POP(rt));
+        operand = wasm__slot_u64(WASM__POP(rt));
+    } else if (subop >= 0x48) {
+        replacement = wasm__slot_index(WASM__POP(rt), is_64);
+        operand = wasm__slot_index(WASM__POP(rt), is_64);
+    } else if (subop == 0x00) {
+        operand = wasm__slot_u32(WASM__POP(rt));
+    } else if (subop >= 0x17) {
+        operand = wasm__slot_index(WASM__POP(rt), is_64);
+    }
+    base = wasm__slot_index(WASM__POP(rt), memory->is_64);
+
+    if (!wasm__memory_effective_addr(memory, base, memarg.offset, &addr) ||
         !wasm__memory_access_in_bounds(addr, size, wasm__memory_byte_size(memory)))
         WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
     if ((addr & (size - 1u)) != 0) {
@@ -103,35 +103,32 @@ WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame
     p = memory->data + addr;
 
     if (subop == 0x00) {
-        uint32_t count = (uint32_t)operand.of.i32;
-        uint32_t woken = memory->is_shared ? wasm__platform_atomic_notify(p, count) : 0u;
-        WASM__PUSH(rt, wasm_i32((int32_t)woken));
+        uint32_t woken = memory->is_shared ? wasm__platform_atomic_notify(p, (uint32_t)operand) : 0u;
+        wasm__slot_set_u32(WASM__PUSH(rt), woken);
     } else if (subop == 0x01 || subop == 0x02) {
         int result;
         if (!memory->is_shared) {
             WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "expected shared memory");
             WASM__TRAP(WASM_ERR_TRAP);
         }
-        result = wasm__platform_atomic_wait(p, size, wasm__atomic_operand(operand, type), replacement.of.i64,
-                                            &rt->interrupt_requested);
+        result = wasm__platform_atomic_wait(p, size, operand, (int64_t)replacement, &rt->interrupt_requested);
         if (result == 3 && wasm__runtime_take_interrupt(rt)) WASM__TRAP(WASM_ERR_INTERRUPTED);
         if (result < 0) {
             WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "atomic wait would block without thread support");
             WASM__TRAP(WASM_ERR_TRAP);
         }
-        WASM__PUSH(rt, wasm_i32(result));
+        wasm__slot_set_i32(WASM__PUSH(rt), result);
     } else if (subop <= 0x16) {
-        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_load(p, size), type));
+        wasm__slot_set_index(WASM__PUSH(rt), wasm__atomic_load(p, size), is_64);
     } else if (subop <= 0x1D) {
-        wasm__atomic_store(p, size, wasm__atomic_operand(operand, type));
+        wasm__atomic_store(p, size, operand);
     } else if (subop <= 0x47) {
-        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_rmw(p, size, subop, wasm__atomic_operand(operand, type)), type));
+        wasm__slot_set_index(WASM__PUSH(rt), wasm__atomic_rmw(p, size, subop, operand), is_64);
     } else {
         uint64_t mask = size == 8u ? UINT64_MAX : ((UINT64_C(1) << (size * 8u)) - 1u);
-        uint64_t expected = wasm__atomic_operand(operand, type) & mask;
-        WASM__PUSH(rt, wasm__atomic_result(wasm__atomic_compare_exchange(p, size, expected,
-                                                                         wasm__atomic_operand(replacement, type)),
-                                           type));
+
+        wasm__slot_set_index(WASM__PUSH(rt), wasm__atomic_compare_exchange(p, size, operand & mask, replacement),
+                             is_64);
     }
 
 cleanup:

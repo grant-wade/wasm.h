@@ -26,52 +26,36 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
     wasm_error_t err = WASM_OK;
     uint32_t subop = wasm__read_leb128_u32(&cf->r);
     switch (subop) {
-        case 0x00: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i32_s((double)a.of.f32));
+        case 0x00:
+            wasm__slot_set_i32(&rt->stack[rt->sp - 1], wasm__trunc_sat_i32_s((double)wasm__slot_f32(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x01: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i32_u((double)a.of.f32));
+        case 0x01:
+            wasm__slot_set_u32(&rt->stack[rt->sp - 1], wasm__trunc_sat_i32_u((double)wasm__slot_f32(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x02: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i32_s(a.of.f64));
+        case 0x02:
+            wasm__slot_set_i32(&rt->stack[rt->sp - 1], wasm__trunc_sat_i32_s(wasm__slot_f64(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x03: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i32_u(a.of.f64));
+        case 0x03:
+            wasm__slot_set_u32(&rt->stack[rt->sp - 1], wasm__trunc_sat_i32_u(wasm__slot_f64(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x04: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i64_s((double)a.of.f32));
+        case 0x04:
+            wasm__slot_set_i64(&rt->stack[rt->sp - 1], wasm__trunc_sat_i64_s((double)wasm__slot_f32(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x05: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i64_u((double)a.of.f32));
+        case 0x05:
+            wasm__slot_set_u64(&rt->stack[rt->sp - 1], wasm__trunc_sat_i64_u((double)wasm__slot_f32(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x06: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i64_s(a.of.f64));
+        case 0x06:
+            wasm__slot_set_i64(&rt->stack[rt->sp - 1], wasm__trunc_sat_i64_s(wasm__slot_f64(&rt->stack[rt->sp - 1])));
             break;
-        }
-        case 0x07: {
-            wasm_value_t a = WASM__POP(rt);
-            WASM__PUSH(rt, wasm__trunc_sat_i64_u(a.of.f64));
+        case 0x07:
+            wasm__slot_set_u64(&rt->stack[rt->sp - 1], wasm__trunc_sat_i64_u(wasm__slot_f64(&rt->stack[rt->sp - 1])));
             break;
-        }
         case 0x08: {
             uint32_t data_idx = wasm__read_leb128_u32(&cf->r);
             uint32_t mem_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t src = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
+            const wasm__slot_t* count = WASM__POP(rt);
+            const wasm__slot_t* src = WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
             uint64_t len;
             uint64_t src_offset;
             uint64_t dst_offset;
@@ -91,9 +75,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 goto cleanup;
             }
             mem_size = wasm__memory_byte_size(memory);
-            len = (uint64_t)(uint32_t)count.of.i32;
-            src_offset = (uint64_t)(uint32_t)src.of.i32;
-            dst_offset = memory->is_64 ? (uint64_t)dst.of.i64 : (uint64_t)(uint32_t)dst.of.i32;
+            len = wasm__slot_u32(count);
+            src_offset = wasm__slot_u32(src);
+            dst_offset = wasm__slot_index(dst, memory->is_64);
 
             segment = &mod->data_segments[data_idx];
             if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
@@ -122,9 +106,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
         case 0x0A: {
             uint32_t dst_mem_idx = wasm__read_leb128_u32(&cf->r);
             uint32_t src_mem_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t src = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
+            const wasm__slot_t* count = WASM__POP(rt);
+            const wasm__slot_t* src = WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
             uint64_t len;
             uint64_t src_offset;
             uint64_t dst_offset;
@@ -142,13 +126,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             }
             dst_mem_size = wasm__memory_byte_size(dst_memory);
             src_mem_size = wasm__memory_byte_size(src_memory);
-            len = (dst_memory->is_64 && src_memory->is_64)
-                      ? (uint64_t)count.of.i64
-                      : (uint64_t)(uint32_t)count.of.i32;
-            src_offset = src_memory->is_64 ? (uint64_t)src.of.i64
-                                           : (uint64_t)(uint32_t)src.of.i32;
-            dst_offset = dst_memory->is_64 ? (uint64_t)dst.of.i64
-                                           : (uint64_t)(uint32_t)dst.of.i32;
+            len = wasm__slot_index(count, dst_memory->is_64 && src_memory->is_64);
+            src_offset = wasm__slot_index(src, src_memory->is_64);
+            dst_offset = wasm__slot_index(dst, dst_memory->is_64);
             if (!wasm__range_in_bounds_u64(src_offset, len, src_mem_size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
@@ -159,9 +139,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
         }
         case 0x0B: {
             uint32_t mem_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t value = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
+            const wasm__slot_t* count = WASM__POP(rt);
+            const wasm__slot_t* value = WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
             uint64_t len;
             uint64_t dst_offset;
             wasm_memory_t* memory = wasm__memory_at(mod, mem_idx);
@@ -173,22 +153,22 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 goto cleanup;
             }
             mem_size = wasm__memory_byte_size(memory);
-            len = memory->is_64 ? (uint64_t)count.of.i64 : (uint64_t)(uint32_t)count.of.i32;
-            dst_offset = memory->is_64 ? (uint64_t)dst.of.i64 : (uint64_t)(uint32_t)dst.of.i32;
+            len = wasm__slot_index(count, memory->is_64);
+            dst_offset = wasm__slot_index(dst, memory->is_64);
             if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             WASM__CHARGE_BYTES(rt, len);
             if (len > 0)
-                memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), (size_t)len);
+                memset(memory->data + dst_offset, (unsigned char)(wasm__slot_u32(value) & 0xFFu), (size_t)len);
             break;
         }
         case 0x0C: {
             uint32_t elem_idx = wasm__read_leb128_u32(&cf->r);
             uint32_t table_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t src = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
-            uint32_t len = (uint32_t)count.of.i32;
-            uint32_t src_offset = (uint32_t)src.of.i32;
+            const wasm__slot_t* count = WASM__POP(rt);
+            const wasm__slot_t* src = WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
+            uint32_t len = wasm__slot_u32(count);
+            uint32_t src_offset = wasm__slot_u32(src);
             uint64_t dst_offset;
             wasm_elem_segment_t* segment;
             wasm_table_t* table;
@@ -203,7 +183,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
 
             table = wasm__table_at(mod, table_idx);
             if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-            dst_offset = wasm__table_index_value(table, &dst);
+            dst_offset = wasm__slot_index(dst, table->is_64);
             segment = &mod->elem_segments[elem_idx];
             if (segment->is_declarative) {
                 WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "out of bounds table access");
@@ -244,9 +224,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
         case 0x0E: {
             uint32_t dst_table_idx = wasm__read_leb128_u32(&cf->r);
             uint32_t src_table_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t src = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
+            const wasm__slot_t* count = WASM__POP(rt);
+            const wasm__slot_t* src = WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
             uint64_t len;
             uint64_t src_offset;
             uint64_t dst_offset;
@@ -257,11 +237,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             dst_table = wasm__table_at(mod, dst_table_idx);
             src_table = wasm__table_at(mod, src_table_idx);
             if (!dst_table || !src_table) WASM__TRAP(WASM_ERR_MALFORMED);
-            dst_offset = wasm__table_index_value(dst_table, &dst);
-            src_offset = wasm__table_index_value(src_table, &src);
-            len = (wasm__table_copy_size_type(dst_table, src_table) == WASM_TYPE_I64)
-                      ? (uint64_t)count.of.i64
-                      : (uint64_t)(uint32_t)count.of.i32;
+            dst_offset = wasm__slot_index(dst, dst_table->is_64);
+            src_offset = wasm__slot_index(src, src_table->is_64);
+            len = wasm__slot_index(count, wasm__table_copy_size_type(dst_table, src_table) == WASM_TYPE_I64);
             if (!wasm__typed_valtype_is_subtype(mod,
                                                 src_table->reftype,
                                                 &src_table->reftype_info,
@@ -282,8 +260,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
         }
         case 0x0F: {
             uint32_t table_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t delta_value = WASM__POP(rt);
-            wasm_value_t init_value = WASM__POP(rt);
+            const wasm__slot_t* delta_value = WASM__POP(rt);
+            wasm_value_t init_value = *WASM__POP(rt);
             wasm_table_t* table;
             uint64_t old_size;
             uint64_t delta;
@@ -296,7 +274,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                                                   table->reftype,
                                                   &table->reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-            delta = wasm__table_index_value(table, &delta_value);
+            delta = wasm__slot_index(delta_value, table->is_64);
             if (rt->fuel_enabled && rt->fuel < delta / WASM__FUEL_ELEMS_PER_UNIT &&
                 (table->max_size == UINT64_MAX || delta <= table->max_size - table->size)) {
                 rt->fuel = 0;
@@ -304,7 +282,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             }
             old_size = wasm__table_grow(rt, table, delta, init_value);
             if (old_size != UINT64_MAX) WASM__CHARGE_ELEMS(rt, delta);
-            WASM__PUSH(rt, wasm__table_index_result(table, old_size));
+            wasm__slot_set_index(WASM__PUSH(rt), old_size, table->is_64);
             break;
         }
         case 0x10: {
@@ -314,14 +292,14 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
             table = wasm__table_at(mod, table_idx);
             if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-            WASM__PUSH(rt, wasm__table_index_result(table, table->size));
+            wasm__slot_set_index(WASM__PUSH(rt), table->size, table->is_64);
             break;
         }
         case 0x11: {
             uint32_t table_idx = wasm__read_leb128_u32(&cf->r);
-            wasm_value_t count = WASM__POP(rt);
-            wasm_value_t value = WASM__POP(rt);
-            wasm_value_t dst = WASM__POP(rt);
+            const wasm__slot_t* count = WASM__POP(rt);
+            wasm_value_t value = *WASM__POP(rt);
+            const wasm__slot_t* dst = WASM__POP(rt);
             wasm_table_t* table;
             uint64_t len;
             uint64_t dst_offset;
@@ -330,8 +308,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
             table = wasm__table_at(mod, table_idx);
             if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-            len = wasm__table_index_value(table, &count);
-            dst_offset = wasm__table_index_value(table, &dst);
+            len = wasm__slot_index(count, table->is_64);
+            dst_offset = wasm__slot_index(dst, table->is_64);
             if (!wasm__runtime_value_matches_type(mod,
                                                   &value,
                                                   table->reftype,
@@ -347,10 +325,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
         }
         case 0x13:
         case 0x14: {
-            uint64_t rhs_hi = (uint64_t)WASM__POP(rt).of.i64;
-            uint64_t rhs_lo = (uint64_t)WASM__POP(rt).of.i64;
-            uint64_t lhs_hi = (uint64_t)WASM__POP(rt).of.i64;
-            uint64_t lhs_lo = (uint64_t)WASM__POP(rt).of.i64;
+            uint64_t rhs_hi = wasm__slot_u64(WASM__POP(rt));
+            uint64_t rhs_lo = wasm__slot_u64(WASM__POP(rt));
+            uint64_t lhs_hi = wasm__slot_u64(WASM__POP(rt));
+            uint64_t lhs_lo = wasm__slot_u64(WASM__POP(rt));
             uint64_t lo, hi;
             if (subop == 0x13) {
                 lo = lhs_lo + rhs_lo;
@@ -359,22 +337,22 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 lo = lhs_lo - rhs_lo;
                 hi = lhs_hi - rhs_hi - (lhs_lo < rhs_lo ? 1u : 0u);
             }
-            WASM__PUSH(rt, wasm_i64((int64_t)lo));
-            WASM__PUSH(rt, wasm_i64((int64_t)hi));
+            wasm__slot_set_u64(WASM__PUSH(rt), lo);
+            wasm__slot_set_u64(WASM__PUSH(rt), hi);
             break;
         }
         case 0x15:
         case 0x16: {
-            int64_t rhs = WASM__POP(rt).of.i64;
-            int64_t lhs = WASM__POP(rt).of.i64;
+            int64_t rhs = wasm__slot_i64(WASM__POP(rt));
+            int64_t lhs = wasm__slot_i64(WASM__POP(rt));
             uint64_t lo, hi;
             wasm__mul_wide_u64((uint64_t)lhs, (uint64_t)rhs, &lo, &hi);
             if (subop == 0x15) {
                 if (lhs < 0) hi -= (uint64_t)rhs;
                 if (rhs < 0) hi -= (uint64_t)lhs;
             }
-            WASM__PUSH(rt, wasm_i64((int64_t)lo));
-            WASM__PUSH(rt, wasm_i64((int64_t)hi));
+            wasm__slot_set_u64(WASM__PUSH(rt), lo);
+            wasm__slot_set_u64(WASM__PUSH(rt), hi);
             break;
         }
         default:

@@ -20,7 +20,7 @@ struct wasm__call_frame_t {
     wasm_module_t* module;
     uint32_t func_idx;
     uint32_t sp_base;
-    wasm_value_t* locals;
+    wasm__slot_t* locals;
     wasm__label_t* labels;
     uint32_t lsp;
     uint32_t max_labels;
@@ -38,9 +38,9 @@ struct wasm__call_frame_t {
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
 #define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt, val) ((rt)->stack[(rt)->sp++] = (val))
-#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
-#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
+#define WASM__PUSH(rt) (&(rt)->stack[(rt)->sp++])
+#define WASM__POP(rt) (&(rt)->stack[--(rt)->sp])
+#define WASM__PEEK(rt) (&(rt)->stack[(rt)->sp - 1])
 #define WASM__TRAP(code) \
     do {                 \
         err = (code);    \
