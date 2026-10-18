@@ -35,16 +35,12 @@ WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf) {
 WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           uint32_t func_idx,
                                           const wasm__slot_t* args,
-                                          wasm_value_t* results_dst,
-                                          uint32_t num_results) {
+                                          wasm_value_t* results_dst) {
     wasm_runtime_t* rt = mod->rt;
     wasm_error_t err;
     wasm_func_t* func;
-    wasm_functype_t* ft;
     wasm__call_frame_t* cf;
-    wasm__slot_t* locals = NULL;
-    wasm__label_t* labels;
-    uint32_t max_labels;
+    wasm__slot_t* locals;
     wasm__arena_mark_t arena_saved;
     uint32_t i;
 
@@ -62,39 +58,27 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
         err = wasm__prepare_function(mod, func_idx);
         if (err != WASM_OK) return err;
     }
-
-    ft = wasm__module_functype(mod, func->type_idx);
-    if (!ft) return WASM_ERR_MALFORMED;
+    if (!wasm__module_functype(mod, func->type_idx)) return WASM_ERR_MALFORMED;
     if (func->max_stack > rt->max_stack - rt->sp) {
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)rt->max_stack);
         return WASM_ERR_STACK_OVERFLOW;
     }
-    max_labels = func->max_label_depth ? func->max_label_depth : 1;
-    if (max_labels > rt->max_labels) {
+    if (func->max_label_depth > rt->max_labels) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
                       "function label depth %u exceeds limit %u",
-                      (unsigned)max_labels,
+                      (unsigned)func->max_label_depth,
                       (unsigned)rt->max_labels);
         return WASM_ERR_CALL_STACK_EXHAUSTED;
     }
     arena_saved = wasm__arena_mark(rt);
-
-    if (func->num_local_slots > 0) {
-        locals = (wasm__slot_t*)wasm__arena_alloc(rt, func->num_local_slots * sizeof(wasm__slot_t));
+    locals = NULL;
+    if (func->frame_bytes > 0) {
+        locals = (wasm__slot_t*)wasm__arena_alloc(rt, func->frame_bytes);
         if (!locals) {
             wasm__arena_reset(rt, arena_saved);
-            WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame locals");
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame");
             return WASM_ERR_OOM;
         }
-    }
-
-    labels = NULL;
-    if (func->max_handlers > 0)
-        labels = (wasm__label_t*)wasm__arena_alloc(rt, func->max_handlers * sizeof(wasm__label_t));
-    if (func->max_handlers > 0 && !labels) {
-        wasm__arena_reset(rt, arena_saved);
-        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame labels");
-        return WASM_ERR_OOM;
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];
@@ -102,18 +86,12 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     cf->func_idx = func_idx;
     cf->sp_base = rt->sp;
     cf->locals = locals;
-    cf->labels = labels;
+    cf->labels = func->max_handlers > 0 ? (wasm__label_t*)(locals + func->num_local_slots) : NULL;
     cf->lsp = 0;
-    cf->max_labels = func->max_handlers;
     cf->pc = func->ops;
     cf->op_at = func->ops;
-    cf->r.ptr = func->code;
-    cf->r.end = func->code + func->code_len;
-    cf->r.malformed = 0;
     cf->func = func;
-    cf->ft = ft;
     cf->results_dst = results_dst;
-    cf->num_results = num_results;
     cf->arena_saved = arena_saved;
 
     i = 0;
@@ -128,16 +106,17 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                                uint32_t func_idx,
                                                const wasm_value_t* args,
                                                uint32_t num_args,
-                                               wasm_value_t* results_dst,
-                                               uint32_t num_results) {
+                                               wasm_value_t* results_dst) {
     wasm_runtime_t* rt = mod->rt;
     wasm__call_frame_t* cf;
-    wasm_error_t err = wasm__push_call_frame(mod, func_idx, NULL, results_dst, num_results);
+    const wasm_functype_t* ft;
+    wasm_error_t err = wasm__push_call_frame(mod, func_idx, NULL, results_dst);
     uint32_t i;
 
     if (err != WASM_OK) return err;
     cf = &rt->call_frames[rt->call_frame_sp - 1u];
-    for (i = 0; i < cf->ft->num_params && i < num_args; i++) {
+    ft = wasm__frame_functype(cf);
+    for (i = 0; i < ft->num_params && i < num_args; i++) {
         wasm_value_t value = args[i];
 
         err = wasm__anyref_from_host(rt, &value);
@@ -149,6 +128,7 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
 
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     wasm__call_frame_t* cf;
+    const wasm_functype_t* ft;
     wasm_value_t result_values_buf[8];
     wasm_value_t* result_values = result_values_buf;
     wasm_value_t* results_dst;
@@ -159,8 +139,9 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     if (rt->call_frame_sp <= base_frame_sp) return WASM_ERR_MALFORMED;
 
     cf = &rt->call_frames[rt->call_frame_sp - 1];
+    ft = wasm__frame_functype(cf);
     results_dst = cf->results_dst;
-    result_count = cf->ft->num_results;
+    result_count = ft->num_results;
     is_root = (rt->call_frame_sp == base_frame_sp + 1u);
 
     if (result_count > 8) {
@@ -168,7 +149,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
         if (!result_values) return WASM_ERR_OOM;
     }
 
-    wasm__values_from_slots(rt, cf->ft->results, cf->ft->result_reftypes, result_count,
+    wasm__values_from_slots(rt, ft->results, ft->result_reftypes, result_count,
                             &rt->stack[rt->sp - cf->func->result_slots], result_values);
 
     rt->sp = cf->sp_base;

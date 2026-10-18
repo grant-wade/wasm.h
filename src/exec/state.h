@@ -23,14 +23,11 @@ struct wasm__call_frame_t {
     wasm__slot_t* locals;
     wasm__label_t* labels;
     uint32_t lsp;
-    uint32_t max_labels;
     const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
     const uint32_t* op_at; /* the instruction it is running, for backtraces */
-    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates */
+    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates, set before each one */
     wasm_func_t* func;
-    wasm_functype_t* ft;
-    wasm_value_t* results_dst;
-    uint32_t num_results;
+    wasm_value_t* results_dst; /* where a root frame's results go */
     wasm__arena_mark_t arena_saved;
 };
 #define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)

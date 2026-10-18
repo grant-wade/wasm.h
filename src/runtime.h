@@ -37,6 +37,11 @@ typedef struct wasm__arena_mark_t {
     size_t used;
 } wasm__arena_mark_t;
 
+/* Block storage starts this far into a block, and allocations are aligned to it. */
+#define WASM__ARENA_ALIGN ((size_t)16u)
+#define WASM__ARENA_HEADER \
+    ((sizeof(wasm__arena_chunk_t) + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN)
+
 #define WASM__HELD_BLOCK_SLOTS 64u
 
 /* Values the host keeps alive with wasm_ref_hold; blocks never move, so slot addresses are stable. */
@@ -221,7 +226,15 @@ WASM_PRIVATE void* wasm__arena_alloc(wasm_runtime_t* rt, size_t size);
 
 WASM_PRIVATE wasm__arena_mark_t wasm__arena_mark(const wasm_runtime_t* rt);
 
-WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark);
+WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__arena_mark_t mark);
+
+WASM_INLINE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
+    if (rt->frame_arena == mark.chunk) {
+        if (mark.chunk) mark.chunk->used = mark.used;
+        return;
+    }
+    wasm__arena_reset_slow(rt, mark);
+}
 
 WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
                                                    const wasm_import_t* imp,

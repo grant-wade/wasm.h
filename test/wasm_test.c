@@ -8647,7 +8647,8 @@ static wasm_error_t wasm_test_forward_call(wasm_module_t* mod,
     wasm_test_forward_t* forward = (wasm_test_forward_t*)userdata;
 
     (void)mod;
-    return wasm__interp(forward->module, forward->func_index, (wasm_value_t*)args, num_args, results, num_results);
+    (void)num_results;
+    return wasm__interp(forward->module, forward->func_index, (wasm_value_t*)args, num_args, results);
 }
 
 /* Exceptions thrown by an imported function reach handlers on every call path, and tail
@@ -17173,6 +17174,229 @@ static uint32_t wasm_test_run_in_fuel_steps(wl_test_ctx* t, wasm_module_t* m, co
     return steps;
 }
 
+static wasm_error_t wasm_test_calls_collect(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                            wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_gc_collect(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+static wasm_error_t wasm_test_calls_interrupt(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_interrupt(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+/* Exports deep, ci, ci64, tail_ci, gcdeep, interrupt_at (function 10), and catcher. */
+static wasm_module_t* wasm_test_load_calls_module(wl_test_ctx* t, wasm_runtime_t* rt) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1d, 0x06, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
+        0x01, 0x7f, 0x01, 0x7f, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x02, 0x7e,
+        0x7f, 0x01, 0x7f, 0x02, 0x21, 0x02, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x07, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63,
+        0x74, 0x00, 0x03, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x09, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74,
+        0x00, 0x03, 0x03, 0x0d, 0x0c, 0x00, 0x01, 0x01, 0x00, 0x05, 0x00, 0x01, 0x03, 0x01, 0x01, 0x01, 0x01, 0x04,
+        0x07, 0x02, 0x70, 0x00, 0x04, 0x70, 0x04, 0x03, 0x0d, 0x03, 0x01, 0x00, 0x04, 0x07, 0x40, 0x07, 0x04, 0x64,
+        0x65, 0x65, 0x70, 0x00, 0x04, 0x02, 0x63, 0x69, 0x00, 0x05, 0x04, 0x63, 0x69, 0x36, 0x34, 0x00, 0x06, 0x07,
+        0x74, 0x61, 0x69, 0x6c, 0x5f, 0x63, 0x69, 0x00, 0x07, 0x06, 0x67, 0x63, 0x64, 0x65, 0x65, 0x70, 0x00, 0x08,
+        0x0c, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x5f, 0x61, 0x74, 0x00, 0x0a, 0x07, 0x63, 0x61,
+        0x74, 0x63, 0x68, 0x65, 0x72, 0x00, 0x0b, 0x09, 0x12, 0x02, 0x02, 0x00, 0x41, 0x00, 0x0b, 0x00, 0x02, 0x02,
+        0x03, 0x02, 0x01, 0x42, 0x01, 0x0b, 0x00, 0x01, 0x02, 0x0a, 0xd3, 0x02, 0x0c, 0x07, 0x00, 0x20, 0x00, 0x20,
+        0x01, 0x6a, 0x0b, 0x07, 0x00, 0x41, 0x00, 0x20, 0x00, 0x6b, 0x0b, 0x45, 0x03, 0x01, 0x7f, 0x01, 0x7e, 0x01,
+        0x7c, 0x20, 0x01, 0x20, 0x02, 0xa7, 0x20, 0x03, 0xaa, 0x72, 0x72, 0x04, 0x40, 0x00, 0x0b, 0x20, 0x00, 0x21,
+        0x01, 0x20, 0x00, 0xad, 0x21, 0x02, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x21, 0x03, 0x20,
+        0x00, 0x45, 0x04, 0x7f, 0x41, 0x00, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x04, 0x20, 0x01, 0x20, 0x02,
+        0xa7, 0x20, 0x03, 0xaa, 0x6a, 0x6a, 0x6a, 0x0b, 0x0b, 0x0b, 0x00, 0x20, 0x01, 0x20, 0x01, 0x20, 0x00, 0x11,
+        0x00, 0x00, 0x0b, 0x0b, 0x00, 0x20, 0x01, 0x20, 0x01, 0x20, 0x00, 0x11, 0x00, 0x01, 0x0b, 0x0b, 0x00, 0x20,
+        0x01, 0x20, 0x01, 0x20, 0x00, 0x13, 0x00, 0x00, 0x0b, 0x2b, 0x02, 0x01, 0x63, 0x02, 0x01, 0x7e, 0x20, 0x00,
+        0xfb, 0x00, 0x02, 0x21, 0x01, 0x20, 0x00, 0x45, 0x04, 0x7f, 0x10, 0x00, 0x10, 0x09, 0x10, 0x00, 0x41, 0x00,
+        0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x08, 0x0b, 0x20, 0x01, 0xfb, 0x02, 0x02, 0x00, 0x6a, 0x0b, 0x1d,
+        0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0xfb, 0x00, 0x02, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00,
+        0x20, 0x00, 0x41, 0xa0, 0x9c, 0x01, 0x49, 0x0d, 0x00, 0x0b, 0x0b, 0x28, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x41,
+        0x03, 0x6c, 0x21, 0x01, 0x20, 0x00, 0x41, 0x03, 0x46, 0x04, 0x40, 0x10, 0x01, 0x0b, 0x20, 0x00, 0x45, 0x04,
+        0x7f, 0x20, 0x01, 0x05, 0x20, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x0a, 0x6a, 0x0b, 0x0b, 0x23, 0x01,
+        0x01, 0x7e, 0x20, 0x00, 0x41, 0xe8, 0x07, 0x6a, 0xad, 0x21, 0x01, 0x02, 0x7f, 0x1f, 0x40, 0x01, 0x00, 0x00,
+        0x00, 0x20, 0x00, 0x10, 0x0c, 0x1a, 0x0b, 0x41, 0x7f, 0x0f, 0x0b, 0x20, 0x01, 0xa7, 0x6a, 0x0b, 0x1f, 0x01,
+        0x01, 0x7f, 0x20, 0x00, 0x41, 0x07, 0x6a, 0x21, 0x01, 0x20, 0x00, 0x45, 0x04, 0x40, 0x41, 0x05, 0x08, 0x00,
+        0x0b, 0x20, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x0d, 0x6a, 0x0b, 0x20, 0x01, 0x01, 0x7f, 0x41, 0x01,
+        0x21, 0x01, 0x02, 0x7f, 0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, 0x20, 0x01, 0x20, 0x00, 0x10, 0x0c, 0x6a, 0x0f,
+        0x0b, 0x00, 0x0b, 0x20, 0x01, 0x6a, 0x08, 0x00, 0x0b,
+    };
+    wasm_import_t imp;
+    wasm_module_t* m;
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "host";
+    imp.name = "collect";
+    imp.func = wasm_test_calls_collect;
+    WASM_CHECK_OK(t, wasm_register_import(rt, &imp));
+    imp.name = "interrupt";
+    imp.func = wasm_test_calls_interrupt;
+    WASM_CHECK_OK(t, wasm_register_import(rt, &imp));
+    m = wasm_load(rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", wasm_runtime_error_message(rt));
+    return m;
+}
+
+static int32_t wasm_test_call_i32(wl_test_ctx* t, wasm_module_t* m, const char* name, int32_t arg) {
+    wasm_value_t value = wasm_i32(arg);
+    wasm_value_t result = wasm_i32(-1);
+
+    WASM_CHECK_OK(t, wasm_call(m, name, &value, 1, &result, 1));
+    return result.of.i32;
+}
+
+WL_TEST(test_calls_reach_the_depth_limit_with_fresh_locals_per_frame) {
+    static const size_t arena_sizes[] = { WASM_FRAME_ARENA_SIZE, 64 };
+    size_t k;
+
+    for (k = 0; k < sizeof(arena_sizes) / sizeof(arena_sizes[0]); k++) {
+        wasm_runtime_t rt;
+        wasm_config_t cfg;
+        wasm_module_t* m;
+        wasm_value_t arg;
+        wasm_value_t result = wasm_i32(0);
+        int round;
+
+        wasm_config_default(&cfg);
+        cfg.max_call_depth = 300;
+        cfg.frame_arena_size = arena_sizes[k];
+        wasm_init_config(&rt, &cfg);
+        m = wasm_test_load_calls_module(t, &rt);
+        if (!m) {
+            wasm_destroy(&rt);
+            continue;
+        }
+        for (round = 0; round < 3; round++) {
+            WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "deep", 299), 299 * 299 + 2 * 299);
+            arg = wasm_i32(300);
+            WL_CHECK(t, wasm_call(m, "deep", &arg, 1, &result, 1) == WASM_ERR_CALL_STACK_EXHAUSTED);
+            WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 300);
+            WL_CHECK(t, rt.call_frame_sp == 0 && rt.sp == 0);
+            WL_CHECK(t, rt.frame_arena != NULL && rt.frame_arena->prev == NULL && rt.frame_arena->used == 0u);
+        }
+        arg = wasm_i32(40);
+        WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "deep", &arg, 1, 1, 0, &result) > 500u);
+        WASM_CHECK_I32(t, result.of.i32, 40 * 40 + 2 * 40);
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+}
+
+WL_TEST(test_call_indirect_traps_on_mismatched_null_and_out_of_range_entries) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    args[1] = wasm_i32(21);
+    args[0] = wasm_i32(0);
+    WASM_CHECK_OK(t, wasm_call(m, "ci", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    WASM_CHECK_OK(t, wasm_call(m, "tail_ci", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    args[0] = wasm_i32(1);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_call(m, "tail_ci", args, 2, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+    args[0] = wasm_i32(2);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_UNINITIALIZED_TABLE);
+    args[0] = wasm_i32(4);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    args[0] = wasm_i32(-1);
+    WL_CHECK(t, wasm_call(m, "tail_ci", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+
+    args[0] = wasm_i64(1);
+    WASM_CHECK_OK(t, wasm_call(m, "ci64", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    args[0] = wasm_i64(0);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNINITIALIZED_TABLE);
+    args[0] = wasm_i64(3);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    args[0] = wasm_i64(((int64_t)1 << 32) + 1);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    WL_CHECK(t, rt.call_frame_sp == 0 && rt.sp == 0);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_calls_interrupted_at_callee_entry_resume_there) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(5);
+    wasm_value_t result = wasm_i32(0);
+    uint32_t func_idx = 0;
+    uint32_t top_offset = 0;
+    uint32_t caller_offset = 0;
+
+    wasm_init(&rt);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm_call(m, "interrupt_at", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 4);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &top_offset));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 10);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 1, NULL, &func_idx, &caller_offset));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 10);
+    WL_CHECK(t, top_offset < caller_offset);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 45);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "deep", 10), 120);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_calls_keep_references_in_locals_through_collections_and_throws) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    cfg.frame_arena_size = 128;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "gcdeep", 200), 200 * 201 / 2);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "catcher", 0), 1005);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "catcher", 30), 1065);
+    arg = wasm_i32(12);
+    WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "gcdeep", &arg, 1, 1, 0, &result) > 100u);
+    WASM_CHECK_I32(t, result.of.i32, 12 * 13 / 2);
+    arg = wasm_i32(6);
+    WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "catcher", &arg, 1, 1, 0, &result) > 50u);
+    WASM_CHECK_I32(t, result.of.i32, 1017);
+    WL_CHECK(t, rt.call_frame_sp == 0 && rt.frame_arena != NULL && rt.frame_arena->prev == NULL &&
+                    rt.frame_arena->used == 0u);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_resume_fuel_steps_match_unmetered_runs) {
     wasm_runtime_t rt;
     wasm_test_resume_host_t host;
@@ -18452,6 +18676,10 @@ int main(void) {
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
         { "memory: growth by a callee or host is visible to the caller", test_memory_grown_by_callee_or_host_is_visible_to_caller },
         { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
+        { "calls: recursion reaches the depth limit with fresh locals in every frame", test_calls_reach_the_depth_limit_with_fresh_locals_per_frame },
+        { "calls: call_indirect traps on mismatched, null, and out-of-range entries", test_call_indirect_traps_on_mismatched_null_and_out_of_range_entries },
+        { "calls: an interrupt at a callee's entry suspends and resumes there", test_calls_interrupted_at_callee_entry_resume_there },
+        { "calls: references in locals survive collections and throws through deep chains", test_calls_keep_references_in_locals_through_collections_and_throws },
         { "resume: fuel stops resumed step by step match unmetered runs", test_resume_fuel_steps_match_unmetered_runs },
         { "resume: yielding host imports suspend nested frames until resumed or cancelled", test_resume_yielding_host_imports },
         { "resume: GC objects in suspended frames survive collections", test_resume_keeps_gc_objects_alive_across_collections },

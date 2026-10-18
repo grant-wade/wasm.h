@@ -273,11 +273,6 @@ WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
     return object;
 }
 
-/* Block storage starts this far into a block, and allocations are aligned to it. */
-#define WASM__ARENA_ALIGN ((size_t)16u)
-#define WASM__ARENA_HEADER \
-    ((sizeof(wasm__arena_chunk_t) + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN)
-
 static void wasm__arena_free_chunk(wasm_runtime_t* rt, wasm__arena_chunk_t* chunk) {
     if (chunk) wasm__free_sized(&rt->allocator, chunk, WASM__ARENA_HEADER + chunk->size, WASM__ARENA_ALIGN);
 }
@@ -341,7 +336,7 @@ WASM_PRIVATE wasm__arena_mark_t wasm__arena_mark(const wasm_runtime_t* rt) {
     return mark;
 }
 
-WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
+WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
     while (rt->frame_arena && rt->frame_arena != mark.chunk) {
         wasm__arena_chunk_t* chunk = rt->frame_arena;
 

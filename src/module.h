@@ -18,6 +18,7 @@ struct wasm_func_t {
     uint32_t max_stack;    /* operand stack slots the body needs at most */
     uint32_t* local_slots; /* slot offset of each local in the frame's locals */
     uint32_t num_local_slots;
+    uint32_t frame_bytes; /* frame arena bytes a call reserves for its locals, then its handler labels */
     uint32_t param_slots;
     uint32_t result_slots;
     uint32_t* stack_maps;     /* bytecode offset, bits index, and slot count of each map, by offset */

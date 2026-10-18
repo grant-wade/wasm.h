@@ -6,7 +6,7 @@
 
 WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
                                  wasm_value_t* args, uint32_t num_args,
-                                 wasm_value_t* results, uint32_t num_results);
+                                 wasm_value_t* results);
 
 /* Continues rt's suspended call; host_results must match the yielding import's result types. */
 WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
