@@ -9,8 +9,9 @@
  * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
  * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
  * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
- * load. ADD, AND, XOR, SHL, SHR_U, ROTL, and MUL are those instructions on i64 after J and on i32
- * otherwise. */
+ * load, STORE32 a 4-byte store, and STORE64 an 8-byte store; LC_LOADn runs an i32.add between
+ * the constant and the load. ADD, AND, XOR, SHL, SHR_U, ROTL, and MUL are those instructions on
+ * i64 after J and on i32 otherwise. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_AND, 0x20, 3, 4)           \
@@ -51,6 +52,11 @@
     X(L_LOAD32, 0x20, 2, 2)         \
     X(L_LOAD64, 0x20, 2, 2)         \
     X(L_LOAD8U, 0x20, 2, 2)         \
+    X(LC_LOAD32, 0x20, 4, 5)        \
+    X(LC_LOAD64, 0x20, 4, 5)        \
+    X(LC_LOAD8U, 0x20, 4, 5)        \
+    X(L_STORE32, 0x20, 2, 2)        \
+    X(L_STORE64, 0x20, 2, 2)        \
     X(L_F64BIN, 0x20, 2, 2)         \
     X(LL_F64BIN, 0x20, 3, 4)        \
     X(D_F64BIN, 0x44, 2, 3)         \

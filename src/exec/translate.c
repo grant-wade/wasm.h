@@ -240,6 +240,14 @@ static int wasm__x_is_i64_bin(uint32_t op) {
     return (op >= 0x51 && op <= 0x5A) || (op >= 0x7C && op <= 0x7E) || (op >= 0x83 && op <= 0x8A);
 }
 
+static int wasm__x_is_load32(uint32_t op) {
+    return op == 0x28 || op == 0x2A || op == 0x35;
+}
+
+static int wasm__x_is_load64(uint32_t op) {
+    return op == 0x29 || op == 0x2B;
+}
+
 static int wasm__x_is_f64_bin(uint32_t op) {
     return op >= 0xA0 && op <= 0xA3;
 }
@@ -281,9 +289,11 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
         if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
         if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
-        if (o[0] == 0x20 && (o[1] == 0x28 || o[1] == 0x2A || o[1] == 0x35)) return WASM__OP_L_LOAD32;
-        if (o[0] == 0x20 && (o[1] == 0x29 || o[1] == 0x2B)) return WASM__OP_L_LOAD64;
+        if (o[0] == 0x20 && wasm__x_is_load32(o[1])) return WASM__OP_L_LOAD32;
+        if (o[0] == 0x20 && wasm__x_is_load64(o[1])) return WASM__OP_L_LOAD64;
         if (o[0] == 0x20 && o[1] == 0x2D) return WASM__OP_L_LOAD8U;
+        if (o[0] == 0x20 && (o[1] == 0x36 || o[1] == 0x38 || o[1] == 0x3E)) return WASM__OP_L_STORE32;
+        if (o[0] == 0x20 && (o[1] == 0x37 || o[1] == 0x39)) return WASM__OP_L_STORE64;
         if (o[0] == 0x6A && o[1] == 0x21) return WASM__OP_ADD_S;
         if (o[0] == 0x6A && o[1] == 0x22) return WASM__OP_ADD_T;
         if (o[0] == 0x21 && o[1] == 0x20) return WASM__OP_S_L;
@@ -307,6 +317,9 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         return 0;
     }
     if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
+    if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load32(o[3])) return WASM__OP_LC_LOAD32;
+    if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load64(o[3])) return WASM__OP_LC_LOAD64;
+    if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x2D) return WASM__OP_LC_LOAD8U;
     if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x21) return WASM__OP_LC_ADD_S;
     if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x22) return WASM__OP_LC_ADD_T;
     if (wasm__x_is_i32_bin(o[2]) && o[3] == 0x21) return o[1] == 0x41 ? WASM__OP_LC_BIN_S : WASM__OP_LL_BIN_S;

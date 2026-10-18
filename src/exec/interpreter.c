@@ -1926,6 +1926,58 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm__slot_set_u32(sp++, *p);
                 WASM__NEXT();
             }
+            WASM__CASE(WASM__OP_LC_LOAD32): {
+                uint8_t* p;
+
+                wasm__slot_set_u32(sp, wasm__slot_u32(locals + pc[0]) + pc[2]);
+                op_at += 5;
+                pc += 5;
+                WASM__MEMORY_PTR(p, sp, 4u);
+                wasm__slot_set_u32(sp++, wasm__load_le32(p));
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_LC_LOAD64): {
+                uint8_t* p;
+
+                wasm__slot_set_u32(sp, wasm__slot_u32(locals + pc[0]) + pc[2]);
+                op_at += 5;
+                pc += 5;
+                WASM__MEMORY_PTR(p, sp, 8u);
+                wasm__slot_set_u64(sp++, wasm__load_le64(p));
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_LC_LOAD8U): {
+                uint8_t* p;
+
+                wasm__slot_set_u32(sp, wasm__slot_u32(locals + pc[0]) + pc[2]);
+                op_at += 5;
+                pc += 5;
+                WASM__MEMORY_PTR(p, sp, 1u);
+                wasm__slot_set_u32(sp++, *p);
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_L_STORE32): {
+                uint8_t* p;
+                const wasm__slot_t* value = locals + pc[0];
+
+                op_at += 2;
+                pc += 2;
+                WASM__MEMORY_PTR(p, sp - 1, 4u);
+                wasm__store_le32(p, wasm__slot_u32(value));
+                sp--;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_L_STORE64): {
+                uint8_t* p;
+                const wasm__slot_t* value = locals + pc[0];
+
+                op_at += 2;
+                pc += 2;
+                WASM__MEMORY_PTR(p, sp - 1, 8u);
+                wasm__store_le64(p, wasm__slot_u64(value));
+                sp--;
+                WASM__NEXT();
+            }
             WASM__CASE(WASM__OP_L_F64BIN):
                 wasm__slot_set_f64_bits(sp - 1, wasm__f64_binop(pc[1], sp - 1, locals + pc[0]));
                 pc += 2;
