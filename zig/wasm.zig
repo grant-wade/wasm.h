@@ -349,6 +349,10 @@ pub const Config = struct {
     lazy_validation: ?bool = null,
     /// Locals per function, parameters included; 0 is unlimited.
     max_function_locals: ?u32 = null,
+    /// Bytes per linear memory, at instantiation and on growth; 0 is unlimited.
+    max_memory_bytes: ?u64 = null,
+    /// Elements per table, at instantiation and on growth; 0 is unlimited.
+    max_table_elements: ?u64 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
@@ -463,6 +467,8 @@ pub const Runtime = opaque {
         if (config.frame_arena_size) |v| cfg.frame_arena_size = v;
         if (config.lazy_validation) |v| cfg.lazy_validation = @intFromBool(v);
         if (config.max_function_locals) |v| cfg.max_function_locals = v;
+        if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
+        if (config.max_table_elements) |v| cfg.max_table_elements = v;
         const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
         check(c.wasm_runtime_last_error(rt.raw())) catch |err| {
             rt.deinit();

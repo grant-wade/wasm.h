@@ -166,11 +166,12 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     uint8_t* nd;
 
     if (!memory) return -1;
-    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
-
     old = memory->pages;
     if (delta_pages > UINT64_MAX - old) return -1;
     np = old + delta_pages;
+    if (mod->rt && mod->rt->max_memory_bytes != 0 && np > mod->rt->max_memory_bytes / wasm__memory_page_size(memory))
+        return -1;
+    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
     if (np > memory->max_pages) return -1;
     memory->pages = old;
     if (!wasm__memory_byte_size_fits_host(memory, &old_size)) return -1;

@@ -307,7 +307,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 break;
             }
             new_size = old_size + delta;
-            if (new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
+            if ((rt->max_table_elements != 0 && new_size > rt->max_table_elements) ||
+                new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
                 WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                 break;
             }

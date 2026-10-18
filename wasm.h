@@ -614,6 +614,12 @@ typedef struct wasm__exception_state_t {
 #ifndef WASM_MAX_FUNCTION_LOCALS
 #define WASM_MAX_FUNCTION_LOCALS 50000u
 #endif
+#ifndef WASM_MAX_MEMORY_BYTES
+#define WASM_MAX_MEMORY_BYTES 0u
+#endif
+#ifndef WASM_MAX_TABLE_ELEMENTS
+#define WASM_MAX_TABLE_ELEMENTS 10000000u
+#endif
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE                                           \
         ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u) >                   \
@@ -631,6 +637,8 @@ typedef struct wasm_config_t {
     int lazy_validation;
     /* Limits for untrusted modules; 0 means unlimited. */
     uint32_t max_function_locals; /* locals per function, parameters included */
+    uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
+    uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -1869,6 +1877,8 @@ struct wasm_runtime_t {
     uint32_t enabled_features;
     int lazy_validation;
     uint32_t max_function_locals;
+    uint64_t max_memory_bytes;
+    uint64_t max_table_elements;
     wasm_error_t last_error;
     char error_msg[256];
     int32_t exit_code;
@@ -11132,6 +11142,8 @@ void wasm_config_default(wasm_config_t* config) {
     config->frame_arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
     config->lazy_validation = 0;
     config->max_function_locals = WASM_MAX_FUNCTION_LOCALS;
+    config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
+    config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -11215,6 +11227,8 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     rt->max_labels = cfg.max_labels;
     rt->lazy_validation = cfg.lazy_validation != 0;
     rt->max_function_locals = cfg.max_function_locals;
+    rt->max_memory_bytes = cfg.max_memory_bytes;
+    rt->max_table_elements = cfg.max_table_elements;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
@@ -17303,7 +17317,16 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         uint32_t mi;
 
         for (mi = 0; mi < mod->num_memories; mi++) {
-            err = wasm__init_memory_storage(&mod->memories[mi]);
+            wasm_memory_t* memory = &mod->memories[mi];
+
+            if (!memory->is_import && rt->max_memory_bytes != 0 &&
+                (memory->pages > rt->max_memory_bytes / wasm__memory_page_size(memory))) {
+                err = WASM_ERR_OOM;
+                WASM__SET_ERR(rt, err, "memory %u: %llu pages exceed the limit of %llu bytes", (unsigned)mi,
+                              (unsigned long long)memory->pages, (unsigned long long)rt->max_memory_bytes);
+                WASM__LOAD_FAIL("init_memory_storage");
+            }
+            err = wasm__init_memory_storage(memory);
             if (err != WASM_OK) {
                 WASM__LOAD_FAIL("init_memory_storage");
             }
@@ -17312,7 +17335,15 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     if (mod->num_tables > 0) {
         uint32_t ti;
         for (ti = 0; ti < mod->num_tables; ti++) {
-            err = wasm__init_table_storage(&mod->tables[ti]);
+            wasm_table_t* table = &mod->tables[ti];
+
+            if (!table->is_import && rt->max_table_elements != 0 && table->size > rt->max_table_elements) {
+                err = WASM_ERR_OOM;
+                WASM__SET_ERR(rt, err, "table %u: %u elements exceed the limit of %llu", (unsigned)ti,
+                              (unsigned)table->size, (unsigned long long)rt->max_table_elements);
+                WASM__LOAD_FAIL("init_table_storage");
+            }
+            err = wasm__init_table_storage(table);
             if (err != WASM_OK) {
                 WASM__LOAD_FAIL("init_table_storage");
             }
@@ -19627,7 +19658,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                 break;
             }
             new_size = old_size + delta;
-            if (new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
+            if ((rt->max_table_elements != 0 && new_size > rt->max_table_elements) ||
+                new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
                 WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
                 break;
             }
@@ -27876,11 +27908,12 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     uint8_t* nd;
 
     if (!memory) return -1;
-    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
-
     old = memory->pages;
     if (delta_pages > UINT64_MAX - old) return -1;
     np = old + delta_pages;
+    if (mod->rt && mod->rt->max_memory_bytes != 0 && np > mod->rt->max_memory_bytes / wasm__memory_page_size(memory))
+        return -1;
+    if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
     if (np > memory->max_pages) return -1;
     memory->pages = old;
     if (!wasm__memory_byte_size_fits_host(memory, &old_size)) return -1;

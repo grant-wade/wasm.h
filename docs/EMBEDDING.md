@@ -58,13 +58,21 @@ config.initial_gc_heap_size = 2u * 1024u * 1024u;
 config.frame_arena_size = 4u * 1024u * 1024u;
 config.lazy_validation = 0;
 config.max_function_locals = 50000;
+config.max_memory_bytes = 256u * 1024u * 1024u;
+config.max_table_elements = 1000000;
 
 rt = wasm_runtime_new(&config);
 ```
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
 
-`max_function_locals` rejects functions that declare more locals, parameters included, so a small module cannot make `wasm_load` allocate gigabytes. Set it to 0 to remove the limit.
+The remaining fields bound what a module can make the host allocate; 0 removes a limit:
+
+- `max_function_locals` (default 50,000) rejects functions that declare more locals, parameters included.
+- `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow_at` past the cap return -1.
+- `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
+
+Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
 
 All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
 

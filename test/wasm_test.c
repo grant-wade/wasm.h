@@ -346,7 +346,11 @@ static wasm_value_t* wasm_test_gc_struct_field_value(wasm_gc_struct_t* object,
     return (wasm_value_t*)(((uint8_t*)object) + offset);
 }
 
-#define WASM_CHECK_OK(t, err) WL_CHECK_MSG((t), (err) == WASM_OK, "%s", wasm_error_string(err))
+#define WASM_CHECK_OK(t, err)                                                              \
+    do {                                                                                   \
+        wasm_error_t wasm_check_ok_err_ = (err);                                           \
+        WL_CHECK_MSG((t), wasm_check_ok_err_ == WASM_OK, "%s", wasm_error_string(wasm_check_ok_err_)); \
+    } while (0)
 #define WASM_CHECK_I32(t, actual, expected) \
     WL_CHECK_MSG((t), (actual) == (expected), "expected %d, got %d", (expected), (actual))
 #define WASM_CHECK_I64(t, actual, expected) \
@@ -8623,6 +8627,70 @@ WL_TEST(test_exceptions_from_imports_reach_handlers_on_all_call_paths) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_runtime_limits_memory_and_tables) {
+    static const uint8_t grow_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03,
+        0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x02, 0x07, 0x19, 0x02, 0x08,
+        0x67, 0x72, 0x6f, 0x77, 0x5f, 0x6d, 0x65, 0x6d, 0x00, 0x00, 0x0a, 0x67, 0x72, 0x6f, 0x77, 0x5f, 0x74, 0x61,
+        0x62, 0x6c, 0x65, 0x00, 0x01, 0x0a, 0x12, 0x02, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b, 0x09, 0x00, 0xd0,
+        0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x0b,
+    };
+    static const uint8_t big_memory_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x05,
+    };
+    static const uint8_t big_table_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x09,
+    };
+    wasm_runtime_t rt;
+    wasm_config_t config;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    wasm_config_default(&config);
+    WL_CHECK(t, config.max_memory_bytes == 0u);
+    WL_CHECK(t, config.max_table_elements == 10000000u);
+    config.max_memory_bytes = 4u * WASM_PAGE_SIZE;
+    config.max_table_elements = 8u;
+    wasm_init_config(&rt, &config);
+
+    m = wasm_load(&rt, big_memory_bytes, sizeof(big_memory_bytes));
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "limit"),
+                 "expected a 5-page memory to exceed a 4-page limit, got: %s", rt.error_msg);
+    wasm_free_module(m);
+    m = wasm_load(&rt, big_table_bytes, sizeof(big_table_bytes));
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "limit"),
+                 "expected a 9-element table to exceed an 8-element limit, got: %s", rt.error_msg);
+    wasm_free_module(m);
+
+    m = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        arg = wasm_i32(2);
+        err = wasm_call(m, "grow_mem", &arg, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, 2);
+        arg = wasm_i32(1);
+        err = wasm_call(m, "grow_mem", &arg, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, -1);
+        WL_CHECK(t, wasm_memory_grow(m, 1) == -1);
+        WL_CHECK(t, wasm_memory_size(m) == 4u * WASM_PAGE_SIZE);
+
+        arg = wasm_i32(7);
+        err = wasm_call(m, "grow_table", &arg, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, 1);
+        arg = wasm_i32(1);
+        err = wasm_call(m, "grow_table", &arg, 1, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, -1);
+    }
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15564,6 +15632,7 @@ int main(void) {
         { "public api: NULL handles are rejected without crashing", test_public_api_tolerates_null_handles },
         { "funcref: references into freed modules trap", test_funcrefs_from_freed_modules_trap },
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
+        { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

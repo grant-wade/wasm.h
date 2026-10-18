@@ -270,6 +270,8 @@ void wasm_config_default(wasm_config_t* config) {
     config->frame_arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
     config->lazy_validation = 0;
     config->max_function_locals = WASM_MAX_FUNCTION_LOCALS;
+    config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
+    config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -353,6 +355,8 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     rt->max_labels = cfg.max_labels;
     rt->lazy_validation = cfg.lazy_validation != 0;
     rt->max_function_locals = cfg.max_function_locals;
+    rt->max_memory_bytes = cfg.max_memory_bytes;
+    rt->max_table_elements = cfg.max_table_elements;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {

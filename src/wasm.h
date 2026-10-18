@@ -605,6 +605,12 @@ typedef struct wasm__exception_state_t {
 #ifndef WASM_MAX_FUNCTION_LOCALS
 #define WASM_MAX_FUNCTION_LOCALS 50000u
 #endif
+#ifndef WASM_MAX_MEMORY_BYTES
+#define WASM_MAX_MEMORY_BYTES 0u
+#endif
+#ifndef WASM_MAX_TABLE_ELEMENTS
+#define WASM_MAX_TABLE_ELEMENTS 10000000u
+#endif
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE                                           \
         ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u) >                   \
@@ -622,6 +628,8 @@ typedef struct wasm_config_t {
     int lazy_validation;
     /* Limits for untrusted modules; 0 means unlimited. */
     uint32_t max_function_locals; /* locals per function, parameters included */
+    uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
+    uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */

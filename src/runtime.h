@@ -54,6 +54,8 @@ struct wasm_runtime_t {
     uint32_t enabled_features;
     int lazy_validation;
     uint32_t max_function_locals;
+    uint64_t max_memory_bytes;
+    uint64_t max_table_elements;
     wasm_error_t last_error;
     char error_msg[256];
     int32_t exit_code;

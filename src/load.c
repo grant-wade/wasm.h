@@ -209,7 +209,16 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         uint32_t mi;
 
         for (mi = 0; mi < mod->num_memories; mi++) {
-            err = wasm__init_memory_storage(&mod->memories[mi]);
+            wasm_memory_t* memory = &mod->memories[mi];
+
+            if (!memory->is_import && rt->max_memory_bytes != 0 &&
+                (memory->pages > rt->max_memory_bytes / wasm__memory_page_size(memory))) {
+                err = WASM_ERR_OOM;
+                WASM__SET_ERR(rt, err, "memory %u: %llu pages exceed the limit of %llu bytes", (unsigned)mi,
+                              (unsigned long long)memory->pages, (unsigned long long)rt->max_memory_bytes);
+                WASM__LOAD_FAIL("init_memory_storage");
+            }
+            err = wasm__init_memory_storage(memory);
             if (err != WASM_OK) {
                 WASM__LOAD_FAIL("init_memory_storage");
             }
@@ -218,7 +227,15 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     if (mod->num_tables > 0) {
         uint32_t ti;
         for (ti = 0; ti < mod->num_tables; ti++) {
-            err = wasm__init_table_storage(&mod->tables[ti]);
+            wasm_table_t* table = &mod->tables[ti];
+
+            if (!table->is_import && rt->max_table_elements != 0 && table->size > rt->max_table_elements) {
+                err = WASM_ERR_OOM;
+                WASM__SET_ERR(rt, err, "table %u: %u elements exceed the limit of %llu", (unsigned)ti,
+                              (unsigned)table->size, (unsigned long long)rt->max_table_elements);
+                WASM__LOAD_FAIL("init_table_storage");
+            }
+            err = wasm__init_table_storage(table);
             if (err != WASM_OK) {
                 WASM__LOAD_FAIL("init_table_storage");
             }
