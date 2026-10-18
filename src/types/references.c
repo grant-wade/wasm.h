@@ -213,12 +213,12 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
     }
     if (!rt) return WASM_ERR_MALFORMED;
 
-    box = (wasm__externref_box_t*)WASM_MALLOC(sizeof(*box));
+    box = (wasm__externref_box_t*)wasm__malloc(&rt->allocator, sizeof(*box));
     if (!box) return WASM_ERR_OOM;
     box->value = value;
     box->marked = 0;
-    if (wasm__handle_set_insert(&rt->externref_boxes, box) != WASM_OK) {
-        WASM_FREE(box);
+    if (wasm__handle_set_insert(&rt->allocator, &rt->externref_boxes, box) != WASM_OK) {
+        wasm__free(&rt->allocator, box);
         return WASM_ERR_OOM;
     }
 

@@ -85,7 +85,7 @@ static wasm_error_t wasm__wasi_set_strings(wasm_runtime_t* rt, int is_env, uint3
     if (!rt) return WASM_ERR_MALFORMED;
     err = wasm__wasi_state_ensure(rt);
     if (err == WASM_OK)
-        err = wasm__wasi_strings_set(is_env ? &rt->wasi_state->env : &rt->wasi_state->args, count, values);
+        err = wasm__wasi_strings_set(&rt->allocator, is_env ? &rt->wasi_state->env : &rt->wasi_state->args, count, values);
     if (err != WASM_OK)
         WASM__SET_ERR(rt, err, "cannot set WASI %s: %s", is_env ? "environment" : "arguments",
                       err == WASM_ERR_OOM ? "out of memory" : "a string is NULL");

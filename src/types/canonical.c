@@ -1,6 +1,7 @@
 #include "canonical.h"
 #include "../module.h"
 #include "../internal/alloc.h"
+#include "../runtime.h"
 #include "references.h"
 #include "../values.h"
 #include <string.h>
@@ -16,11 +17,11 @@ static int wasm__canonical_type_equal_visit(const wasm_module_t* mod,
                                             uint32_t rhs_idx,
                                             uint8_t* memo);
 
-WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft) {
-    WASM_FREE(ft->params);
-    WASM_FREE(ft->results);
-    WASM_FREE(ft->param_reftypes);
-    WASM_FREE(ft->result_reftypes);
+WASM_PRIVATE void wasm__free_functype(const wasm_allocator_t* a, wasm_functype_t* ft) {
+    wasm__free(a, ft->params);
+    wasm__free(a, ft->results);
+    wasm__free(a, ft->param_reftypes);
+    wasm__free(a, ft->result_reftypes);
     ft->params = NULL;
     ft->results = NULL;
     ft->param_reftypes = NULL;
@@ -39,29 +40,29 @@ WASM_PRIVATE int wasm__functype_is_zeroed(const wasm_functype_t* ft) {
            ft->param_reftypes == NULL && ft->result_reftypes == NULL;
 }
 
-WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft) {
-    wasm__free_functype(ft);
+WASM_PRIVATE void wasm__functype_mark_unspecified(const wasm_allocator_t* a, wasm_functype_t* ft) {
+    wasm__free_functype(a, ft);
     ft->num_params = UINT32_MAX;
     ft->num_results = UINT32_MAX;
 }
 
-static void wasm__free_structtype(wasm_structtype_t* st) {
-    WASM_FREE(st->fields);
+static void wasm__free_structtype(const wasm_allocator_t* a, wasm_structtype_t* st) {
+    wasm__free(a, st->fields);
     st->fields = NULL;
     st->num_fields = 0;
 }
 
-WASM_PRIVATE void wasm__free_comptype(wasm_comptype_t* type) {
-    WASM_FREE(type->supertypes);
+WASM_PRIVATE void wasm__free_comptype(const wasm_allocator_t* a, wasm_comptype_t* type) {
+    wasm__free(a, type->supertypes);
     type->supertypes = NULL;
     type->num_supertypes = 0;
 
     switch (type->kind) {
         case WASM_COMP_FUNC:
-            wasm__free_functype(&type->of.func);
+            wasm__free_functype(a, &type->of.func);
             break;
         case WASM_COMP_STRUCT:
-            wasm__free_structtype(&type->of.struct_);
+            wasm__free_structtype(a, &type->of.struct_);
             break;
         case WASM_COMP_ARRAY:
             break;
@@ -75,7 +76,7 @@ WASM_PRIVATE void wasm__free_comptype(wasm_comptype_t* type) {
     type->is_final = 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src) {
+WASM_PRIVATE wasm_error_t wasm__copy_functype(const wasm_allocator_t* a, wasm_functype_t* dst, const wasm_functype_t* src) {
     memset(dst, 0, sizeof(*dst));
     if (wasm__functype_is_unspecified(src)) {
         dst->num_params = UINT32_MAX;
@@ -86,10 +87,10 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
     dst->num_results = src->num_results;
 
     if (src->num_params > 0) {
-        dst->params = (wasm_valtype_t*)wasm__malloc_array(src->num_params, sizeof(wasm_valtype_t));
-        if (dst->params) dst->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_params, sizeof(wasm_reftype_t));
+        dst->params = (wasm_valtype_t*)wasm__malloc_array(a, src->num_params, sizeof(wasm_valtype_t));
+        if (dst->params) dst->param_reftypes = (wasm_reftype_t*)wasm__calloc(a, src->num_params, sizeof(wasm_reftype_t));
         if (!dst->params || !dst->param_reftypes) {
-            wasm__free_functype(dst);
+            wasm__free_functype(a, dst);
             return WASM_ERR_OOM;
         }
         if (src->params)
@@ -101,10 +102,10 @@ WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_f
     }
 
     if (src->num_results > 0) {
-        dst->results = (wasm_valtype_t*)wasm__malloc_array(src->num_results, sizeof(wasm_valtype_t));
-        if (dst->results) dst->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(src->num_results, sizeof(wasm_reftype_t));
+        dst->results = (wasm_valtype_t*)wasm__malloc_array(a, src->num_results, sizeof(wasm_valtype_t));
+        if (dst->results) dst->result_reftypes = (wasm_reftype_t*)wasm__calloc(a, src->num_results, sizeof(wasm_reftype_t));
         if (!dst->results || !dst->result_reftypes) {
-            wasm__free_functype(dst);
+            wasm__free_functype(a, dst);
             return WASM_ERR_OOM;
         }
         if (src->results)
@@ -408,10 +409,10 @@ static int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint
 
     if (!mod) return 0;
     memo_size = mod->num_types ? (size_t)mod->num_types * (size_t)mod->num_types : 1u;
-    memo = (uint8_t*)WASM_CALLOC(memo_size, sizeof(uint8_t));
+    memo = (uint8_t*)wasm__calloc(&mod->rt->allocator, memo_size, sizeof(uint8_t));
     if (!memo) return 0;
     result = wasm__canonical_type_equal_visit(mod, lhs_idx, rhs_idx, memo);
-    WASM_FREE(memo);
+    wasm__free(&mod->rt->allocator, memo);
     return result;
 }
 
@@ -525,11 +526,11 @@ WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
     while (capacity < (size_t)mod->num_rec_groups * 2u) capacity <<= 1;
     mask = capacity - 1u;
     if (mod->num_rec_groups > 0) {
-        slots = (uint32_t*)WASM_CALLOC(capacity, sizeof(*slots));
-        hashes = (uint64_t*)wasm__malloc_array(mod->num_rec_groups, sizeof(*hashes));
+        slots = (uint32_t*)wasm__calloc(&mod->rt->allocator, capacity, sizeof(*slots));
+        hashes = (uint64_t*)wasm__malloc_array(&mod->rt->allocator, mod->num_rec_groups, sizeof(*hashes));
         if (!slots || !hashes) {
-            WASM_FREE(slots);
-            WASM_FREE(hashes);
+            wasm__free(&mod->rt->allocator, slots);
+            wasm__free(&mod->rt->allocator, hashes);
             return WASM_ERR_OOM;
         }
     }
@@ -558,15 +559,15 @@ WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
             continue;
         }
         if (group->num_types > UINT32_MAX - next_id) {
-            WASM_FREE(slots);
-            WASM_FREE(hashes);
+            wasm__free(&mod->rt->allocator, slots);
+            wasm__free(&mod->rt->allocator, hashes);
             return WASM_ERR_OOM;
         }
         for (k = 0; k < group->num_types; k++) mod->types[group->first_type + k].canonical_id = next_id++;
         slots[slot] = i + 1u;
     }
-    WASM_FREE(slots);
-    WASM_FREE(hashes);
+    wasm__free(&mod->rt->allocator, slots);
+    wasm__free(&mod->rt->allocator, hashes);
 
     for (i = 0; i < mod->num_types; i++) {
         if (mod->types[i].canonical_id != 0) continue;

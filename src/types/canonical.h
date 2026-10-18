@@ -3,17 +3,17 @@
 
 #include "../internal/config.h"
 
-WASM_PRIVATE void wasm__free_functype(wasm_functype_t* ft);
+WASM_PRIVATE void wasm__free_functype(const wasm_allocator_t* a, wasm_functype_t* ft);
 
 WASM_PRIVATE int wasm__functype_is_unspecified(const wasm_functype_t* ft);
 
 WASM_PRIVATE int wasm__functype_is_zeroed(const wasm_functype_t* ft);
 
-WASM_PRIVATE void wasm__functype_mark_unspecified(wasm_functype_t* ft);
+WASM_PRIVATE void wasm__functype_mark_unspecified(const wasm_allocator_t* a, wasm_functype_t* ft);
 
-WASM_PRIVATE void wasm__free_comptype(wasm_comptype_t* type);
+WASM_PRIVATE void wasm__free_comptype(const wasm_allocator_t* a, wasm_comptype_t* type);
 
-WASM_PRIVATE wasm_error_t wasm__copy_functype(wasm_functype_t* dst, const wasm_functype_t* src);
+WASM_PRIVATE wasm_error_t wasm__copy_functype(const wasm_allocator_t* a, wasm_functype_t* dst, const wasm_functype_t* src);
 
 WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_functype_t* rhs);
 

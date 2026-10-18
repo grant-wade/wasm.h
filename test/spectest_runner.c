@@ -3089,7 +3089,7 @@ static int spec_harness_init(spec_harness_t* harness,
         return 0;
     }
 
-    err = wasm__runtime_init(&harness->runtime, NULL);
+    err = wasm__runtime_init(&harness->runtime, wasm_libc_allocator(), NULL);
     if (err != WASM_OK) {
         spec_set_error(error_text, error_size, "failed to initialize runtime: %s", wasm_error_string(err));
         return 0;

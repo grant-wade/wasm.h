@@ -75,27 +75,44 @@ static void wasm_test_thread_join(wasm_test_thread_t thread) {
 }
 #endif
 
-#ifdef WASM_TEST_MODULAR
-#include "wasm_test_alloc.h"
-#define WASM_TEST_ALLOC_LINKAGE
+#ifndef WASM_TEST_MODULAR
+#define WASM_IMPL
+#include "wasm.h"
 #else
-#define WASM_TEST_ALLOC_LINKAGE static
+#include "../src/module.h"
+#include "../src/runtime.h"
+#include "../src/values.h"
+#include "../src/portable.h"
+#include "../src/types/canonical.h"
+#include "../src/types/references.h"
+#include "../src/exec/frames.h"
+#include "../src/exec/interpreter.h"
+#include "../src/exec/state.h"
+#include "../src/platform/wasi_path.h"
+#include "../src/platform/wasi_state.h"
+#include "../src/simd/compare.h"
+#include "../src/simd/float.h"
+#include "../src/simd/integer_small.h"
+#include "../src/simd/integer_wide.h"
+#include "../src/simd/lanes.h"
 #endif
 
-typedef struct wasm_test_alloc_header {
-    size_t size;
-} wasm_test_alloc_header;
+
+#include <stddef.h>
+#include <stdint.h>
 
 typedef struct wasm_test_alloc_stats {
-    size_t malloc_calls;
-    size_t realloc_calls;
+    size_t alloc_calls;
+    size_t resize_calls;
     size_t free_calls;
-    size_t calloc_calls;
     size_t live_blocks;
     size_t peak_live_blocks;
+    size_t mismatches; /* frees and resizes whose size or alignment differ from the block's */
 } wasm_test_alloc_stats;
 
 static wasm_test_alloc_stats g_wasm_test_alloc_stats;
+
+static size_t g_wasm_test_alloc_fail_countdown;
 
 /* Counters change atomically because the threads test runs runtimes on several threads at once. */
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -147,97 +164,99 @@ static void wasm_test_record_live_alloc(void) {
     }
 }
 
-static void* wasm_test_alloc_block(size_t size, int zero_fill) {
-    wasm_test_alloc_header* header;
-    size_t payload_size = size ? size : 1u;
+/* Bookkeeping stored just before each block the test allocator returns. */
+typedef struct wasm_test_block_t {
+    void* raw;
+    size_t size;
+    size_t align;
+} wasm_test_block_t;
 
-    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
-
-    if (zero_fill)
-        header = (wasm_test_alloc_header*)calloc(1, sizeof(*header) + payload_size);
-    else
-        header = (wasm_test_alloc_header*)malloc(sizeof(*header) + payload_size);
-    if (!header) return NULL;
-
-    header->size = payload_size;
-    wasm_test_record_live_alloc();
-    return (void*)(header + 1);
+static int wasm_test_alloc_should_fail(void) {
+    if (g_wasm_test_alloc_fail_countdown == 0) return 0;
+    return --g_wasm_test_alloc_fail_countdown == 0;
 }
 
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_malloc(size_t size) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.malloc_calls, wasm_test_increment);
-    return wasm_test_alloc_block(size, 0);
-}
+static void* wasm_test_alloc_block(size_t size, size_t align) {
+    wasm_test_block_t block;
+    size_t pad = align < 16u ? 16u : align;
+    uint8_t* raw;
+    uint8_t* p;
 
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_calloc(size_t count, size_t size) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.calloc_calls, wasm_test_increment);
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
-    return wasm_test_alloc_block(count * size, 1);
-}
-
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
-    wasm_test_alloc_header* header;
-    wasm_test_alloc_header* resized;
-    size_t payload_size = size ? size : 1u;
-
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.realloc_calls, wasm_test_increment);
-    if (!ptr) return wasm_test_alloc_block(size, 0);
-    if (size == 0) {
-        free(((wasm_test_alloc_header*)ptr) - 1);
-        wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
+    if (size == 0 || align == 0 || (align & (align - 1u)) != 0) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
         return NULL;
     }
-    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
-
-    header = ((wasm_test_alloc_header*)ptr) - 1;
-    resized = (wasm_test_alloc_header*)realloc(header, sizeof(*resized) + payload_size);
-    if (!resized) return NULL;
-
-    resized->size = payload_size;
-    return (void*)(resized + 1);
+    if (size > SIZE_MAX - sizeof(block) - pad) return NULL;
+    raw = (uint8_t*)malloc(sizeof(block) + pad + size);
+    if (!raw) return NULL;
+    p = (uint8_t*)(((uintptr_t)raw + sizeof(block) + pad - 1u) & ~(uintptr_t)(pad - 1u));
+    block.raw = raw;
+    block.size = size;
+    block.align = align;
+    memcpy(p - sizeof(block), &block, sizeof(block));
+    memset(p, 0xA5, size);
+    wasm_test_record_live_alloc();
+    return p;
 }
 
-WASM_TEST_ALLOC_LINKAGE void wasm_test_free(void* ptr) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.free_calls, wasm_test_increment);
-    if (!ptr) return;
+static void wasm_test_block_take(void* p, size_t size, size_t align, wasm_test_block_t* out) {
+    memcpy(out, (uint8_t*)p - sizeof(*out), sizeof(*out));
+    if (out->size != size || out->align != align)
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+}
 
-    free(((wasm_test_alloc_header*)ptr) - 1);
+static void wasm_test_block_release(const wasm_test_block_t* block) {
+    free(block->raw);
     wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
 }
+
+static void* wasm_test_alloc(void* ctx, size_t size, size_t align) {
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.alloc_calls, wasm_test_increment);
+    if (wasm_test_alloc_should_fail()) return NULL;
+    return wasm_test_alloc_block(size, align);
+}
+
+static void* wasm_test_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
+    wasm_test_block_t block;
+    void* moved;
+
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.resize_calls, wasm_test_increment);
+    if (!p) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+        return NULL;
+    }
+    if (wasm_test_alloc_should_fail()) return NULL;
+    wasm_test_block_take(p, old_size, align, &block);
+    moved = wasm_test_alloc_block(new_size, block.align);
+    if (!moved) return NULL;
+    memcpy(moved, p, block.size < new_size ? block.size : new_size);
+    wasm_test_block_release(&block);
+    return moved;
+}
+
+static void wasm_test_free(void* ctx, void* p, size_t size, size_t align) {
+    wasm_test_block_t block;
+
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.free_calls, wasm_test_increment);
+    if (!p) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+        return;
+    }
+    wasm_test_block_take(p, size, align, &block);
+    wasm_test_block_release(&block);
+}
+
+static const wasm_allocator_t wasm_test_allocator = { NULL, wasm_test_alloc, wasm_test_resize, wasm_test_free };
 
 static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
     return g_wasm_test_alloc_stats;
 }
 
-#ifndef WASM_TEST_MODULAR
-#define WASM_MALLOC(sz) wasm_test_malloc(sz)
-#define WASM_REALLOC(p, sz) wasm_test_realloc((p), (sz))
-#define WASM_FREE(p) wasm_test_free(p)
-#define WASM_CALLOC(n, sz) wasm_test_calloc((n), (sz))
-
-#define WASM_IMPL
-#include "wasm.h"
-#else
-#include "../src/module.h"
-#include "../src/runtime.h"
-#include "../src/values.h"
-#include "../src/portable.h"
-#include "../src/types/canonical.h"
-#include "../src/types/references.h"
-#include "../src/exec/frames.h"
-#include "../src/exec/interpreter.h"
-#include "../src/exec/state.h"
-#include "../src/platform/wasi_path.h"
-#include "../src/platform/wasi_state.h"
-#include "../src/simd/compare.h"
-#include "../src/simd/float.h"
-#include "../src/simd/integer_small.h"
-#include "../src/simd/integer_wide.h"
-#include "../src/simd/lanes.h"
-#endif
-
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
-    return wasm__runtime_init(rt, config);
+    return wasm__runtime_init(rt, &wasm_test_allocator, config);
 }
 
 static void wasm_test_init_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
@@ -286,6 +305,12 @@ static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
                  "allocator leak after test %s: %zu live blocks",
                  case_name,
                  g_wasm_test_alloc_stats.live_blocks);
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.mismatches == 0,
+                 "allocator misuse in test %s: %zu frees or resizes with the wrong size or alignment",
+                 case_name,
+                 g_wasm_test_alloc_stats.mismatches);
+    g_wasm_test_alloc_stats.mismatches = 0;
+    g_wasm_test_alloc_fail_countdown = 0;
 }
 
 #define wasm_init(rt) wasm_test_init_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
@@ -897,9 +922,8 @@ WL_TEST(test_add) {
     wasm_destroy(&rt);
 
     alloc_after = wasm_test_alloc_snapshot();
-    alloc_delta = (alloc_after.malloc_calls - alloc_before.malloc_calls) +
-                  (alloc_after.realloc_calls - alloc_before.realloc_calls) +
-                  (alloc_after.calloc_calls - alloc_before.calloc_calls);
+    alloc_delta = (alloc_after.alloc_calls - alloc_before.alloc_calls) +
+                  (alloc_after.resize_calls - alloc_before.resize_calls);
     free_delta = alloc_after.free_calls - alloc_before.free_calls;
     WL_CHECK_MSG(t, alloc_delta > 0, "%s", "expected custom wasm allocators to be exercised");
     WL_CHECK_MSG(t, free_delta > 0, "%s", "expected custom wasm allocator frees during cleanup");
@@ -7330,7 +7354,7 @@ WL_TEST(test_runtime_config_rejects_zero_limits) {
     WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
 
-    WL_CHECK(t, wasm_runtime_new(&cfg) == NULL);
+    WL_CHECK(t, wasm_runtime_new(&wasm_test_allocator, &cfg) == NULL);
 }
 
 WL_TEST(test_runtime_config_limits_operand_stack_validation) {
@@ -7549,6 +7573,7 @@ WL_TEST(test_frame_arena_allocator) {
     void* big;
 
     memset(&rt, 0, sizeof(rt));
+    rt.allocator = wasm_test_allocator;
 
     WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
     WL_CHECK_MSG(t, rt.frame_arena != NULL, "%s", "expected a first arena block");
@@ -8417,8 +8442,11 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_memory_length(NULL) == 0);
     wasm_memory_free(NULL);
     wasm_table_free(NULL);
-    WL_CHECK(t, wasm_memory_new(2, 1, 0) == NULL);
-    WL_CHECK(t, wasm_table_new(WASM_TYPE_I32, 1, 1) == NULL);
+    WL_CHECK(t, wasm_memory_new(&wasm_test_allocator, 2, 1, 0) == NULL);
+    WL_CHECK(t, wasm_memory_new(NULL, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_shared_memory_new(NULL, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(&wasm_test_allocator, WASM_TYPE_I32, 1, 1) == NULL);
+    WL_CHECK(t, wasm_table_new(NULL, WASM_TYPE_FUNCREF, 1, 1) == NULL);
     WL_CHECK(t, wasm_table_count(NULL) == 0);
     WL_CHECK(t, wasm_module_table(NULL, 0) == NULL);
     (void)wasm_table_type(NULL, 0);
@@ -8719,6 +8747,107 @@ static wasm_error_t wasm_test_host_add(wasm_module_t* mod, const wasm_value_t* a
     (void)userdata;
     results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32);
     return WASM_OK;
+}
+
+WL_TEST(test_allocator_contract) {
+    const wasm_allocator_t* libc = wasm_libc_allocator();
+    wasm_allocator_t missing = wasm_test_allocator;
+    wasm_runtime_t* rt;
+    size_t align;
+
+    WL_CHECK(t, libc && libc->alloc && libc->resize && libc->free);
+    for (align = 1; align <= 4096u; align *= 2u) {
+        uint8_t* p = (uint8_t*)libc->alloc(libc->ctx, 3u, align);
+        uint8_t* q;
+
+        WL_CHECK_MSG(t, p && ((uintptr_t)p & (align - 1u)) == 0, "alloc misaligned for %zu", align);
+        if (!p) continue;
+        memcpy(p, "abc", 3u);
+        q = (uint8_t*)libc->resize(libc->ctx, p, 3u, 5000u, align);
+        WL_CHECK_MSG(t, q && ((uintptr_t)q & (align - 1u)) == 0 && memcmp(q, "abc", 3u) == 0,
+                     "resize misaligned or lost data for %zu", align);
+        libc->free(libc->ctx, q ? q : p, q ? 5000u : 3u, align);
+    }
+
+    WL_CHECK(t, wasm_runtime_new(NULL, NULL) == NULL);
+    missing.resize = NULL;
+    WL_CHECK(t, wasm_runtime_new(&missing, NULL) == NULL);
+    WL_CHECK(t, wasm_memory_new(&missing, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(&missing, WASM_TYPE_FUNCREF, 1, 1) == NULL);
+    rt = wasm_runtime_new(libc, NULL);
+    WL_CHECK(t, rt != NULL && wasm_runtime_allocator(rt)->alloc == libc->alloc);
+    wasm_runtime_free(rt);
+}
+
+WL_TEST(test_allocation_failures_unwind_without_leaks) {
+    /* Imports env.add; run(1) grows memory and a table, allocates GC objects, throws through try_table,
+     * calls through the table, and catches with a legacy try, returning 123. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x21, 0x07, 0x5f, 0x01, 0x7f, 0x01, 0x5e, 0x7f, 0x01,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7e, 0x00, 0x60, 0x01,
+        0x7f, 0x00, 0x60, 0x00, 0x02, 0x7f, 0x7e, 0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x64, 0x64,
+        0x00, 0x03, 0x03, 0x05, 0x04, 0x02, 0x02, 0x02, 0x02, 0x04, 0x04, 0x01, 0x70, 0x00, 0x04, 0x05, 0x04, 0x01,
+        0x01, 0x01, 0x04, 0x0d, 0x05, 0x02, 0x00, 0x04, 0x00, 0x05, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x05, 0x0b,
+        0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x04, 0x09, 0x08, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x01,
+        0x02, 0x0a, 0x7e, 0x04, 0x07, 0x00, 0x20, 0x00, 0x41, 0x02, 0x6c, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x41, 0x03,
+        0x6c, 0x0b, 0x0e, 0x00, 0x06, 0x7f, 0x20, 0x00, 0x08, 0x01, 0x07, 0x01, 0x41, 0x01, 0x6a, 0x0b, 0x0b, 0x5d,
+        0x02, 0x01, 0x63, 0x00, 0x01, 0x63, 0x01, 0x41, 0x01, 0x40, 0x00, 0x1a, 0xd2, 0x01, 0x41, 0x02, 0xfc, 0x0f,
+        0x00, 0x1a, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x01, 0x41, 0x07, 0x41, 0x03, 0xfb, 0x06, 0x01, 0x21, 0x02,
+        0x02, 0x06, 0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x41, 0x01, 0x11, 0x02, 0x00, 0x23, 0x00, 0x6a,
+        0x42, 0x09, 0x08, 0x00, 0x0b, 0x00, 0x0b, 0x1a, 0x20, 0x01, 0xfb, 0x02, 0x00, 0x00, 0x6a, 0x20, 0x02, 0x41,
+        0x02, 0xfb, 0x0b, 0x01, 0x6a, 0x41, 0x10, 0x2d, 0x00, 0x00, 0x6a, 0x20, 0x00, 0x10, 0x03, 0x6a, 0x41, 0x01,
+        0x10, 0x00, 0x0b, 0x0b, 0x0b, 0x01, 0x00, 0x41, 0x10, 0x0b, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x58,
+        0x04, 0x6e, 0x61, 0x6d, 0x65, 0x01, 0x1e, 0x04, 0x00, 0x03, 0x61, 0x64, 0x64, 0x01, 0x06, 0x64, 0x6f, 0x75,
+        0x62, 0x6c, 0x65, 0x02, 0x06, 0x74, 0x72, 0x69, 0x70, 0x6c, 0x65, 0x03, 0x06, 0x6c, 0x65, 0x67, 0x61, 0x63,
+        0x79, 0x02, 0x09, 0x01, 0x04, 0x02, 0x01, 0x01, 0x73, 0x02, 0x01, 0x61, 0x03, 0x06, 0x01, 0x04, 0x01, 0x00,
+        0x01, 0x68, 0x04, 0x0e, 0x03, 0x00, 0x02, 0x70, 0x74, 0x01, 0x03, 0x61, 0x72, 0x72, 0x02, 0x02, 0x75, 0x6e,
+        0x07, 0x04, 0x01, 0x00, 0x01, 0x67, 0x0b, 0x08, 0x02, 0x00, 0x01, 0x65, 0x01, 0x02, 0x65, 0x31,
+    };
+    size_t fail_at;
+    int completed = 0;
+
+    for (fail_at = 1; fail_at < 100000u && !completed; fail_at++) {
+        wasm_runtime_t* rt;
+        wasm_module_t* compiled = NULL;
+        wasm_module_t* m = NULL;
+        wasm_value_t* held = NULL;
+        wasm_value_t arg = wasm_i32(1);
+        wasm_value_t result = wasm_i32(0);
+        wasm_value_t field = wasm_i32(4);
+        wasm_value_t object;
+        int32_t fmt_result = 0;
+        wasm_error_t err = WASM_ERR_OOM;
+
+        g_wasm_test_alloc_fail_countdown = fail_at;
+        rt = wasm_runtime_new(&wasm_test_allocator, NULL);
+        if (rt && wasm_bind_host_func(rt, "env", "add", "ii(i)", wasm_test_host_add, NULL) == WASM_OK) {
+            compiled = wasm_compile(rt, module_bytes, sizeof(module_bytes));
+            m = compiled ? wasm_instantiate(compiled) : NULL;
+            if (m) err = wasm_call(m, "run", &arg, 1, &result, 1);
+            if (err == WASM_OK) err = wasm_call_fmt(m, "run", "i(i)", 1, &fmt_result);
+            if (err == WASM_OK) err = wasm_struct_new(m, 0, &field, 1, &object);
+            if (err == WASM_OK) {
+                held = wasm_ref_hold(rt, object);
+                if (!held) err = WASM_ERR_OOM;
+            }
+            wasm_gc_collect(rt);
+        }
+        if (g_wasm_test_alloc_fail_countdown != 0) {
+            completed = 1;
+            WASM_CHECK_OK(t, err);
+            WASM_CHECK_I32(t, result.of.i32, 123);
+            WASM_CHECK_I32(t, fmt_result, 123);
+        }
+        g_wasm_test_alloc_fail_countdown = 0;
+        if (held) wasm_ref_release(rt, held);
+        wasm_module_free(m);
+        wasm_module_free(compiled);
+        wasm_runtime_free(rt);
+        WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0, "%zu blocks leaked when allocation %zu failed",
+                     g_wasm_test_alloc_stats.live_blocks, fail_at);
+        if (g_wasm_test_alloc_stats.live_blocks != 0) break;
+    }
+    WL_CHECK_MSG(t, completed, "%s", "expected the run to succeed once no allocation fails");
 }
 
 WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
@@ -12864,7 +12993,7 @@ WL_TEST(test_threads_shared_memory_across_runtimes) {
     wasm_test_shared_worker_t workers[WORKERS + 1];
     wasm_test_thread_start_t starts[WORKERS + 1];
     wasm_test_thread_t threads[WORKERS + 1];
-    wasm_memory_t* memory = wasm_shared_memory_new(1, 1, 0);
+    wasm_memory_t* memory = wasm_shared_memory_new(&wasm_test_allocator, 1, 1, 0);
     wasm_test_shared_worker_t* waiter = &workers[WORKERS];
     wasm_value_t results[1];
     uint32_t counter;
@@ -17056,8 +17185,8 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
         wasm_module_free(c);
     }
 
-    memory = wasm_memory_new(1, 2, 0);
-    table = wasm_table_new(WASM_TYPE_FUNCREF, 1, UINT32_MAX);
+    memory = wasm_memory_new(&wasm_test_allocator, 1, 2, 0);
+    table = wasm_table_new(&wasm_test_allocator, WASM_TYPE_FUNCREF, 1, UINT32_MAX);
     WL_CHECK(t, memory != NULL && table != NULL);
     memset(&memory_import, 0, sizeof(memory_import));
     memory_import.module = "host";
@@ -17281,6 +17410,8 @@ int main(void) {
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
         { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
+        { "allocator: libc alignment and invalid allocators", test_allocator_contract },
+        { "allocator: every failing allocation unwinds without leaks", test_allocation_failures_unwind_without_leaks },
         { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
         { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
         { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },

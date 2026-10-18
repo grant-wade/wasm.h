@@ -228,7 +228,8 @@ static int wasm__bytes_equal(const void* lhs, size_t lhs_len, const void* rhs, s
     return memcmp(lhs, rhs, lhs_len) == 0;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** out_name, uint32_t* out_len) {
+WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(const wasm_allocator_t* a, wasm__reader_t* r, char** out_name,
+                                                   uint32_t* out_len) {
     uint32_t len = wasm__read_leb128_u32(r);
     char* name;
 
@@ -246,7 +247,7 @@ WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** ou
         return WASM_ERR_MALFORMED;
     }
 
-    name = (char*)WASM_MALLOC((size_t)len + 1u);
+    name = (char*)wasm__malloc(a, (size_t)len + 1u);
     if (!name) return WASM_ERR_OOM;
 
     if (len > 0) memcpy(name, r->ptr, len);
@@ -257,8 +258,8 @@ WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** ou
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name) {
-    return wasm__read_name_owned_len(r, out_name, NULL);
+WASM_PRIVATE wasm_error_t wasm__read_name_owned(const wasm_allocator_t* a, wasm__reader_t* r, char** out_name) {
+    return wasm__read_name_owned_len(a, r, out_name, NULL);
 }
 
 WASM_PRIVATE int wasm__export_name_matches_bytes(const wasm_export_t* exp,
@@ -278,20 +279,20 @@ WASM_PRIVATE const char* wasm__export_name_cstr(const wasm_export_t* exp) {
     return exp->name;
 }
 
-WASM_PRIVATE void wasm__free_export(wasm_export_t* exp) {
+WASM_PRIVATE void wasm__free_export(const wasm_allocator_t* a, wasm_export_t* exp) {
     if (!exp) return;
-    WASM_FREE(exp->name);
+    wasm__free(a, exp->name);
     exp->name = NULL;
     exp->name_len = 0u;
 }
 
-WASM_PRIVATE char* wasm__strdup(const char* text) {
+WASM_PRIVATE char* wasm__strdup(const wasm_allocator_t* a, const char* text) {
     size_t len;
     char* copy;
 
     if (!text) return NULL;
     len = strlen(text);
-    copy = (char*)WASM_MALLOC(len + 1u);
+    copy = (char*)wasm__malloc(a, len + 1u);
     if (!copy) return NULL;
     if (len > 0u) memcpy(copy, text, len);
     copy[len] = '\0';

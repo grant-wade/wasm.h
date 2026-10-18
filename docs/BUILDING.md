@@ -100,7 +100,7 @@ If using a hook manager, call `.githooks/pre-commit` from the existing hook inst
 
 `./cbuild -t wasm_runtime` builds `build/<config>/libwasm_runtime.a` (`wasm_runtime.lib` with MSVC). Link it, add `src/` to the application's include path, link the math library where it is separate (`-lm`), and include `wasm.h` without defining `WASM_IMPL`.
 
-To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform and allocator definitions consistently to every runtime translation unit. For platform-enabled POSIX builds, compile and link with `-pthread`.
+To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform definitions consistently to every runtime translation unit. For platform-enabled POSIX builds, compile and link with `-pthread`.
 
 ## Standalone header
 

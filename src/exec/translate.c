@@ -3,6 +3,7 @@
 #include "../internal/alloc.h"
 #include "../portable.h"
 #include "../reader.h"
+#include "../runtime.h"
 #include "../types/canonical.h"
 #include "../values.h"
 #include <string.h>
@@ -29,6 +30,7 @@ typedef struct wasm__xclause_t {
 } wasm__xclause_t;
 
 typedef struct wasm__translator_t {
+    const wasm_allocator_t* allocator;
     uint32_t* ops;
     uint32_t len;
     uint32_t cap;
@@ -61,7 +63,7 @@ static void* wasm__x_grow(wasm__translator_t* t, void* buf, uint32_t* cap, uint3
         }
         new_cap *= 2u;
     }
-    grown = wasm__realloc_array(buf, new_cap, size);
+    grown = wasm__realloc_array(t->allocator, buf, new_cap, size);
     if (!grown) {
         t->failed = 1;
         return buf;
@@ -181,11 +183,11 @@ static void wasm__x_record_offset(wasm__translator_t* t, uint32_t offset) {
 }
 
 static void wasm__x_free(wasm__translator_t* t) {
-    WASM_FREE(t->ops);
-    WASM_FREE(t->offsets);
-    WASM_FREE(t->frames);
-    WASM_FREE(t->clauses);
-    WASM_FREE(t->try_operands);
+    wasm__free(t->allocator, t->ops);
+    wasm__free(t->allocator, t->offsets);
+    wasm__free(t->allocator, t->frames);
+    wasm__free(t->allocator, t->clauses);
+    wasm__free(t->allocator, t->try_operands);
 }
 
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func, const uint32_t* heights) {
@@ -530,6 +532,7 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     wasm_error_t err;
 
     memset(&t, 0, sizeof(t));
+    t.allocator = &mod->rt->allocator;
     err = wasm__x_body(&t, mod, func, heights);
     if (err == WASM_OK) {
         wasm__x_try_tables(&t);
@@ -539,7 +542,7 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
         wasm__x_free(&t);
         return err;
     }
-    wasm__free_translation(func);
+    wasm__free_translation(&mod->rt->allocator, func);
     func->ops = t.ops;
     func->num_ops = t.len;
     func->op_offsets = t.offsets;
@@ -551,22 +554,22 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__copy_translation(wasm_func_t* dst, const wasm_func_t* src) {
+WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm_func_t* dst, const wasm_func_t* src) {
     uint32_t* ops = NULL;
     uint32_t* offsets = NULL;
 
     if (src->ops) {
-        ops = (uint32_t*)wasm__malloc_array(src->num_ops, sizeof(uint32_t));
-        offsets = (uint32_t*)wasm__malloc_array((size_t)src->num_op_offsets * 2u, sizeof(uint32_t));
+        ops = (uint32_t*)wasm__malloc_array(a, src->num_ops, sizeof(uint32_t));
+        offsets = (uint32_t*)wasm__malloc_array(a, (size_t)src->num_op_offsets * 2u, sizeof(uint32_t));
         if (!ops || !offsets) {
-            WASM_FREE(ops);
-            WASM_FREE(offsets);
+            wasm__free(a, ops);
+            wasm__free(a, offsets);
             return WASM_ERR_OOM;
         }
         memcpy(ops, src->ops, src->num_ops * sizeof(uint32_t));
         memcpy(offsets, src->op_offsets, (size_t)src->num_op_offsets * 2u * sizeof(uint32_t));
     }
-    wasm__free_translation(dst);
+    wasm__free_translation(a, dst);
     dst->ops = ops;
     dst->num_ops = src->num_ops;
     dst->op_offsets = offsets;
@@ -575,9 +578,9 @@ WASM_PRIVATE wasm_error_t wasm__copy_translation(wasm_func_t* dst, const wasm_fu
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_translation(wasm_func_t* func) {
-    WASM_FREE(func->ops);
-    WASM_FREE(func->op_offsets);
+WASM_PRIVATE void wasm__free_translation(const wasm_allocator_t* a, wasm_func_t* func) {
+    wasm__free(a, func->ops);
+    wasm__free(a, func->op_offsets);
     func->ops = NULL;
     func->op_offsets = NULL;
     func->num_ops = 0;

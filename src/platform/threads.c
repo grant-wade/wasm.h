@@ -1,7 +1,6 @@
 #include "threads.h"
 #include "host.h"
 #include "../atomics.h"
-#include "../internal/alloc.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -254,7 +253,7 @@ WASM_PRIVATE uint8_t* wasm__platform_shared_reserve(uint64_t min_bytes, uint64_t
 #if defined(WASM__THREADS_WINDOWS)
         base = VirtualAlloc(NULL, (SIZE_T)request, MEM_RESERVE, PAGE_NOACCESS);
 #else
-        base = WASM_CALLOC(1u, (size_t)request);
+        base = calloc(1u, (size_t)request);
 #endif
         if (base) {
             *out_bytes = bytes;
@@ -283,6 +282,6 @@ WASM_PRIVATE void wasm__platform_shared_release(uint8_t* base, uint64_t reserved
     VirtualFree(base, 0, MEM_RELEASE);
 #else
     (void)reserved_bytes;
-    WASM_FREE(base);
+    free(base);
 #endif
 }

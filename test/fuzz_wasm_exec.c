@@ -64,18 +64,18 @@ static void wasm_fuzz_stubs_free(wasm_fuzz_stubs_t* stubs) {
 
     for (i = 0; i < stubs->count; i++) {
         if (stubs->memories[i]) {
-            WASM_FREE(stubs->memories[i]->data);
-            WASM_FREE(stubs->memories[i]);
+            wasm__free_memory(stubs->memories[i]);
+            free(stubs->memories[i]);
         }
         if (stubs->tables[i]) {
-            WASM_FREE(stubs->tables[i]->elems);
-            WASM_FREE(stubs->tables[i]);
+            wasm__free_table(stubs->tables[i]);
+            free(stubs->tables[i]);
         }
-        WASM_FREE(stubs->globals[i]);
+        free(stubs->globals[i]);
     }
-    WASM_FREE(stubs->memories);
-    WASM_FREE(stubs->tables);
-    WASM_FREE(stubs->globals);
+    free(stubs->memories);
+    free(stubs->tables);
+    free(stubs->globals);
     memset(stubs, 0, sizeof(*stubs));
 }
 
@@ -87,18 +87,16 @@ static void wasm_fuzz_stub_memory(wasm_runtime_t* rt, const wasm_module_t* compi
     wasm_memory_import_t imp;
 
     if (declared->pages > WASM_FUZZ_MAX_MEMORY_BYTES / page_size) return;
-    memory = (wasm_memory_t*)WASM_CALLOC(1, sizeof(*memory));
+    memory = (wasm_memory_t*)calloc(1, sizeof(*memory));
     if (!memory) return;
+    memory->allocator = *wasm_libc_allocator();
     memory->pages = declared->pages;
     memory->max_pages = declared->max_pages;
     memory->is_64 = declared->is_64;
     memory->page_size = declared->page_size;
-    if (memory->pages > 0) {
-        memory->data = (uint8_t*)WASM_CALLOC(1, (size_t)(memory->pages * page_size));
-        if (!memory->data) {
-            WASM_FREE(memory);
-            return;
-        }
+    if (wasm__init_memory_storage(memory, 0) != WASM_OK) {
+        free(memory);
+        return;
     }
     stubs->memories[slot] = memory;
     imp.module = info->module;
@@ -113,26 +111,22 @@ static void wasm_fuzz_stub_table(wasm_runtime_t* rt, const wasm_module_t* compil
     wasm_table_t* table;
     wasm_table_import_t imp;
     wasm_value_t fill = wasm_i32(0);
-    uint32_t i;
 
     if (declared->size > WASM_FUZZ_MAX_TABLE_ELEMENTS ||
         !wasm_fuzz_default_value(declared->reftype, &declared->reftype_info, &fill))
         return;
-    table = (wasm_table_t*)WASM_CALLOC(1, sizeof(*table));
+    table = (wasm_table_t*)calloc(1, sizeof(*table));
     if (!table) return;
+    table->allocator = *wasm_libc_allocator();
     table->reftype = declared->reftype;
     table->reftype_info = declared->reftype_info;
     table->default_value = fill;
     table->size = declared->size;
     table->max_size = declared->max_size;
     table->is_64 = declared->is_64;
-    if (table->size > 0) {
-        table->elems = (wasm_value_t*)WASM_MALLOC((size_t)table->size * sizeof(wasm_value_t));
-        if (!table->elems) {
-            WASM_FREE(table);
-            return;
-        }
-        for (i = 0; i < table->size; i++) table->elems[i] = fill;
+    if (wasm__init_table_storage(table) != WASM_OK) {
+        free(table);
+        return;
     }
     stubs->tables[slot] = table;
     imp.module = info->module;
@@ -145,9 +139,9 @@ static void wasm_fuzz_stub_imports(wasm_runtime_t* rt, wasm_module_t* compiled, 
     uint32_t count = wasm_import_count(compiled);
     uint32_t i;
 
-    stubs->memories = (wasm_memory_t**)WASM_CALLOC(count ? count : 1u, sizeof(*stubs->memories));
-    stubs->tables = (wasm_table_t**)WASM_CALLOC(count ? count : 1u, sizeof(*stubs->tables));
-    stubs->globals = (wasm_value_t**)WASM_CALLOC(count ? count : 1u, sizeof(*stubs->globals));
+    stubs->memories = (wasm_memory_t**)calloc(count ? count : 1u, sizeof(*stubs->memories));
+    stubs->tables = (wasm_table_t**)calloc(count ? count : 1u, sizeof(*stubs->tables));
+    stubs->globals = (wasm_value_t**)calloc(count ? count : 1u, sizeof(*stubs->globals));
     if (!stubs->memories || !stubs->tables || !stubs->globals) return;
     stubs->count = count;
 
@@ -181,11 +175,11 @@ static void wasm_fuzz_stub_imports(wasm_runtime_t* rt, wasm_module_t* compiled, 
                 break;
             case WASM_IMPORT_GLOBAL: {
                 wasm_global_import_t imp;
-                wasm_value_t* value = (wasm_value_t*)WASM_MALLOC(sizeof(*value));
+                wasm_value_t* value = (wasm_value_t*)malloc(sizeof(*value));
 
                 if (!value) break;
                 if (!wasm_fuzz_default_value(info->type, &info->ref_type, value)) {
-                    WASM_FREE(value);
+                    free(value);
                     break;
                 }
                 stubs->globals[i] = value;
@@ -243,7 +237,7 @@ static void wasm_fuzz_instance_open(wasm_fuzz_instance_t* inst, const uint8_t* d
     config.max_table_elements = WASM_FUZZ_MAX_TABLE_ELEMENTS;
     config.max_gc_heap_bytes = WASM_FUZZ_MAX_GC_HEAP_BYTES;
 
-    inst->rt = wasm_runtime_new(&config);
+    inst->rt = wasm_runtime_new(wasm_libc_allocator(), &config);
     if (!inst->rt || wasm_runtime_last_error(inst->rt) != WASM_OK) return;
     wasm_runtime_enable_all_features(inst->rt);
     wasm_runtime_disable_feature(inst->rt, WASM_FEATURE_THREADS);
@@ -341,9 +335,9 @@ static void wasm_fuzz_call_exports(wasm_fuzz_instance_t* ref, wasm_fuzz_instance
         if (wasm_export_kind(ref->instance, i) != WASM_EXPORT_FUNC) continue;
         type = wasm_func_functype(ref->instance, func_idx);
         if (!type) continue;
-        args = (wasm_value_t*)WASM_CALLOC(type->num_params ? type->num_params : 1u, sizeof(*args));
-        results = (wasm_value_t*)WASM_CALLOC(type->num_results ? type->num_results : 1u, sizeof(*results));
-        stepped_results = (wasm_value_t*)WASM_CALLOC(type->num_results ? type->num_results : 1u, sizeof(*results));
+        args = (wasm_value_t*)calloc(type->num_params ? type->num_params : 1u, sizeof(*args));
+        results = (wasm_value_t*)calloc(type->num_results ? type->num_results : 1u, sizeof(*results));
+        stepped_results = (wasm_value_t*)calloc(type->num_results ? type->num_results : 1u, sizeof(*results));
         for (p = 0; args && p < type->num_params; p++) {
             if (!wasm_fuzz_default_value(type->params[p], type->param_reftypes ? &type->param_reftypes[p] : NULL,
                                          &args[p]))
@@ -376,9 +370,9 @@ static void wasm_fuzz_call_exports(wasm_fuzz_instance_t* ref, wasm_fuzz_instance
                 }
             }
         }
-        WASM_FREE(args);
-        WASM_FREE(results);
-        WASM_FREE(stepped_results);
+        free(args);
+        free(results);
+        free(stepped_results);
         if (stop) break;
     }
 }

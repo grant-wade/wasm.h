@@ -82,18 +82,18 @@ typedef struct __stat64 wasm__wasi_host_stat_t;
 typedef struct stat wasm__wasi_host_stat_t;
 #endif
 
-WASM_PRIVATE char* wasm__wasi_strdup(const char* text);
+WASM_PRIVATE char* wasm__wasi_strdup(const wasm_allocator_t* a, const char* text);
 
 WASM_PRIVATE int wasm__wasi_host_close(int fd);
 
 WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode);
 
-WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry);
+WASM_PRIVATE void wasm__wasi_fd_entry_reset(const wasm_allocator_t* a, wasm__wasi_fd_entry_t* entry);
 
-WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings);
+WASM_PRIVATE void wasm__wasi_strings_free(const wasm_allocator_t* a, wasm__wasi_strings_t* strings);
 
 /* Replaces strings with copies of values; on failure strings is unchanged. */
-WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(const wasm_allocator_t* a, wasm__wasi_strings_t* strings, uint32_t count,
                                                  const char* const* values);
 
 WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
@@ -117,7 +117,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint32_t fd);
 
-WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+WASM_PRIVATE int wasm__wasi_read_guest_string(const wasm_allocator_t* a, wasm_memory_t* memory,
                                         uint64_t mem_size,
                                         uint32_t ptr,
                                         uint32_t len,
@@ -128,7 +128,7 @@ WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
 WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t* out_depth);
 
 /* Reads a guest path that must stay beneath its directory; returns a WASI errno. */
-WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(const wasm_allocator_t* a, wasm_memory_t* memory,
                                            uint64_t mem_size,
                                            uint32_t ptr,
                                            uint32_t len,
@@ -159,33 +159,33 @@ WASM_PRIVATE int wasm__wasi_host_pread(int fd, void* buf, size_t len, uint64_t o
 WASM_PRIVATE int wasm__wasi_host_pwrite(int fd, const void* buf, size_t len, uint64_t offset, size_t* out_count);
 
 #if defined(_WIN32)
-WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out_wide);
+WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const wasm_allocator_t* a, const char* text, wchar_t** out_wide);
 
-WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out_text);
+WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wasm_allocator_t* a, const wchar_t* text, char** out_text);
 
 WASM_PRIVATE int wasm__wasi_windows_path_is_absolute(const char* path);
 
-WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path, char** out_path);
+WASM_PRIVATE int wasm__wasi_windows_join_path(const wasm_allocator_t* a, const char* base, const char* path, char** out_path);
 
-WASM_PRIVATE int wasm__wasi_windows_stat_path(const char* path, wasm__wasi_host_stat_t* st);
+WASM_PRIVATE int wasm__wasi_windows_stat_path(const wasm_allocator_t* a, const char* path, wasm__wasi_host_stat_t* st);
 
-WASM_PRIVATE int wasm__wasi_windows_open_path(const char* path, int oflags);
+WASM_PRIVATE int wasm__wasi_windows_open_path(const wasm_allocator_t* a, const char* path, int oflags);
 
 WASM_PRIVATE uint32_t wasm__wasi_windows_error_to_wasi(DWORD error_code);
 
-WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm__wasi_fd_entry_t* entry,
+WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm_allocator_t* a, const wasm__wasi_fd_entry_t* entry,
                                            const char* path,
                                            char** out_path);
 
 WASM_PRIVATE uint8_t wasm__wasi_windows_filetype_from_attributes(DWORD attributes);
 
-WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_target);
+WASM_PRIVATE int wasm__wasi_windows_readlink_path(const wasm_allocator_t* a, const char* path, char** out_target);
 
 #endif
 
 WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_stat_t* st);
 
-WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
+WASM_PRIVATE int wasm__wasi_entry_stat(const wasm_allocator_t* a, const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
 #endif
 
 #endif /* WASM_PLATFORM_WASI_STATE_H */

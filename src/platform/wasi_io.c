@@ -528,11 +528,11 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
     else {
         if (entry->host_fd < 0) {
-            wasm__wasi_fd_entry_reset(entry);
+            wasm__wasi_fd_entry_reset(&mod->rt->allocator, entry);
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
         } else if (wasm__wasi_host_close(entry->host_fd) == 0) {
             entry->owns_host_fd = 0;
-            wasm__wasi_fd_entry_reset(entry);
+            wasm__wasi_fd_entry_reset(&mod->rt->allocator, entry);
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
         } else
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
@@ -722,7 +722,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
     {
         wasm__wasi_host_stat_t st;
 
-        if (!wasm__wasi_entry_stat(entry, &st)) {
+        if (!wasm__wasi_entry_stat(&mod->rt->allocator, entry, &st)) {
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
             return WASM_OK;
         }

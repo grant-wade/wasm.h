@@ -108,16 +108,16 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
 
     if (!rt->validator_stack) {
-        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack));
+        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity, sizeof(*rt->validator_stack));
         if (!rt->validator_stack) return WASM_ERR_OOM;
     }
     if (!rt->validator_stack_reftypes) {
         rt->validator_stack_reftypes =
-            (wasm_reftype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
+            (wasm_reftype_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
         if (!rt->validator_stack_reftypes) return WASM_ERR_OOM;
     }
     if (!rt->validator_frames) {
-        rt->validator_frames = (wasm__val_frame_t*)WASM_CALLOC(frame_capacity, sizeof(*rt->validator_frames));
+        rt->validator_frames = (wasm__val_frame_t*)wasm__calloc(&rt->allocator, frame_capacity, sizeof(*rt->validator_frames));
         if (!rt->validator_frames) return WASM_ERR_OOM;
     } else {
         memset(rt->validator_frames, 0, (size_t)frame_capacity * sizeof(*rt->validator_frames));
@@ -144,12 +144,12 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
         if (total_words > (uint64_t)(SIZE_MAX / sizeof(uint64_t))) return WASM_ERR_OOM;
         bytes = (size_t)total_words * sizeof(uint64_t);
         if (bytes > rt->validator_local_init_capacity) {
-            uint64_t* bits = (uint64_t*)WASM_REALLOC(rt->validator_local_init_bits, bytes);
+            uint64_t* bits = (uint64_t*)wasm__realloc(&rt->allocator, rt->validator_local_init_bits, bytes);
             uint64_t* entry_bits;
 
             if (!bits) return WASM_ERR_OOM;
             rt->validator_local_init_bits = bits;
-            entry_bits = (uint64_t*)WASM_REALLOC(rt->validator_local_init_entry_bits, bytes);
+            entry_bits = (uint64_t*)wasm__realloc(&rt->allocator, rt->validator_local_init_entry_bits, bytes);
             if (!entry_bits) return WASM_ERR_OOM;
             rt->validator_local_init_entry_bits = entry_bits;
             rt->validator_local_init_capacity = bytes;

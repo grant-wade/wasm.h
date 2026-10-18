@@ -28,9 +28,10 @@ WASM_PRIVATE wasm_value_t wasm__read_f32(wasm__reader_t* r);
 
 WASM_PRIVATE wasm_value_t wasm__read_f64(wasm__reader_t* r);
 
-WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(wasm__reader_t* r, char** out_name, uint32_t* out_len);
+WASM_PRIVATE wasm_error_t wasm__read_name_owned_len(const wasm_allocator_t* a, wasm__reader_t* r, char** out_name,
+                                                   uint32_t* out_len);
 
-WASM_PRIVATE wasm_error_t wasm__read_name_owned(wasm__reader_t* r, char** out_name);
+WASM_PRIVATE wasm_error_t wasm__read_name_owned(const wasm_allocator_t* a, wasm__reader_t* r, char** out_name);
 
 WASM_PRIVATE int wasm__export_name_matches_bytes(const wasm_export_t* exp,
                                            const uint8_t* name,
@@ -40,8 +41,8 @@ WASM_PRIVATE int wasm__export_name_matches_cstr(const wasm_export_t* exp, const 
 
 WASM_PRIVATE const char* wasm__export_name_cstr(const wasm_export_t* exp);
 
-WASM_PRIVATE void wasm__free_export(wasm_export_t* exp);
+WASM_PRIVATE void wasm__free_export(const wasm_allocator_t* a, wasm_export_t* exp);
 
-WASM_PRIVATE char* wasm__strdup(const char* text);
+WASM_PRIVATE char* wasm__strdup(const wasm_allocator_t* a, const char* text);
 
 #endif /* WASM_READER_H */

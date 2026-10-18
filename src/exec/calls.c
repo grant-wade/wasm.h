@@ -12,7 +12,7 @@
 
 WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
     if (label->caught_values) {
-        WASM_FREE(label->caught_values);
+        wasm__free(label->caught_allocator, label->caught_values);
         label->caught_values = NULL;
     }
     label->caught_tag = UINT32_MAX;
@@ -140,7 +140,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     is_root = (rt->call_frame_sp == base_frame_sp + 1u);
 
     if (result_count > 8) {
-        result_values = (wasm_value_t*)wasm__malloc_array(result_count, sizeof(wasm_value_t));
+        result_values = (wasm_value_t*)wasm__malloc_array(&rt->allocator, result_count, sizeof(wasm_value_t));
         if (!result_values) return WASM_ERR_OOM;
     }
 
@@ -166,7 +166,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
         for (i = 0; i < result_count; i++) rt->stack[rt->sp++] = result_values[i];
     }
 
-    if (result_values != result_values_buf) WASM_FREE(result_values);
+    if (result_values != result_values_buf) wasm__free(&rt->allocator, result_values);
     return WASM_OK;
 }
 

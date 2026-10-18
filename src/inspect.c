@@ -233,25 +233,25 @@ static void wasm__load_names(wasm_module_t* mod) {
         sub.malformed = 0;
         r.ptr += size;
         if (id == 0u && !mod->module_name) {
-            if (wasm__read_name_owned(&sub, &mod->module_name) != WASM_OK) return;
+            if (wasm__read_name_owned(&mod->rt->allocator, &sub, &mod->module_name) != WASM_OK) return;
         } else if (id == 1u) {
             uint32_t count = wasm__read_count(&sub);
             uint32_t i;
 
             if (sub.malformed || mod->num_funcs == 0) continue;
             if (!mod->func_names) {
-                mod->func_names = (char**)WASM_CALLOC(mod->num_funcs, sizeof(char*));
+                mod->func_names = (char**)wasm__calloc(&mod->rt->allocator, mod->num_funcs, sizeof(char*));
                 if (!mod->func_names) return;
             }
             for (i = 0; i < count; i++) {
                 uint32_t func_idx = wasm__read_leb128_u32(&sub);
                 char* name = NULL;
 
-                if (sub.malformed || wasm__read_name_owned(&sub, &name) != WASM_OK) return;
+                if (sub.malformed || wasm__read_name_owned(&mod->rt->allocator, &sub, &name) != WASM_OK) return;
                 if (func_idx < mod->num_funcs && !mod->func_names[func_idx])
                     mod->func_names[func_idx] = name;
                 else
-                    WASM_FREE(name);
+                    wasm__free(&mod->rt->allocator, name);
             }
         }
     }
@@ -359,7 +359,7 @@ static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_
                                            wasm_value_t** out_copy) {
     *out_copy = NULL;
     if (count == 0) return WASM_OK;
-    *out_copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
+    *out_copy = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, count, sizeof(wasm_value_t));
     if (!*out_copy) {
         WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "out of memory copying GC object values");
         return WASM_ERR_OOM;
@@ -403,7 +403,7 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
 
     for (i = 0; err == WASM_OK && i < st->num_fields; i++)
         err = wasm__gc_struct_store_field(object, st, i, values[i]);
-    WASM_FREE(values);
+    wasm__free(&mod->rt->allocator, values);
     if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
@@ -443,7 +443,7 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
 
     for (i = 0; err == WASM_OK && i < num_elems; i++)
         err = wasm__gc_array_store_element(object, at, i, values[i]);
-    WASM_FREE(values);
+    wasm__free(&mod->rt->allocator, values);
     if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);

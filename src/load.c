@@ -62,7 +62,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         return NULL;
     }
 
-    mod = (wasm_module_t*)WASM_CALLOC(1, sizeof(wasm_module_t));
+    mod = (wasm_module_t*)wasm__calloc(&rt->allocator, 1, sizeof(wasm_module_t));
     if (!mod) {
         WASM__SET_ERR(rt, WASM_ERR_OOM, "module alloc");
         return NULL;
@@ -72,10 +72,10 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     mod->is_compiled = compile_only;
     mod->loaded_features = rt->enabled_features;
     if (len > 0) {
-        mod->module_bytes = (uint8_t*)WASM_MALLOC(len);
+        mod->module_bytes = (uint8_t*)wasm__malloc(&rt->allocator, len);
         if (!mod->module_bytes) {
             WASM__SET_ERR(rt, WASM_ERR_OOM, "module bytes alloc");
-            WASM_FREE(mod);
+            wasm__free(&rt->allocator, mod);
             return NULL;
         }
         memcpy(mod->module_bytes, bytes, len);
@@ -220,7 +220,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         uint32_t fi;
 
         for (fi = mod->num_func_imports; fi < mod->num_funcs; fi++) {
-            err = wasm__copy_translation(&mod->funcs[fi], &compiled->funcs[fi]);
+            err = wasm__copy_translation(&rt->allocator, &mod->funcs[fi], &compiled->funcs[fi]);
             if (err != WASM_OK) WASM__LOAD_FAIL("copy_translation");
             mod->funcs[fi].max_label_depth = compiled->funcs[fi].max_label_depth;
         }
@@ -321,8 +321,10 @@ wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
 void wasm_module_free(wasm_module_t* mod) {
     wasm_gc_header_t* object;
     wasm__linked_func_t* linked;
+    const wasm_allocator_t* a;
     uint32_t i;
     if (!mod) return;
+    a = &mod->rt->allocator;
     if (mod->rt) {
         wasm__interp_cancel_using(mod->rt, mod);
         for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
@@ -338,39 +340,39 @@ void wasm_module_free(wasm_module_t* mod) {
     }
     if (mod->is_compiled) {
         for (i = 0; i < mod->num_globals; i++) {
-            if (mod->globals[i].is_import) WASM_FREE(mod->globals[i].import_value);
+            if (mod->globals[i].is_import) wasm__free(a, mod->globals[i].import_value);
         }
     }
-    for (i = 0; i < mod->num_types; i++) wasm__free_comptype(&mod->types[i]);
-    WASM_FREE(mod->types);
-    WASM_FREE(mod->rec_groups);
+    for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
+    wasm__free(a, mod->types);
+    wasm__free(a, mod->rec_groups);
     for (i = 0; i < mod->num_funcs; i++) {
-        WASM_FREE(mod->funcs[i].locals);
-        WASM_FREE(mod->funcs[i].local_reftypes);
-        wasm__free_translation(&mod->funcs[i]);
+        wasm__free(a, mod->funcs[i].locals);
+        wasm__free(a, mod->funcs[i].local_reftypes);
+        wasm__free_translation(a, &mod->funcs[i]);
     }
-    WASM_FREE(mod->funcs);
-    for (i = 0; i < mod->num_imports; i++) wasm__free_import_info(&mod->imports[i]);
-    WASM_FREE(mod->imports);
-    for (i = 0; i < mod->num_exports; i++) wasm__free_export(&mod->exports[i]);
-    WASM_FREE(mod->exports);
-    WASM_FREE(mod->globals);
-    WASM_FREE(mod->tags);
-    for (i = 0; i < mod->num_custom_sections; i++) wasm__free_custom_section(&mod->custom_sections[i]);
+    wasm__free(a, mod->funcs);
+    for (i = 0; i < mod->num_imports; i++) wasm__free_import_info(a, &mod->imports[i]);
+    wasm__free(a, mod->imports);
+    for (i = 0; i < mod->num_exports; i++) wasm__free_export(a, &mod->exports[i]);
+    wasm__free(a, mod->exports);
+    wasm__free(a, mod->globals);
+    wasm__free(a, mod->tags);
+    for (i = 0; i < mod->num_custom_sections; i++) wasm__free_custom_section(a, &mod->custom_sections[i]);
     if (mod->func_names) {
-        for (i = 0; i < mod->num_funcs; i++) WASM_FREE(mod->func_names[i]);
-        WASM_FREE(mod->func_names);
+        for (i = 0; i < mod->num_funcs; i++) wasm__free(a, mod->func_names[i]);
+        wasm__free(a, mod->func_names);
     }
-    WASM_FREE(mod->module_name);
-    WASM_FREE(mod->custom_sections);
-    for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(&mod->data_segments[i]);
-    WASM_FREE(mod->data_segments);
-    for (i = 0; i < mod->num_elem_segments; i++) wasm__free_elem_segment(&mod->elem_segments[i]);
-    WASM_FREE(mod->elem_segments);
+    wasm__free(a, mod->module_name);
+    wasm__free(a, mod->custom_sections);
+    for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(a, &mod->data_segments[i]);
+    wasm__free(a, mod->data_segments);
+    for (i = 0; i < mod->num_elem_segments; i++) wasm__free_elem_segment(a, &mod->elem_segments[i]);
+    wasm__free(a, mod->elem_segments);
     for (i = 0; i < mod->num_tables; i++) wasm__free_table(&mod->tables[i]);
-    WASM_FREE(mod->tables);
+    wasm__free(a, mod->tables);
     for (i = 0; i < mod->num_memories; i++) wasm__free_memory(&mod->memories[i]);
-    WASM_FREE(mod->memories);
-    WASM_FREE(mod->module_bytes);
-    WASM_FREE(mod);
+    wasm__free(a, mod->memories);
+    wasm__free(a, mod->module_bytes);
+    wasm__free(a, mod);
 }

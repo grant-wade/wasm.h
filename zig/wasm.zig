@@ -474,8 +474,52 @@ fn span(ptr: [*c]const u8) [:0]const u8 {
     return std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
 }
 
+/// Serves a `wasm_allocator_t` from the `std.mem.Allocator` its ctx points to.
+const AllocatorBridge = struct {
+    fn from(ctx: ?*anyopaque) std.mem.Allocator {
+        return @as(*const std.mem.Allocator, @ptrCast(@alignCast(ctx))).*;
+    }
+
+    fn alloc(ctx: ?*anyopaque, size: usize, alignment: usize) callconv(.c) ?*anyopaque {
+        return from(ctx).rawAlloc(size, .fromByteUnits(alignment), @returnAddress());
+    }
+
+    fn resize(ctx: ?*anyopaque, p: ?*anyopaque, old_size: usize, new_size: usize, alignment: usize) callconv(.c) ?*anyopaque {
+        const a = from(ctx);
+        const al: std.mem.Alignment = .fromByteUnits(alignment);
+        const old = @as([*]u8, @ptrCast(p))[0..old_size];
+        if (a.rawRemap(old, al, new_size, @returnAddress())) |moved| return moved;
+        const moved = a.rawAlloc(new_size, al, @returnAddress()) orelse return null;
+        const keep = @min(old_size, new_size);
+        @memcpy(moved[0..keep], old[0..keep]);
+        a.rawFree(old, al, @returnAddress());
+        return moved;
+    }
+
+    fn free(ctx: ?*anyopaque, p: ?*anyopaque, size: usize, alignment: usize) callconv(.c) void {
+        from(ctx).rawFree(@as([*]u8, @ptrCast(p))[0..size], .fromByteUnits(alignment), @returnAddress());
+    }
+
+    /// The returned allocator's ctx is `stored`, which must outlive every block it allocates.
+    fn wrap(stored: *const std.mem.Allocator) c.wasm_allocator_t {
+        return .{ .ctx = @constCast(stored), .alloc = alloc, .resize = resize, .free = free };
+    }
+
+    fn box(allocator: std.mem.Allocator) Error!*std.mem.Allocator {
+        const b = allocator.create(std.mem.Allocator) catch return error.OutOfMemory;
+        b.* = allocator;
+        return b;
+    }
+
+    fn unbox(ctx: ?*anyopaque) void {
+        const b: *std.mem.Allocator = @ptrCast(@alignCast(ctx));
+        b.*.destroy(b);
+    }
+};
+
 pub const Runtime = opaque {
-    pub fn init(config: Config) Error!*Runtime {
+    /// The runtime allocates everything it uses from `allocator`, which must outlive it.
+    pub fn init(allocator: std.mem.Allocator, config: Config) Error!*Runtime {
         var cfg: c.wasm_config_t = undefined;
         c.wasm_config_default(&cfg);
         if (config.max_stack_values) |v| cfg.max_stack_values = v;
@@ -490,12 +534,19 @@ pub const Runtime = opaque {
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
         if (config.max_gc_heap_bytes) |v| cfg.max_gc_heap_bytes = v;
         if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
-        return @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
+        const b = try AllocatorBridge.box(allocator);
+        const bridged = AllocatorBridge.wrap(b);
+        return @ptrCast(c.wasm_runtime_new(&bridged, &cfg) orelse {
+            allocator.destroy(b);
+            return error.OutOfMemory;
+        });
     }
 
     /// Free its modules first.
     pub fn deinit(rt: *Runtime) void {
+        const ctx = c.wasm_runtime_allocator(rt.raw()).*.ctx;
         c.wasm_runtime_free(rt.raw());
+        AllocatorBridge.unbox(ctx);
     }
 
     pub fn raw(rt: *Runtime) *c.wasm_runtime_t {
@@ -1097,24 +1148,35 @@ pub const Memory = struct {
 
 /// A memory for the threads proposal, shared by runtimes on separate threads through `Runtime.bindMemory`.
 /// It never moves when it grows, and must outlive every module that imports it.
-pub const SharedMemory = opaque {
+pub const SharedMemory = struct {
+    memory: *c.wasm_memory_t,
+    allocator: std.mem.Allocator,
+
     pub const Options = struct {
         pages: u64,
         max_pages: u64,
         memory64: bool = false,
     };
 
-    pub fn init(options: Options) Error!*SharedMemory {
-        const memory = c.wasm_shared_memory_new(options.pages, options.max_pages, @intFromBool(options.memory64));
-        return if (memory == null) error.OutOfMemory else @ptrCast(memory);
+    /// `allocator` must be thread-safe and outlive the memory.
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!*SharedMemory {
+        const shared = allocator.create(SharedMemory) catch return error.OutOfMemory;
+        shared.allocator = allocator;
+        const bridged = AllocatorBridge.wrap(&shared.allocator);
+        shared.memory = c.wasm_shared_memory_new(&bridged, options.pages, options.max_pages, @intFromBool(options.memory64)) orelse {
+            allocator.destroy(shared);
+            return error.OutOfMemory;
+        };
+        return shared;
     }
 
-    pub fn deinit(memory: *SharedMemory) void {
-        c.wasm_memory_free(memory.raw());
+    pub fn deinit(shared: *SharedMemory) void {
+        c.wasm_memory_free(shared.memory);
+        shared.allocator.destroy(shared);
     }
 
-    pub fn raw(memory: *SharedMemory) *c.wasm_memory_t {
-        return @ptrCast(@alignCast(memory));
+    pub fn raw(shared: *SharedMemory) *c.wasm_memory_t {
+        return shared.memory;
     }
 
     /// The bytes currently in bounds. Another thread may grow the memory, which keeps this slice valid.

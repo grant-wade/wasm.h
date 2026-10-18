@@ -10,14 +10,9 @@
  *   platform-backed WASI and Emscripten compatibility helpers.
  *
  * CUSTOM ALLOCATORS:
- *   #define WASM_MALLOC(sz)      my_malloc(sz)
- *   #define WASM_REALLOC(p, sz)  my_realloc(p, sz)
- *   #define WASM_FREE(p)         my_free(p)
- *   #define WASM_CALLOC(n, sz)   my_calloc(n, sz)
- *   #define WASM_GC_ALLOC(sz)    my_gc_alloc(sz)
- *   #define WASM_GC_FREE(p)      my_gc_free(p)
- *   #define WASM_IMPL
- *   #include "wasm.h"
+ *   Every runtime takes a wasm_allocator_t; wasm_libc_allocator() wraps malloc.
+ *   static const wasm_allocator_t my_allocator = { &my_ctx, my_alloc, my_resize, my_free };
+ *   rt = wasm_runtime_new(&my_allocator, NULL);
  *
  * QUICK START:
  *   wasm_runtime_t *rt;
@@ -25,7 +20,7 @@
  *   wasm_value_t args[1];
  *   wasm_value_t result;
  *
- *   rt = wasm_runtime_new(NULL);
+ *   rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
  *   if (!rt || wasm_runtime_last_error(rt) != WASM_OK) {
  *       wasm_runtime_free(rt);
  *       return 1;
@@ -517,10 +512,27 @@ typedef struct wasm_config_t {
     uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
 } wasm_config_t;
 
+/* Memory source for a runtime and for standalone memories and tables. size and new_size are never
+   0, p is never NULL, and align is a power of two. free and resize receive the size and alignment
+   the block was allocated with. resize returns the block, possibly moved, or NULL leaving the old
+   block intact. An allocator used by runtimes on several threads must be thread-safe. */
+typedef struct wasm_allocator_t {
+    void* ctx;
+    void* (*alloc)(void* ctx, size_t size, size_t align);
+    void* (*resize)(void* ctx, void* p, size_t old_size, size_t new_size, size_t align);
+    void (*free)(void* ctx, void* p, size_t size, size_t align);
+} wasm_allocator_t;
+
 /* ── Public API ───────────────────────────────────────────────────── */
+/* A static allocator over malloc, realloc, and free that honors alignments beyond malloc's. */
+const wasm_allocator_t* wasm_libc_allocator(void);
 void wasm_config_default(wasm_config_t* config);
-wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config);
+/* Returns NULL when allocator is NULL or lacks a function. The runtime copies *allocator; its ctx
+   must outlive the runtime. config may be NULL for the defaults. */
+wasm_runtime_t* wasm_runtime_new(const wasm_allocator_t* allocator, const wasm_config_t* config);
 void wasm_runtime_free(wasm_runtime_t* rt);
+/* The runtime's copy of the allocator passed to wasm_runtime_new. */
+const wasm_allocator_t* wasm_runtime_allocator(const wasm_runtime_t* rt);
 wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
 const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
@@ -604,11 +616,14 @@ uint8_t* wasm_memory_data(wasm_module_t* mod, uint32_t memory_index);
 uint64_t wasm_memory_size(const wasm_module_t* mod, uint32_t memory_index);
 int64_t wasm_memory_grow(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 /* Creates a zeroed memory for hosts to register with wasm_register_memory_import. It must outlive
-   every module that imports it. Growth reallocates its data with WASM_REALLOC. */
-wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+   every module that imports it. Its data comes from allocator, which is copied and also grows and
+   frees it; allocator's ctx must outlive the memory. Returns NULL for an invalid allocator. */
+wasm_memory_t* wasm_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages, int is_64);
 /* Creates a shared memory (threads proposal) for hosts to register as an import in several runtimes,
-   each used by its own thread. It must outlive every module that imports it. */
-wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+   each used by its own thread. It must outlive every module that imports it. Its data is reserved
+   from the operating system; allocator, as for wasm_memory_new, holds its bookkeeping. */
+wasm_memory_t* wasm_shared_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages,
+                                      int is_64);
 /* Frees a memory from wasm_memory_new or wasm_shared_memory_new. */
 void wasm_memory_free(wasm_memory_t* memory);
 /* The data and byte size of a memory handle; another thread may grow a shared one at any time. */
@@ -626,7 +641,10 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
 int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
 /* Creates a table of size null references for hosts to register with wasm_register_table_import;
    max_size UINT32_MAX means no maximum. It must outlive every module that imports it. */
-wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size);
+/* Creates a table for hosts to register with wasm_register_table_import, allocated from allocator as
+   for wasm_memory_new. */
+wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
+                             uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);
 uint32_t wasm_global_count(const wasm_module_t* mod);
 wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx);

@@ -28,7 +28,7 @@ typedef struct wasm__gc_mark_stack_t {
 /* Doubles a full mark stack of pointers; returns NULL and records the failure when out of memory. */
 static void* wasm__gc_grow(wasm__gc_mark_stack_t* stack, void* items, size_t* capacity) {
     size_t new_capacity = *capacity ? *capacity * 2u : 64u;
-    void* grown = wasm__realloc_array(items, new_capacity, sizeof(void*));
+    void* grown = wasm__realloc_array(&stack->rt->allocator, items, new_capacity, sizeof(void*));
 
     if (!grown) {
         stack->failed = 1;
@@ -344,15 +344,15 @@ static int wasm__gc_exception_is_marked(void* handle) {
     return ((wasm__exception_object_t*)handle)->marked;
 }
 
-static void wasm__gc_free_box(void* handle) {
-    WASM_FREE(handle);
+static void wasm__gc_free_box(const wasm_allocator_t* a, void* handle) {
+    wasm__free(a, handle);
 }
 
-static void wasm__gc_free_exception(void* handle) {
+static void wasm__gc_free_exception(const wasm_allocator_t* a, void* handle) {
     wasm__exception_object_t* exception = (wasm__exception_object_t*)handle;
 
-    WASM_FREE(exception->values);
-    WASM_FREE(exception);
+    wasm__free(a, exception->values);
+    wasm__free(a, exception);
 }
 
 static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
@@ -404,15 +404,15 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     stack.rt = rt;
     wasm__gc_mark_runtime_roots(&stack, rt);
     wasm__gc_drain_mark_stack(&stack);
-    WASM_FREE(stack.items);
-    WASM_FREE(stack.exceptions);
+    wasm__free(&rt->allocator, stack.items);
+    wasm__free(&rt->allocator, stack.exceptions);
     if (stack.failed) {
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory marking live GC objects");
         return WASM_ERR_OOM;
     }
 
-    wasm__handle_set_filter(&rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
-    wasm__handle_set_filter(&rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
+    wasm__handle_set_filter(&rt->allocator, &rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
+    wasm__handle_set_filter(&rt->allocator, &rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
 
     if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
     needed = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
@@ -431,9 +431,11 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     }
 
     if (live == 0 && new_size <= rt->gc_heap_size) {
-        new_heap = new_size > 0 && new_size < rt->gc_heap_size ? (uint8_t*)WASM_GC_ALLOC(new_size) : NULL;
+        new_heap = new_size > 0 && new_size < rt->gc_heap_size
+                       ? (uint8_t*)wasm__alloc_sized(&rt->allocator, new_size, WASM__BLOCK_ALIGN)
+                       : NULL;
         if (new_heap || new_size == 0) {
-            WASM_GC_FREE(rt->gc_heap);
+            wasm__free_sized(&rt->allocator, rt->gc_heap, rt->gc_heap_size, WASM__BLOCK_ALIGN);
             rt->gc_heap = new_heap;
             rt->gc_heap_size = new_size;
         }
@@ -442,7 +444,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
         return WASM_OK;
     }
 
-    new_heap = (uint8_t*)WASM_GC_ALLOC(new_size);
+    new_heap = (uint8_t*)wasm__alloc_sized(&rt->allocator, new_size, WASM__BLOCK_ALIGN);
     if (!new_heap) {
         WASM__SET_ERR(rt, WASM_ERR_OOM, "failed to allocate a %zu-byte GC heap", new_size);
         return WASM_ERR_OOM;
@@ -477,7 +479,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
         wasm__gc_forward_object_refs(rt, object);
     }
 
-    WASM_GC_FREE(rt->gc_heap);
+    wasm__free_sized(&rt->allocator, rt->gc_heap, rt->gc_heap_size, WASM__BLOCK_ALIGN);
     rt->gc_heap = new_heap;
     rt->gc_heap_size = new_size;
     rt->gc_heap_offset = new_offset;
@@ -499,7 +501,7 @@ wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value) {
             if (!block->slots[i].in_use) goto found;
         }
     }
-    block = (wasm__held_block_t*)WASM_CALLOC(1u, sizeof(*block));
+    block = (wasm__held_block_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*block));
     if (!block) return NULL;
     block->next = rt->held_values;
     rt->held_values = block;

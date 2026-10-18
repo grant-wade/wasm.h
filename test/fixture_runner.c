@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    runtime = wasm_runtime_new(NULL);
+    runtime = wasm_runtime_new(wasm_libc_allocator(), NULL);
     if (!runtime) {
         fprintf(stderr, "failed to initialize runtime\n");
         free(bytes);

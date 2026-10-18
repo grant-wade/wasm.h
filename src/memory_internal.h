@@ -66,11 +66,11 @@ WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table);
 
 WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_custom_section(wasm_custom_section_t* section);
+WASM_PRIVATE void wasm__free_custom_section(const wasm_allocator_t* a, wasm_custom_section_t* section);
 
 WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_elem_segment(wasm_elem_segment_t* segment);
+WASM_PRIVATE void wasm__free_elem_segment(const wasm_allocator_t* a, wasm_elem_segment_t* segment);
 
 WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 

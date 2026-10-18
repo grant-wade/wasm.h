@@ -96,15 +96,16 @@ WASM_PRIVATE int64_t wasm__wrap_i64_mul(int64_t lhs, int64_t rhs);
 
 WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_import_info(wasm_import_info_t* info);
+WASM_PRIVATE void wasm__free_import_info(const wasm_allocator_t* a, wasm_import_info_t* info);
 
 WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
 WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_exception_state(wasm__exception_state_t* ex);
+WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex);
 
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
+WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
+                                              wasm__exception_state_t* ex,
                                               uint32_t tag_index,
                                               uint64_t tag_identity,
                                               const wasm_value_t* values,
@@ -122,7 +123,7 @@ WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const 
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_data_segment(wasm_data_segment_t* segment);
+WASM_PRIVATE void wasm__free_data_segment(const wasm_allocator_t* a, wasm_data_segment_t* segment);
 
 WASM_PRIVATE wasm_table_t* wasm__table_actual(wasm_table_t* table);
 

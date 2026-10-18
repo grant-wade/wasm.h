@@ -13,13 +13,13 @@ typedef struct wasm__handle_set_t {
 
 WASM_PRIVATE int wasm__handle_set_contains(const wasm__handle_set_t* set, const void* handle);
 
-WASM_PRIVATE wasm_error_t wasm__handle_set_insert(wasm__handle_set_t* set, void* handle);
+WASM_PRIVATE wasm_error_t wasm__handle_set_insert(const wasm_allocator_t* a, wasm__handle_set_t* set, void* handle);
 
-/* Keeps the handles for which keep() returns nonzero and passes the rest to drop(). If the
+/* Keeps the handles for which keep() returns nonzero and passes the rest to drop() with a. If the
  * smaller table cannot be allocated, every handle is kept. */
-WASM_PRIVATE void wasm__handle_set_filter(wasm__handle_set_t* set, int (*keep)(void*),
-                                          void (*drop)(void*));
+WASM_PRIVATE void wasm__handle_set_filter(const wasm_allocator_t* a, wasm__handle_set_t* set, int (*keep)(void*),
+                                          void (*drop)(const wasm_allocator_t*, void*));
 
-WASM_PRIVATE void wasm__handle_set_free(wasm__handle_set_t* set);
+WASM_PRIVATE void wasm__handle_set_free(const wasm_allocator_t* a, wasm__handle_set_t* set);
 
 #endif /* WASM_HANDLES_H */
