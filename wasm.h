@@ -23444,6 +23444,7 @@ static WASM__NOINLINE wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod
     if (call_results != results_buf) wasm__free(&mod->rt->allocator, call_results);
     return err;
 }
+#undef WASM__NOINLINE
 
 /* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
    already given up its frame, so that frame's handlers are skipped. Returns

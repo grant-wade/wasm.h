@@ -17397,6 +17397,77 @@ WL_TEST(test_cross_module_call_indirect_checks_types_per_calling_module) {
     wasm_destroy(&rt);
 }
 
+typedef struct wasm_test_make_host_t {
+    wasm_module_t* owner;
+    int yield;
+} wasm_test_make_host_t;
+
+static wasm_error_t wasm_test_make_struct(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_make_host_t* host = (wasm_test_make_host_t*)userdata;
+    wasm_value_t field = wasm_i32(7);
+
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)num_results;
+    if (host->yield) return WASM_YIELD;
+    return wasm_struct_new(host->owner, 1, &field, 1, &results[0]);
+}
+
+WL_TEST(test_imports_called_indirectly_from_another_module_check_results_against_their_own_type) {
+    /* a: types array, struct $s, func returning (ref null $s); imports host.make and exports it in table t.
+     * b: types struct $s, array, the same func type; calls t[0] and returns 7 + ref.is_null. */
+    static const uint8_t a_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x5e, 0x7f, 0x00, 0x5f, 0x01, 0x7f, 0x00,
+        0x60, 0x00, 0x01, 0x63, 0x01, 0x02, 0x0d, 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x04, 0x6d, 0x61, 0x6b, 0x65,
+        0x00, 0x02, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01, 0x00, 0x09, 0x07, 0x01,
+        0x00, 0x41, 0x00, 0x0b, 0x01, 0x00,
+    };
+    static const uint8_t b_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x04, 0x5f, 0x01, 0x7f, 0x00, 0x5e, 0x7e, 0x00,
+        0x60, 0x00, 0x01, 0x63, 0x00, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x61, 0x01, 0x74, 0x01, 0x70,
+        0x00, 0x01, 0x03, 0x02, 0x01, 0x03, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00, 0x0a, 0x0d, 0x01,
+        0x0b, 0x00, 0x41, 0x07, 0x41, 0x00, 0x11, 0x02, 0x00, 0xd1, 0x6a, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_test_make_host_t host = { NULL, 0 };
+    wasm_import_t imp;
+    wasm_module_t* b;
+    wasm_value_t made;
+    wasm_value_t field = wasm_i32(9);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "host";
+    imp.name = "make";
+    imp.func = wasm_test_make_struct;
+    imp.userdata = &host;
+    WASM_CHECK_OK(t, wasm_register_import(&rt, &imp));
+    host.owner = wasm_load(&rt, a_bytes, sizeof(a_bytes));
+    WL_CHECK_MSG(t, host.owner != NULL, "%s", rt.error_msg);
+    if (!host.owner) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_register_module(&rt, "a", host.owner));
+    b = wasm_load(&rt, b_bytes, sizeof(b_bytes));
+    WL_CHECK_MSG(t, b != NULL, "%s", rt.error_msg);
+    if (b) {
+        WASM_CHECK_OK(t, wasm_call(b, "get", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        host.yield = 1;
+        WL_CHECK(t, wasm_call(b, "get", NULL, 0, &result, 1) == WASM_YIELD);
+        WASM_CHECK_OK(t, wasm_struct_new(host.owner, 1, &field, 1, &made));
+        WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &made, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        wasm_module_free(b);
+    }
+    wasm_module_free(host.owner);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_calls_interrupted_at_callee_entry_resume_there) {
     wasm_runtime_t rt;
     wasm_module_t* m;
@@ -18742,6 +18813,7 @@ int main(void) {
         { "calls: recursion reaches the depth limit with fresh locals in every frame", test_calls_reach_the_depth_limit_with_fresh_locals_per_frame },
         { "calls: call_indirect traps on mismatched, null, and out-of-range entries", test_call_indirect_traps_on_mismatched_null_and_out_of_range_entries },
         { "calls: cross-module call_indirect checks types per calling module", test_cross_module_call_indirect_checks_types_per_calling_module },
+        { "calls: imports called indirectly from another module check results against their own type", test_imports_called_indirectly_from_another_module_check_results_against_their_own_type },
         { "calls: an interrupt at a callee's entry suspends and resumes there", test_calls_interrupted_at_callee_entry_resume_there },
         { "calls: references in locals survive collections and throws through deep chains", test_calls_keep_references_in_locals_through_collections_and_throws },
         { "resume: fuel stops resumed step by step match unmetered runs", test_resume_fuel_steps_match_unmetered_runs },
