@@ -23,9 +23,9 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     }
 
     /* Bound start functions as well as calls made while instantiating a module. */
-    wasm_set_fuel(runtime, UINT64_C(10000));
+    wasm_runtime_set_fuel(runtime, UINT64_C(10000));
     module = wasm_load(runtime, data, size);
-    wasm_free_module(module);
+    wasm_module_free(module);
     wasm_runtime_free(runtime);
     return 0;
 }

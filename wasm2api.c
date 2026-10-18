@@ -1691,14 +1691,8 @@ static int wasm2api_write_source(const char* source_path,
     fputs("        ctx->owned_rt = wasm_runtime_new(runtime_config);\n", out);
     fputs("        ctx->rt = ctx->owned_rt;\n", out);
     fputs("        if (!ctx->rt) {\n", out);
-        fprintf(out, "            %s_set_error(ctx, WASM_ERR_OOM, \"runtime allocation failed\");\n",
+        fprintf(out, "            %s_set_error(ctx, WASM_ERR_OOM, \"runtime creation failed\");\n",
                 model->api_prefix);
-    fputs("            return ctx;\n", out);
-    fputs("        }\n", out);
-    fputs("        err = wasm_runtime_last_error(ctx->rt);\n", out);
-    fputs("        if (err != WASM_OK) {\n", out);
-    fprintf(out, "            %s_capture_runtime_error(ctx, err, \"runtime init failed\");\n",
-            model->api_prefix);
     fputs("            return ctx;\n", out);
     fputs("        }\n", out);
     fputs("        ctx->owns_runtime = 1;\n", out);
@@ -1851,7 +1845,7 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    return ctx;\n", out);
     fputs("\n", out);
     fputs("fail_loaded_module:\n", out);
-    fputs("    wasm_free_module(ctx->mod);\n", out);
+    fputs("    wasm_module_free(ctx->mod);\n", out);
     fputs("    ctx->mod = NULL;\n", out);
     fputs("    return ctx;\n", out);
     fputs("}\n\n", out);
@@ -1864,7 +1858,7 @@ static int wasm2api_write_source(const char* source_path,
                 model->api_prefix);
     }
     fputs("    if (!ctx) return;\n", out);
-    fputs("    if (ctx->mod) wasm_free_module(ctx->mod);\n", out);
+    fputs("    if (ctx->mod) wasm_module_free(ctx->mod);\n", out);
     fputs("    if (ctx->owns_runtime) wasm_runtime_free(ctx->owned_rt);\n", out);
     fputs("    free(ctx);\n", out);
     fputs("}\n\n", out);
@@ -1986,7 +1980,7 @@ static int wasm2api_write_source(const char* source_path,
             fputs("    if (!ctx || !ctx->mod) return NULL;\n", out);
         }
         fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
-        fprintf(out, "    return wasm_memory_data_at(ctx->mod, ctx->%s);\n",
+        fprintf(out, "    return wasm_memory_data(ctx->mod, ctx->%s);\n",
                 model->memory_index_field);
         fputs("}\n\n", out);
 
@@ -2002,7 +1996,7 @@ static int wasm2api_write_source(const char* source_path,
             fputs("    uint64_t size_bytes;\n\n", out);
             fputs("    if (!ctx || !ctx->mod) return 0u;\n", out);
         }
-        fprintf(out, "    size_bytes = wasm_memory_size_at(ctx->mod, ctx->%s);\n",
+        fprintf(out, "    size_bytes = wasm_memory_size(ctx->mod, ctx->%s);\n",
                 model->memory_index_field);
         fprintf(out, "    %s_clear_error(ctx);\n", model->api_prefix);
         fputs("    return size_bytes;\n", out);
@@ -2271,11 +2265,10 @@ int main(int argc, char** argv) {
     const char* header_include;
     uint8_t* wasm_bytes = NULL;
     size_t wasm_len = 0u;
-    wasm_runtime_t rt;
+    wasm_runtime_t* rt = NULL;
     wasm_module_t* mod = NULL;
     wasm2api_model_t model;
     wasm2api_export_filter_set_t export_filters;
-    wasm_error_t err;
     int embed_wasm = 0;
     int singleton_mode = 0;
     int no_export_prefix = 0;
@@ -2384,19 +2377,16 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    err = wasm_init(&rt, NULL);
-    if (err != WASM_OK) {
-        fprintf(stderr, "wasm2api: runtime init failed: %s\n", wasm_error_string(err));
+    rt = wasm_runtime_new(NULL);
+    if (!rt) {
+        fprintf(stderr, "wasm2api: runtime init failed\n");
         goto cleanup;
     }
 
     /* Generating wrappers only inspects the module: it binds no imports and runs no guest code. */
-    mod = wasm_compile(&rt, wasm_bytes, wasm_len);
+    mod = wasm_compile(rt, wasm_bytes, wasm_len);
     if (!mod) {
-        fprintf(stderr, "wasm2api: failed to load %s: %s", input_path,
-                wasm_error_string(rt.last_error));
-        if (rt.error_msg[0]) fprintf(stderr, " (%s)", rt.error_msg);
-        fputc('\n', stderr);
+        fprintf(stderr, "wasm2api: failed to load %s: %s\n", input_path, wasm_runtime_error_message(rt));
         goto cleanup_runtime;
     }
 
@@ -2428,8 +2418,8 @@ int main(int argc, char** argv) {
     ok = 1;
 
 cleanup_runtime:
-    if (mod) wasm_free_module(mod);
-    wasm_destroy(&rt);
+    if (mod) wasm_module_free(mod);
+    wasm_runtime_free(rt);
 
 cleanup:
     wasm2api_export_filter_set_free(&export_filters);

@@ -15,9 +15,9 @@ WASM_PRIVATE wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count
 
 WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE wasm_table_t* wasm__table_at(wasm_module_t* mod, uint32_t table_index);
+WASM_PRIVATE wasm_table_t* wasm__table_at(const wasm_module_t* mod, uint32_t table_index);
 
-WASM_PRIVATE wasm_memory_t* wasm__memory_at(wasm_module_t* mod, uint32_t memory_index);
+WASM_PRIVATE wasm_memory_t* wasm__memory_at(const wasm_module_t* mod, uint32_t memory_index);
 
 WASM_PRIVATE wasm_valtype_t wasm__memory_index_type(const wasm_memory_t* memory);
 

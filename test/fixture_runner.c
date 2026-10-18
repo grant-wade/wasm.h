@@ -184,7 +184,7 @@ int main(int argc, char** argv) {
     const char* export_name = NULL;
     unsigned char* bytes = NULL;
     size_t size = 0;
-    wasm_runtime_t runtime;
+    wasm_runtime_t* runtime = NULL;
     wasm_module_t* module = NULL;
     int exit_code = 1;
 
@@ -202,27 +202,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (wasm_init(&runtime, NULL) != WASM_OK) {
+    runtime = wasm_runtime_new(NULL);
+    if (!runtime) {
         fprintf(stderr, "failed to initialize runtime\n");
         free(bytes);
         return 1;
     }
 
-    if (wasm_bind_wasi_stubs(&runtime) != WASM_OK) {
+    if (wasm_bind_wasi_stubs(runtime) != WASM_OK) {
         fprintf(stderr, "failed to bind wasi stubs: %s\n",
-                runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(runtime.last_error));
+                wasm_runtime_error_message(runtime));
         goto cleanup;
     }
 
-    module = wasm_load(&runtime, bytes, size);
+    module = wasm_load(runtime, bytes, size);
     if (!module) {
         if (strcmp(mode, "load-fail") == 0) {
             printf("expected load failure: %s\n",
-                   runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(runtime.last_error));
+                   wasm_runtime_error_message(runtime));
             exit_code = 0;
             goto cleanup;
         }
-        fprintf(stderr, "load failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(runtime.last_error));
+        fprintf(stderr, "load failed: %s\n", wasm_runtime_error_message(runtime));
         goto cleanup;
     }
 
@@ -235,7 +236,7 @@ int main(int argc, char** argv) {
         for (memory_index = 0; memory_index < wasm_memory_count(module); memory_index++) {
             printf("memory[%u]: %llu bytes\n",
                    (unsigned)memory_index,
-                   (unsigned long long)wasm_memory_size_at(module, memory_index));
+                   (unsigned long long)wasm_memory_size(module, memory_index));
         }
     }
 
@@ -259,7 +260,7 @@ int main(int argc, char** argv) {
         {
             wasm_error_t err = wasm_call(module, export_name, NULL, 0, NULL, 0);
             if (err != WASM_OK) {
-                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(runtime));
                 goto cleanup;
             }
             printf("call ok: %s() -> void\n", export_name);
@@ -283,7 +284,7 @@ int main(int argc, char** argv) {
                 goto cleanup;
             }
             printf("expected call failure: %s\n",
-                   runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                   wasm_runtime_error_message(runtime));
             exit_code = 0;
             goto cleanup;
         }
@@ -304,7 +305,7 @@ int main(int argc, char** argv) {
             wasm_value_t result;
             wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
             if (err != WASM_OK) {
-                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(runtime));
                 goto cleanup;
             }
             printf("call ok: %s() -> %d\n", export_name, result.of.i32);
@@ -338,7 +339,7 @@ int main(int argc, char** argv) {
             wasm_value_t result;
             wasm_error_t err = wasm_call(module, export_name, NULL, 0, &result, 1);
             if (err != WASM_OK) {
-                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(runtime));
                 goto cleanup;
             }
             printf("call ok: %s() -> %lld\n", export_name, (long long)result.of.i64);
@@ -375,7 +376,7 @@ int main(int argc, char** argv) {
                 goto cleanup;
             }
             if (err != WASM_OK) {
-                fprintf(stderr, "call failed: %s\n", runtime.error_msg[0] ? runtime.error_msg : wasm_error_string(err));
+                fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(runtime));
                 free(captured);
                 goto cleanup;
             }
@@ -394,8 +395,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "unknown mode: %s\n", mode);
 
 cleanup:
-    wasm_free_module(module);
-    wasm_destroy(&runtime);
+    wasm_module_free(module);
+    wasm_runtime_free(runtime);
     free(bytes);
     return exit_code;
 }

@@ -6,7 +6,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Breaking
 
-- `wasm_get_call_frame_info` takes a `wasm_module_t** out_module` after `depth`, and any of its outputs may be NULL. In Zig, `CallFrame` has a `module` field.
+- `wasm_init` and `wasm_destroy` are removed, and `wasm_runtime_new` returns NULL when the configuration is invalid or allocation fails.
+- Runtime state functions are `wasm_runtime_set_fuel`, `wasm_runtime_fuel`, `wasm_runtime_enable_feature`, `wasm_runtime_disable_feature`, `wasm_runtime_enable_all_features`, `wasm_runtime_call_depth`, `wasm_runtime_call_frame`, and `wasm_runtime_backtrace`, replacing `wasm_set_fuel`, `wasm_get_fuel`, `wasm_enable_feature`, `wasm_disable_feature`, `wasm_enable_all_features`, `wasm_get_call_stack_depth`, `wasm_get_call_frame_info`, and `wasm_dump_backtrace`.
+- `wasm_runtime_call_frame` takes a `wasm_module_t** out_module` after `depth`, and any of its outputs may be NULL. In Zig, `CallFrame` has a `module` field.
+- `wasm_free_module` is `wasm_module_free`, and `wasm_module_get_userdata` is `wasm_module_userdata`.
+- `wasm_memory_data`, `wasm_memory_size`, and `wasm_memory_grow` take a memory index and replace their `_at` variants.
+- `wasm_memory_ref_at`, `wasm_table_ref_at`, and `wasm_global_value_ref_at` are `wasm_module_memory`, `wasm_module_table`, and `wasm_module_global`.
+- `wasm_memory_t`, `wasm_table_t`, `wasm_global_t`, `wasm_comptype_t`, `wasm_export_t`, and the segment, tag, custom section, and exception state structs are opaque.
+- Module and runtime query functions take `const` pointers, `wasm_module_runtime` returns a non-`const` runtime, and `wasm_import_info_t` names are `const char*`.
 - `wasm_shared_memory_free` is now `wasm_memory_free`, which also frees memories from the new `wasm_memory_new`.
 - `frame_arena_size` (and `WASM_FRAME_ARENA_SIZE`, now 256 KiB) sets the size of each block of call frame storage. The runtime allocated the largest frame times the call depth limit up front, up to about 750 MB for a module with large frames, and a nested call needing more failed with `WASM_ERR_CALL_STACK_EXHAUSTED`. Blocks are now added as calls nest and released as they return, and running out of memory for a frame fails with `WASM_ERR_OOM`.
 - `wasm_error_t` has a new last member, `WASM_ERR_INTERRUPTED`.
@@ -21,13 +28,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_runtime_interrupt` stops a running call from any thread with `WASM_ERR_INTERRUPTED`, at the next loop iteration, function entry, `memory.atomic.wait`, or WASI sleep. In Zig, `Runtime.interrupt` and `error.Interrupted`.
 - `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold` and `release`.
 - `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.
-- `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_at` and `wasm_global_set_at`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
-- `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, instead of filling in the structs by hand.
+- `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_index` and `wasm_global_set_index`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
+- `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, and `wasm_memory_base` and `wasm_memory_length` read a memory handle's data and size.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
 - Backtraces name each frame's module and function from the `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`, and `wasm_func_name` and `wasm_module_name` return those names.
 - `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
 - WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
-- `wasm_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
+- `wasm_runtime_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
 - The CLI `run` command runs a WASI command's `_start` with the remaining arguments as its argv, and `--dir HOST[::GUEST]` and `--env NAME=VALUE` configure its WASI environment. With `--wasi`, `call` passes the module path as `argv[0]`.
 
 ### Changed

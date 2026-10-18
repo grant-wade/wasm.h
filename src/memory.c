@@ -13,15 +13,15 @@
 #include <stdio.h>
 
 /* Compiled modules have declared memories but no storage. */
-static wasm_memory_t* wasm__instance_memory_at(wasm_module_t* mod, uint32_t memory_index) {
+static wasm_memory_t* wasm__instance_memory_at(const wasm_module_t* mod, uint32_t memory_index) {
     return mod && !mod->is_compiled ? wasm__memory_at(mod, memory_index) : NULL;
 }
 
-uint32_t wasm_memory_count(wasm_module_t* mod) {
+uint32_t wasm_memory_count(const wasm_module_t* mod) {
     return mod ? mod->num_memories : 0;
 }
 
-wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
+wasm_error_t wasm_memory_read(const wasm_module_t* mod, uint32_t memory_index,
                               uint64_t offset, void* dst, size_t len) {
     wasm_memory_t* memory;
     uint64_t mem_size;
@@ -87,7 +87,7 @@ wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
     return WASM_OK;
 }
 
-wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
+wasm_error_t wasm_memory_get_string(const wasm_module_t* mod, uint32_t memory_index,
                                     uint64_t offset, char* dst, size_t max_len) {
     wasm_memory_t* memory;
     uint64_t mem_size;
@@ -134,12 +134,12 @@ wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
     return WASM_OK;
 }
 
-uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index) {
+uint8_t* wasm_memory_data(wasm_module_t* mod, uint32_t memory_index) {
     wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     return memory ? memory->data : NULL;
 }
 
-uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index) {
+uint64_t wasm_memory_size(const wasm_module_t* mod, uint32_t memory_index) {
     wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
     return memory ? wasm__memory_byte_size(memory) : 0;
 }
@@ -164,7 +164,7 @@ static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pa
     return result;
 }
 
-int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
+int64_t wasm_memory_grow(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
     wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     uint64_t old, np;
     size_t old_size;
@@ -201,54 +201,42 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     return (int64_t)old;
 }
 
-wasm_memory_t* wasm_memory_ref_at(wasm_module_t* mod, uint32_t memory_index) {
+wasm_memory_t* wasm_module_memory(wasm_module_t* mod, uint32_t memory_index) {
     return wasm__memory_at(mod, memory_index);
 }
 
-uint8_t* wasm_memory_data(wasm_module_t* mod) {
-    return wasm_memory_data_at(mod, 0);
-}
-
-uint64_t wasm_memory_size(wasm_module_t* mod) {
-    return wasm_memory_size_at(mod, 0);
-}
-
-int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages) {
-    return wasm_memory_grow_at(mod, 0, delta_pages);
-}
-
-uint32_t wasm_table_count(wasm_module_t* mod) {
+uint32_t wasm_table_count(const wasm_module_t* mod) {
     return mod ? mod->num_tables : 0;
 }
 
-wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx) {
+wasm_table_t* wasm_module_table(wasm_module_t* mod, uint32_t table_idx) {
     return wasm__table_at(mod, table_idx);
 }
 
-wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx) {
+wasm_valtype_t wasm_table_type(const wasm_module_t* mod, uint32_t table_idx) {
     wasm_table_t* table = wasm__table_at(mod, table_idx);
     return table ? table->reftype : WASM_TYPE_VOID;
 }
 
-const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx) {
+const wasm_reftype_t* wasm_table_reftype(const wasm_module_t* mod, uint32_t table_idx) {
     wasm_table_t* table = wasm__table_at(mod, table_idx);
     return table ? &table->reftype_info : NULL;
 }
 
-static wasm_table_t* wasm__api_table(wasm_module_t* mod, uint32_t table_idx) {
+static wasm_table_t* wasm__api_table(const wasm_module_t* mod, uint32_t table_idx) {
     wasm_table_t* table = (mod && !mod->is_compiled) ? wasm__table_at(mod, table_idx) : NULL;
 
     if (!table && mod && mod->rt) WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "table %u not found", (unsigned)table_idx);
     return table;
 }
 
-uint64_t wasm_table_size(wasm_module_t* mod, uint32_t table_idx) {
+uint64_t wasm_table_size(const wasm_module_t* mod, uint32_t table_idx) {
     wasm_table_t* table = (mod && !mod->is_compiled) ? wasm__table_at(mod, table_idx) : NULL;
 
     return table ? table->size : 0;
 }
 
-wasm_error_t wasm_table_get(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val) {
+wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val) {
     wasm_table_t* table = wasm__api_table(mod, table_idx);
 
     if (!table || !out_val) return WASM_ERR_MALFORMED;
@@ -285,26 +273,26 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;
 }
 
-uint32_t wasm_global_count(wasm_module_t* mod) {
+uint32_t wasm_global_count(const wasm_module_t* mod) {
     return mod ? mod->num_globals : 0;
 }
 
-wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx) {
+wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx) {
     if (!mod || global_idx >= mod->num_globals) return WASM_TYPE_VOID;
     return mod->globals[global_idx].type;
 }
 
-const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx) {
+const wasm_reftype_t* wasm_global_reftype(const wasm_module_t* mod, uint32_t global_idx) {
     if (!mod || global_idx >= mod->num_globals) return NULL;
     return &mod->globals[global_idx].ref_type;
 }
 
-int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx) {
+int wasm_global_is_mutable(const wasm_module_t* mod, uint32_t global_idx) {
     if (!mod || global_idx >= mod->num_globals) return 0;
     return mod->globals[global_idx].is_mutable;
 }
 
-wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx) {
+wasm_value_t* wasm_module_global(wasm_module_t* mod, uint32_t global_idx) {
     wasm_global_t* global;
 
     if (!mod || mod->is_compiled || global_idx >= mod->num_globals) return NULL;
@@ -312,7 +300,7 @@ wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx) 
     return global->is_import ? global->import_value : &global->value;
 }
 
-static wasm_global_t* wasm__api_global(wasm_module_t* mod, uint32_t global_idx) {
+static wasm_global_t* wasm__api_global(const wasm_module_t* mod, uint32_t global_idx) {
     if (!mod || mod->is_compiled || global_idx >= mod->num_globals) {
         if (mod && mod->rt) WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "global %u not found", (unsigned)global_idx);
         return NULL;
@@ -320,7 +308,7 @@ static wasm_global_t* wasm__api_global(wasm_module_t* mod, uint32_t global_idx) 
     return &mod->globals[global_idx];
 }
 
-wasm_error_t wasm_global_get_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val) {
+wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val) {
     wasm_global_t* global = wasm__api_global(mod, global_idx);
 
     if (!global || !out_val) return WASM_ERR_MALFORMED;
@@ -328,7 +316,7 @@ wasm_error_t wasm_global_get_at(wasm_module_t* mod, uint32_t global_idx, wasm_va
     return WASM_OK;
 }
 
-wasm_error_t wasm_global_set_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val) {
+wasm_error_t wasm_global_set_index(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val) {
     wasm_global_t* global = wasm__api_global(mod, global_idx);
 
     if (!global) return WASM_ERR_MALFORMED;
@@ -344,7 +332,7 @@ wasm_error_t wasm_global_set_at(wasm_module_t* mod, uint32_t global_idx, wasm_va
     return WASM_OK;
 }
 
-wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val) {
+wasm_error_t wasm_global_get(const wasm_module_t* mod, const char* name, wasm_value_t* out_val) {
     wasm_global_t* global;
     wasm_error_t err;
 
@@ -399,25 +387,25 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
     return WASM_OK;
 }
 
-uint32_t wasm_export_count(wasm_module_t* mod) {
+uint32_t wasm_export_count(const wasm_module_t* mod) {
     return mod ? mod->num_exports : 0;
 }
 
-uint32_t wasm_import_count(wasm_module_t* mod) {
+uint32_t wasm_import_count(const wasm_module_t* mod) {
     return mod ? mod->num_imports : 0;
 }
 
-const wasm_import_info_t* wasm_import_info(wasm_module_t* mod, uint32_t index) {
+const wasm_import_info_t* wasm_import_info(const wasm_module_t* mod, uint32_t index) {
     if (!mod || index >= mod->num_imports) return NULL;
     return &mod->imports[index];
 }
 
-const char* wasm_export_name(wasm_module_t* mod, uint32_t index) {
+const char* wasm_export_name(const wasm_module_t* mod, uint32_t index) {
     if (!mod || index >= mod->num_exports) return NULL;
     return wasm__export_name_cstr(&mod->exports[index]);
 }
 
-const uint8_t* wasm_export_name_bytes(wasm_module_t* mod, uint32_t index, size_t* out_len) {
+const uint8_t* wasm_export_name_bytes(const wasm_module_t* mod, uint32_t index, size_t* out_len) {
     if (!mod || index >= mod->num_exports) {
         if (out_len) *out_len = 0u;
         return NULL;
@@ -426,23 +414,23 @@ const uint8_t* wasm_export_name_bytes(wasm_module_t* mod, uint32_t index, size_t
     return (const uint8_t*)mod->exports[index].name;
 }
 
-wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index) {
+wasm_export_kind_t wasm_export_kind(const wasm_module_t* mod, uint32_t index) {
     if (!mod || index >= mod->num_exports) return (wasm_export_kind_t)0;
     return mod->exports[index].kind;
 }
 
-uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index) {
+uint32_t wasm_export_index(const wasm_module_t* mod, uint32_t export_index) {
     if (!mod || export_index >= mod->num_exports) return 0;
     return mod->exports[export_index].index;
 }
 
-int wasm_find_export(wasm_module_t* mod, const char* name,
+int wasm_find_export(const wasm_module_t* mod, const char* name,
                      wasm_export_kind_t* out_kind, uint32_t* out_index) {
     if (!name) return 0;
     return wasm_find_export_bytes(mod, (const uint8_t*)name, strlen(name), out_kind, out_index);
 }
 
-int wasm_find_export_bytes(wasm_module_t* mod, const uint8_t* name, size_t name_len,
+int wasm_find_export_bytes(const wasm_module_t* mod, const uint8_t* name, size_t name_len,
                            wasm_export_kind_t* out_kind, uint32_t* out_index) {
     uint32_t index;
 
@@ -459,23 +447,23 @@ int wasm_find_export_bytes(wasm_module_t* mod, const uint8_t* name, size_t name_
     return 0;
 }
 
-uint32_t wasm_custom_section_count(wasm_module_t* mod) {
+uint32_t wasm_custom_section_count(const wasm_module_t* mod) {
     return mod ? mod->num_custom_sections : 0;
 }
 
-const char* wasm_custom_section_name(wasm_module_t* mod, uint32_t index) {
+const char* wasm_custom_section_name(const wasm_module_t* mod, uint32_t index) {
     if (!mod || index >= mod->num_custom_sections) return NULL;
     return mod->custom_sections[index].name;
 }
 
-const uint8_t* wasm_custom_section_data(wasm_module_t* mod, uint32_t index, size_t* out_len) {
+const uint8_t* wasm_custom_section_data(const wasm_module_t* mod, uint32_t index, size_t* out_len) {
     if (out_len) *out_len = 0;
     if (!mod || index >= mod->num_custom_sections) return NULL;
     if (out_len) *out_len = (size_t)mod->custom_sections[index].size;
     return mod->custom_sections[index].data;
 }
 
-const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, size_t* out_len) {
+const uint8_t* wasm_custom_section_find(const wasm_module_t* mod, const char* name, size_t* out_len) {
     uint32_t index;
 
     if (out_len) *out_len = 0;
@@ -491,25 +479,25 @@ const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, si
     return NULL;
 }
 
-uint32_t wasm_type_count(wasm_module_t* mod) {
+uint32_t wasm_type_count(const wasm_module_t* mod) {
     return mod ? mod->num_types : 0;
 }
 
-wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx) {
+wasm_comptype_kind_t wasm_type_kind(const wasm_module_t* mod, uint32_t type_idx) {
     if (!mod || type_idx >= mod->num_types) return WASM_COMP_INVALID;
     return mod->types[type_idx].kind;
 }
 
-const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx) {
+const wasm_functype_t* wasm_type_functype(const wasm_module_t* mod, uint32_t type_idx) {
     return wasm__module_const_functype(mod, type_idx);
 }
 
-uint32_t wasm_struct_type_field_count(wasm_module_t* mod, uint32_t type_idx) {
+uint32_t wasm_struct_type_field_count(const wasm_module_t* mod, uint32_t type_idx) {
     const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
     return st ? st->num_fields : 0;
 }
 
-const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type_idx,
+const wasm_fieldtype_t* wasm_struct_type_field(const wasm_module_t* mod, uint32_t type_idx,
                                                uint32_t field_idx) {
     const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
 
@@ -517,23 +505,23 @@ const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type
     return &st->fields[field_idx];
 }
 
-const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx) {
+const wasm_fieldtype_t* wasm_array_type_field(const wasm_module_t* mod, uint32_t type_idx) {
     const wasm_arraytype_t* at = wasm__module_const_arraytype(mod, type_idx);
 
     if (!at) return NULL;
     return &at->field;
 }
 
-uint32_t wasm_func_count(wasm_module_t* mod) {
+uint32_t wasm_func_count(const wasm_module_t* mod) {
     return mod ? mod->num_funcs : 0;
 }
 
-const wasm_functype_t* wasm_func_functype(wasm_module_t* mod, uint32_t func_idx) {
+const wasm_functype_t* wasm_func_functype(const wasm_module_t* mod, uint32_t func_idx) {
     if (!mod || func_idx >= mod->num_funcs) return NULL;
     return wasm__module_const_functype(mod, mod->funcs[func_idx].type_idx);
 }
 
-uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx) {
+uint32_t wasm_func_param_count(const wasm_module_t* mod, uint32_t func_idx) {
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return 0;
@@ -542,7 +530,7 @@ uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx) {
     return ft->num_params;
 }
 
-uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx) {
+uint32_t wasm_func_result_count(const wasm_module_t* mod, uint32_t func_idx) {
     wasm_functype_t* ft;
 
     if (!mod || func_idx >= mod->num_funcs) return 0;
@@ -551,7 +539,7 @@ uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx) {
     return ft->num_results;
 }
 
-wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
+wasm_valtype_t wasm_func_param_type(const wasm_module_t* mod, uint32_t func_idx,
                                     uint32_t param_idx) {
     wasm_functype_t* ft;
 
@@ -562,7 +550,7 @@ wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
     return ft->params[param_idx];
 }
 
-wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
+wasm_valtype_t wasm_func_result_type(const wasm_module_t* mod, uint32_t func_idx,
                                      uint32_t result_idx) {
     wasm_functype_t* ft;
 
@@ -573,11 +561,11 @@ wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
     return ft->results[result_idx];
 }
 
-uint32_t wasm_tag_count(wasm_module_t* mod) {
+uint32_t wasm_tag_count(const wasm_module_t* mod) {
     return mod ? mod->num_tags : 0;
 }
 
-const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
+const wasm_functype_t* wasm_tag_functype(const wasm_module_t* mod, uint32_t tag_idx) {
     if (!mod || tag_idx >= mod->num_tags) return NULL;
     return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
 }
@@ -619,6 +607,14 @@ void wasm_memory_free(wasm_memory_t* memory) {
     if (!memory) return;
     wasm__free_memory(memory);
     WASM_FREE(memory);
+}
+
+uint8_t* wasm_memory_base(wasm_memory_t* memory) {
+    return memory ? memory->data : NULL;
+}
+
+uint64_t wasm_memory_length(const wasm_memory_t* memory) {
+    return wasm__memory_byte_size(memory);
 }
 
 wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size) {

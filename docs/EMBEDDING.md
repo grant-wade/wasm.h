@@ -11,18 +11,13 @@ Elsewhere, include `wasm.h` without `WASM_IMPL`. For modular linking, see the [b
 
 ## Runtime and module lifetime
 
-`wasm_runtime_t` is opaque to declaration-only users; allocate it with `wasm_runtime_new`.
+`wasm_runtime_t` and `wasm_module_t` are opaque. `wasm_runtime_new` returns NULL when allocation fails or the configuration is invalid.
 
 ```c
 wasm_runtime_t* rt = wasm_runtime_new(NULL);
 wasm_module_t* mod;
 
-if (!rt || wasm_runtime_last_error(rt) != WASM_OK) {
-    fprintf(stderr, "runtime init: %s\n",
-            rt ? wasm_runtime_error_message(rt) : "out of memory");
-    wasm_runtime_free(rt);
-    return 1;
-}
+if (!rt) return 1;
 
 mod = wasm_load(rt, bytes, byte_count);
 if (!mod) {
@@ -34,7 +29,7 @@ if (!mod) {
 if (wasm_call(mod, "run", NULL, 0, NULL, 0) != WASM_OK)
     fprintf(stderr, "run: %s\n", wasm_runtime_error_message(rt));
 
-wasm_free_module(mod);
+wasm_module_free(mod);
 wasm_runtime_free(rt);
 ```
 
@@ -55,13 +50,11 @@ for (uint32_t i = 0; i < wasm_import_count(compiled); i++) {
 }
 instance = wasm_instantiate(compiled);
 /* ... */
-wasm_free_module(instance);
-wasm_free_module(compiled);
+wasm_module_free(instance);
+wasm_module_free(compiled);
 ```
 
 A compiled module supports the introspection functions, but calls, memory access, and global reads fail. `wasm_instantiate` resolves imports registered on the runtime at that point and does not validate function bodies again. Each instance has its own globals, memories, and tables, and is freed independently of the compiled module.
-
-`wasm_init` and `wasm_destroy` support custom storage when the concrete runtime definition is available.
 
 ## Configuration
 
@@ -91,13 +84,13 @@ With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enab
 The remaining fields bound what a module can make the host allocate; 0 removes a limit:
 
 - `max_function_locals` (default 50,000) rejects functions that declare more locals, parameters included.
-- `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow_at` past the cap return -1. A shared memory reserves address space only up to this cap.
+- `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow` past the cap return -1. A shared memory reserves address space only up to this cap.
 - `max_total_memory_bytes` (default 0, unlimited) caps the linear memories that all of the runtime's instances define, together, in the same way. Memories the host creates and registers do not count.
 - `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
 
 Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
 
-All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
+All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_runtime_enable_feature` or `wasm_runtime_enable_all_features`. Set feature flags before loading with `wasm_runtime_disable_feature`, `wasm_runtime_enable_feature`, or `wasm_runtime_set_enabled_features`.
 
 ## Calling exports
 
@@ -168,7 +161,7 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
 
-Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_get_userdata` for per-module host state.
+Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
 
 ### Linking modules
 
@@ -222,9 +215,9 @@ wasm_error_t err = wasm_memory_read(mod, 0, guest_offset,
                                     data, sizeof(data));
 ```
 
-Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, null-terminated string extraction. The `*_at` accessors expose direct memory data, size, and growth for a selected memory. Reacquire direct data pointers after `wasm_memory_grow_at`, because growth may relocate storage.
+Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, null-terminated string extraction. `wasm_memory_data`, `wasm_memory_size`, and `wasm_memory_grow` expose a memory's data, byte size, and growth. Reacquire direct data pointers after `wasm_memory_grow`, because growth may relocate storage.
 
-Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`, and any global by index with `wasm_global_get_at` and `wasm_global_set_at`; setters check mutability and type. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
+Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`, and any global by index with `wasm_global_get_index` and `wasm_global_set_index`; setters check mutability and type. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
 
 Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`. `wasm_call_ref` calls the function a funcref refers to, such as one read from a table.
 
@@ -249,12 +242,12 @@ wasm_memory_import_t imp = { "env", "memory", memory };
 
 /* On each thread: */
 wasm_runtime_t* rt = wasm_runtime_new(NULL);
-wasm_enable_feature(rt, WASM_FEATURE_THREADS);
+wasm_runtime_enable_feature(rt, WASM_FEATURE_THREADS);
 wasm_register_memory_import(rt, &imp);
 wasm_module_t* mod = wasm_load(rt, bytes, len);
 ```
 
-A shared memory exported by one module can be imported the same way. Free it with `wasm_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid.
+A shared memory exported by one module can be imported the same way. Free it with `wasm_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid. `wasm_memory_base` and `wasm_memory_length` return the data and byte size of a memory handle.
 
 `memory.atomic.wait32`/`wait64` block and `memory.atomic.notify` wakes threads when the platform layer is compiled in (`WASM_ENABLE_PLATFORM`), using pthreads or Win32; link with `-pthread` on toolchains that need it. Without it, a wait that would block traps, because no other thread could wake it.
 
@@ -283,22 +276,22 @@ A guest that calls WASI `proc_exit` stops at once: the call (or `wasm_load`, fro
 Fuel metering is disabled until a budget is set:
 
 ```c
-wasm_set_fuel(rt, 1000000);
+wasm_runtime_set_fuel(rt, 1000000);
 err = wasm_call(mod, "run", NULL, 0, NULL, 0);
 if (err == WASM_ERR_OUT_OF_FUEL) {
     fprintf(stderr, "instruction budget exhausted\n");
 }
 ```
 
-Every instruction costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_disable_fuel` turns metering off again.
+Every instruction costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_runtime_disable_fuel` turns metering off again.
 
 To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call fails with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one stops at its first such point.
 
-After a trap, use `wasm_dump_backtrace` or `wasm_get_call_frame_info` to inspect the captured Wasm stack. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
+After a trap, use `wasm_runtime_backtrace` or `wasm_runtime_call_frame` to inspect the captured Wasm stack. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
 
 ```c
 char trace[2048];
-wasm_dump_backtrace(rt, trace, sizeof(trace));
+wasm_runtime_backtrace(rt, trace, sizeof(trace));
 fputs(trace, stderr);
 ```
 

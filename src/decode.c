@@ -579,6 +579,7 @@ static wasm_error_t wasm__decode_compact_imports(wasm_module_t* mod,
     for (i = 0; i < count; i++) {
         uint32_t import_index;
         wasm_import_info_t* info;
+        char* field_name = NULL;
 
         err = wasm__append_import_infos(mod, 1, &import_index);
         if (err != WASM_OK) return err;
@@ -586,7 +587,8 @@ static wasm_error_t wasm__decode_compact_imports(wasm_module_t* mod,
         info->type_index = UINT32_MAX;
         info->module = wasm__strdup(module_name);
         if (!info->module) return WASM_ERR_OOM;
-        err = wasm__read_name_owned(r, &info->name);
+        err = wasm__read_name_owned(r, &field_name);
+        info->name = field_name;
         if (err != WASM_OK) return err;
 
         if (encoding == 0x7F) {

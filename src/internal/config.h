@@ -2,6 +2,7 @@
 #define WASM_INTERNAL_CONFIG_H
 
 #include "../wasm.h"
+#include "types.h"
 
 #ifdef WASM_AMALGAMATION
 #define WASM_PRIVATE static

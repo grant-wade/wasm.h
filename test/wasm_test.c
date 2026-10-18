@@ -237,7 +237,7 @@ static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
 #endif
 
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
-    return wasm_init(rt, config);
+    return wasm__runtime_init(rt, config);
 }
 
 static void wasm_test_init_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
@@ -272,7 +272,7 @@ static void wasm_test_init_with_config_checked(wl_test_ctx* t,
 }
 
 static void wasm_test_destroy_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
-    wasm_destroy(rt);
+    wasm__runtime_destroy(rt);
     WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0,
                  "allocator leak after %s: %zu live blocks",
                  test_name,
@@ -893,7 +893,7 @@ WL_TEST(test_add) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 10);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 
     alloc_after = wasm_test_alloc_snapshot();
@@ -1039,7 +1039,7 @@ WL_TEST(test_introspection_helpers) {
     WL_CHECK_MSG(t, wasm_func_result_type(NULL, 0, 0) == WASM_TYPE_VOID,
                  "%s", "NULL module result type should default to void");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -1151,7 +1151,7 @@ WL_TEST(test_factorial) {
         WASM_CHECK_I32(t, result.of.i32, 3628800);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -1288,7 +1288,7 @@ static wasm_error_t host_capture_module_userdata(wasm_module_t* mod,
     (void)userdata;
 
     host_userdata_seen_module = mod;
-    host_userdata_seen_value = wasm_module_get_userdata(mod);
+    host_userdata_seen_value = wasm_module_userdata(mod);
     return WASM_OK;
 }
 
@@ -1301,7 +1301,7 @@ static wasm_error_t host_module_userdata_add(wasm_module_t* mod,
     (void)userdata;
 
     if (!mod || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    if (wasm_module_get_userdata(mod)) bias = *(const int32_t*)wasm_module_get_userdata(mod);
+    if (wasm_module_userdata(mod)) bias = *(const int32_t*)wasm_module_userdata(mod);
 
     results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32 + bias);
     return WASM_OK;
@@ -1437,7 +1437,7 @@ WL_TEST(test_host_import) {
         }
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -1547,7 +1547,7 @@ WL_TEST(test_import_introspection_api) {
 
     WL_CHECK_MSG(t, wasm_import_info(m, 2) == NULL, "%s", "out-of-range import metadata should be null");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -1654,10 +1654,10 @@ WL_TEST(test_module_userdata_api) {
         return;
     }
 
-    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == NULL,
+    WL_CHECK_MSG(t, wasm_module_userdata(m) == NULL,
                  "%s", "module userdata should default to null");
     wasm_module_set_userdata(m, &module_context);
-    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == &module_context,
+    WL_CHECK_MSG(t, wasm_module_userdata(m) == &module_context,
                  "%s", "module userdata getter should return the stored pointer");
 
     err = wasm_call(m, "run", NULL, 0, NULL, 0);
@@ -1670,10 +1670,10 @@ WL_TEST(test_module_userdata_api) {
     }
 
     wasm_module_set_userdata(m, NULL);
-    WL_CHECK_MSG(t, wasm_module_get_userdata(m) == NULL,
+    WL_CHECK_MSG(t, wasm_module_userdata(m) == NULL,
                  "%s", "module userdata should clear back to null");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -1785,7 +1785,7 @@ WL_TEST(test_module_userdata_api_multiple_modules) {
     m2 = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m2 != NULL, "%s", rt.error_msg);
     if (m2 == NULL) {
-        wasm_free_module(m1);
+        wasm_module_free(m1);
         wasm_destroy(&rt);
         return;
     }
@@ -1814,8 +1814,8 @@ WL_TEST(test_module_userdata_api_multiple_modules) {
                      "%s", "shared host import should read the second module userdata");
     }
 
-    wasm_free_module(m2);
-    wasm_free_module(m1);
+    wasm_module_free(m2);
+    wasm_module_free(m1);
     wasm_destroy(&rt);
 }
 
@@ -1917,7 +1917,7 @@ WL_TEST(test_format_call_api) {
     err = wasm_call_fmt(m, "add", "ii(i", (int32_t)1, (int32_t)2, &sum_i32);
     WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected malformed format string rejection");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2025,7 +2025,7 @@ WL_TEST(test_bind_host_func_api) {
         WASM_CHECK_I32(t, result, 18);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2139,7 +2139,7 @@ WL_TEST(test_bind_host_func_uses_module_userdata) {
         WASM_CHECK_I32(t, result, 19);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2239,7 +2239,7 @@ WL_TEST(test_host_callback_module_reads_memory) {
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
                  "%s", "expected host callback memory read to preserve out-of-bounds errors");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2357,7 +2357,7 @@ WL_TEST(test_imported_mutable_global) {
         WASM_CHECK_I32(t, imported_counter.of.i32, 15);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2481,7 +2481,7 @@ WL_TEST(test_global_init_expr_global_get_import) {
         WASM_CHECK_I32(t, result.of.i32, 33);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2577,7 +2577,7 @@ WL_TEST(test_global_init_expr_extended_i32_arithmetic) {
         WASM_CHECK_I32(t, result.of.i32, 22);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2673,7 +2673,7 @@ WL_TEST(test_global_init_expr_extended_i64_arithmetic) {
         WASM_CHECK_I64(t, result.of.i64, 23);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2706,7 +2706,7 @@ WL_TEST(test_init_expr_rejects_local_mutable_global_get) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected mutable local global.get rejection");
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2849,7 +2849,7 @@ WL_TEST(test_data_offset_from_imported_global) {
         WASM_CHECK_I32(t, result.of.i32, 42);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -2998,7 +2998,7 @@ WL_TEST(test_data_offset_extended_const_expr) {
         WASM_CHECK_I32(t, result.of.i32, 55);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3108,7 +3108,7 @@ WL_TEST(test_element_offset_extended_const_expr) {
         WASM_CHECK_I32(t, result.of.i32, 77);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3210,7 +3210,7 @@ WL_TEST(test_memory) {
         WASM_CHECK_I32(t, result.of.i32, 99);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3319,12 +3319,12 @@ WL_TEST(test_multi_memory_indexed_access) {
     }
 
     WASM_CHECK_I32(t, (int32_t)wasm_memory_count(m), 2);
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m), (int32_t)WASM_PAGE_SIZE);
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 1), (int32_t)WASM_PAGE_SIZE);
-    WL_CHECK_MSG(t, wasm_memory_data_at(m, 2) == NULL, "%s", "expected only two memories");
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 0), (int32_t)WASM_PAGE_SIZE);
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 1), (int32_t)WASM_PAGE_SIZE);
+    WL_CHECK_MSG(t, wasm_memory_data(m, 2) == NULL, "%s", "expected only two memories");
 
-    memory0 = wasm_memory_data(m);
-    memory1 = wasm_memory_data_at(m, 1);
+    memory0 = wasm_memory_data(m, 0);
+    memory1 = wasm_memory_data(m, 1);
     WL_CHECK_MSG(t, memory0 != NULL, "%s", "expected memory 0 allocation");
     WL_CHECK_MSG(t, memory1 != NULL, "%s", "expected memory 1 allocation");
     if (memory0 && memory1) {
@@ -3332,7 +3332,7 @@ WL_TEST(test_multi_memory_indexed_access) {
         WASM_CHECK_I32(t, memory1[0], 31);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3396,7 +3396,7 @@ WL_TEST(test_public_memory_helpers) {
     err = wasm_memory_get_string(m, 0, 0, buffer, 0);
     WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected zero-length string buffer rejection");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3558,8 +3558,8 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
         WASM_CHECK_I32(t, result.of.i32, 231);
     }
 
-    memory0 = wasm_memory_data_at(m, 0);
-    memory1 = wasm_memory_data_at(m, 1);
+    memory0 = wasm_memory_data(m, 0);
+    memory1 = wasm_memory_data(m, 1);
     WL_CHECK_MSG(t, memory0 != NULL, "%s", "expected memory 0 allocation");
     WL_CHECK_MSG(t, memory1 != NULL, "%s", "expected memory 1 allocation");
     if (memory0 && memory1) {
@@ -3569,13 +3569,13 @@ WL_TEST(test_multi_memory_bulk_ops_and_growth) {
         WASM_CHECK_I32(t, memory1[1], 'b');
         WASM_CHECK_I32(t, memory1[6], '!');
     }
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 1), (int32_t)(2 * WASM_PAGE_SIZE));
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 1), (int32_t)(2 * WASM_PAGE_SIZE));
 
-    old_pages = wasm_memory_grow_at(m, 0, 1);
+    old_pages = wasm_memory_grow(m, 0, 1);
     WASM_CHECK_I64(t, old_pages, 1);
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), (int32_t)(2 * WASM_PAGE_SIZE));
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 0), (int32_t)(2 * WASM_PAGE_SIZE));
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3668,7 +3668,7 @@ WL_TEST(test_memory64_basic_ops) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, 44);
 
-    WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), (int64_t)(2u * WASM_PAGE_SIZE));
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), (int64_t)(2u * WASM_PAGE_SIZE));
 
     err = wasm_memory_read(m, 0, 8, bytes, sizeof(bytes));
     WASM_CHECK_OK(t, err);
@@ -3677,11 +3677,11 @@ WL_TEST(test_memory64_basic_ops) {
         WASM_CHECK_I32(t, bytes[1], 0);
     }
 
-    old_pages = wasm_memory_grow_at(m, 0, 1);
+    old_pages = wasm_memory_grow(m, 0, 1);
     WASM_CHECK_I64(t, old_pages, 2);
-    WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), (int64_t)(3u * WASM_PAGE_SIZE));
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), (int64_t)(3u * WASM_PAGE_SIZE));
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3717,14 +3717,14 @@ WL_TEST(test_memory64_active_data_segment_offset) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
     if (m != NULL) {
-        uint8_t* memory = wasm_memory_data(m);
+        uint8_t* memory = wasm_memory_data(m, 0);
 
         WL_CHECK_MSG(t, memory != NULL, "%s", "expected memory allocation");
         if (memory) {
             WASM_CHECK_I32(t, memory[4], 'z');
             WASM_CHECK_I32(t, memory[5], 0);
         }
-        wasm_free_module(m);
+        wasm_module_free(m);
     }
     wasm_destroy(&rt);
 }
@@ -3779,7 +3779,7 @@ WL_TEST(test_memory64_rejects_i32_address_operands) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected Memory64 load to reject i32 address operands");
-    if (m) wasm_free_module(m);
+    if (m) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -3820,7 +3820,7 @@ WL_TEST(test_table64_import_width_mismatch) {
 
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected table32 import to reject table64 host binding");
-    if (m) wasm_free_module(m);
+    if (m) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -4009,7 +4009,7 @@ WL_TEST(test_bulk_memory_ops) {
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, result.of.i32, 166);
 
-        memory = wasm_memory_data(m);
+        memory = wasm_memory_data(m, 0);
         WL_CHECK_MSG(t, memory != NULL, "%s", "expected linear memory allocation");
         if (memory) {
             WASM_CHECK_I32(t, memory[0], 'A');
@@ -4023,7 +4023,7 @@ WL_TEST(test_bulk_memory_ops) {
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
                  "%s", "expected dropped passive segment to behave like an empty segment on memory.init");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -4258,7 +4258,7 @@ WL_TEST(test_bulk_memory_table_ops) {
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
                  "%s", "expected dropped passive element segment to behave like an empty segment on table.init");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -4403,7 +4403,7 @@ WL_TEST(test_bulk_memory_oob_traps) {
     err = wasm_call(m, "bad_copy", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS, "%s", "expected memory.copy out-of-bounds trap");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -4563,7 +4563,7 @@ WL_TEST(test_bulk_memory_table_oob_traps) {
     err = wasm_call(m, "bad_copy", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS, "%s", "expected table.copy out-of-bounds trap");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -4835,7 +4835,7 @@ WL_TEST(test_reference_types_table_ops) {
         WASM_CHECK_I32(t, result.of.i32, 83);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5019,7 +5019,7 @@ WL_TEST(test_reference_types_expr_element_segments) {
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_BOUNDS,
                  "%s", "expected dropped passive expr element segment to behave like an empty segment on table.init");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5126,7 +5126,7 @@ WL_TEST(test_reference_types_active_expr_element_segment) {
         WASM_CHECK_I32(t, result.of.i32, 77);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5300,7 +5300,7 @@ WL_TEST(test_loop) {
         WASM_CHECK_I32(t, result.of.i32, 55);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5392,7 +5392,7 @@ WL_TEST(test_large_param_call) {
         WASM_CHECK_I32(t, result.of.i32, 17);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5492,7 +5492,7 @@ WL_TEST(test_multi_result_call) {
             "unexpected multi-result values");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5610,7 +5610,7 @@ WL_TEST(test_loop_type_index_block) {
         WASM_CHECK_I32(t, result.of.i32, 5);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5708,7 +5708,7 @@ WL_TEST(test_prefixed_opcode_in_dead_branch) {
         WASM_CHECK_I32(t, result.of.i32, 7);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5820,7 +5820,7 @@ WL_TEST(test_sign_extension_ops) {
     err = wasm_call(m, "ext32", NULL, 0, &i32_result, 1);
     WASM_CHECK_OK(t, err);
     if (err != WASM_OK) {
-        wasm_free_module(m);
+        wasm_module_free(m);
         wasm_destroy(&rt);
         return;
     }
@@ -5832,7 +5832,7 @@ WL_TEST(test_sign_extension_ops) {
         WASM_CHECK_I64(t, i64_result.of.i64, -32896);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -5955,7 +5955,7 @@ WL_TEST(test_exported_ctor_startup) {
         WASM_CHECK_I32(t, result.of.i32, 77);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6047,13 +6047,13 @@ WL_TEST(test_multivalue_if_block) {
     err = wasm_call(m, "mv", args, 1, results, 2);
     WASM_CHECK_OK(t, err);
     if (err != WASM_OK) {
-        wasm_free_module(m);
+        wasm_module_free(m);
         wasm_destroy(&rt);
         return;
     }
     if (!(results[0].of.i32 == 11 && results[1].of.i32 == 22)) {
         WL_CHECK_MSG(t, false, "%s", "unexpected true-branch multivalue results");
-        wasm_free_module(m);
+        wasm_module_free(m);
         wasm_destroy(&rt);
         return;
     }
@@ -6069,7 +6069,7 @@ WL_TEST(test_multivalue_if_block) {
             "unexpected false-branch multivalue results");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6164,7 +6164,7 @@ WL_TEST(test_multivalue_branch_block) {
             "unexpected multivalue branch results");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6274,7 +6274,7 @@ WL_TEST(test_multivalue_loop_params) {
             "unexpected multivalue loop results");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6454,25 +6454,25 @@ WL_TEST(test_trunc_sat_ops) {
         err = wasm_call(m, names[index], NULL, 0, &result, 1);
         WASM_CHECK_OK(t, err);
         if (err != WASM_OK) {
-            wasm_free_module(m);
+            wasm_module_free(m);
             wasm_destroy(&rt);
             return;
         }
         if (!is_i64[index] && result.of.i32 != expected_i32[index]) {
             WASM_CHECK_I32(t, result.of.i32, expected_i32[index]);
-            wasm_free_module(m);
+            wasm_module_free(m);
             wasm_destroy(&rt);
             return;
         }
         if (is_i64[index] && result.of.i64 != expected_i64[index]) {
             WASM_CHECK_I64(t, result.of.i64, expected_i64[index]);
-            wasm_free_module(m);
+            wasm_module_free(m);
             wasm_destroy(&rt);
             return;
         }
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6566,7 +6566,7 @@ WL_TEST(test_tail_call_self_recursion) {
         WASM_CHECK_I32(t, result.of.i32, 42);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6672,7 +6672,7 @@ WL_TEST(test_tail_call_indirect) {
         WASM_CHECK_I32(t, result.of.i32, 77);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6797,7 +6797,7 @@ WL_TEST(test_exception_try_catch_payload) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 14);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6881,7 +6881,7 @@ WL_TEST(test_exception_catch_all) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 55);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -6981,7 +6981,7 @@ WL_TEST(test_exception_rethrow) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 109);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -7080,7 +7080,7 @@ WL_TEST(test_exception_delegate) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 8);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -7103,7 +7103,7 @@ WL_TEST(test_feature_gate_exceptions_disabled) {
     emit_single_tag_section(&mod, 0);
 
     wasm_init(&rt);
-    wasm_disable_feature(&rt, WASM_FEATURE_EXCEPTIONS);
+    wasm_runtime_disable_feature(&rt, WASM_FEATURE_EXCEPTIONS);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled exceptions feature to reject module load");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
@@ -7149,7 +7149,7 @@ WL_TEST(test_feature_gate_tail_call_disabled) {
     }
 
     wasm_init(&rt);
-    wasm_disable_feature(&rt, WASM_FEATURE_TAIL_CALL);
+    wasm_runtime_disable_feature(&rt, WASM_FEATURE_TAIL_CALL);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled tail-call feature to reject module load");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
@@ -7196,7 +7196,7 @@ WL_TEST(test_feature_gate_sign_extension_disabled) {
     }
 
     wasm_init(&rt);
-    wasm_disable_feature(&rt, WASM_FEATURE_SIGN_EXT);
+    wasm_runtime_disable_feature(&rt, WASM_FEATURE_SIGN_EXT);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected disabled sign-extension feature to reject module load");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "disabled") != NULL, "%s", rt.error_msg);
@@ -7329,6 +7329,8 @@ WL_TEST(test_runtime_config_rejects_zero_limits) {
                  (int)err);
     WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
+
+    WL_CHECK(t, wasm_runtime_new(&cfg) == NULL);
 }
 
 WL_TEST(test_runtime_config_limits_operand_stack_validation) {
@@ -7522,18 +7524,18 @@ WL_TEST(test_runtime_config_limits_call_depth_and_backtrace) {
     WL_CHECK_MSG(t, err == WASM_ERR_CALL_STACK_EXHAUSTED,
                  "expected WASM_ERR_CALL_STACK_EXHAUSTED, got %d",
                  (int)err);
-    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 4,
+    WL_CHECK_MSG(t, wasm_runtime_call_depth(&rt) == 4,
                  "expected backtrace depth 4, got %u",
-                 (unsigned)wasm_get_call_stack_depth(&rt));
-    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset));
+                 (unsigned)wasm_runtime_call_depth(&rt));
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &offset));
     WL_CHECK_MSG(t, func_idx == 0, "expected top backtrace function 0, got %u", (unsigned)func_idx);
-    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 3, NULL, &func_idx, &offset));
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 3, NULL, &func_idx, &offset));
     WL_CHECK_MSG(t, func_idx == 0, "expected deepest captured function 0, got %u", (unsigned)func_idx);
-    WL_CHECK_MSG(t, wasm_get_call_frame_info(&rt, 4, NULL, &func_idx, &offset) == WASM_ERR_MALFORMED,
+    WL_CHECK_MSG(t, wasm_runtime_call_frame(&rt, 4, NULL, &func_idx, &offset) == WASM_ERR_MALFORMED,
                  "%s",
                  "expected querying beyond configured backtrace depth to fail");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -7654,7 +7656,7 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
     WL_CHECK(t, rt.frame_arena != NULL && rt.frame_arena->prev == NULL && rt.frame_arena->used == 0u);
     WL_CHECK(t, rt.frame_arena_spare != NULL && rt.frame_arena_spare->size > 16u);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -7913,7 +7915,7 @@ WL_TEST(test_lazy_validation_defers_body_errors_until_first_call) {
     WL_CHECK_MSG(t, err != WASM_OK, "%s", "expected bad export to fail deferred validation");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "type mismatch") != NULL, "%s", rt.error_msg);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -8284,7 +8286,7 @@ WL_TEST(test_load_limits_function_locals) {
     wasm_init(&rt);
     m = wasm_load(&rt, at_limit.buf, at_limit.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
     m = wasm_load(&rt, over_limit.buf, over_limit.len);
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "too many locals"),
                  "expected the locals limit to reject the module, got: %s", rt.error_msg);
@@ -8298,7 +8300,7 @@ WL_TEST(test_load_limits_function_locals) {
     wasm_init_config(&rt, &config);
     m = wasm_load(&rt, over_limit.buf, over_limit.len);
     WL_CHECK_MSG(t, m != NULL, "expected max_function_locals = 0 to lift the limit: %s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -8357,7 +8359,7 @@ WL_TEST(test_canonicalization_dedupes_many_types) {
         WL_CHECK_MSG(t, mismatches == 0, "expected identical types to share ids and distinct types not to, %u wrong",
                      (unsigned)mismatches);
     }
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -8393,12 +8395,12 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_register_table_import(NULL, &table_imp) != WASM_OK);
     WL_CHECK(t, wasm_register_memory_import(NULL, &memory_imp) != WASM_OK);
     WL_CHECK(t, wasm_register_tag_import(NULL, &tag_imp) != WASM_OK);
-    wasm_enable_feature(NULL, WASM_FEATURE_SIMD);
-    wasm_disable_feature(NULL, WASM_FEATURE_SIMD);
-    wasm_enable_all_features(NULL);
+    wasm_runtime_enable_feature(NULL, WASM_FEATURE_SIMD);
+    wasm_runtime_disable_feature(NULL, WASM_FEATURE_SIMD);
+    wasm_runtime_enable_all_features(NULL);
     wasm_gc_collect(NULL);
     WL_CHECK(t, wasm_load(NULL, &byte, 1) == NULL);
-    wasm_free_module(NULL);
+    wasm_module_free(NULL);
     WL_CHECK(t, wasm_call(NULL, "f", NULL, 0, NULL, 0) != WASM_OK);
     WL_CHECK(t, wasm_call_index(NULL, 0, NULL, 0, NULL, 0) != WASM_OK);
     WL_CHECK(t, wasm_call_fmt(NULL, "f", "v()") != WASM_OK);
@@ -8407,26 +8409,25 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_memory_read(NULL, 0, 0, &byte, 1) != WASM_OK);
     WL_CHECK(t, wasm_memory_write(NULL, 0, 0, &byte, 1) != WASM_OK);
     WL_CHECK(t, wasm_memory_get_string(NULL, 0, 0, text, sizeof(text)) != WASM_OK);
-    WL_CHECK(t, wasm_memory_ref_at(NULL, 0) == NULL);
-    WL_CHECK(t, wasm_memory_data_at(NULL, 0) == NULL);
-    WL_CHECK(t, wasm_memory_size_at(NULL, 0) == 0);
-    WL_CHECK(t, wasm_memory_grow_at(NULL, 0, 1) < 0);
-    WL_CHECK(t, wasm_memory_data(NULL) == NULL);
-    WL_CHECK(t, wasm_memory_size(NULL) == 0);
-    WL_CHECK(t, wasm_memory_grow(NULL, 1) < 0);
+    WL_CHECK(t, wasm_module_memory(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_memory_data(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_memory_size(NULL, 0) == 0);
+    WL_CHECK(t, wasm_memory_grow(NULL, 0, 1) < 0);
+    WL_CHECK(t, wasm_memory_base(NULL) == NULL);
+    WL_CHECK(t, wasm_memory_length(NULL) == 0);
     wasm_memory_free(NULL);
     wasm_table_free(NULL);
     WL_CHECK(t, wasm_memory_new(2, 1, 0) == NULL);
     WL_CHECK(t, wasm_table_new(WASM_TYPE_I32, 1, 1) == NULL);
     WL_CHECK(t, wasm_table_count(NULL) == 0);
-    WL_CHECK(t, wasm_table_ref_at(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_module_table(NULL, 0) == NULL);
     (void)wasm_table_type(NULL, 0);
     WL_CHECK(t, wasm_table_reftype(NULL, 0) == NULL);
     WL_CHECK(t, wasm_global_count(NULL) == 0);
     (void)wasm_global_type(NULL, 0);
     WL_CHECK(t, wasm_global_reftype(NULL, 0) == NULL);
     WL_CHECK(t, wasm_global_is_mutable(NULL, 0) == 0);
-    WL_CHECK(t, wasm_global_value_ref_at(NULL, 0) == NULL);
+    WL_CHECK(t, wasm_module_global(NULL, 0) == NULL);
     WL_CHECK(t, wasm_global_get(NULL, "g", &value) != WASM_OK);
     WL_CHECK(t, wasm_global_set(NULL, "g", value) != WASM_OK);
     WL_CHECK(t, wasm_import_count(NULL) == 0);
@@ -8463,15 +8464,15 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_array_length(NULL, value, &out_u32) != WASM_OK);
     WL_CHECK(t, wasm_array_get_elem(NULL, value, 0, &value) != WASM_OK);
     WL_CHECK(t, wasm_array_set_elem(NULL, value, 0, value) != WASM_OK);
-    wasm_dump_backtrace(NULL, text, sizeof(text));
-    WL_CHECK(t, wasm_get_call_stack_depth(NULL) == 0);
-    WL_CHECK(t, wasm_get_call_frame_info(NULL, 0, NULL, &index, &out_u32) != WASM_OK);
-    wasm_set_fuel(NULL, 1);
-    wasm_disable_fuel(NULL);
-    WL_CHECK(t, wasm_get_fuel(NULL) == 0);
+    wasm_runtime_backtrace(NULL, text, sizeof(text));
+    WL_CHECK(t, wasm_runtime_call_depth(NULL) == 0);
+    WL_CHECK(t, wasm_runtime_call_frame(NULL, 0, NULL, &index, &out_u32) != WASM_OK);
+    wasm_runtime_set_fuel(NULL, 1);
+    wasm_runtime_disable_fuel(NULL);
+    WL_CHECK(t, wasm_runtime_fuel(NULL) == 0);
     WL_CHECK(t, wasm_module_runtime(NULL) == NULL);
     wasm_module_set_userdata(NULL, NULL);
-    WL_CHECK(t, wasm_module_get_userdata(NULL) == NULL);
+    WL_CHECK(t, wasm_module_userdata(NULL) == NULL);
 #if WASM_ENABLE_PLATFORM
     WL_CHECK(t, wasm_bind_wasi_stubs(NULL) != WASM_OK);
     WL_CHECK(t, wasm_bind_emscripten_stubs(NULL) != WASM_OK);
@@ -8508,13 +8509,13 @@ WL_TEST(test_funcrefs_from_freed_modules_trap) {
         WASM_CHECK_OK(t, wasm_call(provider, "get", NULL, 0, &ref, 1));
         WASM_CHECK_OK(t, wasm_call(caller, "call", &ref, 1, &result, 1));
         WASM_CHECK_I32(t, result.of.i32, 7);
-        wasm_free_module(provider);
+        wasm_module_free(provider);
         provider = NULL;
         WL_CHECK_MSG(t, wasm_call(caller, "call", &ref, 1, &result, 1) != WASM_OK, "%s",
                      "expected a funcref into a freed module to trap");
     }
-    wasm_free_module(provider);
-    wasm_free_module(caller);
+    wasm_module_free(provider);
+    wasm_module_free(caller);
     wasm_destroy(&rt);
 }
 
@@ -8620,8 +8621,8 @@ WL_TEST(test_exceptions_from_imports_reach_handlers_on_all_call_paths) {
         WL_CHECK_MSG(t, err == WASM_OK && result.of.i32 == cases[i].expected, "%s: expected %d, got err=%d result=%d (%s)",
                      cases[i].name, (int)cases[i].expected, (int)err, (int)result.of.i32, rt.error_msg);
     }
-    wasm_free_module(catcher);
-    wasm_free_module(thrower);
+    wasm_module_free(catcher);
+    wasm_module_free(thrower);
     wasm_destroy(&rt);
 }
 
@@ -8656,11 +8657,11 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
     m = wasm_load(&rt, big_memory_bytes, sizeof(big_memory_bytes));
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "limit"),
                  "expected a 5-page memory to exceed a 4-page limit, got: %s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
     m = wasm_load(&rt, big_table_bytes, sizeof(big_table_bytes));
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "limit"),
                  "expected a 9-element table to exceed an 8-element limit, got: %s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
 
     m = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
@@ -8673,8 +8674,8 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
         err = wasm_call(m, "grow_mem", &arg, 1, &result, 1);
         WASM_CHECK_OK(t, err);
         WASM_CHECK_I32(t, result.of.i32, -1);
-        WL_CHECK(t, wasm_memory_grow(m, 1) == -1);
-        WL_CHECK(t, wasm_memory_size(m) == 4u * WASM_PAGE_SIZE);
+        WL_CHECK(t, wasm_memory_grow(m, 0, 1) == -1);
+        WL_CHECK(t, wasm_memory_size(m, 0) == 4u * WASM_PAGE_SIZE);
 
         arg = wasm_i32(7);
         err = wasm_call(m, "grow_table", &arg, 1, &result, 1);
@@ -8685,7 +8686,7 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
         WASM_CHECK_OK(t, err);
         WASM_CHECK_I32(t, result.of.i32, -1);
     }
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 
     /* Each instance of grow_bytes starts with 2 pages; the runtime allows 5 in total. */
@@ -8701,11 +8702,11 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
         m = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
         WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "runtime's limit"),
                      "expected a third instance to exceed the runtime limit, got: %s", rt.error_msg);
-        WL_CHECK(t, wasm_memory_grow(first, 1) == 2);
-        WL_CHECK(t, wasm_memory_grow(first, 1) == -1);
-        wasm_free_module(second);
-        WL_CHECK(t, wasm_memory_grow(first, 2) == 3);
-        wasm_free_module(first);
+        WL_CHECK(t, wasm_memory_grow(first, 0, 1) == 2);
+        WL_CHECK(t, wasm_memory_grow(first, 0, 1) == -1);
+        wasm_module_free(second);
+        WL_CHECK(t, wasm_memory_grow(first, 0, 2) == 3);
+        wasm_module_free(first);
     }
     wasm_destroy(&rt);
 }
@@ -8767,8 +8768,8 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     err = wasm_call(compiled, "bump", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED && strstr(rt.error_msg, "not instantiated"), "%s", rt.error_msg);
     WL_CHECK(t, wasm_memory_read(compiled, 0, 0, &byte, 1) != WASM_OK);
-    WL_CHECK(t, wasm_memory_data_at(compiled, 0) == NULL);
-    WL_CHECK(t, wasm_global_value_ref_at(compiled, 0) == NULL);
+    WL_CHECK(t, wasm_memory_data(compiled, 0) == NULL);
+    WL_CHECK(t, wasm_module_global(compiled, 0) == NULL);
 
     m = wasm_instantiate(compiled);
     WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "env"), "expected unresolved imports to fail: %s", rt.error_msg);
@@ -8816,9 +8817,9 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
         WASM_CHECK_OK(t, err);
         WASM_CHECK_I32(t, result.of.i32, 11);
     }
-    wasm_free_module(second);
-    wasm_free_module(first);
-    wasm_free_module(compiled);
+    wasm_module_free(second);
+    wasm_module_free(first);
+    wasm_module_free(compiled);
     free(memory.data);
 
     compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
@@ -8826,8 +8827,8 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     m = compiled ? wasm_instantiate(compiled) : NULL;
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE, "expected the start function to trap: %s",
                  rt.error_msg);
-    wasm_free_module(m);
-    wasm_free_module(compiled);
+    wasm_module_free(m);
+    wasm_module_free(compiled);
     wasm_destroy(&rt);
 }
 
@@ -8846,10 +8847,10 @@ WL_TEST(test_load_rejects_misordered_sections) {
     m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "section 7 is repeated"),
                  "expected a repeated export section to be malformed, got: %s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
     m = wasm_compile(&rt, module_bytes, sizeof(module_bytes));
     WL_CHECK(t, m == NULL);
-    wasm_free_module(m);
+    wasm_module_free(m);
 
     emit_header(&late_types);
     {
@@ -8867,7 +8868,7 @@ WL_TEST(test_load_rejects_misordered_sections) {
     m = wasm_load(&rt, late_types.buf, late_types.len);
     WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "section out of order: section 1 must come earlier"),
                  "expected a type section after the function section to be malformed, got: %s", rt.error_msg);
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -8880,7 +8881,7 @@ WL_TEST(test_bad_magic) {
     m = wasm_load(&rt, bad, sizeof(bad));
     if (m) {
         WL_CHECK_MSG(t, false, "%s", "should have rejected");
-        wasm_free_module(m);
+        wasm_module_free(m);
     } else {
         WL_CHECK(t, rt.last_error == WASM_ERR_INVALID_MAGIC);
     }
@@ -8947,7 +8948,7 @@ WL_TEST(test_div_by_zero) {
     err = wasm_call(m, "f", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_DIV_BY_ZERO, "%s", "expected div by zero trap");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9030,35 +9031,35 @@ WL_TEST(test_public_backtrace_helpers_capture_traps) {
         return;
     }
 
-    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 0, "%s", "expected empty initial backtrace");
+    WL_CHECK_MSG(t, wasm_runtime_call_depth(&rt) == 0, "%s", "expected empty initial backtrace");
 
     err = wasm_call(m, "run", NULL, 0, NULL, 0);
     WL_CHECK_MSG(t, err == WASM_ERR_UNREACHABLE, "%s", "expected unreachable trap");
 
-    WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 3);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 3);
 
-    err = wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset);
+    err = wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 2);
         WASM_CHECK_I32(t, (int32_t)offset, 0);
     }
 
-    err = wasm_get_call_frame_info(&rt, 1, NULL, &func_idx, &offset);
+    err = wasm_runtime_call_frame(&rt, 1, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 1);
         WASM_CHECK_I32(t, (int32_t)offset, 0);
     }
 
-    err = wasm_get_call_frame_info(&rt, 2, NULL, &func_idx, &offset);
+    err = wasm_runtime_call_frame(&rt, 2, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 0);
         WASM_CHECK_I32(t, (int32_t)offset, 0);
     }
 
-    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
     WL_CHECK_MSG(t, strstr(backtrace, "#0 func[2] at offset 0x0000") != NULL,
                  "%s", "expected top frame in formatted backtrace");
     WL_CHECK_MSG(t, strstr(backtrace, "#1 func[1] at offset 0x0000") != NULL,
@@ -9066,18 +9067,18 @@ WL_TEST(test_public_backtrace_helpers_capture_traps) {
     WL_CHECK_MSG(t, strstr(backtrace, "#2 func[0] at offset 0x0000") != NULL,
                  "%s", "expected root frame in formatted backtrace");
 
-    err = wasm_get_call_frame_info(&rt, 3, NULL, &func_idx, &offset);
+    err = wasm_runtime_call_frame(&rt, 3, NULL, &func_idx, &offset);
     WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected out-of-range frame query rejection");
 
     bad_arg = wasm_i32(7);
     err = wasm_call(m, "run", &bad_arg, 1, NULL, 0);
     WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected signature mismatch rejection");
-    WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 0, "%s", "expected backtrace reset before a non-executing call failure");
+    WL_CHECK_MSG(t, wasm_runtime_call_depth(&rt) == 0, "%s", "expected backtrace reset before a non-executing call failure");
 
-    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
     WL_CHECK_MSG(t, backtrace[0] == '\0', "%s", "expected empty backtrace string after reset");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9141,26 +9142,26 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
         return;
     }
 
-    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+    WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
 
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
-    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+    WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
 
-    wasm_set_fuel(&rt, 2);
+    wasm_runtime_set_fuel(&rt, 2);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
-    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+    WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
     WL_CHECK(t, wasm_call(m, "run", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
 
-    wasm_disable_fuel(&rt);
+    wasm_runtime_disable_fuel(&rt);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9228,24 +9229,24 @@ WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
         return;
     }
 
-    wasm_set_fuel(&rt, 5);
+    wasm_runtime_set_fuel(&rt, 5);
     err = wasm_call(m, "spin", NULL, 0, NULL, 0);
     WL_CHECK_MSG(t, err == WASM_ERR_OUT_OF_FUEL, "%s", "expected out of fuel trap");
-    WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
-    WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 1);
+    WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 1);
 
-    err = wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset);
+    err = wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 0);
         WASM_CHECK_I32(t, (int32_t)offset, 2);
     }
 
-    wasm_dump_backtrace(&rt, backtrace, sizeof(backtrace));
+    wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
     WL_CHECK_MSG(t, strstr(backtrace, "#0 func[0] at offset 0x0002") != NULL,
                  "%s", "expected fuel trap backtrace frame");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9379,7 +9380,7 @@ WL_TEST(test_wasi_config_args_env_preopens_and_poll) {
     args[2] = wasm_i32(0);
     WL_CHECK(t, wasm_test_wasi_call(t, m, "poll_oneoff", args, 4) == 28u);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9413,7 +9414,7 @@ WL_TEST(test_wasi_proc_raise_does_not_signal_the_host) {
         WL_CHECK_MSG(t, result.of.i32 == 52, "expected ENOSYS for signal %d, got %d", (int)signals[i],
                      (int)result.of.i32);
     }
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -9709,7 +9710,7 @@ WL_TEST(test_public_wasi_stub_helpers) {
     WASM_CHECK_I32(t, (int32_t)err, (int32_t)WASM_ERR_EXIT);
     WASM_CHECK_I32(t, wasm_runtime_exit_code(&rt), 5);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -10079,7 +10080,7 @@ WL_TEST(test_public_wasi_metadata_helpers) {
                      "%s", "expected clock_time_get to overwrite the sentinel timestamp");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -10311,7 +10312,7 @@ WL_TEST(test_public_wasi_preview1_surface_imports) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -10453,7 +10454,7 @@ WL_TEST(test_wasi_paths_stay_beneath_preopens) {
     }
 #endif
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -10639,7 +10640,7 @@ WL_TEST(test_public_emscripten_stub_helpers) {
         return;
     }
 
-    memory = wasm_memory_ref_at(m, 0);
+    memory = wasm_module_memory(m, 0);
     WL_CHECK_MSG(t, memory != NULL, "%s", "expected imported env.memory binding");
     if (memory) {
         WL_CHECK_MSG(t, memory->pages == 128u, "expected 128 initial pages, got %llu",
@@ -10648,7 +10649,7 @@ WL_TEST(test_public_emscripten_stub_helpers) {
                      (unsigned long long)memory->max_pages);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 #endif /* WASM_ENABLE_PLATFORM */
@@ -10828,7 +10829,7 @@ WL_TEST(test_public_global_helpers) {
     err = wasm_global_get(m, "missing", &value);
     WL_CHECK_MSG(t, err == WASM_ERR_UNDEFINED_EXPORT, "%s", "expected missing global export lookup to fail");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -10866,7 +10867,7 @@ WL_TEST(test_float_signaling_nan_bits) {
         emit_bytes(&sec, body.buf, body.len);
         emit_section(&mod, 10, sec.buf, sec.len);
         wasm_init(&rt);
-        wasm_enable_all_features(&rt);
+        wasm_runtime_enable_all_features(&rt);
         m = wasm_load(&rt, mod.buf, mod.len);
         WL_CHECK_MSG(t, m != NULL, "case %u: %s", i, rt.error_msg);
         if (m) {
@@ -10876,7 +10877,7 @@ WL_TEST(test_float_signaling_nan_bits) {
                 WL_CHECK_MSG(t, (uint32_t)result.of.i32 == expected[i],
                              "case %u: signaling NaN bits changed", i);
             }
-            wasm_free_module(m);
+            wasm_module_free(m);
         }
         wasm_destroy(&rt);
     }
@@ -11008,7 +11009,7 @@ WL_TEST(test_float_min_max_semantics) {
         WL_CHECK_MSG(t, isnan(result.of.f64), "%s", "expected f64.max(1, NaN) to return NaN");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -11165,7 +11166,7 @@ WL_TEST(test_trapping_float_to_int_conversions) {
         WL_CHECK_MSG(t, err == WASM_ERR_INVALID_CONVERSION, "%s", wasm_error_string(err));
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -11268,7 +11269,7 @@ WL_TEST(test_rotate_by_zero) {
         if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, (int64_t)0x8123456789ABCDEFull);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -11351,7 +11352,7 @@ WL_TEST(test_typed_select_funcref) {
         WL_CHECK_MSG(t, result.of.funcref == UINT32_MAX, "%s", "expected typed select to choose ref.null");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12121,16 +12122,16 @@ WL_TEST(test_simd_execution_and_feature_gate) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, (int32_t)memory_bytes[0] + (int32_t)memory_bytes[15]);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 
     wasm_init(&rt);
-    wasm_disable_feature(&rt, WASM_FEATURE_SIMD);
+    wasm_runtime_disable_feature(&rt, WASM_FEATURE_SIMD);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected SIMD-disabled runtime to reject v128 module");
     WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", "expected malformed error for disabled SIMD feature");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "SIMD") != NULL, "%s", "expected SIMD feature error message");
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12159,15 +12160,15 @@ WL_TEST(test_memory_grow_respects_zero_max) {
         return;
     }
 
-    old_pages = wasm_memory_grow_at(m, 0, 0);
+    old_pages = wasm_memory_grow(m, 0, 0);
     WASM_CHECK_I64(t, old_pages, 0);
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 0), 0);
 
-    old_pages = wasm_memory_grow_at(m, 0, 1);
+    old_pages = wasm_memory_grow(m, 0, 1);
     WASM_CHECK_I64(t, old_pages, -1);
-    WASM_CHECK_I32(t, (int32_t)wasm_memory_size_at(m, 0), 0);
+    WASM_CHECK_I32(t, (int32_t)wasm_memory_size(m, 0), 0);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12281,7 +12282,7 @@ WL_TEST(test_trunc_allows_fractional_lower_edges) {
         if (err == WASM_OK) WASM_CHECK_I64(t, result.of.i64, 0);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12386,7 +12387,7 @@ WL_TEST(test_call_indirect_uses_structural_type_equality) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12518,7 +12519,7 @@ WL_TEST(test_gc_type_section_parses_composite_types) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12569,7 +12570,7 @@ WL_TEST(test_gc_type_section_respects_feature_gate) {
     }
 
     wasm_init(&rt);
-    wasm_disable_feature(&rt, WASM_FEATURE_GC);
+    wasm_runtime_disable_feature(&rt, WASM_FEATURE_GC);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected GC-disabled runtime to reject GC type section");
     WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s", rt.error_msg);
@@ -12610,7 +12611,7 @@ WL_TEST(test_decode_rejects_counts_beyond_section) {
         m = wasm_load(&rt, mod.buf, mod.len);
         WL_CHECK_MSG(t, m == NULL, "expected oversized %s to be rejected", cases[i].name);
         WL_CHECK_MSG(t, rt.last_error == WASM_ERR_MALFORMED, "%s: %s", cases[i].name, rt.error_msg);
-        if (m != NULL) wasm_free_module(m);
+        if (m != NULL) wasm_module_free(m);
         wasm_destroy(&rt);
     }
 }
@@ -12633,7 +12634,7 @@ WL_TEST(test_gc_rejects_multiple_supertypes) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected multiple supertypes to be rejected");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "multiple supertypes") != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12650,12 +12651,12 @@ WL_TEST(test_compact_imports_is_opt_in) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected compact imports to be disabled by default");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "compact imports") != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
 
-    wasm_enable_feature(&rt, WASM_FEATURE_COMPACT_IMPORTS);
+    wasm_runtime_enable_feature(&rt, WASM_FEATURE_COMPACT_IMPORTS);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -12672,18 +12673,18 @@ WL_TEST(test_custom_page_sizes_is_opt_in) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected custom page sizes to be disabled by default");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "custom page sizes") != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
 
-    wasm_enable_feature(&rt, WASM_FEATURE_CUSTOM_PAGE_SIZES);
+    wasm_runtime_enable_feature(&rt, WASM_FEATURE_CUSTOM_PAGE_SIZES);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
     if (m != NULL) {
         int64_t old_pages;
-        WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), 3);
-        old_pages = wasm_memory_grow_at(m, 0, 5);
+        WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 3);
+        old_pages = wasm_memory_grow(m, 0, 5);
         WASM_CHECK_I64(t, old_pages, 3);
-        WASM_CHECK_I64(t, (int64_t)wasm_memory_size_at(m, 0), 8);
-        wasm_free_module(m);
+        WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 8);
+        wasm_module_free(m);
     }
     wasm_destroy(&rt);
 }
@@ -12748,7 +12749,7 @@ static wasm_module_t* wasm_test_load_shared_worker(wl_test_ctx* t, wasm_test_sha
     imp.memory = memory;
     WL_CHECK_MSG(t, wasm_test_init_raw(&worker->rt, NULL) == WASM_OK, "%s", worker->rt.error_msg);
     worker->initialized = 1;
-    wasm_enable_feature(&worker->rt, WASM_FEATURE_THREADS);
+    wasm_runtime_enable_feature(&worker->rt, WASM_FEATURE_THREADS);
     WL_CHECK_MSG(t, wasm_register_memory_import(&worker->rt, &imp) == WASM_OK, "%s", worker->rt.error_msg);
     worker->mod = wasm_load(&worker->rt, mod->buf, mod->len);
     WL_CHECK_MSG(t, worker->mod != NULL, "%s", worker->rt.error_msg);
@@ -12799,8 +12800,8 @@ WL_TEST(test_threads_shared_memory_across_runtimes) {
 
 cleanup:
     for (i = 0; i <= WORKERS; i++) {
-        if (workers[i].mod) wasm_free_module(workers[i].mod);
-        if (workers[i].initialized) (wasm_destroy)(&workers[i].rt);
+        if (workers[i].mod) wasm_module_free(workers[i].mod);
+        if (workers[i].initialized) wasm__runtime_destroy(&workers[i].rt);
     }
     wasm_memory_free(memory);
 }
@@ -12827,9 +12828,9 @@ WL_TEST(test_wide_arithmetic_is_opt_in) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected wide arithmetic to be disabled by default");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "wide arithmetic") != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
 
-    wasm_enable_feature(&rt, WASM_FEATURE_WIDE_ARITHMETIC);
+    wasm_runtime_enable_feature(&rt, WASM_FEATURE_WIDE_ARITHMETIC);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
     if (m != NULL) {
@@ -12846,7 +12847,7 @@ WL_TEST(test_wide_arithmetic_is_opt_in) {
         WL_CHECK_MSG(t, err == WASM_OK, "%s", rt.error_msg);
         WASM_CHECK_I64(t, results[0].of.i64, 0);
         WASM_CHECK_I64(t, results[1].of.i64, INT64_C(0x4000000000000000));
-        wasm_free_module(m);
+        wasm_module_free(m);
     }
     wasm_destroy(&rt);
 }
@@ -13013,7 +13014,7 @@ WL_TEST(test_gc_heaptype_parsing_tracks_concrete_type_refs) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13077,7 +13078,7 @@ WL_TEST(test_gc_ref_is_null_on_abstract_anyref) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13160,7 +13161,7 @@ WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected null anyref result");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13243,7 +13244,7 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected table entry 0 to hold a null eqref");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13309,7 +13310,7 @@ WL_TEST(test_gc_ref_eq_accepts_eqref_subtypes) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13448,7 +13449,7 @@ WL_TEST(test_gc_function_import_accepts_subtype_signature) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13565,7 +13566,7 @@ WL_TEST(test_gc_global_import_accepts_subtype_binding) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -13789,7 +13790,7 @@ WL_TEST(test_gc_public_type_helpers_and_host_allocators) {
         WL_CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s", "expected i31 array length rejection");
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -14091,7 +14092,7 @@ WL_TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     WL_CHECK_MSG(t, wasm_test_value_is_i31ref(&m->globals[5].value), "%s", "expected ref.i31 const expr to use the tagged i31 representation");
     WASM_CHECK_I32(t, wasm_test_gc_i31_get_s(m->globals[5].value.of.gc_ref), -1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -14758,7 +14759,7 @@ WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 286);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -14929,7 +14930,7 @@ WL_TEST(test_gc_runtime_executes_cast_and_branch_cast_opcodes) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15196,7 +15197,7 @@ WL_TEST(test_gc_runtime_executes_segment_backed_array_ops) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 390);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15264,7 +15265,7 @@ WL_TEST(test_gc_validation_accepts_struct_and_array_gc_opcodes) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15424,7 +15425,7 @@ WL_TEST(test_gc_validation_accepts_cast_and_branch_cast_opcodes) {
     wasm_init(&rt);
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
-    if (m != NULL) wasm_free_module(m);
+    if (m != NULL) wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15542,7 +15543,7 @@ WL_TEST(test_gc_type_canonicalization_and_function_subtyping) {
     WL_CHECK_MSG(t, wasm__is_subtype(m, 1, 0), "%s", "expected declared subtype relation to hold");
     WL_CHECK_MSG(t, !wasm__is_subtype(m, 0, 1), "%s", "expected subtype relation to be directional");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15589,7 +15590,7 @@ WL_TEST(test_gc_type_validation_accepts_struct_width_subtyping) {
     WL_CHECK_MSG(t, wasm__is_subtype(m, 1, 0), "%s", "expected struct width/depth subtype to validate");
     WL_CHECK_MSG(t, !wasm__type_equal(m, 1, 0), "%s", "expected subtype to stay distinct from supertype");
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15729,7 +15730,7 @@ WL_TEST(test_control_target_scan_accepts_signed_i32_const_leb) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 1);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15912,7 +15913,7 @@ WL_TEST(test_host_results_must_match_the_import_type) {
     WL_CHECK(t, wasm_call(m, "ref", NULL, 0, &result, 1) == WASM_ERR_TYPE_MISMATCH);
     WL_CHECK_MSG(t, strstr(rt.error_msg, "host function result 0") != NULL, "%s", rt.error_msg);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15923,7 +15924,7 @@ static wasm_error_t wasm_test_host_grow_memory(wasm_module_t* mod, const wasm_va
     (void)results;
     (void)num_results;
     (void)userdata;
-    return wasm_memory_grow(mod, 1) == 2 ? WASM_OK : WASM_ERR_TRAP;
+    return wasm_memory_grow(mod, 0, 1) == 2 ? WASM_OK : WASM_ERR_TRAP;
 }
 
 WL_TEST(test_memory_grown_by_callee_or_host_is_visible_to_caller) {
@@ -15960,7 +15961,7 @@ WL_TEST(test_memory_grown_by_callee_or_host_is_visible_to_caller) {
     WASM_CHECK_I32(t, result.of.i32, 44);
     WL_CHECK(t, wasm_call(m, "past_end", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_BOUNDS);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -15994,15 +15995,15 @@ WL_TEST(test_bulk_fuel_and_array_new_rooting) {
         return;
     }
 
-    wasm_set_fuel(&rt, 100);
+    wasm_runtime_set_fuel(&rt, 100);
     arg = wasm_i32(64 * 50);
     WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, NULL, 0));
-    WL_CHECK_MSG(t, wasm_get_fuel(&rt) < 50u, "expected 3200 bytes to cost 50 units, %u left",
-                 (unsigned)wasm_get_fuel(&rt));
-    wasm_set_fuel(&rt, 100);
+    WL_CHECK_MSG(t, wasm_runtime_fuel(&rt) < 50u, "expected 3200 bytes to cost 50 units, %u left",
+                 (unsigned)wasm_runtime_fuel(&rt));
+    wasm_runtime_set_fuel(&rt, 100);
     arg = wasm_i32(65536);
     WL_CHECK(t, wasm_call(m, "fill", &arg, 1, NULL, 0) == WASM_ERR_OUT_OF_FUEL);
-    wasm_disable_fuel(&rt);
+    wasm_runtime_disable_fuel(&rt);
 
     /* A held struct survives the collections below and follows the object as it moves. */
     {
@@ -16032,7 +16033,7 @@ WL_TEST(test_bulk_fuel_and_array_new_rooting) {
         WL_CHECK(t, wasm_ref_hold(NULL, point) == NULL);
     }
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -16063,7 +16064,7 @@ WL_TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
     wasm_value_t result = wasm_i32(0);
 
     wasm_init(&rt);
-    wasm_enable_feature(&rt, WASM_FEATURE_THREADS);
+    wasm_runtime_enable_feature(&rt, WASM_FEATURE_THREADS);
     m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
     WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
     if (!m) {
@@ -16096,7 +16097,7 @@ WL_TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
     }
 #endif
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -16160,12 +16161,12 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
     c = wasm_load(&rt, c_bytes, sizeof(c_bytes));
     WL_CHECK_MSG(t, b != NULL && c != NULL, "%s", rt.error_msg);
 
-    WASM_CHECK_OK(t, wasm_global_set_at(a, 0, wasm_i32(21)));
-    WL_CHECK(t, wasm_global_set_at(a, 1, wasm_i32(6)) == WASM_ERR_TYPE_MISMATCH);
-    WL_CHECK(t, wasm_global_set_at(a, 0, wasm_i64(21)) == WASM_ERR_TYPE_MISMATCH);
-    WASM_CHECK_OK(t, wasm_global_get_at(a, 1, &value));
+    WASM_CHECK_OK(t, wasm_global_set_index(a, 0, wasm_i32(21)));
+    WL_CHECK(t, wasm_global_set_index(a, 1, wasm_i32(6)) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_global_set_index(a, 0, wasm_i64(21)) == WASM_ERR_TYPE_MISMATCH);
+    WASM_CHECK_OK(t, wasm_global_get_index(a, 1, &value));
     WL_CHECK(t, value.of.i32 == 5);
-    WL_CHECK(t, wasm_global_get_at(a, 2, &value) == WASM_ERR_MALFORMED);
+    WL_CHECK(t, wasm_global_get_index(a, 2, &value) == WASM_ERR_MALFORMED);
 
     WL_CHECK(t, wasm_table_size(a, 0) == 2u);
     WASM_CHECK_OK(t, wasm_table_get(a, 0, 0, &ref));
@@ -16183,14 +16184,14 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
     if (b) {
         WASM_CHECK_OK(t, wasm_call(b, "run", NULL, 0, &result, 1));
         WL_CHECK_MSG(t, result.of.i32 == 42 + 100 + 3, "expected 145, got %d", (int)result.of.i32);
-        wasm_free_module(b);
+        wasm_module_free(b);
     }
-    wasm_free_module(a);
+    wasm_module_free(a);
     if (c) {
         arg = wasm_i32(4);
         WL_CHECK(t, wasm_call(c, "call_double", &arg, 1, &result, 1) == WASM_ERR_TRAP);
         WL_CHECK_MSG(t, strstr(rt.error_msg, "freed module") != NULL, "%s", rt.error_msg);
-        wasm_free_module(c);
+        wasm_module_free(c);
     }
 
     memory = wasm_memory_new(1, 2, 0);
@@ -16212,12 +16213,14 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
         arg = wasm_i32(1);
         WASM_CHECK_OK(t, wasm_call(e, "grow_mem", &arg, 1, &result, 1));
         WL_CHECK(t, result.of.i32 == 1 && memory->pages == 2u);
+        WL_CHECK(t, wasm_memory_base(memory) == wasm_memory_data(e, 0));
+        WL_CHECK(t, wasm_memory_length(memory) == 2u * WASM_PAGE_SIZE);
         WASM_CHECK_OK(t, wasm_call(e, "grow_mem", &arg, 1, &result, 1));
         WL_CHECK(t, result.of.i32 == -1);
         arg = wasm_i32(3);
         WASM_CHECK_OK(t, wasm_call(e, "grow_tab", &arg, 1, &result, 1));
         WL_CHECK(t, result.of.i32 == 1 && table->size == 4u);
-        wasm_free_module(e);
+        wasm_module_free(e);
     }
     wasm_memory_free(memory);
     wasm_table_free(table);
@@ -16251,14 +16254,14 @@ WL_TEST(test_backtraces_name_modules_and_functions) {
     WL_CHECK(t, wasm_func_name(m, 2) == NULL);
 
     WL_CHECK(t, wasm_call(m, "outer", NULL, 0, NULL, 0) == WASM_ERR_UNREACHABLE);
-    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, &frame_module, &func_idx, NULL));
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, &frame_module, &func_idx, NULL));
     WL_CHECK(t, frame_module == m && func_idx == 0u);
-    wasm_dump_backtrace(&rt, trace, sizeof(trace));
+    wasm_runtime_backtrace(&rt, trace, sizeof(trace));
     WL_CHECK_MSG(t, strstr(trace, "#0 demo!inner (func[0]) at offset") != NULL &&
                         strstr(trace, "#1 demo!outer (func[1]) at offset") != NULL,
                  "unexpected backtrace:\n%s", trace);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -16300,7 +16303,7 @@ WL_TEST(test_gc_collects_unreachable_externref_boxes_and_exnrefs) {
     WL_CHECK(t, rt.externref_boxes.count == 0u);
     WL_CHECK(t, rt.exception_objects.count == 0u);
 
-    wasm_free_module(m);
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 

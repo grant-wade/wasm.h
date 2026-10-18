@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
+WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(const wasm_module_t* mod,
                                                   const char* name,
                                                   wasm_global_t** out_global,
                                                   uint32_t* out_index) {
@@ -106,8 +106,8 @@ WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count,
 
 WASM_PRIVATE void wasm__free_import_info(wasm_import_info_t* info) {
     if (!info) return;
-    WASM_FREE(info->module);
-    WASM_FREE(info->name);
+    WASM_FREE((char*)info->module);
+    WASM_FREE((char*)info->name);
     wasm__clear_reftype(&info->ref_type);
     memset(info, 0, sizeof(*info));
 }

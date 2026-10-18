@@ -93,7 +93,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
             mod->failed_next = rt->failed_modules;                                   \
             rt->failed_modules = mod;                                                \
         } else {                                                                     \
-            wasm_free_module(mod);                                                   \
+            wasm_module_free(mod);                                                   \
         }                                                                            \
         return NULL;                                                                 \
     } while (0)
@@ -191,7 +191,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         r.ptr = se;
     }
     if (err != WASM_OK) {
-        wasm_free_module(mod);
+        wasm_module_free(mod);
         return NULL;
     }
 
@@ -317,7 +317,7 @@ wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
     return wasm__load_module(compiled->rt, compiled->module_bytes, compiled->module_size, 0, compiled);
 }
 
-void wasm_free_module(wasm_module_t* mod) {
+void wasm_module_free(wasm_module_t* mod) {
     wasm_gc_header_t* object;
     wasm__linked_func_t* linked;
     uint32_t i;

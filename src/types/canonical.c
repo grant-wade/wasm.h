@@ -729,7 +729,7 @@ static const wasm_functype_t* wasm__type_as_const_functype(const wasm_comptype_t
     return &type->of.func;
 }
 
-WASM_PRIVATE wasm_functype_t* wasm__module_functype(wasm_module_t* mod, uint32_t type_idx) {
+WASM_PRIVATE wasm_functype_t* wasm__module_functype(const wasm_module_t* mod, uint32_t type_idx) {
     if (!mod || type_idx >= mod->num_types) return NULL;
     return wasm__type_as_functype(&mod->types[type_idx]);
 }

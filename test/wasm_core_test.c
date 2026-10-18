@@ -31,7 +31,7 @@ int main(void) {
     if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK || result != 43)
         failed = 1;
 
-    wasm_free_module(mod);
+    wasm_module_free(mod);
 
     if (wasm_load(rt, NULL, 0u) != NULL ||
         wasm_runtime_last_error(rt) != WASM_ERR_MALFORMED)

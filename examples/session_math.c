@@ -238,12 +238,7 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
         ctx->owned_rt = wasm_runtime_new(runtime_config);
         ctx->rt = ctx->owned_rt;
         if (!ctx->rt) {
-            session_math_set_error(ctx, WASM_ERR_OOM, "runtime allocation failed");
-            return ctx;
-        }
-        err = wasm_runtime_last_error(ctx->rt);
-        if (err != WASM_OK) {
-            session_math_capture_runtime_error(ctx, err, "runtime init failed");
+            session_math_set_error(ctx, WASM_ERR_OOM, "runtime creation failed");
             return ctx;
         }
         ctx->owns_runtime = 1;
@@ -324,14 +319,14 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
     return ctx;
 
 fail_loaded_module:
-    wasm_free_module(ctx->mod);
+    wasm_module_free(ctx->mod);
     ctx->mod = NULL;
     return ctx;
 }
 
 static void session_math__free_ctx(session_math_ctx_t* ctx) {
     if (!ctx) return;
-    if (ctx->mod) wasm_free_module(ctx->mod);
+    if (ctx->mod) wasm_module_free(ctx->mod);
     if (ctx->owns_runtime) wasm_runtime_free(ctx->owned_rt);
     free(ctx);
 }
@@ -401,7 +396,7 @@ uint8_t* session_math_get_memory_ptr(void) {
     session_math_ctx_t* ctx = session_math__require_ctx();
     if (!ctx) return NULL;
     session_math_clear_error(ctx);
-    return wasm_memory_data_at(ctx->mod, ctx->memory_export_index);
+    return wasm_memory_data(ctx->mod, ctx->memory_export_index);
 }
 
 uint64_t session_math_get_memory_size(void) {
@@ -409,7 +404,7 @@ uint64_t session_math_get_memory_size(void) {
     uint64_t size_bytes;
 
     if (!ctx) return 0u;
-    size_bytes = wasm_memory_size_at(ctx->mod, ctx->memory_export_index);
+    size_bytes = wasm_memory_size(ctx->mod, ctx->memory_export_index);
     session_math_clear_error(ctx);
     return size_bytes;
 }

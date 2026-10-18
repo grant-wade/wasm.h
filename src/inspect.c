@@ -22,7 +22,7 @@ static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     }
 }
 
-static wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
+static wasm_error_t wasm__public_resolve_gc_object(const wasm_module_t* mod,
                                                    const wasm_value_t* ref,
                                                    wasm_gc_object_kind_t expected_kind,
                                                    const wasm_gc_header_t** out_object) {
@@ -84,7 +84,7 @@ static wasm_error_t wasm__public_resolve_gc_object(wasm_module_t* mod,
     return WASM_OK;
 }
 
-wasm_error_t wasm_struct_get_field(wasm_module_t* mod, wasm_value_t struct_ref,
+wasm_error_t wasm_struct_get_field(const wasm_module_t* mod, wasm_value_t struct_ref,
                                    uint32_t field_idx, wasm_value_t* out_val) {
     const wasm_gc_header_t* header;
     const wasm_structtype_t* type;
@@ -140,7 +140,7 @@ wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
     return wasm__gc_struct_set_field((wasm_gc_struct_t*)header, type, field_idx, val);
 }
 
-wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
+wasm_error_t wasm_array_length(const wasm_module_t* mod, wasm_value_t array_ref,
                                uint32_t* out_len) {
     const wasm_gc_header_t* header;
     wasm_error_t err;
@@ -158,7 +158,7 @@ wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
     return WASM_OK;
 }
 
-wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
+wasm_error_t wasm_array_get_elem(const wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t* out_val) {
     const wasm_gc_header_t* header;
     const wasm_arraytype_t* type;
@@ -256,19 +256,19 @@ static void wasm__load_names(wasm_module_t* mod) {
     }
 }
 
-const char* wasm_func_name(wasm_module_t* mod, uint32_t func_idx) {
+const char* wasm_func_name(const wasm_module_t* mod, uint32_t func_idx) {
     if (!mod || func_idx >= mod->num_funcs) return NULL;
-    wasm__load_names(mod);
+    wasm__load_names((wasm_module_t*)mod);
     return mod->func_names ? mod->func_names[func_idx] : NULL;
 }
 
-const char* wasm_module_name(wasm_module_t* mod) {
+const char* wasm_module_name(const wasm_module_t* mod) {
     if (!mod) return NULL;
-    wasm__load_names(mod);
+    wasm__load_names((wasm_module_t*)mod);
     return mod->module_name;
 }
 
-void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
+void wasm_runtime_backtrace(const wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
     uint32_t depth;
     size_t used = 0;
     uint32_t i;
@@ -312,45 +312,36 @@ void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
     buffer[used] = '\0';
 }
 
-uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt) {
+uint32_t wasm_runtime_call_depth(const wasm_runtime_t* rt) {
     return wasm__visible_call_stack_depth(rt);
 }
 
-wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
+wasm_error_t wasm_runtime_call_frame(const wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
                                       uint32_t* out_func_idx, uint32_t* out_offset) {
-    uint32_t stack_depth;
-
-    if (!rt) return WASM_ERR_MALFORMED;
-    stack_depth = wasm__visible_call_stack_depth(rt);
-    if (!wasm__visible_call_frame_info(rt, depth, out_module, out_func_idx, out_offset)) {
-        WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
-                      "call frame depth %u out of range (depth=%u)",
-                      (unsigned)depth, (unsigned)stack_depth);
+    if (!rt || !wasm__visible_call_frame_info(rt, depth, out_module, out_func_idx, out_offset))
         return WASM_ERR_MALFORMED;
-    }
-
     return WASM_OK;
 }
 
-void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
+void wasm_runtime_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
     if (!rt) return;
 
     rt->fuel = fuel;
     rt->fuel_enabled = 1;
 }
 
-void wasm_disable_fuel(wasm_runtime_t* rt) {
+void wasm_runtime_disable_fuel(wasm_runtime_t* rt) {
     if (!rt) return;
 
     rt->fuel = 0;
     rt->fuel_enabled = 0;
 }
 
-uint64_t wasm_get_fuel(wasm_runtime_t* rt) {
+uint64_t wasm_runtime_fuel(const wasm_runtime_t* rt) {
     return rt ? rt->fuel : 0;
 }
 
-const wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod) {
+wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod) {
     return mod ? mod->rt : NULL;
 }
 
@@ -359,7 +350,7 @@ void wasm_module_set_userdata(wasm_module_t* mod, void* userdata) {
     mod->host_userdata = userdata;
 }
 
-void* wasm_module_get_userdata(wasm_module_t* mod) {
+void* wasm_module_userdata(const wasm_module_t* mod) {
     return mod ? mod->host_userdata : NULL;
 }
 

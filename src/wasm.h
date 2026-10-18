@@ -41,7 +41,7 @@
  *       printf("result = %d\n", result.of.i32);
  *   }
  *
- *   wasm_free_module(mod);
+ *   wasm_module_free(mod);
  *   wasm_runtime_free(rt);
  *
  * INTROSPECTION:
@@ -247,16 +247,8 @@ typedef enum wasm_valtype_t {
 typedef struct wasm_module_t wasm_module_t;
 typedef struct wasm_gc_header_t wasm_gc_header_t;
 typedef struct wasm_runtime_t wasm_runtime_t;
-typedef struct wasm__val_frame_t wasm__val_frame_t;
-typedef struct wasm__externref_box_t wasm__externref_box_t;
-typedef struct wasm_func_t wasm_func_t;
-typedef struct wasm_func_ref_t wasm_func_ref_t;
-typedef struct wasm__call_frame_t wasm__call_frame_t;
-typedef struct wasm__exception_object_t wasm__exception_object_t;
-typedef struct wasm__emscripten_state_t wasm__emscripten_state_t;
-typedef struct wasm__wasi_state_t wasm__wasi_state_t;
-struct wasm_table_t;
-struct wasm_memory_t;
+typedef struct wasm_memory_t wasm_memory_t;
+typedef struct wasm_table_t wasm_table_t;
 
 typedef struct wasm_value_t {
     wasm_valtype_t type;
@@ -396,40 +388,12 @@ typedef struct wasm_fieldtype_t {
     int is_mutable;
 } wasm_fieldtype_t;
 
-typedef struct wasm_structtype_t {
-    uint32_t num_fields;
-    wasm_fieldtype_t* fields;
-} wasm_structtype_t;
-
-typedef struct wasm_arraytype_t {
-    wasm_fieldtype_t field;
-} wasm_arraytype_t;
-
 typedef enum wasm_comptype_kind_t {
     WASM_COMP_FUNC = 0,
     WASM_COMP_STRUCT = 1,
     WASM_COMP_ARRAY = 2,
     WASM_COMP_INVALID = 0xFF
 } wasm_comptype_kind_t;
-
-typedef struct wasm_comptype_t {
-    wasm_comptype_kind_t kind;
-    uint32_t num_supertypes;
-    uint32_t* supertypes;
-    uint32_t rec_group;
-    uint32_t canonical_id;
-    int is_final;
-    union {
-        wasm_functype_t func;
-        wasm_structtype_t struct_;
-        wasm_arraytype_t array;
-    } of;
-} wasm_comptype_t;
-
-typedef struct wasm_recgroup_t {
-    uint32_t first_type;
-    uint32_t num_types;
-} wasm_recgroup_t;
 
 /* ── Import binding ───────────────────────────────────────────────── */
 typedef struct wasm_import_t {
@@ -452,8 +416,8 @@ typedef enum wasm_import_kind_t {
 } wasm_import_kind_t;
 
 typedef struct wasm_import_info_t {
-    char* module;
-    char* name;
+    const char* module;
+    const char* name;
     wasm_import_kind_t kind;
     uint32_t index;
     uint32_t type_index;
@@ -480,75 +444,10 @@ typedef enum wasm_export_kind_t {
     WASM_EXPORT_TAG = 0x04
 } wasm_export_kind_t;
 
-typedef struct wasm_export_t {
-    char* name;
-    uint32_t name_len;
-    wasm_export_kind_t kind;
-    uint32_t index;
-} wasm_export_t;
-
-/* ── Global variable ──────────────────────────────────────────────── */
-typedef struct wasm_global_t {
-    wasm_valtype_t type;
-    wasm_reftype_t ref_type;
-    int is_mutable;
-    int is_import;
-    wasm_value_t* import_value;
-    wasm_value_t value;
-} wasm_global_t;
-
-/* ── Table ────────────────────────────────────────────────────────── */
-typedef struct wasm_table_t {
-    wasm_valtype_t reftype;
-    wasm_reftype_t reftype_info;
-    wasm_value_t* elems;
-    wasm_value_t default_value;
-    uint32_t size;
-    uint64_t max_size;
-    int is_64;
-    int is_import;
-    struct wasm_table_t* import_table;
-} wasm_table_t;
-
-typedef struct wasm_data_segment_t {
-    uint8_t* bytes;
-    uint32_t size;
-    uint32_t memory_index;
-    uint64_t offset;
-    int is_passive;
-    int is_dropped;
-} wasm_data_segment_t;
-
-typedef struct wasm_elem_segment_t {
-    wasm_valtype_t elem_type;
-    wasm_reftype_t elem_ref_type;
-    wasm_value_t* elems;
-    uint32_t num_elems;
-    uint32_t table_index;
-    uint64_t offset;
-    int uses_expr;
-    int is_passive;
-    int is_declarative;
-    int is_dropped;
-} wasm_elem_segment_t;
-
 /* ── Linear memory ────────────────────────────────────────────────── */
 #define WASM_PAGE_SIZE 65536u
 #define WASM_MEMORY32_MAX_PAGES 65536u
 #define WASM_MEMORY64_MAX_PAGES (UINT64_C(1) << 48)
-
-typedef struct wasm_memory_t {
-    uint8_t* data;
-    uint64_t pages;
-    uint64_t max_pages;
-    int is_64;
-    int is_import;
-    struct wasm_memory_t* import_memory;
-    uint32_t page_size; /* bytes per page, 1 or WASM_PAGE_SIZE; 0 means WASM_PAGE_SIZE */
-    int is_shared;          /* shared memories never move and may be used by runtimes on other threads */
-    uint64_t reserved_bytes; /* shared memories: size of the fixed reservation backing data */
-    size_t shared_size;      /* shared memories: current size in bytes, read atomically while others grow it */
-} wasm_memory_t;
 
 typedef struct wasm_table_import_t {
     const char* module;
@@ -571,25 +470,6 @@ typedef struct wasm_tag_import_t {
     int has_type_context;
     uint64_t identity;
 } wasm_tag_import_t;
-
-typedef struct wasm_tag_t {
-    uint32_t type_idx;
-    uint64_t identity;
-} wasm_tag_t;
-
-typedef struct wasm_custom_section_t {
-    char* name;
-    const uint8_t* data;
-    uint32_t size;
-} wasm_custom_section_t;
-
-typedef struct wasm__exception_state_t {
-    uint32_t tag_index;
-    uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
-    int is_pending;
-} wasm__exception_state_t;
 
 /* ── Runtime configuration ────────────────────────────────────────── */
 #ifndef WASM_MAX_STACK
@@ -635,8 +515,6 @@ typedef struct wasm_config_t {
 void wasm_config_default(wasm_config_t* config);
 wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config);
 void wasm_runtime_free(wasm_runtime_t* rt);
-wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config);
-void wasm_destroy(wasm_runtime_t* rt);
 wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
 const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
@@ -657,9 +535,9 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
    module name name. Imports bind to mod's own functions, globals, tables, memories, and tags, so
    mod must outlive the modules that import from it; calls into a freed mod trap. */
 wasm_error_t wasm_register_module(wasm_runtime_t* rt, const char* name, wasm_module_t* mod);
-void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag);
-void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
-void wasm_enable_all_features(wasm_runtime_t* rt);
+void wasm_runtime_enable_feature(wasm_runtime_t* rt, uint32_t flag);
+void wasm_runtime_disable_feature(wasm_runtime_t* rt, uint32_t flag);
+void wasm_runtime_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 /* Keeps a reference alive across collections until wasm_ref_release. Returns a slot holding the
    value, which collections update when they move the object; read the reference from the slot
@@ -669,12 +547,12 @@ void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
 /* Decodes and validates a module without resolving imports, allocating memories or tables, or
    running code. The result supports the introspection functions but cannot be called; pass it
-   to wasm_instantiate, as often as needed, and free it with wasm_free_module. */
+   to wasm_instantiate, as often as needed, and free it with wasm_module_free. */
 wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
 /* Instantiates a compiled module in its runtime, resolving imports registered there and
    running the start function, without validating function bodies again. */
 wasm_module_t* wasm_instantiate(const wasm_module_t* compiled);
-void wasm_free_module(wasm_module_t* mod);
+void wasm_module_free(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results);
@@ -698,19 +576,17 @@ wasm_error_t wasm_wasi_set_args(wasm_runtime_t* rt, uint32_t argc, const char* c
 wasm_error_t wasm_wasi_set_env(wasm_runtime_t* rt, uint32_t count, const char* const* env);
 /* Lets the guest open files beneath the host directory host_path, which it sees as guest_path. */
 wasm_error_t wasm_wasi_preopen_dir(wasm_runtime_t* rt, const char* host_path, const char* guest_path);
-uint32_t wasm_memory_count(wasm_module_t* mod);
-wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
+uint32_t wasm_memory_count(const wasm_module_t* mod);
+wasm_error_t wasm_memory_read(const wasm_module_t* mod, uint32_t memory_index,
                               uint64_t offset, void* dst, size_t len);
 wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
                                uint64_t offset, const void* src, size_t len);
-wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
+wasm_error_t wasm_memory_get_string(const wasm_module_t* mod, uint32_t memory_index,
                                     uint64_t offset, char* dst, size_t max_len);
-wasm_memory_t* wasm_memory_ref_at(wasm_module_t* mod, uint32_t memory_index);
-uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index);
-uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
-int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
-uint8_t* wasm_memory_data(wasm_module_t* mod);
-uint64_t wasm_memory_size(wasm_module_t* mod);
+wasm_memory_t* wasm_module_memory(wasm_module_t* mod, uint32_t memory_index);
+uint8_t* wasm_memory_data(wasm_module_t* mod, uint32_t memory_index);
+uint64_t wasm_memory_size(const wasm_module_t* mod, uint32_t memory_index);
+int64_t wasm_memory_grow(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 /* Creates a zeroed memory for hosts to register with wasm_register_memory_import. It must outlive
    every module that imports it. Growth reallocates its data with WASM_REALLOC. */
 wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
@@ -719,13 +595,15 @@ wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
 wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
 /* Frees a memory from wasm_memory_new or wasm_shared_memory_new. */
 void wasm_memory_free(wasm_memory_t* memory);
-int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages);
-uint32_t wasm_table_count(wasm_module_t* mod);
-wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx);
-wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx);
-const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx);
-uint64_t wasm_table_size(wasm_module_t* mod, uint32_t table_idx);
-wasm_error_t wasm_table_get(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val);
+/* The data and byte size of a memory handle; another thread may grow a shared one at any time. */
+uint8_t* wasm_memory_base(wasm_memory_t* memory);
+uint64_t wasm_memory_length(const wasm_memory_t* memory);
+uint32_t wasm_table_count(const wasm_module_t* mod);
+wasm_table_t* wasm_module_table(wasm_module_t* mod, uint32_t table_idx);
+wasm_valtype_t wasm_table_type(const wasm_module_t* mod, uint32_t table_idx);
+const wasm_reftype_t* wasm_table_reftype(const wasm_module_t* mod, uint32_t table_idx);
+uint64_t wasm_table_size(const wasm_module_t* mod, uint32_t table_idx);
+wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val);
 /* Stores val, which must match the table's element type. */
 wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t val);
 /* Adds delta elements set to init and returns the previous size, or -1 if the table cannot grow. */
@@ -734,81 +612,81 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
    max_size UINT32_MAX means no maximum. It must outlive every module that imports it. */
 wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);
-uint32_t wasm_global_count(wasm_module_t* mod);
-wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx);
-const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx);
-int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx);
-wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx);
-wasm_error_t wasm_global_get_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
+uint32_t wasm_global_count(const wasm_module_t* mod);
+wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx);
+const wasm_reftype_t* wasm_global_reftype(const wasm_module_t* mod, uint32_t global_idx);
+int wasm_global_is_mutable(const wasm_module_t* mod, uint32_t global_idx);
+wasm_value_t* wasm_module_global(wasm_module_t* mod, uint32_t global_idx);
+wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
 /* Fails with WASM_ERR_TYPE_MISMATCH for immutable globals and values of the wrong type. */
-wasm_error_t wasm_global_set_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val);
-wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val);
+wasm_error_t wasm_global_set_index(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val);
+wasm_error_t wasm_global_get(const wasm_module_t* mod, const char* name, wasm_value_t* out_val);
 wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t val);
-uint32_t wasm_import_count(wasm_module_t* mod);
-const wasm_import_info_t* wasm_import_info(wasm_module_t* mod, uint32_t index);
-uint32_t wasm_export_count(wasm_module_t* mod);
-const char* wasm_export_name(wasm_module_t* mod, uint32_t index);
-const uint8_t* wasm_export_name_bytes(wasm_module_t* mod, uint32_t index, size_t* out_len);
-wasm_export_kind_t wasm_export_kind(wasm_module_t* mod, uint32_t index);
-uint32_t wasm_export_index(wasm_module_t* mod, uint32_t export_index);
-int wasm_find_export(wasm_module_t* mod, const char* name,
+uint32_t wasm_import_count(const wasm_module_t* mod);
+const wasm_import_info_t* wasm_import_info(const wasm_module_t* mod, uint32_t index);
+uint32_t wasm_export_count(const wasm_module_t* mod);
+const char* wasm_export_name(const wasm_module_t* mod, uint32_t index);
+const uint8_t* wasm_export_name_bytes(const wasm_module_t* mod, uint32_t index, size_t* out_len);
+wasm_export_kind_t wasm_export_kind(const wasm_module_t* mod, uint32_t index);
+uint32_t wasm_export_index(const wasm_module_t* mod, uint32_t export_index);
+int wasm_find_export(const wasm_module_t* mod, const char* name,
                      wasm_export_kind_t* out_kind, uint32_t* out_index);
-int wasm_find_export_bytes(wasm_module_t* mod, const uint8_t* name, size_t name_len,
+int wasm_find_export_bytes(const wasm_module_t* mod, const uint8_t* name, size_t name_len,
                            wasm_export_kind_t* out_kind, uint32_t* out_index);
-uint32_t wasm_custom_section_count(wasm_module_t* mod);
-const char* wasm_custom_section_name(wasm_module_t* mod, uint32_t index);
-const uint8_t* wasm_custom_section_data(wasm_module_t* mod, uint32_t index, size_t* out_len);
-const uint8_t* wasm_custom_section_find(wasm_module_t* mod, const char* name, size_t* out_len);
-uint32_t wasm_type_count(wasm_module_t* mod);
-wasm_comptype_kind_t wasm_type_kind(wasm_module_t* mod, uint32_t type_idx);
-const wasm_functype_t* wasm_type_functype(wasm_module_t* mod, uint32_t type_idx);
-uint32_t wasm_struct_type_field_count(wasm_module_t* mod, uint32_t type_idx);
-const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type_idx,
+uint32_t wasm_custom_section_count(const wasm_module_t* mod);
+const char* wasm_custom_section_name(const wasm_module_t* mod, uint32_t index);
+const uint8_t* wasm_custom_section_data(const wasm_module_t* mod, uint32_t index, size_t* out_len);
+const uint8_t* wasm_custom_section_find(const wasm_module_t* mod, const char* name, size_t* out_len);
+uint32_t wasm_type_count(const wasm_module_t* mod);
+wasm_comptype_kind_t wasm_type_kind(const wasm_module_t* mod, uint32_t type_idx);
+const wasm_functype_t* wasm_type_functype(const wasm_module_t* mod, uint32_t type_idx);
+uint32_t wasm_struct_type_field_count(const wasm_module_t* mod, uint32_t type_idx);
+const wasm_fieldtype_t* wasm_struct_type_field(const wasm_module_t* mod, uint32_t type_idx,
                                                uint32_t field_idx);
-const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx);
-uint32_t wasm_func_count(wasm_module_t* mod);
+const wasm_fieldtype_t* wasm_array_type_field(const wasm_module_t* mod, uint32_t type_idx);
+uint32_t wasm_func_count(const wasm_module_t* mod);
 /* Names from the module's "name" custom section, or NULL when it has none. */
-const char* wasm_func_name(wasm_module_t* mod, uint32_t func_idx);
-const char* wasm_module_name(wasm_module_t* mod);
-const wasm_functype_t* wasm_func_functype(wasm_module_t* mod, uint32_t func_idx);
-uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx);
-uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx);
-wasm_valtype_t wasm_func_param_type(wasm_module_t* mod, uint32_t func_idx,
+const char* wasm_func_name(const wasm_module_t* mod, uint32_t func_idx);
+const char* wasm_module_name(const wasm_module_t* mod);
+const wasm_functype_t* wasm_func_functype(const wasm_module_t* mod, uint32_t func_idx);
+uint32_t wasm_func_param_count(const wasm_module_t* mod, uint32_t func_idx);
+uint32_t wasm_func_result_count(const wasm_module_t* mod, uint32_t func_idx);
+wasm_valtype_t wasm_func_param_type(const wasm_module_t* mod, uint32_t func_idx,
                                     uint32_t param_idx);
-wasm_valtype_t wasm_func_result_type(wasm_module_t* mod, uint32_t func_idx,
+wasm_valtype_t wasm_func_result_type(const wasm_module_t* mod, uint32_t func_idx,
                                      uint32_t result_idx);
-uint32_t wasm_tag_count(wasm_module_t* mod);
-const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx);
+uint32_t wasm_tag_count(const wasm_module_t* mod);
+const wasm_functype_t* wasm_tag_functype(const wasm_module_t* mod, uint32_t tag_idx);
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref);
 wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             const wasm_value_t* elem_values, uint32_t num_elems,
                             wasm_value_t* out_ref);
-wasm_error_t wasm_struct_get_field(wasm_module_t* mod, wasm_value_t struct_ref,
+wasm_error_t wasm_struct_get_field(const wasm_module_t* mod, wasm_value_t struct_ref,
                                    uint32_t field_idx, wasm_value_t* out_val);
 wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
                                    uint32_t field_idx, wasm_value_t val);
-wasm_error_t wasm_array_length(wasm_module_t* mod, wasm_value_t array_ref,
+wasm_error_t wasm_array_length(const wasm_module_t* mod, wasm_value_t array_ref,
                                uint32_t* out_len);
-wasm_error_t wasm_array_get_elem(wasm_module_t* mod, wasm_value_t array_ref,
+wasm_error_t wasm_array_get_elem(const wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t* out_val);
 wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t val);
-void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size);
-uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
+void wasm_runtime_backtrace(const wasm_runtime_t* rt, char* buffer, size_t buffer_size);
+uint32_t wasm_runtime_call_depth(const wasm_runtime_t* rt);
 /* Describes the frame depth levels below the innermost one of the running or last trapped call:
    its module, function index, and byte offset within the function's body. Outputs may be NULL;
    the module stays valid only while it is not freed. */
-wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
+wasm_error_t wasm_runtime_call_frame(const wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
-void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
-/* Stops metering; calls run without a budget until wasm_set_fuel is called again. */
-void wasm_disable_fuel(wasm_runtime_t* rt);
-uint64_t wasm_get_fuel(wasm_runtime_t* rt);
-const wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod);
+void wasm_runtime_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
+/* Stops metering; calls run without a budget until wasm_runtime_set_fuel is called again. */
+void wasm_runtime_disable_fuel(wasm_runtime_t* rt);
+uint64_t wasm_runtime_fuel(const wasm_runtime_t* rt);
+wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod);
 void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);
-void* wasm_module_get_userdata(wasm_module_t* mod);
+void* wasm_module_userdata(const wasm_module_t* mod);
 const char* wasm_error_string(wasm_error_t err);
 
 #ifdef __cplusplus

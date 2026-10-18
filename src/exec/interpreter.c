@@ -1004,7 +1004,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 d = WASM__SP_POP();
                 memory = wasm__memory_at(mod, mem_idx);
                 if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                res = wasm_memory_grow_at(mod,
+                res = wasm_memory_grow(mod,
                                           mem_idx,
                                           memory->is_64 ? (uint64_t)d.of.i64
                                                         : (uint64_t)(uint32_t)d.of.i32);

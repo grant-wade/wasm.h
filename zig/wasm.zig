@@ -483,12 +483,8 @@ pub const Runtime = opaque {
         if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
         if (config.max_total_memory_bytes) |v| cfg.max_total_memory_bytes = v;
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
-        const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
-        check(c.wasm_runtime_last_error(rt.raw())) catch |err| {
-            rt.deinit();
-            return err;
-        };
-        return rt;
+        if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
+        return @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
     }
 
     /// Free its modules first.
@@ -519,15 +515,15 @@ pub const Runtime = opaque {
     }
 
     pub fn enableFeatures(rt: *Runtime, set: Features) void {
-        c.wasm_enable_feature(rt.raw(), set.bits());
+        c.wasm_runtime_enable_feature(rt.raw(), set.bits());
     }
 
     pub fn disableFeatures(rt: *Runtime, set: Features) void {
-        c.wasm_disable_feature(rt.raw(), set.bits());
+        c.wasm_runtime_disable_feature(rt.raw(), set.bits());
     }
 
     pub fn enableAllFeatures(rt: *Runtime) void {
-        c.wasm_enable_all_features(rt.raw());
+        c.wasm_runtime_enable_all_features(rt.raw());
     }
 
     /// `bytes` is copied and may be freed afterwards.
@@ -659,7 +655,7 @@ pub const Runtime = opaque {
 
     /// Limits execution to `fuel` units; calls fail with `error.OutOfFuel` once it runs out.
     pub fn setFuel(rt: *Runtime, fuel_units: u64) void {
-        c.wasm_set_fuel(rt.raw(), fuel_units);
+        c.wasm_runtime_set_fuel(rt.raw(), fuel_units);
     }
 
     /// Makes the running call, or the next one, fail with `error.Interrupted` at its next loop
@@ -670,11 +666,11 @@ pub const Runtime = opaque {
 
     /// Stops metering until `setFuel` is called again.
     pub fn disableFuel(rt: *Runtime) void {
-        c.wasm_disable_fuel(rt.raw());
+        c.wasm_runtime_disable_fuel(rt.raw());
     }
 
     pub fn fuel(rt: *Runtime) u64 {
-        return c.wasm_get_fuel(rt.raw());
+        return c.wasm_runtime_fuel(rt.raw());
     }
 
     /// The status the guest passed to WASI `proc_exit` when a call failed with `error.Exit`.
@@ -685,18 +681,18 @@ pub const Runtime = opaque {
     /// Writes the current Wasm call stack into `buffer`, typically from a host function.
     pub fn backtrace(rt: *Runtime, buffer: []u8) [:0]const u8 {
         if (buffer.len == 0) return "";
-        c.wasm_dump_backtrace(rt.raw(), buffer.ptr, buffer.len);
+        c.wasm_runtime_backtrace(rt.raw(), buffer.ptr, buffer.len);
         return span(buffer.ptr);
     }
 
     pub fn callDepth(rt: *Runtime) u32 {
-        return c.wasm_get_call_stack_depth(rt.raw());
+        return c.wasm_runtime_call_depth(rt.raw());
     }
 
     pub fn callFrame(rt: *Runtime, depth: u32) ?CallFrame {
         var frame: CallFrame = undefined;
         var mod: ?*c.wasm_module_t = null;
-        check(c.wasm_get_call_frame_info(rt.raw(), depth, &mod, &frame.func_index, &frame.offset)) catch return null;
+        check(c.wasm_runtime_call_frame(rt.raw(), depth, &mod, &frame.func_index, &frame.offset)) catch return null;
         frame.module = @ptrCast(mod);
         return frame;
     }
@@ -772,7 +768,7 @@ pub fn TypedFunc(comptime Fn: type) type {
 pub const Module = opaque {
     /// Free modules before the runtime that loaded them.
     pub fn deinit(mod: *Module) void {
-        c.wasm_free_module(mod.raw());
+        c.wasm_module_free(mod.raw());
     }
 
     pub fn raw(mod: *Module) *c.wasm_module_t {
@@ -857,7 +853,7 @@ pub const Module = opaque {
     }
 
     pub fn table(mod: *Module, table_index: u32) ?*c.wasm_table_t {
-        return c.wasm_table_ref_at(mod.raw(), table_index);
+        return c.wasm_module_table(mod.raw(), table_index);
     }
 
     pub fn exportCount(mod: *Module) u32 {
@@ -1003,7 +999,7 @@ pub const Module = opaque {
     }
 
     pub fn userdata(mod: *Module, comptime T: type) ?*T {
-        return @ptrCast(@alignCast(c.wasm_module_get_userdata(mod.raw())));
+        return @ptrCast(@alignCast(c.wasm_module_userdata(mod.raw())));
     }
 };
 
@@ -1027,18 +1023,18 @@ pub const Memory = struct {
 
     /// The memory's bytes. Growing the memory invalidates the slice unless the memory is shared.
     pub fn data(self: Memory) []u8 {
-        const ptr = c.wasm_memory_data_at(self.module.raw(), self.index);
+        const ptr = c.wasm_memory_data(self.module.raw(), self.index);
         return if (ptr == null) &.{} else ptr[0..@intCast(self.size())];
     }
 
     /// The size in bytes.
     pub fn size(self: Memory) u64 {
-        return c.wasm_memory_size_at(self.module.raw(), self.index);
+        return c.wasm_memory_size(self.module.raw(), self.index);
     }
 
     /// Grows the memory by `delta_pages`, returning the old size in pages, or null when it cannot grow.
     pub fn grow(self: Memory, delta_pages: u64) ?u64 {
-        const old = c.wasm_memory_grow_at(self.module.raw(), self.index, delta_pages);
+        const old = c.wasm_memory_grow(self.module.raw(), self.index, delta_pages);
         return if (old < 0) null else @intCast(old);
     }
 
@@ -1057,7 +1053,7 @@ pub const Memory = struct {
     }
 
     pub fn raw(self: Memory) *c.wasm_memory_t {
-        return c.wasm_memory_ref_at(self.module.raw(), self.index);
+        return c.wasm_module_memory(self.module.raw(), self.index);
     }
 };
 
@@ -1086,6 +1082,7 @@ pub const SharedMemory = opaque {
     /// The bytes currently in bounds. Another thread may grow the memory, which keeps this slice valid.
     pub fn data(memory: *SharedMemory) []u8 {
         const m = memory.raw();
-        return m.data[0..@atomicLoad(usize, &m.shared_size, .acquire)];
+        const base = c.wasm_memory_base(m) orelse return &.{};
+        return base[0..@intCast(c.wasm_memory_length(m))];
     }
 };

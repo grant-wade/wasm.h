@@ -335,7 +335,7 @@ static wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
     if (!mod || !results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[0].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, 0);
 
-    memory = wasm_memory_ref_at(mod, 0);
+    memory = wasm_module_memory(mod, 0);
     if (!memory) return wasm__emscripten_return_i32(results, num_results, 0);
 
     requested_bytes = (uint64_t)(uint32_t)args[0].of.i32;
@@ -345,7 +345,7 @@ static wasm_error_t wasm__emscripten_resize_heap(wasm_module_t* mod,
 
     return wasm__emscripten_return_i32(results,
                                        num_results,
-                                       wasm_memory_grow(mod, target_pages - memory->pages) >= 0 ? 1 : 0);
+                                       wasm_memory_grow(mod, 0, target_pages - memory->pages) >= 0 ? 1 : 0);
 }
 
 static wasm_error_t wasm__emscripten_tzset_js(wasm_module_t* mod,

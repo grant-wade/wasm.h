@@ -132,6 +132,10 @@ struct wasm_runtime_t {
     wasm__emscripten_state_t* emscripten_state;
 };
 
+WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_config_t* config);
+
+WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt);
+
 WASM_PRIVATE wasm_global_import_t* wasm__find_global_import(wasm_runtime_t* rt,
                                                       const char* module,
                                                       const char* name);

@@ -73,7 +73,7 @@ struct wasm_module_t {
     wasm_module_t* failed_next;
 };
 
-WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(wasm_module_t* mod,
+WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(const wasm_module_t* mod,
                                                   const char* name,
                                                   wasm_global_t** out_global,
                                                   uint32_t* out_index);

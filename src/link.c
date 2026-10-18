@@ -57,7 +57,7 @@ static wasm_error_t wasm__register_export(wasm_runtime_t* rt, const char* module
             desc.type = wasm_global_type(mod, index);
             if (ref_type) desc.ref_type = *ref_type;
             desc.is_mutable = wasm_global_is_mutable(mod, index);
-            desc.value = wasm_global_value_ref_at(mod, index);
+            desc.value = wasm_module_global(mod, index);
             return wasm_register_global_import(rt, &desc);
         }
         case WASM_EXPORT_TABLE: {
@@ -66,7 +66,7 @@ static wasm_error_t wasm__register_export(wasm_runtime_t* rt, const char* module
             memset(&desc, 0, sizeof(desc));
             desc.module = module_name;
             desc.name = name;
-            desc.table = wasm_table_ref_at(mod, index);
+            desc.table = wasm_module_table(mod, index);
             return wasm_register_table_import(rt, &desc);
         }
         case WASM_EXPORT_MEM: {
@@ -75,7 +75,7 @@ static wasm_error_t wasm__register_export(wasm_runtime_t* rt, const char* module
             memset(&desc, 0, sizeof(desc));
             desc.module = module_name;
             desc.name = name;
-            desc.memory = wasm_memory_ref_at(mod, index);
+            desc.memory = wasm_module_memory(mod, index);
             return wasm_register_memory_import(rt, &desc);
         }
         case WASM_EXPORT_TAG: {

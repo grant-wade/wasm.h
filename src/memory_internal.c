@@ -71,12 +71,12 @@ WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t cou
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_table_t* wasm__table_at(wasm_module_t* mod, uint32_t table_index) {
+WASM_PRIVATE wasm_table_t* wasm__table_at(const wasm_module_t* mod, uint32_t table_index) {
     if (!mod || table_index >= mod->num_tables) return NULL;
     return wasm__table_actual(&mod->tables[table_index]);
 }
 
-WASM_PRIVATE wasm_memory_t* wasm__memory_at(wasm_module_t* mod, uint32_t memory_index) {
+WASM_PRIVATE wasm_memory_t* wasm__memory_at(const wasm_module_t* mod, uint32_t memory_index) {
     if (!mod || memory_index >= mod->num_memories) return NULL;
     return wasm__memory_actual(&mod->memories[memory_index]);
 }

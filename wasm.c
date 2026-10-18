@@ -60,18 +60,12 @@ static void wasm_cli_print_usage(FILE* stream, const char* argv0) {
             argv0);
 }
 
-static const char* wasm_cli_error_text(const wasm_runtime_t* rt) {
-    if (!rt) return "unknown error";
-    if (rt->error_msg[0] != '\0') return rt->error_msg;
-    return wasm_error_string(rt->last_error);
-}
-
 static void wasm_cli_print_backtrace(const wasm_runtime_t* rt) {
     char buffer[1024];
 
     if (!rt) return;
     buffer[0] = '\0';
-    wasm_dump_backtrace((wasm_runtime_t*)rt, buffer, sizeof(buffer));
+    wasm_runtime_backtrace(rt, buffer, sizeof(buffer));
     if (buffer[0] != '\0') fprintf(stderr, "backtrace:\n%s\n", buffer);
 }
 
@@ -711,7 +705,7 @@ static void wasm_cli_print_memories(wasm_module_t* mod) {
 
     for (i = 0; i < wasm_memory_count(mod); i++) {
         const char* export_name = wasm_cli_first_export_name(mod, WASM_EXPORT_MEM, i);
-        uint64_t size_bytes = wasm_memory_size_at(mod, i);
+        uint64_t size_bytes = wasm_memory_size(mod, i);
 
         printf("[%u] pages=%llu bytes=%llu max_pages=%llu%s",
                (unsigned)i,
@@ -818,7 +812,7 @@ static int wasm_cli_call_export(wasm_module_t* mod, const char* export_name,
         goto cleanup;
     }
     if (err != WASM_OK) {
-        fprintf(stderr, "call failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(mod->rt));
         wasm_cli_print_backtrace(mod->rt);
         goto cleanup;
     }
@@ -900,7 +894,7 @@ static int wasm_cli_call_index(wasm_module_t* mod, const char* func_index_text,
             goto cleanup;
         }
         if (err != WASM_OK) {
-            fprintf(stderr, "call failed: %s\n", wasm_cli_error_text(mod->rt));
+            fprintf(stderr, "call failed: %s\n", wasm_runtime_error_message(mod->rt));
             wasm_cli_print_backtrace(mod->rt);
             goto cleanup;
         }
@@ -920,7 +914,7 @@ static int wasm_cli_global_get_cmd(wasm_module_t* mod, const char* export_name) 
 
     err = wasm_global_get(mod, export_name, &value);
     if (err != WASM_OK) {
-        fprintf(stderr, "global-get failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "global-get failed: %s\n", wasm_runtime_error_message(mod->rt));
         return 1;
     }
 
@@ -952,7 +946,7 @@ static int wasm_cli_global_set_cmd(wasm_module_t* mod, const char* export_name, 
 
     err = wasm_global_set(mod, export_name, value);
     if (err != WASM_OK) {
-        fprintf(stderr, "global-set failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "global-set failed: %s\n", wasm_runtime_error_message(mod->rt));
         return 1;
     }
 
@@ -1010,7 +1004,7 @@ static int wasm_cli_memory_read_cmd(wasm_module_t* mod, const char* memory_index
 
     err = wasm_memory_read(mod, memory_index, offset, buffer, length);
     if (err != WASM_OK) {
-        fprintf(stderr, "memory-read failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "memory-read failed: %s\n", wasm_runtime_error_message(mod->rt));
         free(buffer);
         return 1;
     }
@@ -1086,7 +1080,7 @@ static int wasm_cli_memory_string_cmd(wasm_module_t* mod, const char* memory_ind
 
     err = wasm_memory_get_string(mod, memory_index, offset, buffer, max_len);
     if (err != WASM_OK) {
-        fprintf(stderr, "memory-string failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "memory-string failed: %s\n", wasm_runtime_error_message(mod->rt));
         free(buffer);
         return 1;
     }
@@ -1101,7 +1095,7 @@ static int wasm_cli_run(wasm_module_t* mod) {
 
     if (err == WASM_ERR_EXIT) return wasm_runtime_exit_code(mod->rt);
     if (err != WASM_OK) {
-        fprintf(stderr, "run failed: %s\n", wasm_cli_error_text(mod->rt));
+        fprintf(stderr, "run failed: %s\n", wasm_runtime_error_message(mod->rt));
         wasm_cli_print_backtrace(mod->rt);
         return 1;
     }
@@ -1125,7 +1119,7 @@ static int wasm_cli_configure_wasi(wasm_runtime_t* rt, const wasm_cli_options_t*
     free(args);
     if (err == WASM_OK && options->num_envs > 0u) err = wasm_wasi_set_env(rt, options->num_envs, options->envs);
     if (err != WASM_OK) {
-        fprintf(stderr, "failed to configure WASI: %s\n", wasm_cli_error_text(rt));
+        fprintf(stderr, "failed to configure WASI: %s\n", wasm_runtime_error_message(rt));
         return 0;
     }
     for (i = 0; i < options->num_dirs; i++) {
@@ -1138,7 +1132,7 @@ static int wasm_cli_configure_wasi(wasm_runtime_t* rt, const wasm_cli_options_t*
             guest = separator + 2;
         }
         if (wasm_wasi_preopen_dir(rt, host, guest) != WASM_OK) {
-            fprintf(stderr, "%s\n", wasm_cli_error_text(rt));
+            fprintf(stderr, "%s\n", wasm_runtime_error_message(rt));
             return 0;
         }
     }
@@ -1152,9 +1146,8 @@ int main(int argc, char** argv) {
     const char* command;
     unsigned char* bytes = NULL;
     size_t bytes_len = 0u;
-    wasm_runtime_t runtime;
+    wasm_runtime_t* runtime = NULL;
     wasm_module_t* module = NULL;
-    int runtime_ready = 0;
     int exit_code = 1;
 
     options.bind_wasi = 0;
@@ -1238,31 +1231,31 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    if (wasm_init(&runtime, NULL) != WASM_OK) {
+    runtime = wasm_runtime_new(NULL);
+    if (!runtime) {
         fprintf(stderr, "failed to initialize runtime\n");
         goto cleanup;
     }
-    runtime_ready = 1;
 
-    if (options.fuel_set) wasm_set_fuel(&runtime, options.fuel);
+    if (options.fuel_set) wasm_runtime_set_fuel(runtime, options.fuel);
 
     if (options.bind_wasi) {
-        wasm_error_t err = wasm_bind_wasi_stubs(&runtime);
+        wasm_error_t err = wasm_bind_wasi_stubs(runtime);
 
         if (err != WASM_OK) {
-            fprintf(stderr, "failed to bind WASI stubs: %s\n", wasm_cli_error_text(&runtime));
+            fprintf(stderr, "failed to bind WASI stubs: %s\n", wasm_runtime_error_message(runtime));
             goto cleanup;
         }
-        if (!wasm_cli_configure_wasi(&runtime, &options, module_path,
+        if (!wasm_cli_configure_wasi(runtime, &options, module_path,
                                      strcmp(command, "run") == 0 ? argc - argi : 0, &argv[argi]))
             goto cleanup;
     }
 
     if (options.bind_emscripten) {
-        wasm_error_t err = wasm_bind_emscripten_stubs(&runtime);
+        wasm_error_t err = wasm_bind_emscripten_stubs(runtime);
 
         if (err != WASM_OK) {
-            fprintf(stderr, "failed to bind Emscripten stubs: %s\n", wasm_cli_error_text(&runtime));
+            fprintf(stderr, "failed to bind Emscripten stubs: %s\n", wasm_runtime_error_message(runtime));
             goto cleanup;
         }
     }
@@ -1278,16 +1271,16 @@ int main(int argc, char** argv) {
             if (strcmp(command, inspect_commands[ci]) == 0) inspect_only = 1;
         }
         /* Inspection never instantiates, so it needs no imports and runs no guest code. */
-        module = inspect_only ? wasm_compile(&runtime, bytes, bytes_len) : wasm_load(&runtime, bytes, bytes_len);
+        module = inspect_only ? wasm_compile(runtime, bytes, bytes_len) : wasm_load(runtime, bytes, bytes_len);
     }
     free(bytes);
     bytes = NULL;
     if (!module) {
-        if (wasm_runtime_last_error(&runtime) == WASM_ERR_EXIT) {
-            exit_code = wasm_runtime_exit_code(&runtime);
+        if (wasm_runtime_last_error(runtime) == WASM_ERR_EXIT) {
+            exit_code = wasm_runtime_exit_code(runtime);
             goto cleanup;
         }
-        fprintf(stderr, "load failed: %s\n", wasm_cli_error_text(&runtime));
+        fprintf(stderr, "load failed: %s\n", wasm_runtime_error_message(runtime));
         goto cleanup;
     }
 
@@ -1369,8 +1362,8 @@ int main(int argc, char** argv) {
     }
 
 cleanup:
-    wasm_free_module(module);
-    if (runtime_ready) wasm_destroy(&runtime);
+    wasm_module_free(module);
+    wasm_runtime_free(runtime);
     free(bytes);
     free(options.envs);
     free(options.dirs);

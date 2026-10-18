@@ -37,7 +37,7 @@ WASM_PRIVATE int wasm__is_comptype_immediate_subtype(const wasm_module_t* mod,
                                                const wasm_comptype_t* subtype,
                                                const wasm_comptype_t* supertype);
 
-WASM_PRIVATE wasm_functype_t* wasm__module_functype(wasm_module_t* mod, uint32_t type_idx);
+WASM_PRIVATE wasm_functype_t* wasm__module_functype(const wasm_module_t* mod, uint32_t type_idx);
 
 WASM_PRIVATE const wasm_functype_t* wasm__module_const_functype(const wasm_module_t* mod, uint32_t type_idx);
 

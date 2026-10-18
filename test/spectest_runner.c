@@ -997,7 +997,7 @@ static wasm_error_t spec_bind_default_empty_imports(spec_harness_t* harness,
             memset(&table_import, 0, sizeof(table_import));
             table_import.module = "";
             table_import.name = "";
-            table_import.table = wasm_table_ref_at(support_module, index);
+            table_import.table = wasm_module_table(support_module, index);
             err = wasm_register_table_import(&harness->runtime, &table_import);
             if (err != WASM_OK) return err;
             bound_table = 1;
@@ -1008,7 +1008,7 @@ static wasm_error_t spec_bind_default_empty_imports(spec_harness_t* harness,
             memset(&memory_import, 0, sizeof(memory_import));
             memory_import.module = "";
             memory_import.name = "";
-            memory_import.memory = wasm_memory_ref_at(support_module, index);
+            memory_import.memory = wasm_module_memory(support_module, index);
             err = wasm_register_memory_import(&harness->runtime, &memory_import);
             if (err != WASM_OK) return err;
             bound_memory = 1;
@@ -2302,7 +2302,7 @@ static wasm_module_t* spec_load_module_bytes(spec_harness_t* harness,
         return NULL;
     }
     if (!spec_harness_add_owned_module(harness, module)) {
-        wasm_free_module(module);
+        wasm_module_free(module);
         spec_set_error(error_text, error_size, "out of memory storing loaded module");
         return NULL;
     }
@@ -3058,7 +3058,7 @@ static void spec_harness_destroy(spec_harness_t* harness) {
         free(harness->module_definitions[i].load_path);
     }
     for (i = 0; i < harness->num_named_modules; i++) free(harness->named_modules[i].name);
-    for (i = 0; i < harness->num_owned_modules; i++) wasm_free_module(harness->owned_modules[i]);
+    for (i = 0; i < harness->num_owned_modules; i++) wasm_module_free(harness->owned_modules[i]);
 
     free(harness->owned_modules);
     free(harness->module_definitions);
@@ -3066,7 +3066,7 @@ static void spec_harness_destroy(spec_harness_t* harness) {
     free(harness->json_dir);
     free((void*)harness->source_filename);
 
-    wasm_destroy(&harness->runtime);
+    wasm__runtime_destroy(&harness->runtime);
     memset(harness, 0, sizeof(*harness));
 }
 
@@ -3089,13 +3089,13 @@ static int spec_harness_init(spec_harness_t* harness,
         return 0;
     }
 
-    err = wasm_init(&harness->runtime, NULL);
+    err = wasm__runtime_init(&harness->runtime, NULL);
     if (err != WASM_OK) {
         spec_set_error(error_text, error_size, "failed to initialize runtime: %s", wasm_error_string(err));
         return 0;
     }
 
-    wasm_enable_all_features(&harness->runtime);
+    wasm_runtime_enable_all_features(&harness->runtime);
 
 #if WASM_ENABLE_PLATFORM
     err = wasm_bind_wasi_stubs(&harness->runtime);
@@ -3215,7 +3215,7 @@ static void spec_disable_runtime_features(wasm_runtime_t* rt, const char* featur
         if (len > 1 && entry[0] == '-') {
             for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
                 if (strlen(names[i].name) == len - 1 && strncmp(entry + 1, names[i].name, len - 1) == 0)
-                    wasm_disable_feature(rt, names[i].flag);
+                    wasm_runtime_disable_feature(rt, names[i].flag);
             }
         }
         entry = end ? end + 1 : NULL;

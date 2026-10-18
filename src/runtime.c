@@ -402,17 +402,20 @@ wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config) {
     wasm_runtime_t* rt = (wasm_runtime_t*)WASM_MALLOC(sizeof(*rt));
 
     if (!rt) return NULL;
-    (void)wasm_init(rt, config);
+    if (wasm__runtime_init(rt, config) != WASM_OK) {
+        wasm_runtime_free(rt);
+        return NULL;
+    }
     return rt;
 }
 
 void wasm_runtime_free(wasm_runtime_t* rt) {
     if (!rt) return;
-    wasm_destroy(rt);
+    wasm__runtime_destroy(rt);
     WASM_FREE(rt);
 }
 
-wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
+WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     wasm_config_t cfg;
     wasm_error_t err;
 
@@ -517,7 +520,7 @@ uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt) {
     return rt ? rt->enabled_features : 0u;
 }
 
-void wasm_destroy(wasm_runtime_t* rt) {
+WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     uint32_t i;
 
     if (!rt) return;
@@ -526,7 +529,7 @@ void wasm_destroy(wasm_runtime_t* rt) {
         wasm_module_t* failed = rt->failed_modules;
         rt->failed_modules = failed->failed_next;
         failed->failed_next = NULL;
-        wasm_free_module(failed);
+        wasm_module_free(failed);
     }
 
     for (i = 0; i < rt->num_imports; i++) {
@@ -798,17 +801,17 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
     return WASM_OK;
 }
 
-void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag) {
+void wasm_runtime_enable_feature(wasm_runtime_t* rt, uint32_t flag) {
     if (!rt) return;
     rt->enabled_features |= flag;
 }
 
-void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag) {
+void wasm_runtime_disable_feature(wasm_runtime_t* rt, uint32_t flag) {
     if (!rt) return;
     rt->enabled_features &= ~flag;
 }
 
-void wasm_enable_all_features(wasm_runtime_t* rt) {
+void wasm_runtime_enable_all_features(wasm_runtime_t* rt) {
     if (!rt) return;
     rt->enabled_features = WASM__IMPLEMENTED_FEATURES;
 }

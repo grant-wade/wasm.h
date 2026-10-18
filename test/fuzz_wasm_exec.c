@@ -232,7 +232,7 @@ static void wasm_fuzz_call_exports(wasm_runtime_t* rt, wasm_module_t* instance) 
                 callable = 0;
         }
         if (args && results && callable) {
-            wasm_set_fuel(rt, WASM_FUZZ_FUEL);
+            wasm_runtime_set_fuel(rt, WASM_FUZZ_FUEL);
             (void)wasm_call_index(instance, func_idx, args, type->num_params, results, type->num_results);
             calls++;
         }
@@ -263,21 +263,21 @@ static void wasm_fuzz_exec_one(const uint8_t* data, size_t size) {
         return;
     }
     /* Threads stay off: an atomic wait on a stubbed shared memory would block forever. */
-    wasm_enable_all_features(runtime);
-    wasm_disable_feature(runtime, WASM_FEATURE_THREADS);
+    wasm_runtime_enable_all_features(runtime);
+    wasm_runtime_disable_feature(runtime, WASM_FEATURE_THREADS);
 
     memset(&stubs, 0, sizeof(stubs));
     compiled = wasm_compile(runtime, data, size);
     if (compiled) {
         wasm_fuzz_stub_imports(runtime, compiled, &stubs);
-        wasm_set_fuel(runtime, WASM_FUZZ_FUEL);
+        wasm_runtime_set_fuel(runtime, WASM_FUZZ_FUEL);
         instance = wasm_instantiate(compiled);
         if (instance) {
             wasm_fuzz_call_exports(runtime, instance);
             wasm_gc_collect(runtime);
-            wasm_free_module(instance);
+            wasm_module_free(instance);
         }
-        wasm_free_module(compiled);
+        wasm_module_free(compiled);
     }
     wasm_runtime_free(runtime);
     wasm_fuzz_stubs_free(&stubs);

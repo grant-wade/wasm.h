@@ -39,11 +39,6 @@ int main(void) {
 
 	rt = wasm_runtime_new(NULL);
 	if (!rt) return 1;
-	if (wasm_runtime_last_error(rt) != WASM_OK) {
-		fprintf(stderr, "init: %s\n", wasm_runtime_error_message(rt));
-		wasm_runtime_free(rt);
-		return 1;
-	}
 
 	mod = wasm_load(rt, wasm_bytes, sizeof(wasm_bytes));
 	if (!mod) {
@@ -54,14 +49,14 @@ int main(void) {
 
 	if (wasm_call_fmt(mod, "main", "i(i)", (int32_t)42, &result) != WASM_OK) {
 		fprintf(stderr, "call: %s\n", wasm_runtime_error_message(rt));
-		wasm_free_module(mod);
+		wasm_module_free(mod);
 		wasm_runtime_free(rt);
 		return 1;
 	}
 
 	printf("result: %d\n", result);
 
-	wasm_free_module(mod);
+	wasm_module_free(mod);
 	wasm_runtime_free(rt);
 	return 0;
 }
@@ -216,7 +211,7 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Extended Name Section | Not applicable: only module and function names are read, for backtraces, and malformed name sections never reject a module |
 | Branch Hinting | Not implemented |
 
-Opt-in proposals have not been standardized yet; enable them with `wasm_enable_feature` or `wasm_enable_all_features`.
+Opt-in proposals have not been standardized yet; enable them with `wasm_runtime_enable_feature` or `wasm_runtime_enable_all_features`.
 
 SIMD execution includes ARM NEON and x86_64 SSE2 fast paths where the platform instructions preserve Wasm semantics exactly.
 

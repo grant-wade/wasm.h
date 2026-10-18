@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
 
             if (wasm_call(mod, kernels[k].name, &arg, 1, &result, 1) != WASM_OK) {
                 fprintf(stderr, "%s failed: %s\n", kernels[k].name, wasm_runtime_error_message(rt));
-                wasm_free_module(mod);
+                wasm_module_free(mod);
                 wasm_runtime_free(rt);
                 return 1;
             }
@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
     }
     printf("%-14s %10.1f\n", "total", total * 1e3);
 
-    wasm_free_module(mod);
+    wasm_module_free(mod);
     wasm_runtime_free(rt);
     return 0;
 }
