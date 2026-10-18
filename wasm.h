@@ -16801,6 +16801,50 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 
 
 
+/* Ops that each run a straight-line sequence of instructions left in place after their first
+ * opcode word: name, first instruction's opcode, instructions run, and word offset of the last.
+ * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
+ * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
+ * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, and LOAD64 an
+ * 8-byte load. */
+#define WASM__FUSED_OPS(X)          \
+    X(LC_ADD, 0x20, 3, 4)           \
+    X(LC_BIN, 0x20, 3, 4)           \
+    X(LL_ADD, 0x20, 3, 4)           \
+    X(LL_BIN, 0x20, 3, 4)           \
+    X(C_ADD, 0x41, 2, 2)            \
+    X(C_BIN, 0x41, 2, 2)            \
+    X(L_ADD, 0x20, 2, 2)            \
+    X(L_BIN, 0x20, 2, 2)            \
+    X(LC_ADD_S, 0x20, 4, 5)         \
+    X(LC_ADD_T, 0x20, 4, 5)         \
+    X(LC_BIN_S, 0x20, 4, 5)         \
+    X(LL_BIN_S, 0x20, 4, 5)         \
+    X(ADD_S, 0x6A, 2, 1)            \
+    X(ADD_T, 0x6A, 2, 1)            \
+    X(S_L, 0x21, 2, 2)              \
+    X(T_L, 0x22, 2, 2)              \
+    X(T_BRIF_LOOP, 0x22, 2, 2)      \
+    X(C_CMP_BRIF, 0x41, 3, 3)       \
+    X(C_CMP_BRIF_LOOP, 0x41, 3, 3)  \
+    X(L_CMP_BRIF, 0x20, 3, 3)       \
+    X(L_CMP_BRIF_LOOP, 0x20, 3, 3)  \
+    X(LC_CMP_BRIF, 0x20, 4, 5)      \
+    X(LC_CMP_BRIF_LOOP, 0x20, 4, 5) \
+    X(LC_CMP_IF, 0x20, 4, 5)        \
+    X(LL_CMP_BRIF, 0x20, 4, 5)      \
+    X(LL_CMP_BRIF_LOOP, 0x20, 4, 5) \
+    X(L_LOAD32, 0x20, 2, 2)         \
+    X(L_LOAD64, 0x20, 2, 2)         \
+    X(L_LOAD8U, 0x20, 2, 2)         \
+    X(L_F64BIN, 0x20, 2, 2)         \
+    X(LL_F64BIN, 0x20, 3, 4)        \
+    X(D_F64BIN, 0x44, 2, 3)         \
+    X(J_I64BIN, 0x42, 2, 3)         \
+    X(LJ_I64BIN, 0x20, 3, 5)        \
+    X(L_S, 0x20, 2, 2)              \
+    X(L_T, 0x20, 2, 2)
+
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
 enum {
@@ -16822,8 +16866,12 @@ enum {
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
     WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+#define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
+    WASM__FUSED_OPS(WASM__FUSED_ENUM)
+#undef WASM__FUSED_ENUM
     WASM__OP_COUNT
 };
+#define WASM__OP_FUSED WASM__OP_LC_ADD
 
 #define WASM__BRANCH_LOOP 0x1u
 #define WASM__BRANCH_RETURN 0x2u
@@ -20231,6 +20279,114 @@ static void wasm__x_param_slots(wasm__translator_t* t, wasm_module_t* mod, uint3
     wasm__x_emit(t, type ? wasm__valtypes_slots(type->params, type->num_params) : 0u);
 }
 
+static int wasm__x_is_i32_bin(uint32_t op) {
+    return (op >= 0x46 && op <= 0x4F) || (op >= 0x6A && op <= 0x6C) || (op >= 0x71 && op <= 0x78);
+}
+
+static int wasm__x_is_i32_cmp(uint32_t op) {
+    return op >= 0x46 && op <= 0x4F;
+}
+
+static int wasm__x_is_i64_bin(uint32_t op) {
+    return (op >= 0x51 && op <= 0x5A) || (op >= 0x7C && op <= 0x7E) || (op >= 0x83 && op <= 0x8A);
+}
+
+static int wasm__x_is_f64_bin(uint32_t op) {
+    return op >= 0xA0 && op <= 0xA3;
+}
+
+/* Returns the fused op that runs the len instructions with translated opcodes o, or 0. */
+static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
+    int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
+    int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
+
+    if (len == 2) {
+        if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
+        if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
+        if (o[0] == 0x20 && o[1] == 0x6A) return WASM__OP_L_ADD;
+        if (o[0] == 0x20 && wasm__x_is_i32_bin(o[1])) return WASM__OP_L_BIN;
+        if (o[0] == 0x20 && wasm__x_is_f64_bin(o[1])) return WASM__OP_L_F64BIN;
+        if (o[0] == 0x44 && wasm__x_is_f64_bin(o[1])) return WASM__OP_D_F64BIN;
+        if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
+        if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
+        if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
+        if (o[0] == 0x20 && (o[1] == 0x28 || o[1] == 0x2A || o[1] == 0x35)) return WASM__OP_L_LOAD32;
+        if (o[0] == 0x20 && (o[1] == 0x29 || o[1] == 0x2B)) return WASM__OP_L_LOAD64;
+        if (o[0] == 0x20 && o[1] == 0x2D) return WASM__OP_L_LOAD8U;
+        if (o[0] == 0x6A && o[1] == 0x21) return WASM__OP_ADD_S;
+        if (o[0] == 0x6A && o[1] == 0x22) return WASM__OP_ADD_T;
+        if (o[0] == 0x21 && o[1] == 0x20) return WASM__OP_S_L;
+        if (o[0] == 0x22 && o[1] == 0x20) return WASM__OP_T_L;
+        if (o[0] == 0x22 && loop) return WASM__OP_T_BRIF_LOOP;
+        return 0;
+    }
+    if (len == 3) {
+        if (o[0] == 0x20 && o[1] == 0x41 && o[2] == 0x6A) return WASM__OP_LC_ADD;
+        if (o[0] == 0x20 && o[1] == 0x41 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LC_BIN;
+        if (o[0] == 0x20 && o[1] == 0x20 && o[2] == 0x6A) return WASM__OP_LL_ADD;
+        if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LL_BIN;
+        if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_f64_bin(o[2])) return WASM__OP_LL_F64BIN;
+        if (o[0] == 0x20 && o[1] == 0x42 && wasm__x_is_i64_bin(o[2])) return WASM__OP_LJ_I64BIN;
+        if (o[0] == 0x41 && wasm__x_is_i32_cmp(o[1]) && brif)
+            return loop ? WASM__OP_C_CMP_BRIF_LOOP : WASM__OP_C_CMP_BRIF;
+        if (o[0] == 0x20 && wasm__x_is_i32_cmp(o[1]) && brif)
+            return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
+        return 0;
+    }
+    if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
+    if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x21) return WASM__OP_LC_ADD_S;
+    if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x22) return WASM__OP_LC_ADD_T;
+    if (wasm__x_is_i32_bin(o[2]) && o[3] == 0x21) return o[1] == 0x41 ? WASM__OP_LC_BIN_S : WASM__OP_LL_BIN_S;
+    if (!wasm__x_is_i32_cmp(o[2])) return 0;
+    if (o[3] == 0x04) return o[1] == 0x41 ? WASM__OP_LC_CMP_IF : 0u;
+    if (!brif) return 0;
+    if (o[1] == 0x41) return loop ? WASM__OP_LC_CMP_BRIF_LOOP : WASM__OP_LC_CMP_BRIF;
+    return loop ? WASM__OP_LL_CMP_BRIF_LOOP : WASM__OP_LL_CMP_BRIF;
+}
+
+/* Rewrites the first opcode word of each run of instructions that a fused op can run, choosing
+ * the runs that leave the fewest ops to dispatch. */
+static void wasm__x_fuse(wasm__translator_t* t) {
+    uint32_t n = t->num_offsets;
+    uint32_t* cost;
+    uint32_t* pick;
+    uint32_t i;
+
+    if (n < 2u) return;
+    cost = (uint32_t*)wasm__malloc_array(t->allocator, (size_t)n * 2u + 1u, sizeof(uint32_t));
+    if (!cost) {
+        t->failed = 1;
+        return;
+    }
+    pick = cost + n + 1u;
+    cost[n] = 0;
+    for (i = n; i-- > 0;) {
+        uint32_t o[4] = { 0, 0, 0, 0 };
+        uint32_t len;
+
+        cost[i] = cost[i + 1u] + 1u;
+        pick[i] = 0;
+        for (len = 0; len < 4u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
+        for (len = 4u; len >= 2u; len--) {
+            uint32_t fused = i + len <= n ? wasm__x_fusion(o, len) : 0u;
+
+            if (fused != 0 && cost[i + len] + 1u < cost[i]) {
+                cost[i] = cost[i + len] + 1u;
+                pick[i] = fused | (len << 16);
+            }
+        }
+    }
+    for (i = 0; i < n;) {
+        if (pick[i] == 0) {
+            i++;
+            continue;
+        }
+        t->ops[t->offsets[i * 2u]] = pick[i] & 0xFFFFu;
+        i += pick[i] >> 16;
+    }
+    wasm__free(t->allocator, cost);
+}
+
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
                                  const wasm__body_info_t* info) {
     const uint32_t* heights = info->heights;
@@ -20576,7 +20732,8 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     }
     if (t->failed) return WASM_ERR_OOM;
     if (t->fp != 0) return WASM_ERR_MALFORMED;
-    return WASM_OK;
+    wasm__x_fuse(t);
+    return t->failed ? WASM_ERR_OOM : WASM_OK;
 }
 
 /* Appends each legacy try's clause table after the body and points its WASM__OP_TRY at it. */
@@ -23100,6 +23257,97 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm__slot_t* sp) {
     }
 }
 
+/* What the fuel meter needs to know about a fused op. */
+typedef struct wasm__fused_info_t {
+    uint8_t first; /* opcode of its first instruction */
+    uint8_t units; /* instructions it runs */
+    uint8_t last;  /* word offset of its last instruction */
+} wasm__fused_info_t;
+
+static const wasm__fused_info_t wasm__fused_info[] = {
+#define WASM__FUSED_INFO(name, first, units, last) { first, units, last },
+    WASM__FUSED_OPS(WASM__FUSED_INFO)
+#undef WASM__FUSED_INFO
+};
+
+/* Bit i of each i32 or i64 comparison's mask is its result when i is
+ * (a == b) | (a <s b) << 1 | (a <u b) << 2. */
+static const uint8_t wasm__i32_compare_masks[10] = { 0x02, 0x55, 0x44, 0x50, 0x11, 0x05, 0x46, 0x52, 0x13, 0x07 };
+
+/* op is an i32 comparison opcode (0x46 to 0x4F). */
+WASM_INLINE uint32_t wasm__i32_compare(uint32_t op, uint32_t a, uint32_t b) {
+    uint32_t index = (uint32_t)(a == b) | ((uint32_t)((int32_t)a < (int32_t)b) << 1) | ((uint32_t)(a < b) << 2);
+
+    return (wasm__i32_compare_masks[op - 0x46] >> index) & 1u;
+}
+
+/* op is an i32 binary or comparison opcode that cannot trap. */
+WASM_INLINE uint32_t wasm__i32_binop(uint32_t op, uint32_t a, uint32_t b) {
+    switch (op) {
+        case 0x6A:
+            return a + b;
+        case 0x6B:
+            return a - b;
+        case 0x6C:
+            return a * b;
+        case 0x71:
+            return a & b;
+        case 0x72:
+            return a | b;
+        case 0x73:
+            return a ^ b;
+        case 0x74:
+            return a << (b & 31u);
+        case 0x75:
+            return wasm__shr_s32_bits(a, b);
+        case 0x76:
+            return a >> (b & 31u);
+        case 0x77:
+            return (a << (b & 31u)) | (a >> ((32u - (b & 31u)) & 31u));
+        case 0x78:
+            return (a >> (b & 31u)) | (a << ((32u - (b & 31u)) & 31u));
+        default:
+            return wasm__i32_compare(op, a, b);
+    }
+}
+
+/* op is an i64 comparison opcode (0x51 to 0x5A). */
+WASM_INLINE uint32_t wasm__i64_compare(uint32_t op, uint64_t a, uint64_t b) {
+    uint32_t index = (uint32_t)(a == b) | ((uint32_t)((int64_t)a < (int64_t)b) << 1) | ((uint32_t)(a < b) << 2);
+
+    return (wasm__i32_compare_masks[op - 0x51] >> index) & 1u;
+}
+
+/* op is an i64 binary or comparison opcode that cannot trap. */
+WASM_INLINE uint64_t wasm__i64_binop(uint32_t op, uint64_t a, uint64_t b) {
+    switch (op) {
+        case 0x7C:
+            return a + b;
+        case 0x7D:
+            return a - b;
+        case 0x7E:
+            return a * b;
+        case 0x83:
+            return a & b;
+        case 0x84:
+            return a | b;
+        case 0x85:
+            return a ^ b;
+        case 0x86:
+            return a << (b & 63u);
+        case 0x87:
+            return wasm__shr_s64_bits(a, (uint32_t)b);
+        case 0x88:
+            return a >> (b & 63u);
+        case 0x89:
+            return (a << (b & 63u)) | (a >> ((64u - (b & 63u)) & 63u));
+        case 0x8A:
+            return (a >> (b & 63u)) | (a << ((64u - (b & 63u)) & 63u));
+        default:
+            return wasm__i64_compare(op, a, b);
+    }
+}
+
 /* Returns the bits of r, an f64 result computed from operands with bits a and b; a NaN result
  * takes the payload of a if a is a NaN, else of b if b is one, made quiet. */
 WASM_INLINE uint64_t wasm__f64_result_bits(double r, uint64_t a, uint64_t b) {
@@ -23113,6 +23361,29 @@ WASM_INLINE uint64_t wasm__f64_result_bits(double r, uint64_t a, uint64_t b) {
     }
     memcpy(&bits, &r, sizeof(bits));
     return bits;
+}
+
+/* op is f64.add, f64.sub, f64.mul, or f64.div; returns the bits of a op b. */
+WASM_INLINE uint64_t wasm__f64_binop(uint32_t op, const wasm__slot_t* a, const wasm__slot_t* b) {
+    double x = wasm__slot_f64(a);
+    double y = wasm__slot_f64(b);
+    double r;
+
+    switch (op) {
+        case 0xA0:
+            r = x + y;
+            break;
+        case 0xA1:
+            r = x - y;
+            break;
+        case 0xA2:
+            r = x * y;
+            break;
+        default:
+            r = x / y;
+            break;
+    }
+    return wasm__f64_result_bits(r, wasm__slot_f64_bits(a), wasm__slot_f64_bits(b));
 }
 
 /* args holds the slots of ft's parameters just above rt->sp. */
@@ -23266,7 +23537,11 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
 #define WASM__CASE(op) case op
 #define WASM__DEFAULT default
 #define WASM__NEXT() continue
-#define WASM__LOAD_FUEL() (fuel_on = rt->fuel_enabled)
+#define WASM__LOAD_FUEL()                 \
+    do {                                  \
+        fuel_on = rt->fuel_enabled;       \
+        fuel_prev = op_at;                \
+    } while (0)
 #endif
 
 /* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns.
@@ -23294,9 +23569,9 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
     uint32_t op;
     uint32_t i;
     wasm_error_t err = WASM_OK;
+    const uint32_t* fuel_prev;
 #if WASM__THREADED_DISPATCH
     const void* const* dispatch;
-    const uint32_t* fuel_prev;
     static const void* const wasm__dispatch[WASM__OP_COUNT] = {
         [0x00] = &&wasm__op_0x00, [0x01] = &&wasm__op_0x01, [0x02] = &&wasm__op_default,
         [0x03] = &&wasm__op_default, [0x04] = &&wasm__op_0x04, [0x05] = &&wasm__op_default,
@@ -23378,18 +23653,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
-        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST
+        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST,
+#define WASM__FUSED_LABEL(name, first, units, last) [WASM__OP_##name] = &&wasm__op_WASM__OP_##name,
+        WASM__FUSED_OPS(WASM__FUSED_LABEL)
+#undef WASM__FUSED_LABEL
     };
-#define WASM__FUEL4 &&wasm__op_fuel, &&wasm__op_fuel, &&wasm__op_fuel, &&wasm__op_fuel
-#define WASM__FUEL16 WASM__FUEL4, WASM__FUEL4, WASM__FUEL4, WASM__FUEL4
-    static const void* const wasm__fuel_dispatch[18 * 16] = {
-        WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16,
-        WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16,
-        WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16, WASM__FUEL16
+    static const void* const wasm__fuel_dispatch[WASM__OP_COUNT] = {
+        [0 ... WASM__OP_FUSED - 1] = &&wasm__op_fuel,
+        [WASM__OP_FUSED ... WASM__OP_COUNT - 1] = &&wasm__op_fuel_fused
     };
-#undef WASM__FUEL16
-#undef WASM__FUEL4
-    enum { wasm__fuel_dispatch_covers_ops = 1 / (WASM__OP_COUNT <= 18 * 16) };
 #else
     int fuel_on;
 #endif
@@ -23409,17 +23681,45 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         rt->fuel--;
         fuel_prev = op_at;
         goto* wasm__dispatch[op];
-        do {
-#else
-        if (fuel_on) {
+    wasm__op_fuel_fused:
+        if (rt->fuel < wasm__fused_info[op - WASM__OP_FUSED].units) {
             if (rt->fuel == 0) {
+                pc = op_at;
+                op_at = fuel_prev;
                 err = WASM_ERR_OUT_OF_FUEL;
                 goto suspend;
             }
             rt->fuel--;
+            fuel_prev = op_at;
+            op = wasm__fused_info[op - WASM__OP_FUSED].first;
+            goto* wasm__dispatch[op];
         }
+        rt->fuel -= wasm__fused_info[op - WASM__OP_FUSED].units;
+        fuel_prev = op_at + wasm__fused_info[op - WASM__OP_FUSED].last;
+        goto* wasm__dispatch[op];
+        do {
+#else
         op_at = pc;
         op = *pc++;
+        if (fuel_on) {
+            if (rt->fuel == 0) {
+                pc = op_at;
+                op_at = fuel_prev;
+                err = WASM_ERR_OUT_OF_FUEL;
+                goto suspend;
+            }
+            if (op < WASM__OP_FUSED) {
+                rt->fuel--;
+                fuel_prev = op_at;
+            } else if (rt->fuel < wasm__fused_info[op - WASM__OP_FUSED].units) {
+                rt->fuel--;
+                fuel_prev = op_at;
+                op = wasm__fused_info[op - WASM__OP_FUSED].first;
+            } else {
+                rt->fuel -= wasm__fused_info[op - WASM__OP_FUSED].units;
+                fuel_prev = op_at + wasm__fused_info[op - WASM__OP_FUSED].last;
+            }
+        }
         switch (op) {
 #endif
             WASM__CASE(0x00):
@@ -24479,6 +24779,217 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__NEXT();
             WASM__CASE(0xC4):
                 WASM__UNARY(uint64_t, u64, u64, (a & 0x80000000u) ? (a | UINT64_C(0xFFFFFFFF00000000)) : (a & 0xFFFFFFFFu));
+                WASM__NEXT();
+
+            /* Fused instructions; pc[k] is word k + 1 of the run. */
+            WASM__CASE(WASM__OP_LC_ADD):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) + pc[2]);
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_BIN):
+                wasm__slot_set_u32(sp++, wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_ADD):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) + wasm__slot_u32(locals + pc[2]));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_BIN):
+                wasm__slot_set_u32(sp++, wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]),
+                                                         wasm__slot_u32(locals + pc[2])));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_ADD):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) + pc[0]);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_BIN):
+                wasm__slot_set_u32(sp - 1, wasm__i32_binop(pc[1], wasm__slot_u32(sp - 1), pc[0]));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_ADD):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) + wasm__slot_u32(locals + pc[0]));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_BIN):
+                wasm__slot_set_u32(sp - 1, wasm__i32_binop(pc[1], wasm__slot_u32(sp - 1),
+                                                           wasm__slot_u32(locals + pc[0])));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_ADD_S):
+                wasm__slot_set_u32(locals + pc[5], wasm__slot_u32(locals + pc[0]) + pc[2]);
+                pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_ADD_T):
+                wasm__slot_set_u32(sp, wasm__slot_u32(locals + pc[0]) + pc[2]);
+                locals[pc[5]] = *sp++;
+                pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_BIN_S):
+                wasm__slot_set_u32(locals + pc[5], wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]));
+                pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_BIN_S):
+                wasm__slot_set_u32(locals + pc[5], wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]),
+                                                                   wasm__slot_u32(locals + pc[2])));
+                pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_ADD_S):
+                sp -= 2;
+                wasm__slot_set_u32(locals + pc[1], wasm__slot_u32(sp) + wasm__slot_u32(sp + 1));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_ADD_T):
+                sp--;
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) + wasm__slot_u32(sp));
+                locals[pc[1]] = sp[-1];
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_S_L):
+                locals[pc[0]] = sp[-1];
+                sp[-1] = locals[pc[2]];
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_T_L):
+                locals[pc[0]] = sp[-1];
+                *sp++ = locals[pc[2]];
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_T_BRIF_LOOP):
+                locals[pc[0]] = *--sp;
+                if (wasm__slot_u32(sp)) {
+                    pc = ops + pc[2];
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
+                } else {
+                    pc += 3;
+                }
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_CMP_BRIF):
+                if (wasm__i32_compare(pc[1], wasm__slot_u32(--sp), pc[0]))
+                    pc = ops + pc[3];
+                else
+                    pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_CMP_BRIF_LOOP):
+                if (wasm__i32_compare(pc[1], wasm__slot_u32(--sp), pc[0])) {
+                    pc = ops + pc[3];
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
+                } else {
+                    pc += 4;
+                }
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_CMP_BRIF):
+                if (wasm__i32_compare(pc[1], wasm__slot_u32(--sp), wasm__slot_u32(locals + pc[0])))
+                    pc = ops + pc[3];
+                else
+                    pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_CMP_BRIF_LOOP):
+                if (wasm__i32_compare(pc[1], wasm__slot_u32(--sp), wasm__slot_u32(locals + pc[0]))) {
+                    pc = ops + pc[3];
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
+                } else {
+                    pc += 4;
+                }
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_CMP_BRIF):
+                if (wasm__i32_compare(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]))
+                    pc = ops + pc[5];
+                else
+                    pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_CMP_BRIF_LOOP):
+                if (wasm__i32_compare(pc[3], wasm__slot_u32(locals + pc[0]), pc[2])) {
+                    pc = ops + pc[5];
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
+                } else {
+                    pc += 6;
+                }
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_CMP_IF):
+                if (wasm__i32_compare(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]))
+                    pc += 6;
+                else
+                    pc = ops + pc[5];
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_CMP_BRIF):
+                if (wasm__i32_compare(pc[3], wasm__slot_u32(locals + pc[0]), wasm__slot_u32(locals + pc[2])))
+                    pc = ops + pc[5];
+                else
+                    pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_CMP_BRIF_LOOP):
+                if (wasm__i32_compare(pc[3], wasm__slot_u32(locals + pc[0]), wasm__slot_u32(locals + pc[2]))) {
+                    pc = ops + pc[5];
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
+                } else {
+                    pc += 6;
+                }
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_LOAD32): {
+                uint8_t* p;
+                const wasm__slot_t* base = locals + pc[0];
+
+                op_at += 2;
+                pc += 2;
+                WASM__MEMORY_PTR(p, base, 4u);
+                wasm__slot_set_u32(sp++, wasm__load_le32(p));
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_L_LOAD64): {
+                uint8_t* p;
+                const wasm__slot_t* base = locals + pc[0];
+
+                op_at += 2;
+                pc += 2;
+                WASM__MEMORY_PTR(p, base, 8u);
+                wasm__slot_set_u64(sp++, wasm__load_le64(p));
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_L_LOAD8U): {
+                uint8_t* p;
+                const wasm__slot_t* base = locals + pc[0];
+
+                op_at += 2;
+                pc += 2;
+                WASM__MEMORY_PTR(p, base, 1u);
+                wasm__slot_set_u32(sp++, *p);
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_L_F64BIN):
+                wasm__slot_set_f64_bits(sp - 1, wasm__f64_binop(pc[1], sp - 1, locals + pc[0]));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LL_F64BIN):
+                wasm__slot_set_f64_bits(sp++, wasm__f64_binop(pc[3], locals + pc[0], locals + pc[2]));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_D_F64BIN): {
+                wasm__slot_t k;
+
+                wasm__slot_set_f64_bits(&k, (uint64_t)pc[0] | ((uint64_t)pc[1] << 32));
+                wasm__slot_set_f64_bits(sp - 1, wasm__f64_binop(pc[2], sp - 1, &k));
+                pc += 3;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_J_I64BIN):
+                wasm__slot_set_u64(sp - 1, wasm__i64_binop(pc[2], wasm__slot_u64(sp - 1),
+                                                           (uint64_t)pc[0] | ((uint64_t)pc[1] << 32)));
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LJ_I64BIN):
+                wasm__slot_set_u64(sp++, wasm__i64_binop(pc[4], wasm__slot_u64(locals + pc[0]),
+                                                         (uint64_t)pc[2] | ((uint64_t)pc[3] << 32)));
+                pc += 5;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_S):
+                locals[pc[2]] = locals[pc[0]];
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_L_T):
+                locals[pc[2]] = locals[pc[0]];
+                *sp++ = locals[pc[0]];
+                pc += 3;
                 WASM__NEXT();
 
             WASM__DEFAULT:

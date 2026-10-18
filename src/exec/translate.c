@@ -228,6 +228,114 @@ static void wasm__x_param_slots(wasm__translator_t* t, wasm_module_t* mod, uint3
     wasm__x_emit(t, type ? wasm__valtypes_slots(type->params, type->num_params) : 0u);
 }
 
+static int wasm__x_is_i32_bin(uint32_t op) {
+    return (op >= 0x46 && op <= 0x4F) || (op >= 0x6A && op <= 0x6C) || (op >= 0x71 && op <= 0x78);
+}
+
+static int wasm__x_is_i32_cmp(uint32_t op) {
+    return op >= 0x46 && op <= 0x4F;
+}
+
+static int wasm__x_is_i64_bin(uint32_t op) {
+    return (op >= 0x51 && op <= 0x5A) || (op >= 0x7C && op <= 0x7E) || (op >= 0x83 && op <= 0x8A);
+}
+
+static int wasm__x_is_f64_bin(uint32_t op) {
+    return op >= 0xA0 && op <= 0xA3;
+}
+
+/* Returns the fused op that runs the len instructions with translated opcodes o, or 0. */
+static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
+    int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
+    int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
+
+    if (len == 2) {
+        if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
+        if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
+        if (o[0] == 0x20 && o[1] == 0x6A) return WASM__OP_L_ADD;
+        if (o[0] == 0x20 && wasm__x_is_i32_bin(o[1])) return WASM__OP_L_BIN;
+        if (o[0] == 0x20 && wasm__x_is_f64_bin(o[1])) return WASM__OP_L_F64BIN;
+        if (o[0] == 0x44 && wasm__x_is_f64_bin(o[1])) return WASM__OP_D_F64BIN;
+        if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
+        if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
+        if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
+        if (o[0] == 0x20 && (o[1] == 0x28 || o[1] == 0x2A || o[1] == 0x35)) return WASM__OP_L_LOAD32;
+        if (o[0] == 0x20 && (o[1] == 0x29 || o[1] == 0x2B)) return WASM__OP_L_LOAD64;
+        if (o[0] == 0x20 && o[1] == 0x2D) return WASM__OP_L_LOAD8U;
+        if (o[0] == 0x6A && o[1] == 0x21) return WASM__OP_ADD_S;
+        if (o[0] == 0x6A && o[1] == 0x22) return WASM__OP_ADD_T;
+        if (o[0] == 0x21 && o[1] == 0x20) return WASM__OP_S_L;
+        if (o[0] == 0x22 && o[1] == 0x20) return WASM__OP_T_L;
+        if (o[0] == 0x22 && loop) return WASM__OP_T_BRIF_LOOP;
+        return 0;
+    }
+    if (len == 3) {
+        if (o[0] == 0x20 && o[1] == 0x41 && o[2] == 0x6A) return WASM__OP_LC_ADD;
+        if (o[0] == 0x20 && o[1] == 0x41 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LC_BIN;
+        if (o[0] == 0x20 && o[1] == 0x20 && o[2] == 0x6A) return WASM__OP_LL_ADD;
+        if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LL_BIN;
+        if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_f64_bin(o[2])) return WASM__OP_LL_F64BIN;
+        if (o[0] == 0x20 && o[1] == 0x42 && wasm__x_is_i64_bin(o[2])) return WASM__OP_LJ_I64BIN;
+        if (o[0] == 0x41 && wasm__x_is_i32_cmp(o[1]) && brif)
+            return loop ? WASM__OP_C_CMP_BRIF_LOOP : WASM__OP_C_CMP_BRIF;
+        if (o[0] == 0x20 && wasm__x_is_i32_cmp(o[1]) && brif)
+            return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
+        return 0;
+    }
+    if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
+    if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x21) return WASM__OP_LC_ADD_S;
+    if (o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x22) return WASM__OP_LC_ADD_T;
+    if (wasm__x_is_i32_bin(o[2]) && o[3] == 0x21) return o[1] == 0x41 ? WASM__OP_LC_BIN_S : WASM__OP_LL_BIN_S;
+    if (!wasm__x_is_i32_cmp(o[2])) return 0;
+    if (o[3] == 0x04) return o[1] == 0x41 ? WASM__OP_LC_CMP_IF : 0u;
+    if (!brif) return 0;
+    if (o[1] == 0x41) return loop ? WASM__OP_LC_CMP_BRIF_LOOP : WASM__OP_LC_CMP_BRIF;
+    return loop ? WASM__OP_LL_CMP_BRIF_LOOP : WASM__OP_LL_CMP_BRIF;
+}
+
+/* Rewrites the first opcode word of each run of instructions that a fused op can run, choosing
+ * the runs that leave the fewest ops to dispatch. */
+static void wasm__x_fuse(wasm__translator_t* t) {
+    uint32_t n = t->num_offsets;
+    uint32_t* cost;
+    uint32_t* pick;
+    uint32_t i;
+
+    if (n < 2u) return;
+    cost = (uint32_t*)wasm__malloc_array(t->allocator, (size_t)n * 2u + 1u, sizeof(uint32_t));
+    if (!cost) {
+        t->failed = 1;
+        return;
+    }
+    pick = cost + n + 1u;
+    cost[n] = 0;
+    for (i = n; i-- > 0;) {
+        uint32_t o[4] = { 0, 0, 0, 0 };
+        uint32_t len;
+
+        cost[i] = cost[i + 1u] + 1u;
+        pick[i] = 0;
+        for (len = 0; len < 4u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
+        for (len = 4u; len >= 2u; len--) {
+            uint32_t fused = i + len <= n ? wasm__x_fusion(o, len) : 0u;
+
+            if (fused != 0 && cost[i + len] + 1u < cost[i]) {
+                cost[i] = cost[i + len] + 1u;
+                pick[i] = fused | (len << 16);
+            }
+        }
+    }
+    for (i = 0; i < n;) {
+        if (pick[i] == 0) {
+            i++;
+            continue;
+        }
+        t->ops[t->offsets[i * 2u]] = pick[i] & 0xFFFFu;
+        i += pick[i] >> 16;
+    }
+    wasm__free(t->allocator, cost);
+}
+
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
                                  const wasm__body_info_t* info) {
     const uint32_t* heights = info->heights;
@@ -573,7 +681,8 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     }
     if (t->failed) return WASM_ERR_OOM;
     if (t->fp != 0) return WASM_ERR_MALFORMED;
-    return WASM_OK;
+    wasm__x_fuse(t);
+    return t->failed ? WASM_ERR_OOM : WASM_OK;
 }
 
 /* Appends each legacy try's clause table after the body and points its WASM__OP_TRY at it. */

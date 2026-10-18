@@ -4,6 +4,50 @@
 #include "../internal/config.h"
 #include "../module.h"
 
+/* Ops that each run a straight-line sequence of instructions left in place after their first
+ * opcode word: name, first instruction's opcode, instructions run, and word offset of the last.
+ * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
+ * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
+ * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, and LOAD64 an
+ * 8-byte load. */
+#define WASM__FUSED_OPS(X)          \
+    X(LC_ADD, 0x20, 3, 4)           \
+    X(LC_BIN, 0x20, 3, 4)           \
+    X(LL_ADD, 0x20, 3, 4)           \
+    X(LL_BIN, 0x20, 3, 4)           \
+    X(C_ADD, 0x41, 2, 2)            \
+    X(C_BIN, 0x41, 2, 2)            \
+    X(L_ADD, 0x20, 2, 2)            \
+    X(L_BIN, 0x20, 2, 2)            \
+    X(LC_ADD_S, 0x20, 4, 5)         \
+    X(LC_ADD_T, 0x20, 4, 5)         \
+    X(LC_BIN_S, 0x20, 4, 5)         \
+    X(LL_BIN_S, 0x20, 4, 5)         \
+    X(ADD_S, 0x6A, 2, 1)            \
+    X(ADD_T, 0x6A, 2, 1)            \
+    X(S_L, 0x21, 2, 2)              \
+    X(T_L, 0x22, 2, 2)              \
+    X(T_BRIF_LOOP, 0x22, 2, 2)      \
+    X(C_CMP_BRIF, 0x41, 3, 3)       \
+    X(C_CMP_BRIF_LOOP, 0x41, 3, 3)  \
+    X(L_CMP_BRIF, 0x20, 3, 3)       \
+    X(L_CMP_BRIF_LOOP, 0x20, 3, 3)  \
+    X(LC_CMP_BRIF, 0x20, 4, 5)      \
+    X(LC_CMP_BRIF_LOOP, 0x20, 4, 5) \
+    X(LC_CMP_IF, 0x20, 4, 5)        \
+    X(LL_CMP_BRIF, 0x20, 4, 5)      \
+    X(LL_CMP_BRIF_LOOP, 0x20, 4, 5) \
+    X(L_LOAD32, 0x20, 2, 2)         \
+    X(L_LOAD64, 0x20, 2, 2)         \
+    X(L_LOAD8U, 0x20, 2, 2)         \
+    X(L_F64BIN, 0x20, 2, 2)         \
+    X(LL_F64BIN, 0x20, 3, 4)        \
+    X(D_F64BIN, 0x44, 2, 3)         \
+    X(J_I64BIN, 0x42, 2, 3)         \
+    X(LJ_I64BIN, 0x20, 3, 5)        \
+    X(L_S, 0x20, 2, 2)              \
+    X(L_T, 0x20, 2, 2)
+
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
 enum {
@@ -25,8 +69,12 @@ enum {
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
     WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+#define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
+    WASM__FUSED_OPS(WASM__FUSED_ENUM)
+#undef WASM__FUSED_ENUM
     WASM__OP_COUNT
 };
+#define WASM__OP_FUSED WASM__OP_LC_ADD
 
 #define WASM__BRANCH_LOOP 0x1u
 #define WASM__BRANCH_RETURN 0x2u
