@@ -546,3 +546,15 @@ const gc_wasm = [_]u8{
     0x02, 0x00, 0x05, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x01, 0x04, 0x69, 0x6e, 0x74, 0x73, 0x0a, 0x09,
     0x01, 0x00, 0x02, 0x00, 0x01, 0x78, 0x01, 0x01, 0x79,
 };
+
+test "allocation failures return errors without leaking" {
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const rt = wasm.Runtime.init(failing.allocator(), .{}) catch continue;
+        defer rt.deinit();
+        const mod = rt.load(&basic_wasm) catch continue;
+        mod.deinit();
+        if (!failing.has_induced_failure) break;
+    }
+}

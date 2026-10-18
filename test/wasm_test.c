@@ -8749,6 +8749,107 @@ static wasm_error_t wasm_test_host_add(wasm_module_t* mod, const wasm_value_t* a
     return WASM_OK;
 }
 
+WL_TEST(test_allocator_contract) {
+    const wasm_allocator_t* libc = wasm_libc_allocator();
+    wasm_allocator_t missing = wasm_test_allocator;
+    wasm_runtime_t* rt;
+    size_t align;
+
+    WL_CHECK(t, libc && libc->alloc && libc->resize && libc->free);
+    for (align = 1; align <= 4096u; align *= 2u) {
+        uint8_t* p = (uint8_t*)libc->alloc(libc->ctx, 3u, align);
+        uint8_t* q;
+
+        WL_CHECK_MSG(t, p && ((uintptr_t)p & (align - 1u)) == 0, "alloc misaligned for %zu", align);
+        if (!p) continue;
+        memcpy(p, "abc", 3u);
+        q = (uint8_t*)libc->resize(libc->ctx, p, 3u, 5000u, align);
+        WL_CHECK_MSG(t, q && ((uintptr_t)q & (align - 1u)) == 0 && memcmp(q, "abc", 3u) == 0,
+                     "resize misaligned or lost data for %zu", align);
+        libc->free(libc->ctx, q ? q : p, q ? 5000u : 3u, align);
+    }
+
+    WL_CHECK(t, wasm_runtime_new(NULL, NULL) == NULL);
+    missing.resize = NULL;
+    WL_CHECK(t, wasm_runtime_new(&missing, NULL) == NULL);
+    WL_CHECK(t, wasm_memory_new(&missing, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(&missing, WASM_TYPE_FUNCREF, 1, 1) == NULL);
+    rt = wasm_runtime_new(libc, NULL);
+    WL_CHECK(t, rt != NULL && wasm_runtime_allocator(rt)->alloc == libc->alloc);
+    wasm_runtime_free(rt);
+}
+
+WL_TEST(test_allocation_failures_unwind_without_leaks) {
+    /* Imports env.add; run(1) grows memory and a table, allocates GC objects, throws through try_table,
+     * calls through the table, and catches with a legacy try, returning 123. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x21, 0x07, 0x5f, 0x01, 0x7f, 0x01, 0x5e, 0x7f, 0x01,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7e, 0x00, 0x60, 0x01,
+        0x7f, 0x00, 0x60, 0x00, 0x02, 0x7f, 0x7e, 0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x64, 0x64,
+        0x00, 0x03, 0x03, 0x05, 0x04, 0x02, 0x02, 0x02, 0x02, 0x04, 0x04, 0x01, 0x70, 0x00, 0x04, 0x05, 0x04, 0x01,
+        0x01, 0x01, 0x04, 0x0d, 0x05, 0x02, 0x00, 0x04, 0x00, 0x05, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x05, 0x0b,
+        0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x04, 0x09, 0x08, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x01,
+        0x02, 0x0a, 0x7e, 0x04, 0x07, 0x00, 0x20, 0x00, 0x41, 0x02, 0x6c, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x41, 0x03,
+        0x6c, 0x0b, 0x0e, 0x00, 0x06, 0x7f, 0x20, 0x00, 0x08, 0x01, 0x07, 0x01, 0x41, 0x01, 0x6a, 0x0b, 0x0b, 0x5d,
+        0x02, 0x01, 0x63, 0x00, 0x01, 0x63, 0x01, 0x41, 0x01, 0x40, 0x00, 0x1a, 0xd2, 0x01, 0x41, 0x02, 0xfc, 0x0f,
+        0x00, 0x1a, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x01, 0x41, 0x07, 0x41, 0x03, 0xfb, 0x06, 0x01, 0x21, 0x02,
+        0x02, 0x06, 0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x41, 0x01, 0x11, 0x02, 0x00, 0x23, 0x00, 0x6a,
+        0x42, 0x09, 0x08, 0x00, 0x0b, 0x00, 0x0b, 0x1a, 0x20, 0x01, 0xfb, 0x02, 0x00, 0x00, 0x6a, 0x20, 0x02, 0x41,
+        0x02, 0xfb, 0x0b, 0x01, 0x6a, 0x41, 0x10, 0x2d, 0x00, 0x00, 0x6a, 0x20, 0x00, 0x10, 0x03, 0x6a, 0x41, 0x01,
+        0x10, 0x00, 0x0b, 0x0b, 0x0b, 0x01, 0x00, 0x41, 0x10, 0x0b, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x58,
+        0x04, 0x6e, 0x61, 0x6d, 0x65, 0x01, 0x1e, 0x04, 0x00, 0x03, 0x61, 0x64, 0x64, 0x01, 0x06, 0x64, 0x6f, 0x75,
+        0x62, 0x6c, 0x65, 0x02, 0x06, 0x74, 0x72, 0x69, 0x70, 0x6c, 0x65, 0x03, 0x06, 0x6c, 0x65, 0x67, 0x61, 0x63,
+        0x79, 0x02, 0x09, 0x01, 0x04, 0x02, 0x01, 0x01, 0x73, 0x02, 0x01, 0x61, 0x03, 0x06, 0x01, 0x04, 0x01, 0x00,
+        0x01, 0x68, 0x04, 0x0e, 0x03, 0x00, 0x02, 0x70, 0x74, 0x01, 0x03, 0x61, 0x72, 0x72, 0x02, 0x02, 0x75, 0x6e,
+        0x07, 0x04, 0x01, 0x00, 0x01, 0x67, 0x0b, 0x08, 0x02, 0x00, 0x01, 0x65, 0x01, 0x02, 0x65, 0x31,
+    };
+    size_t fail_at;
+    int completed = 0;
+
+    for (fail_at = 1; fail_at < 100000u && !completed; fail_at++) {
+        wasm_runtime_t* rt;
+        wasm_module_t* compiled = NULL;
+        wasm_module_t* m = NULL;
+        wasm_value_t* held = NULL;
+        wasm_value_t arg = wasm_i32(1);
+        wasm_value_t result = wasm_i32(0);
+        wasm_value_t field = wasm_i32(4);
+        wasm_value_t object;
+        int32_t fmt_result = 0;
+        wasm_error_t err = WASM_ERR_OOM;
+
+        g_wasm_test_alloc_fail_countdown = fail_at;
+        rt = wasm_runtime_new(&wasm_test_allocator, NULL);
+        if (rt && wasm_bind_host_func(rt, "env", "add", "ii(i)", wasm_test_host_add, NULL) == WASM_OK) {
+            compiled = wasm_compile(rt, module_bytes, sizeof(module_bytes));
+            m = compiled ? wasm_instantiate(compiled) : NULL;
+            if (m) err = wasm_call(m, "run", &arg, 1, &result, 1);
+            if (err == WASM_OK) err = wasm_call_fmt(m, "run", "i(i)", 1, &fmt_result);
+            if (err == WASM_OK) err = wasm_struct_new(m, 0, &field, 1, &object);
+            if (err == WASM_OK) {
+                held = wasm_ref_hold(rt, object);
+                if (!held) err = WASM_ERR_OOM;
+            }
+            wasm_gc_collect(rt);
+        }
+        if (g_wasm_test_alloc_fail_countdown != 0) {
+            completed = 1;
+            WASM_CHECK_OK(t, err);
+            WASM_CHECK_I32(t, result.of.i32, 123);
+            WASM_CHECK_I32(t, fmt_result, 123);
+        }
+        g_wasm_test_alloc_fail_countdown = 0;
+        if (held) wasm_ref_release(rt, held);
+        wasm_module_free(m);
+        wasm_module_free(compiled);
+        wasm_runtime_free(rt);
+        WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0, "%zu blocks leaked when allocation %zu failed",
+                     g_wasm_test_alloc_stats.live_blocks, fail_at);
+        if (g_wasm_test_alloc_stats.live_blocks != 0) break;
+    }
+    WL_CHECK_MSG(t, completed, "%s", "expected the run to succeed once no allocation fails");
+}
+
 WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     static const uint8_t module_bytes[] = {
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x03, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
@@ -16442,6 +16543,8 @@ int main(void) {
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
         { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
+        { "allocator: libc alignment and invalid allocators", test_allocator_contract },
+        { "allocator: every failing allocation unwinds without leaks", test_allocation_failures_unwind_without_leaks },
         { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
         { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
         { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },
