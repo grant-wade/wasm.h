@@ -9104,6 +9104,75 @@ WL_TEST(test_bad_magic) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_f64_arithmetic_propagates_the_first_nan_operand) {
+    static const char* const names[] = { "add", "sub", "mul", "div" };
+    static const uint64_t cases[][3] = {
+        { UINT64_C(0x7FF0000000000001), UINT64_C(0x7FF8000000000002), UINT64_C(0x7FF8000000000001) },
+        { UINT64_C(0x7FF8000000000002), UINT64_C(0x7FF0000000000001), UINT64_C(0x7FF8000000000002) },
+        { UINT64_C(0x3FF0000000000000), UINT64_C(0xFFF0000000000003), UINT64_C(0xFFF8000000000003) },
+        { UINT64_C(0xFFF800000000000A), UINT64_C(0x3FF0000000000000), UINT64_C(0xFFF800000000000A) },
+        { UINT64_C(0x7FF800000000000A), UINT64_C(0xFFF800000000000B), UINT64_C(0x7FF800000000000A) },
+    };
+    wasm_builder_t mod = { 0 };
+    wasm_builder_t sec = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t i;
+    uint32_t k;
+
+    emit_header(&mod);
+    emit(&sec, 1);
+    emit(&sec, 0x60);
+    emit(&sec, 2);
+    emit(&sec, 0x7E);
+    emit(&sec, 0x7E);
+    emit(&sec, 1);
+    emit(&sec, 0x7E);
+    emit_section(&mod, 1, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) emit(&sec, 0);
+    emit_section(&mod, 3, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) emit_export_func(&sec, names[i], i);
+    emit_section(&mod, 7, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) {
+        static const uint8_t body[] = { 10, 0, 0x20, 0, 0xBF, 0x20, 1, 0xBF, 0, 0xBD, 0x0B };
+        uint8_t code[sizeof(body)];
+
+        memcpy(code, body, sizeof(body));
+        code[8] = (uint8_t)(0xA0 + i);
+        emit_bytes(&sec, code, sizeof(code));
+    }
+    emit_section(&mod, 10, sec.buf, sec.len);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < 4; i++) {
+        for (k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+            wasm_value_t args[2];
+            wasm_value_t result = wasm_i64(0);
+
+            args[0] = wasm_i64((int64_t)cases[k][0]);
+            args[1] = wasm_i64((int64_t)cases[k][1]);
+            WASM_CHECK_OK(t, wasm_call(m, names[i], args, 2, &result, 1));
+            WL_CHECK_MSG(t, (uint64_t)result.of.i64 == cases[k][2], "f64.%s of %llx and %llx gave %llx", names[i],
+                         (unsigned long long)cases[k][0], (unsigned long long)cases[k][1],
+                         (unsigned long long)result.of.i64);
+        }
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_div_by_zero) {
     wasm_builder_t mod = { 0 };
     emit_header(&mod);
@@ -17811,6 +17880,7 @@ int main(void) {
         { "gc: bulk instructions pay fuel for their size; array.new and held values stay rooted", test_bulk_fuel_and_array_new_rooting },
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
+        { "f64 arithmetic: a NaN result takes the first NaN operand's payload", test_f64_arithmetic_propagates_the_first_nan_operand },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: failed calls record the trap code and message", test_failed_calls_record_trap_codes_and_messages },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

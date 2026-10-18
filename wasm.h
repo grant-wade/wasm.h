@@ -23100,6 +23100,21 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm__slot_t* sp) {
     }
 }
 
+/* Returns the bits of r, an f64 result computed from operands with bits a and b; a NaN result
+ * takes the payload of a if a is a NaN, else of b if b is one, made quiet. */
+WASM_INLINE uint64_t wasm__f64_result_bits(double r, uint64_t a, uint64_t b) {
+    uint64_t bits;
+
+    if (r != r) {
+        if ((a & UINT64_C(0x7FFFFFFFFFFFFFFF)) > UINT64_C(0x7FF0000000000000))
+            return a | UINT64_C(0x0008000000000000);
+        if ((b & UINT64_C(0x7FFFFFFFFFFFFFFF)) > UINT64_C(0x7FF0000000000000))
+            return b | UINT64_C(0x0008000000000000);
+    }
+    memcpy(&bits, &r, sizeof(bits));
+    return bits;
+}
+
 /* args holds the slots of ft's parameters just above rt->sp. */
 static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
                                                const wasm_functype_t* ft,
@@ -23208,6 +23223,16 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
     do {                                         \
         type a = wasm__slot_##get(sp - 1);       \
         wasm__slot_set_##set(sp - 1, expr);      \
+    } while (0)
+/* Replaces the top two f64 slots, a below b, with expr, whose NaN results follow wasm__f64_result_bits. */
+#define WASM__F64_BINARY(expr)                                                              \
+    do {                                                                                    \
+        double b = wasm__slot_f64(sp - 1);                                                  \
+        double a = wasm__slot_f64(sp - 2);                                                  \
+        uint64_t bits_ = wasm__f64_result_bits(expr, wasm__slot_f64_bits(sp - 2),           \
+                                               wasm__slot_f64_bits(sp - 1));                \
+        sp--;                                                                               \
+        wasm__slot_set_f64_bits(sp - 1, bits_);                                             \
     } while (0)
 /* Replaces the top two slots, a below b, with expr. */
 #define WASM__BINARY(type, get, set, expr)       \
@@ -24313,16 +24338,16 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__UNARY(double, f64, f64, wasm__sqrt_f64(a));
                 WASM__NEXT();
             WASM__CASE(0xA0):
-                WASM__BINARY(double, f64, f64, a + b);
+                WASM__F64_BINARY(a + b);
                 WASM__NEXT();
             WASM__CASE(0xA1):
-                WASM__BINARY(double, f64, f64, a - b);
+                WASM__F64_BINARY(a - b);
                 WASM__NEXT();
             WASM__CASE(0xA2):
-                WASM__BINARY(double, f64, f64, a * b);
+                WASM__F64_BINARY(a * b);
                 WASM__NEXT();
             WASM__CASE(0xA3):
-                WASM__BINARY(double, f64, f64, a / b);
+                WASM__F64_BINARY(a / b);
                 WASM__NEXT();
             WASM__CASE(0xA4):
                 WASM__BINARY(double, f64, f64, wasm__f64_min(a, b));
@@ -24606,6 +24631,7 @@ cleanup:
 }
 
 #undef WASM__BINARY
+#undef WASM__F64_BINARY
 #undef WASM__UNARY
 #undef WASM__CALL_OUT
 #undef WASM__MEMORY_PTR

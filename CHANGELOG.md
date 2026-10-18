@@ -55,6 +55,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 - Interpreter instructions read and write operand stack slots in place; `wasm_bench` takes about 1.3 s, down from 3.4 s.
 - `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two.
+- A NaN result of `f64.add`, `f64.sub`, `f64.mul`, or `f64.div` carries the payload of its first NaN operand, made quiet.
 
 ### Fixed
 
