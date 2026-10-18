@@ -93,7 +93,7 @@ The portable core is enabled by default. To compile WASI and Emscripten bridges:
 #include "wasm.h"
 ```
 
-Bind them explicitly before loading a module. `wasm_bind_wasi_stubs(rt)` exposes standard I/O and metadata without preopening host directories. `wasm_bind_emscripten_stubs(rt)` forwards some filesystem operations to the host and must only be used with trusted modules. These are partial compatibility bindings.
+Bind them explicitly before loading a module. `wasm_bind_wasi_stubs(rt)` exposes standard I/O and metadata; the guest reaches host files only through directories granted with `wasm_wasi_preopen_dir`, and `wasm_wasi_set_args` and `wasm_wasi_set_env` supply its arguments and environment. `wasm_bind_emscripten_stubs(rt)` forwards some filesystem operations to the host and must only be used with trusted modules. These are partial compatibility bindings.
 
 ## Build and test
 
@@ -128,11 +128,13 @@ See the [Zig guide](docs/ZIG.md) for installation, host imports, memory, and thr
 `wasm.c` builds a command-line tool for inspection and execution:
 
 ```
-wasm [--help] [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]
+wasm [--help] [--wasi] [--dir HOST[::GUEST]] [--env NAME=VALUE] [--emscripten] [--fuel N]
+     <module.wasm> <command> [args...]
 ```
 
 | Command | Description |
 | --- | --- |
+| `run [args...]` | Run a WASI command's `_start`, passing `args` after the module path as its argv. |
 | `info` | Module summary. |
 | `imports` | List imports with their types. |
 | `exports` | List exports. |
@@ -154,11 +156,11 @@ wasm [--help] [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args..
 ./build/wasm hello.wasm info
 ./build/wasm math.wasm call add 2 40
 ./build/wasm memory.wasm memory-read 0 0 64
-./build/wasm --wasi command.wasm call _start
+./build/wasm --dir ./data::/data --env LANG=C command.wasm run input.txt
 ./build/wasm --emscripten trusted-toolchain-module.wasm info
 ```
 
-WASI and Emscripten imports are unbound by default. `--wasi` enables the capability-free WASI compatibility bindings described above. Emscripten-compatible `env` shims are opt-in via `--emscripten` or `wasm_bind_emscripten_stubs(rt)` in the embedding API and must only be used with trusted modules.
+WASI and Emscripten imports are unbound by default. `--wasi` enables the WASI compatibility bindings described above, and `run`, `--dir`, and `--env` imply it. Each `--dir` grants the guest one host directory, under the guest path after `::` or else under its host path. Emscripten-compatible `env` shims are opt-in via `--emscripten` or `wasm_bind_emscripten_stubs(rt)` in the embedding API and must only be used with trusted modules.
 
 ## wasm2api
 

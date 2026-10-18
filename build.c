@@ -31,6 +31,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/exec/numeric.c",
     "src/exec/interpreter.c",
     "src/gc.c",
+    "src/handles.c",
     "src/init_expr.c",
     "src/instructions.c",
     "src/inspect.c",

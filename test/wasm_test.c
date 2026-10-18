@@ -8477,6 +8477,7 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_get_call_stack_depth(NULL) == 0);
     WL_CHECK(t, wasm_get_call_frame_info(NULL, 0, &index, &out_u32) != WASM_OK);
     wasm_set_fuel(NULL, 1);
+    wasm_disable_fuel(NULL);
     WL_CHECK(t, wasm_get_fuel(NULL) == 0);
     WL_CHECK(t, wasm_module_runtime(NULL) == NULL);
     wasm_module_set_userdata(NULL, NULL);
@@ -8485,6 +8486,9 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_bind_wasi_stubs(NULL) != WASM_OK);
     WL_CHECK(t, wasm_bind_emscripten_stubs(NULL) != WASM_OK);
 #endif
+    WL_CHECK(t, wasm_wasi_set_args(NULL, 0, NULL) != WASM_OK);
+    WL_CHECK(t, wasm_wasi_set_env(NULL, 0, NULL) != WASM_OK);
+    WL_CHECK(t, wasm_wasi_preopen_dir(NULL, ".", "/") != WASM_OK);
     wasm_runtime_free(NULL);
 }
 
@@ -9138,6 +9142,12 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
     WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
+    WL_CHECK(t, wasm_call(m, "run", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+
+    wasm_disable_fuel(&rt);
+    err = wasm_call(m, "run", NULL, 0, &result, 1);
+    WASM_CHECK_OK(t, err);
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -9229,6 +9239,173 @@ WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
 }
 
 #if WASM_ENABLE_PLATFORM
+static uint32_t wasm_test_wasi_call(wl_test_ctx* t, wasm_module_t* m, const char* name, const wasm_value_t* args,
+                                    uint32_t num_args) {
+    wasm_value_t result = wasm_i32(-1);
+
+    WASM_CHECK_OK(t, wasm_call(m, name, args, num_args, &result, 1));
+    return (uint32_t)result.of.i32;
+}
+
+WL_TEST(test_wasi_config_args_env_preopens_and_poll) {
+    /* Each export forwards its arguments to the wasi_snapshot_preview1 import of the same name. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x03, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
+        0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x02, 0xf0, 0x01, 0x06,
+        0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65,
+        0x76, 0x69, 0x65, 0x77, 0x31, 0x0e, 0x61, 0x72, 0x67, 0x73, 0x5f, 0x73, 0x69, 0x7a, 0x65, 0x73, 0x5f, 0x67,
+        0x65, 0x74, 0x00, 0x00, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74,
+        0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x08, 0x61, 0x72, 0x67, 0x73, 0x5f, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70,
+        0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x11, 0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x5f, 0x73, 0x69,
+        0x7a, 0x65, 0x73, 0x5f, 0x67, 0x65, 0x74, 0x00, 0x00, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61,
+        0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x0e, 0x66, 0x64, 0x5f,
+        0x70, 0x72, 0x65, 0x73, 0x74, 0x61, 0x74, 0x5f, 0x67, 0x65, 0x74, 0x00, 0x00, 0x16, 0x77, 0x61, 0x73, 0x69,
+        0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31,
+        0x13, 0x66, 0x64, 0x5f, 0x70, 0x72, 0x65, 0x73, 0x74, 0x61, 0x74, 0x5f, 0x64, 0x69, 0x72, 0x5f, 0x6e, 0x61,
+        0x6d, 0x65, 0x00, 0x01, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74,
+        0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x0b, 0x70, 0x6f, 0x6c, 0x6c, 0x5f, 0x6f, 0x6e, 0x65,
+        0x6f, 0x66, 0x66, 0x00, 0x02, 0x03, 0x07, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00,
+        0x01, 0x07, 0x6f, 0x07, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0e, 0x61, 0x72, 0x67, 0x73,
+        0x5f, 0x73, 0x69, 0x7a, 0x65, 0x73, 0x5f, 0x67, 0x65, 0x74, 0x00, 0x06, 0x08, 0x61, 0x72, 0x67, 0x73, 0x5f,
+        0x67, 0x65, 0x74, 0x00, 0x07, 0x11, 0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x5f, 0x73, 0x69, 0x7a, 0x65,
+        0x73, 0x5f, 0x67, 0x65, 0x74, 0x00, 0x08, 0x0e, 0x66, 0x64, 0x5f, 0x70, 0x72, 0x65, 0x73, 0x74, 0x61, 0x74,
+        0x5f, 0x67, 0x65, 0x74, 0x00, 0x09, 0x13, 0x66, 0x64, 0x5f, 0x70, 0x72, 0x65, 0x73, 0x74, 0x61, 0x74, 0x5f,
+        0x64, 0x69, 0x72, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x0a, 0x0b, 0x70, 0x6f, 0x6c, 0x6c, 0x5f, 0x6f, 0x6e,
+        0x65, 0x6f, 0x66, 0x66, 0x00, 0x0b, 0x0a, 0x3d, 0x06, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x00, 0x0b,
+        0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x01, 0x0b, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x02, 0x0b,
+        0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x03, 0x0b, 0x0a, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x10,
+        0x04, 0x0b, 0x0c, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x10, 0x05, 0x0b,
+    };
+    static const char* const argv[] = { "prog", "a b" };
+    static const char* const env[] = { "KEY=value" };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[4];
+    uint8_t buf[64];
+    uint32_t value = 0;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_wasi_set_args(&rt, 2, argv));
+    WASM_CHECK_OK(t, wasm_bind_wasi_stubs(&rt));
+    WASM_CHECK_OK(t, wasm_wasi_set_env(&rt, 1, env));
+    WASM_CHECK_OK(t, wasm_wasi_preopen_dir(&rt, ".", "/work"));
+    WL_CHECK(t, wasm_wasi_preopen_dir(&rt, "wasm_test_missing_dir/nested", "/missing") == WASM_ERR_MALFORMED);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "wasm_test_missing_dir") != NULL, "%s", rt.error_msg);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(0);
+    args[1] = wasm_i32(4);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "args_sizes_get", args, 2) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 0, &value, 4));
+    WL_CHECK(t, value == 2u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 4, &value, 4));
+    WL_CHECK(t, value == 9u);
+    args[0] = wasm_i32(16);
+    args[1] = wasm_i32(32);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "args_get", args, 2) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 32, buf, 9));
+    WL_CHECK(t, memcmp(buf, "prog\0a b\0", 9) == 0);
+
+    args[0] = wasm_i32(0);
+    args[1] = wasm_i32(4);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "environ_sizes_get", args, 2) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 0, &value, 4));
+    WL_CHECK(t, value == 1u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 4, &value, 4));
+    WL_CHECK(t, value == 10u);
+
+    args[0] = wasm_i32(3);
+    args[1] = wasm_i32(0);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "fd_prestat_get", args, 2) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 4, &value, 4));
+    WL_CHECK(t, value == 5u);
+    args[1] = wasm_i32(64);
+    args[2] = wasm_i32(5);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "fd_prestat_dir_name", args, 3) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 64, buf, 5));
+    WL_CHECK(t, memcmp(buf, "/work", 5) == 0);
+    args[0] = wasm_i32(4);
+    args[1] = wasm_i32(0);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "fd_prestat_get", args, 2) == 8u);
+
+    /* One relative 1 ms monotonic clock subscription with userdata 42, and one on a closed fd. */
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 42;
+    buf[8] = 0;
+    buf[16] = 1;
+    buf[24 + 2] = 0x0F;
+    buf[24 + 1] = 0x42;
+    buf[24] = 0x40;
+    WASM_CHECK_OK(t, wasm_memory_write(m, 0, 256, buf, 48));
+    args[0] = wasm_i32(256);
+    args[1] = wasm_i32(512);
+    args[2] = wasm_i32(1);
+    args[3] = wasm_i32(600);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "poll_oneoff", args, 4) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 600, &value, 4));
+    WL_CHECK(t, value == 1u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 512, buf, 32));
+    WL_CHECK(t, buf[0] == 42 && buf[8] == 0 && buf[9] == 0 && buf[10] == 0);
+
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 7;
+    buf[8] = 1;
+    buf[16] = 40;
+    WASM_CHECK_OK(t, wasm_memory_write(m, 0, 256 + 48, buf, 48));
+    args[2] = wasm_i32(2);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "poll_oneoff", args, 4) == 0u);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 600, &value, 4));
+    WL_CHECK_MSG(t, value == 1u, "expected only the fd event, got %u events", (unsigned)value);
+    WASM_CHECK_OK(t, wasm_memory_read(m, 0, 512, buf, 32));
+    WL_CHECK(t, buf[0] == 7 && buf[8] == 8 && buf[10] == 1);
+
+    args[2] = wasm_i32(0);
+    WL_CHECK(t, wasm_test_wasi_call(t, m, "poll_oneoff", args, 4) == 28u);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_wasi_proc_raise_does_not_signal_the_host) {
+    /* raise(sig) forwards to wasi_snapshot_preview1.proc_raise. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x25,
+        0x01, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72,
+        0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x0a, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x72, 0x61, 0x69, 0x73, 0x65, 0x00,
+        0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x72, 0x61, 0x69, 0x73, 0x65, 0x00, 0x01, 0x0a, 0x08,
+        0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+    };
+    static const int32_t signals[] = { 2, 6, 9, 11, 15 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t i;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_wasi_stubs(&rt));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        wasm_value_t arg = wasm_i32(signals[i]);
+        wasm_value_t result = wasm_i32(0);
+
+        WASM_CHECK_OK(t, wasm_call(m, "raise", &arg, 1, &result, 1));
+        WL_CHECK_MSG(t, result.of.i32 == 52, "expected ENOSYS for signal %d, got %d", (int)signals[i],
+                     (int)result.of.i32);
+    }
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_public_wasi_stub_helpers) {
     static const uint8_t wasi_message[] = "hello wasi\n";
     static const uint8_t wasi_iov[] = {
@@ -15666,6 +15843,110 @@ WL_TEST(test_validation_rejects_long_i64_leb128) {
     wasm_destroy(&rt);
 }
 
+static wasm_error_t wasm_test_host_set_payload_only(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                                    wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)num_results;
+    (void)userdata;
+    results[0].of.i32 = 7;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm_test_host_return_i32(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)num_results;
+    (void)userdata;
+    results[0] = wasm_i32(0x1234);
+    return WASM_OK;
+}
+
+WL_TEST(test_host_results_must_match_the_import_type) {
+    /* get() returns env.get(), declared () -> i32; ref() returns ref.is_null(env.ref()), declared () -> anyref. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x00, 0x01,
+        0x6e, 0x02, 0x15, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00, 0x03, 0x65, 0x6e, 0x76,
+        0x03, 0x72, 0x65, 0x66, 0x00, 0x01, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07, 0x0d, 0x02, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x02, 0x03, 0x72, 0x65, 0x66, 0x00, 0x03, 0x0a, 0x0c, 0x02, 0x04, 0x00, 0x10, 0x00, 0x0b, 0x05, 0x00,
+        0x10, 0x01, 0xd1, 0x0b,
+    };
+    wasm_valtype_t anyref_result = WASM_TYPE_ANYREF;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_import_t imp;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "get", "(i)", wasm_test_host_set_payload_only, NULL));
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "env";
+    imp.name = "ref";
+    imp.type.num_results = 1;
+    imp.type.results = &anyref_result;
+    imp.func = wasm_test_host_return_i32;
+    WASM_CHECK_OK(t, wasm_register_import(&rt, &imp));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WASM_CHECK_OK(t, wasm_call(m, "get", NULL, 0, &result, 1));
+    WL_CHECK(t, result.type == WASM_TYPE_I32 && result.of.i32 == 7);
+    WL_CHECK(t, wasm_call(m, "ref", NULL, 0, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "host function result 0") != NULL, "%s", rt.error_msg);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_collects_unreachable_externref_boxes_and_exnrefs) {
+    /* boxes(n) converts n i31refs to externref and keeps one boxed struct alive;
+     * exns(n) catches n exceptions with catch_all_ref and drops each exnref. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x03, 0x5f, 0x00, 0x60, 0x00, 0x00, 0x60, 0x01,
+        0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x02, 0x02, 0x0d, 0x03, 0x01, 0x00, 0x01, 0x07, 0x10, 0x02, 0x05, 0x62,
+        0x6f, 0x78, 0x65, 0x73, 0x00, 0x00, 0x04, 0x65, 0x78, 0x6e, 0x73, 0x00, 0x01, 0x0a, 0x49, 0x02, 0x29, 0x01,
+        0x01, 0x6f, 0xfb, 0x00, 0x00, 0xfb, 0x1b, 0x21, 0x01, 0x03, 0x40, 0x20, 0x00, 0xfb, 0x1c, 0xfb, 0x1b, 0x1a,
+        0xfb, 0x00, 0x00, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0xfb, 0x1a,
+        0xfb, 0x14, 0x00, 0x0b, 0x1d, 0x00, 0x03, 0x40, 0x02, 0x69, 0x1f, 0x40, 0x01, 0x03, 0x00, 0x08, 0x00, 0x0b,
+        0x00, 0x0b, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x41, 0x01, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(100000);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WASM_CHECK_OK(t, wasm_call(m, "boxes", &arg, 1, &result, 1));
+    WL_CHECK_MSG(t, result.of.i32 == 1, "%s", "expected the rooted box to still hold its struct");
+    WL_CHECK_MSG(t, rt.externref_boxes.count < 4096u, "expected unreachable boxes to be freed, %u live",
+                 (unsigned)rt.externref_boxes.count);
+
+    WASM_CHECK_OK(t, wasm_call(m, "exns", &arg, 1, &result, 1));
+    WL_CHECK_MSG(t, rt.exception_objects.count < 4096u, "expected unreachable exnrefs to be freed, %u live",
+                 (unsigned)rt.exception_objects.count);
+
+    wasm_gc_collect(&rt);
+    WL_CHECK(t, rt.externref_boxes.count == 0u);
+    WL_CHECK(t, rt.exception_objects.count == 0u);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -15801,6 +16082,8 @@ int main(void) {
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
+        { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
+        { "gc: unreachable externref boxes and exnrefs are freed", test_gc_collects_unreachable_externref_boxes_and_exnrefs },
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
@@ -15811,6 +16094,8 @@ int main(void) {
         { "public api: WASI stubs bind fd_write, environ_get, and proc_exit", test_public_wasi_stub_helpers },
         { "public api: WASI stubs expose args, env, fdstat, random, and clock helpers", test_public_wasi_metadata_helpers },
         { "public api: WASI stubs bind the full preview1 surface", test_public_wasi_preview1_surface_imports },
+        { "wasi: proc_raise reports ENOSYS instead of signaling the host", test_wasi_proc_raise_does_not_signal_the_host },
+        { "wasi: per-runtime args, environment, preopens, and poll_oneoff", test_wasi_config_args_env_preopens_and_poll },
         { "WASI: path operations need a preopen and stay beneath it", test_wasi_paths_stay_beneath_preopens },
         { "public api: Emscripten stubs bind toolchain env imports and memory", test_public_emscripten_stub_helpers },
 #endif

@@ -62,8 +62,18 @@ typedef struct wasm__wasi_fd_entry_t {
     char* preopen_path;
 } wasm__wasi_fd_entry_t;
 
+/* Strings a guest reads through args_get or environ_get. Until the host sets a list, the
+ * WASM_WASI_ARG_* or WASM_WASI_ENV_* macros supply it. */
+typedef struct wasm__wasi_strings_t {
+    char** items;
+    uint32_t count;
+    int is_set;
+} wasm__wasi_strings_t;
+
 struct wasm__wasi_state_t {
     wasm__wasi_fd_entry_t fds[WASM__WASI_MAX_FDS];
+    wasm__wasi_strings_t args;
+    wasm__wasi_strings_t env;
 };
 
 #if defined(_WIN32)
@@ -80,6 +90,12 @@ WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode);
 
 WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry);
 
+WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings);
+
+/* Replaces strings with copies of values; on failure strings is unchanged. */
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+                                                 const char* const* values);
+
 WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
@@ -91,6 +107,11 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
                                             const char* host_path,
                                             const char* preopen_path,
                                             uint32_t* out_fd);
+
+/* Opens host_path, which must be a directory, as a preopen the guest sees as guest_path.
+ * Returns WASM_ERR_MALFORMED when host_path is missing or not a directory. */
+WASM_PRIVATE wasm_error_t wasm__wasi_state_preopen_dir(wasm_runtime_t* rt, const char* host_path,
+                                                      const char* guest_path);
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
 
@@ -165,8 +186,6 @@ WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_t
 WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_stat_t* st);
 
 WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig);
 #endif
 
 #endif /* WASM_PLATFORM_WASI_STATE_H */

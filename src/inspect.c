@@ -271,6 +271,13 @@ void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
     rt->fuel_enabled = 1;
 }
 
+void wasm_disable_fuel(wasm_runtime_t* rt) {
+    if (!rt) return;
+
+    rt->fuel = 0;
+    rt->fuel_enabled = 0;
+}
+
 uint64_t wasm_get_fuel(wasm_runtime_t* rt) {
     return rt ? rt->fuel : 0;
 }

@@ -201,12 +201,14 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                     if (rt->sp + tag_type->num_params + 1u > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
                     for (i = 0; i < tag_type->num_params; i++)
                         rt->stack[rt->sp++] = rt->pending_exception.values[i];
+                    wasm__gc_collect_handles_if_needed(rt);
                     err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
                     if (err != WASM_OK) return err;
                     rt->stack[rt->sp++] = exnref_value;
                 } else if (clause.kind == 0x03) {
                     wasm_value_t exnref_value;
 
+                    wasm__gc_collect_handles_if_needed(rt);
                     err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
                     if (err != WASM_OK) return err;
                     if (rt->sp >= rt->max_stack) return WASM_ERR_STACK_OVERFLOW;

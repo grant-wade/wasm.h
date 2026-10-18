@@ -523,7 +523,11 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
         }
         case 0x1A:
         case 0x1B: {
-            wasm_value_t value = WASM__POP(rt);
+            wasm_value_t value;
+
+            /* Collect while the operand is still on the stack, where the GC can see it. */
+            if (subop == 0x1B) wasm__gc_collect_handles_if_needed(rt);
+            value = WASM__POP(rt);
 
             if (subop == 0x1A) {
                 WASM__PUSH(rt, wasm__anyref_from_externref_value(rt, value));

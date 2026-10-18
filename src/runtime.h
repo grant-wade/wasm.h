@@ -4,6 +4,7 @@
 #include "internal/config.h"
 #include <stdio.h>
 #include "internal/gc_types.h"
+#include "handles.h"
 
 /* ── Portable snprintf ────────────────────────────────────────────── */
 #if defined(_MSC_VER) && _MSC_VER < 1900
@@ -60,14 +61,15 @@ struct wasm_runtime_t {
     char error_msg[256];
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
-    wasm__exception_object_t* exception_objects;
+    wasm__handle_set_t exception_objects;
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
     wasm_gc_header_t* gc_allocations;
     wasm_module_t* gc_modules;
     wasm_module_t* failed_modules;
-    wasm__externref_box_t* externref_boxes;
+    wasm__handle_set_t externref_boxes;
+    uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
     uint8_t* frame_arena;
     size_t frame_arena_size;
     size_t frame_arena_offset;
@@ -116,6 +118,10 @@ WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* 
 WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+/* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
+ * only where every live reference is reachable from the runtime's roots. */
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
                                                       const wasm_module_t* mod,

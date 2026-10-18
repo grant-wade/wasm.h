@@ -11,6 +11,7 @@
 #pragma warning(disable : 4702)
 #endif
 #include "support.c"
+#include "handles.c"
 #include "simd/native.c"
 #include "platform/host.c"
 #include "portable.c"

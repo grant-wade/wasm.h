@@ -75,6 +75,44 @@ WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry) {
     entry->host_fd = -1;
 }
 
+WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings) {
+    uint32_t i;
+
+    if (!strings) return;
+    for (i = 0; i < strings->count; i++) WASM_FREE(strings->items[i]);
+    WASM_FREE(strings->items);
+    memset(strings, 0, sizeof(*strings));
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+                                                 const char* const* values) {
+    wasm__wasi_strings_t copy;
+    uint32_t i;
+
+    if (!strings || (count > 0u && !values)) return WASM_ERR_MALFORMED;
+    memset(&copy, 0, sizeof(copy));
+    copy.is_set = 1;
+    if (count > 0u) {
+        copy.items = (char**)WASM_CALLOC(count, sizeof(char*));
+        if (!copy.items) return WASM_ERR_OOM;
+    }
+    for (i = 0; i < count; i++) {
+        if (!values[i]) {
+            wasm__wasi_strings_free(&copy);
+            return WASM_ERR_MALFORMED;
+        }
+        copy.items[i] = wasm__wasi_strdup(values[i]);
+        if (!copy.items[i]) {
+            wasm__wasi_strings_free(&copy);
+            return WASM_ERR_OOM;
+        }
+        copy.count = i + 1u;
+    }
+    wasm__wasi_strings_free(strings);
+    *strings = copy;
+    return WASM_OK;
+}
+
 WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
     uint32_t i;
     wasm__wasi_state_t* state;
@@ -83,6 +121,8 @@ WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
 
     state = rt->wasi_state;
     for (i = 0; i < WASM__WASI_MAX_FDS; i++) wasm__wasi_fd_entry_reset(&state->fds[i]);
+    wasm__wasi_strings_free(&state->args);
+    wasm__wasi_strings_free(&state->env);
     WASM_FREE(state);
     rt->wasi_state = NULL;
 }
@@ -149,6 +189,46 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
     WASM_FREE(copied_preopen_path);
     if (owns_host_fd && host_fd >= 0) (void)wasm__wasi_host_close(host_fd);
     return WASM_ERR_OOM;
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_state_preopen_dir(wasm_runtime_t* rt, const char* host_path,
+                                                      const char* guest_path) {
+    wasm__wasi_host_stat_t st;
+    int host_fd = -1;
+    int owns_host_fd = 0;
+
+    if (!rt || !rt->wasi_state || !host_path || !guest_path || !guest_path[0]) return WASM_ERR_MALFORMED;
+#if defined(_WIN32)
+    if (!wasm__wasi_windows_stat_path(host_path, &st)) return WASM_ERR_MALFORMED;
+#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+    {
+        int flags = O_RDONLY;
+
+#ifdef O_DIRECTORY
+        flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+        host_fd = open(host_path, flags);
+        if (host_fd < 0) return WASM_ERR_MALFORMED;
+        owns_host_fd = 1;
+        if (!wasm__wasi_host_fstat(host_fd, &st)) {
+            (void)wasm__wasi_host_close(host_fd);
+            return WASM_ERR_MALFORMED;
+        }
+    }
+#else
+    (void)st;
+    return WASM_ERR_MALFORMED;
+#endif
+    if (wasm__wasi_filetype_from_mode((int)st.st_mode) != WASM__WASI_FILETYPE_DIRECTORY) {
+        if (owns_host_fd) (void)wasm__wasi_host_close(host_fd);
+        return WASM_ERR_MALFORMED;
+    }
+    return wasm__wasi_state_add_fd(rt, host_fd, owns_host_fd, WASM__WASI_FILETYPE_DIRECTORY,
+                                   WASM__WASI_RIGHTS_ALL, WASM__WASI_RIGHTS_ALL, host_path, guest_path,
+                                   NULL);
 }
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt) {
@@ -638,75 +718,6 @@ WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm_
 #else
     return 0;
 #endif
-}
-
-WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig) {
-    switch (sig) {
-        case 0u:
-            return 0;
-#ifdef SIGHUP
-        case 1u:
-            return SIGHUP;
-#endif
-#ifdef SIGINT
-        case 2u:
-            return SIGINT;
-#endif
-#ifdef SIGQUIT
-        case 3u:
-            return SIGQUIT;
-#endif
-#ifdef SIGILL
-        case 4u:
-            return SIGILL;
-#endif
-#ifdef SIGTRAP
-        case 5u:
-            return SIGTRAP;
-#endif
-#ifdef SIGABRT
-        case 6u:
-            return SIGABRT;
-#endif
-#ifdef SIGBUS
-        case 7u:
-            return SIGBUS;
-#endif
-#ifdef SIGFPE
-        case 8u:
-            return SIGFPE;
-#endif
-#ifdef SIGKILL
-        case 9u:
-            return SIGKILL;
-#endif
-#ifdef SIGUSR1
-        case 10u:
-            return SIGUSR1;
-#endif
-#ifdef SIGSEGV
-        case 11u:
-            return SIGSEGV;
-#endif
-#ifdef SIGUSR2
-        case 12u:
-            return SIGUSR2;
-#endif
-#ifdef SIGPIPE
-        case 13u:
-            return SIGPIPE;
-#endif
-#ifdef SIGALRM
-        case 14u:
-            return SIGALRM;
-#endif
-#ifdef SIGTERM
-        case 15u:
-            return SIGTERM;
-#endif
-        default:
-            return -1;
-    }
 }
 
 #endif

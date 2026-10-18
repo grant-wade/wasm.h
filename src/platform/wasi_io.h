@@ -80,6 +80,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata);
 
+/* Clock subscriptions sleep until the earliest deadline; fd subscriptions report ready at once. */
+WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
 WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,

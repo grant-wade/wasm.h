@@ -96,6 +96,23 @@ test "traps and fuel" {
     const spin = try mod.func("spin", fn () void);
     try expectError(error.OutOfFuel, spin.call(.{}));
     try expectEqual(@as(u64, 0), rt.fuel());
+    try expectError(error.OutOfFuel, div.call(.{ 9, 3 }));
+    rt.disableFuel();
+    try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
+}
+
+test "wasi configuration" {
+    const rt = try wasm.Runtime.init(.{});
+    defer rt.deinit();
+    const args = [_][*:0]const u8{ "prog", "first" };
+    const env = [_][*:0]const u8{"GREETING=hi"};
+
+    // Without the platform option every WASI call fails this way.
+    rt.setWasiArgs(&args) catch |err| return expectEqual(error.Malformed, err);
+    try rt.setWasiEnv(&env);
+    try rt.preopenDir(".", "/work");
+    try expectError(error.Malformed, rt.preopenDir("missing-wasm-test-dir", "/missing"));
+    try rt.bindWasi();
 }
 
 test "untyped calls" {

@@ -324,32 +324,6 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata) {
-    int host_sig;
-
-    (void)mod;
-    (void)userdata;
-
-    if (!results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    if (args[0].of.i32 < 0) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        return WASM_OK;
-    }
-    host_sig = wasm__wasi_signal_to_host((uint32_t)args[0].of.i32);
-    if (host_sig < 0) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        return WASM_OK;
-    }
-    if (raise(host_sig) != 0)
-        wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
-    else
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-    return WASM_OK;
-}
-
 WASM_PRIVATE wasm_error_t wasm__wasi_sched_yield(wasm_module_t* mod,
                                            const wasm_value_t* args, uint32_t num_args,
                                            wasm_value_t* results, uint32_t num_results,

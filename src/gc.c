@@ -1,6 +1,8 @@
 #include "wasm.h"
+#include "handles.h"
 #include "exec/state.h"
 #include "values.h"
+#include "support.h"
 #include "runtime.h"
 #include "types/canonical.h"
 #include "memory_internal.h"
@@ -10,31 +12,80 @@
 #include "internal/alloc.h"
 #include <string.h>
 
-/* Objects marked but not yet scanned; an explicit stack keeps deep object graphs off the C stack. */
+/* Objects marked but not yet scanned; explicit stacks keep deep object graphs off the C stack. */
 typedef struct wasm__gc_mark_stack_t {
+    wasm_runtime_t* rt;
     wasm_gc_header_t** items;
     size_t count;
     size_t capacity;
+    wasm__exception_object_t** exceptions;
+    size_t exception_count;
+    size_t exception_capacity;
     int failed;
 } wasm__gc_mark_stack_t;
+
+/* Doubles a full mark stack of pointers; returns NULL and records the failure when out of memory. */
+static void* wasm__gc_grow(wasm__gc_mark_stack_t* stack, void* items, size_t* capacity) {
+    size_t new_capacity = *capacity ? *capacity * 2u : 64u;
+    void* grown = wasm__realloc_array(items, new_capacity, sizeof(void*));
+
+    if (!grown) {
+        stack->failed = 1;
+        return NULL;
+    }
+    *capacity = new_capacity;
+    return grown;
+}
+
+static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value);
+
+static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_t* value) {
+    void* handle = (void*)value->of.externref;
+
+    if (!handle) return;
+    if (wasm__uses_externref_storage(value->type)) {
+        wasm__externref_box_t* box;
+
+        if (!wasm__handle_set_contains(&stack->rt->externref_boxes, handle)) return;
+        box = (wasm__externref_box_t*)handle;
+        if (box->marked) return;
+        box->marked = 1;
+        /* A box holds an anyref, never another box or an exception, so this does not recurse. */
+        wasm__gc_mark_value(stack, &box->value);
+    } else {
+        wasm__exception_object_t* exception;
+
+        if (!wasm__handle_set_contains(&stack->rt->exception_objects, handle)) return;
+        exception = (wasm__exception_object_t*)handle;
+        if (exception->marked) return;
+        if (stack->exception_count == stack->exception_capacity) {
+            wasm__exception_object_t** exceptions = (wasm__exception_object_t**)wasm__gc_grow(
+                stack, stack->exceptions, &stack->exception_capacity);
+
+            if (!exceptions) return;
+            stack->exceptions = exceptions;
+        }
+        exception->marked = 1;
+        stack->exceptions[stack->exception_count++] = exception;
+    }
+}
 
 static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value) {
     wasm_gc_header_t* object;
 
+    if (!value) return;
+    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) {
+        wasm__gc_mark_handle(stack, value);
+        return;
+    }
     if (!wasm__is_heap_gc_ref_value(value)) return;
     object = (wasm_gc_header_t*)value->of.gc_obj;
     if (!object || object->marked) return;
     if (stack->count == stack->capacity) {
-        size_t new_capacity = stack->capacity ? stack->capacity * 2u : 64u;
-        wasm_gc_header_t** items =
-            (wasm_gc_header_t**)wasm__realloc_array(stack->items, new_capacity, sizeof(*items));
+        wasm_gc_header_t** items = (wasm_gc_header_t**)wasm__gc_grow(stack, stack->items, &stack->capacity);
 
-        if (!items) {
-            stack->failed = 1;
-            return;
-        }
+        if (!items) return;
         stack->items = items;
-        stack->capacity = new_capacity;
     }
     object->marked = 1;
     stack->items[stack->count++] = object;
@@ -101,13 +152,21 @@ static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t*
 }
 
 static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
-    while (stack->count > 0u && !stack->failed) wasm__gc_scan_object(stack, stack->items[--stack->count]);
+    while (!stack->failed) {
+        if (stack->count > 0u) {
+            wasm__gc_scan_object(stack, stack->items[--stack->count]);
+        } else if (stack->exception_count > 0u) {
+            wasm__exception_object_t* exception = stack->exceptions[--stack->exception_count];
+
+            wasm__gc_mark_values(stack, exception->values, exception->num_values);
+        } else {
+            break;
+        }
+    }
 }
 
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
-    wasm__exception_object_t* exception_object;
-    wasm__externref_box_t* box;
     uint32_t i;
 
     if (!rt) return;
@@ -116,12 +175,6 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
-    }
-    for (box = rt->externref_boxes; box; box = box->next) {
-        wasm__gc_mark_value(stack, &box->value);
-    }
-    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
-        wasm__gc_mark_values(stack, exception_object->values, exception_object->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -212,8 +265,6 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
-    wasm__exception_object_t* exception_object;
-    wasm__externref_box_t* box;
     uint32_t i;
 
     if (!rt) return;
@@ -223,11 +274,15 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
     }
-    for (box = rt->externref_boxes; box; box = box->next) {
-        wasm__gc_forward_value(rt, &box->value);
+    for (i = 0; i < rt->externref_boxes.capacity; i++) {
+        wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
+
+        if (box) wasm__gc_forward_value(rt, &box->value);
     }
-    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
-        wasm__gc_forward_values(rt, exception_object->values, exception_object->num_values);
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (exception) wasm__gc_forward_values(rt, exception->values, exception->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -259,6 +314,40 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     }
 }
 
+static int wasm__gc_box_is_marked(void* handle) {
+    return ((wasm__externref_box_t*)handle)->marked;
+}
+
+static int wasm__gc_exception_is_marked(void* handle) {
+    return ((wasm__exception_object_t*)handle)->marked;
+}
+
+static void wasm__gc_free_box(void* handle) {
+    WASM_FREE(handle);
+}
+
+static void wasm__gc_free_exception(void* handle) {
+    wasm__exception_object_t* exception = (wasm__exception_object_t*)handle;
+
+    WASM_FREE(exception->values);
+    WASM_FREE(exception);
+}
+
+static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->externref_boxes.capacity; i++) {
+        wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
+
+        if (box) box->marked = 0;
+    }
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (exception) exception->marked = 0;
+    }
+}
+
 void wasm_gc_collect(wasm_runtime_t* rt) {
     wasm_gc_header_t* object;
     wasm_gc_header_t* new_allocations = NULL;
@@ -268,15 +357,22 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
     int has_live = 0;
     wasm__gc_mark_stack_t stack;
 
-    if (!rt || !rt->gc_heap) return;
+    if (!rt) return;
 
     for (object = rt->gc_allocations; object; object = object->next_alloc) object->marked = 0;
+    wasm__gc_clear_handle_marks(rt);
 
     memset(&stack, 0, sizeof(stack));
+    stack.rt = rt;
     wasm__gc_mark_runtime_roots(&stack, rt);
     wasm__gc_drain_mark_stack(&stack);
     WASM_FREE(stack.items);
+    WASM_FREE(stack.exceptions);
     if (stack.failed) return;
+
+    wasm__handle_set_filter(&rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
+    wasm__handle_set_filter(&rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
+    if (!rt->gc_heap) return;
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->marked) {
             has_live = 1;

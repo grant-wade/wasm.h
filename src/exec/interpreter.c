@@ -52,15 +52,36 @@ WASM_INLINE wasm_error_t wasm__imm_memarg(wasm__reader_t* r, wasm__memarg_t* mem
     return wasm__read_memarg(r, memarg);
 }
 
+/* Calls a host import of type ft, whose type indices belong to mod. Results start as typed
+ * defaults, so a host may set only the payload, and must match ft when it returns. */
 static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
+                                           const wasm_functype_t* ft,
                                            wasm_host_func_t host_func,
                                            const wasm_value_t* args,
-                                           uint32_t num_args,
                                            wasm_value_t* results,
-                                           uint32_t num_results,
                                            void* userdata) {
-    if (!mod || !mod->rt || !host_func) return WASM_ERR_MALFORMED;
-    return host_func(mod, args, num_args, results, num_results, userdata);
+    wasm_error_t err;
+    uint32_t i;
+
+    if (!mod || !mod->rt || !ft || !host_func) return WASM_ERR_MALFORMED;
+    for (i = 0; i < ft->num_results; i++) {
+        const wasm_reftype_t* reftype = ft->result_reftypes ? &ft->result_reftypes[i] : NULL;
+
+        results[i] = wasm__is_ref_type(ft->results[i]) ? wasm__typed_ref_null(ft->results[i], reftype)
+                                                       : wasm__default_value(ft->results[i]);
+    }
+    err = host_func(mod, args, ft->num_params, results, ft->num_results, userdata);
+    if (err != WASM_OK) return err;
+    for (i = 0; i < ft->num_results; i++) {
+        const wasm_reftype_t* reftype = ft->result_reftypes ? &ft->result_reftypes[i] : NULL;
+
+        if (!wasm__runtime_value_matches_type(mod, &results[i], ft->results[i], reftype)) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "host function result %u does not match its declared type", (unsigned)i);
+            return WASM_ERR_TYPE_MISMATCH;
+        }
+    }
+    return WASM_OK;
 }
 
 /* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
@@ -358,7 +379,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x0A: { /* throw_ref */
                 wasm_value_t exnref_value = WASM__POP(rt);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(&exnref_value);
+                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
 
                 if (!exn) WASM__TRAP(WASM_ERR_TRAP);
                 err = wasm__set_exception_state(&rt->pending_exception,
@@ -444,12 +465,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -516,12 +533,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -572,12 +585,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -651,12 +660,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -727,12 +732,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -798,12 +799,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -1396,9 +1393,8 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
 
     func = &mod->funcs[func_idx];
     if (func->is_import)
-        return wasm__invoke_host_func(mod, func->host_func,
-                                      args, num_args, results, num_results,
-                                      func->host_userdata);
+        return wasm__invoke_host_func(mod, wasm__module_functype(mod, func->type_idx), func->host_func,
+                                      args, results, func->host_userdata);
 
     err = wasm__push_call_frame(mod, func_idx, args, num_args, results, num_results);
     if (err != WASM_OK) goto cleanup;

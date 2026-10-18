@@ -684,6 +684,13 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                  wasm_host_func_t callback, void* userdata);
 wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt);
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
+/* WASI configuration for one runtime, usable before or after wasm_bind_wasi_stubs. The strings
+   are copied. These require WASM_ENABLE_PLATFORM and fail with WASM_ERR_MALFORMED without it. */
+wasm_error_t wasm_wasi_set_args(wasm_runtime_t* rt, uint32_t argc, const char* const* argv);
+/* Each entry has the form "NAME=value". */
+wasm_error_t wasm_wasi_set_env(wasm_runtime_t* rt, uint32_t count, const char* const* env);
+/* Lets the guest open files beneath the host directory host_path, which it sees as guest_path. */
+wasm_error_t wasm_wasi_preopen_dir(wasm_runtime_t* rt, const char* host_path, const char* guest_path);
 uint32_t wasm_memory_count(wasm_module_t* mod);
 wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
                               uint64_t offset, void* dst, size_t len);
@@ -766,6 +773,8 @@ uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
 wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
 void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
+/* Stops metering; calls run without a budget until wasm_set_fuel is called again. */
+void wasm_disable_fuel(wasm_runtime_t* rt);
 uint64_t wasm_get_fuel(wasm_runtime_t* rt);
 const wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod);
 void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);
@@ -940,6 +949,138 @@ WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type) {
     }
 }
 /* END src/support.c */
+
+/* BEGIN src/handles.c */
+
+/* BEGIN src/handles.h */
+#ifndef WASM_HANDLES_H
+#define WASM_HANDLES_H
+
+
+/* Open-addressing set of host-heap objects that reference values point to, so a
+ * handle can be checked before it is dereferenced. */
+typedef struct wasm__handle_set_t {
+    void** slots;      /* NULL marks an empty slot */
+    uint32_t capacity; /* zero or a power of two */
+    uint32_t count;
+} wasm__handle_set_t;
+
+WASM_PRIVATE int wasm__handle_set_contains(const wasm__handle_set_t* set, const void* handle);
+
+WASM_PRIVATE wasm_error_t wasm__handle_set_insert(wasm__handle_set_t* set, void* handle);
+
+/* Keeps the handles for which keep() returns nonzero and passes the rest to drop(). If the
+ * smaller table cannot be allocated, every handle is kept. */
+WASM_PRIVATE void wasm__handle_set_filter(wasm__handle_set_t* set, int (*keep)(void*),
+                                          void (*drop)(void*));
+
+WASM_PRIVATE void wasm__handle_set_free(wasm__handle_set_t* set);
+
+#endif /* WASM_HANDLES_H */
+/* END src/handles.h */
+
+#include <string.h>
+
+#define WASM__HANDLE_SET_MIN_CAPACITY 16u
+
+static uint32_t wasm__handle_hash(const void* handle) {
+    uint64_t h = (uint64_t)(uintptr_t)handle;
+
+    h ^= h >> 33;
+    h *= UINT64_C(0xff51afd7ed558ccd);
+    h ^= h >> 33;
+    return (uint32_t)h;
+}
+
+static void wasm__handle_slots_put(void** slots, uint32_t capacity, void* handle) {
+    uint32_t mask = capacity - 1u;
+    uint32_t i = wasm__handle_hash(handle) & mask;
+
+    while (slots[i]) i = (i + 1u) & mask;
+    slots[i] = handle;
+}
+
+WASM_PRIVATE int wasm__handle_set_contains(const wasm__handle_set_t* set, const void* handle) {
+    uint32_t mask;
+    uint32_t i;
+
+    if (!set || !handle || set->capacity == 0) return 0;
+    mask = set->capacity - 1u;
+    i = wasm__handle_hash(handle) & mask;
+    while (set->slots[i]) {
+        if (set->slots[i] == handle) return 1;
+        i = (i + 1u) & mask;
+    }
+    return 0;
+}
+
+static wasm_error_t wasm__handle_set_resize(wasm__handle_set_t* set, uint32_t capacity) {
+    void** slots = (void**)WASM_CALLOC(capacity, sizeof(void*));
+    uint32_t i;
+
+    if (!slots) return WASM_ERR_OOM;
+    for (i = 0; i < set->capacity; i++) {
+        if (set->slots[i]) wasm__handle_slots_put(slots, capacity, set->slots[i]);
+    }
+    WASM_FREE(set->slots);
+    set->slots = slots;
+    set->capacity = capacity;
+    return WASM_OK;
+}
+
+WASM_PRIVATE wasm_error_t wasm__handle_set_insert(wasm__handle_set_t* set, void* handle) {
+    if (!set || !handle) return WASM_ERR_MALFORMED;
+    /* Keep the load factor at or below one half. */
+    if ((set->count + 1u) * 2u > set->capacity) {
+        uint32_t capacity = set->capacity ? set->capacity * 2u : WASM__HANDLE_SET_MIN_CAPACITY;
+        wasm_error_t err;
+
+        if (set->capacity > UINT32_MAX / 4u) return WASM_ERR_OOM;
+        err = wasm__handle_set_resize(set, capacity);
+        if (err != WASM_OK) return err;
+    }
+    wasm__handle_slots_put(set->slots, set->capacity, handle);
+    set->count++;
+    return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__handle_set_filter(wasm__handle_set_t* set, int (*keep)(void*),
+                                          void (*drop)(void*)) {
+    uint32_t survivors = 0;
+    uint32_t capacity = WASM__HANDLE_SET_MIN_CAPACITY;
+    void** slots;
+    uint32_t i;
+
+    if (!set || set->count == 0) return;
+    for (i = 0; i < set->capacity; i++) {
+        if (set->slots[i] && keep(set->slots[i])) survivors++;
+    }
+    if (survivors == set->count) return;
+    while (capacity < survivors * 2u) capacity *= 2u;
+
+    slots = (void**)WASM_CALLOC(capacity, sizeof(void*));
+    if (!slots) return;
+    for (i = 0; i < set->capacity; i++) {
+        void* handle = set->slots[i];
+
+        if (!handle) continue;
+        if (keep(handle))
+            wasm__handle_slots_put(slots, capacity, handle);
+        else
+            drop(handle);
+    }
+    WASM_FREE(set->slots);
+    set->slots = slots;
+    set->capacity = capacity;
+    set->count = survivors;
+}
+
+WASM_PRIVATE void wasm__handle_set_free(wasm__handle_set_t* set) {
+    if (!set) return;
+    WASM_FREE(set->slots);
+    memset(set, 0, sizeof(*set));
+}
+/* END src/handles.c */
 
 /* BEGIN src/simd/native.c */
 
@@ -1253,10 +1394,13 @@ WASM_PRIVATE uint32_t wasm__platform_wasi_env_count(void);
 WASM_PRIVATE const char* wasm__platform_wasi_env_at(uint32_t index);
 WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
 WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id, uint64_t precision, uint64_t* out_time);
+/* Blocks the calling thread for at least ns nanoseconds; returns 0 where sleeping is unsupported. */
+WASM_PRIVATE int wasm__platform_sleep_ns(uint64_t ns);
 #endif
 
 #endif /* WASM_PLATFORM_HOST_H */
 /* END src/platform/host.h */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1578,6 +1722,46 @@ WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
 
 #endif
 #endif
+#if WASM_ENABLE_PLATFORM
+WASM_PRIVATE int wasm__platform_sleep_ns(uint64_t ns) {
+#if WASM__PLATFORM_WINDOWS
+    uint64_t ms = ns / 1000000u + (ns % 1000000u != 0u);
+
+    while (ms > 0u) {
+        DWORD chunk = ms > 0x7FFFFFFFu ? 0x7FFFFFFFu : (DWORD)ms;
+
+        Sleep(chunk);
+        ms -= chunk;
+    }
+    return 1;
+#elif WASM__PLATFORM_POSIX && defined(CLOCK_REALTIME)
+    struct timespec request;
+    struct timespec remaining;
+    uint64_t seconds = ns / 1000000000u;
+
+    request.tv_sec = (time_t)(seconds > 0x7FFFFFFFu ? 0x7FFFFFFFu : seconds);
+    request.tv_nsec = (long)(ns % 1000000000u);
+    while (nanosleep(&request, &remaining) != 0) {
+        if (errno != EINTR) return 0;
+        request = remaining;
+    }
+    return 1;
+#elif WASM__PLATFORM_POSIX
+    uint64_t seconds = ns / 1000000000u + (ns % 1000000000u != 0u);
+
+    while (seconds > 0u) {
+        unsigned int chunk = seconds > 0xFFFFu ? 0xFFFFu : (unsigned int)seconds;
+        unsigned int left = sleep(chunk);
+
+        seconds -= chunk - left;
+    }
+    return 1;
+#else
+    (void)ns;
+    return 0;
+#endif
+}
+#endif
 /* END src/platform/host.c */
 
 /* BEGIN src/portable.c */
@@ -1756,7 +1940,9 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
                                             const wasm__exception_state_t* ex,
                                             wasm_value_t* out_value);
 
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value);
+/* Returns NULL unless value refers to a live exception object of rt. */
+WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
+                                                                       const wasm_value_t* value);
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
@@ -1827,16 +2013,17 @@ struct wasm__exception_object_t {
     uint64_t tag_identity;
     wasm_value_t* values;
     uint32_t num_values;
-    struct wasm__exception_object_t* next;
+    int marked;
 };
 
 struct wasm__externref_box_t {
     wasm_value_t value;
-    wasm__externref_box_t* next;
+    int marked;
 };
 
 #endif /* WASM_INTERNAL_GC_TYPES_H */
 /* END src/internal/gc_types.h */
+
 
 /* ── Portable snprintf ────────────────────────────────────────────── */
 #if defined(_MSC_VER) && _MSC_VER < 1900
@@ -1893,14 +2080,15 @@ struct wasm_runtime_t {
     char error_msg[256];
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
-    wasm__exception_object_t* exception_objects;
+    wasm__handle_set_t exception_objects;
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
     wasm_gc_header_t* gc_allocations;
     wasm_module_t* gc_modules;
     wasm_module_t* failed_modules;
-    wasm__externref_box_t* externref_boxes;
+    wasm__handle_set_t externref_boxes;
+    uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
     uint8_t* frame_arena;
     size_t frame_arena_size;
     size_t frame_arena_offset;
@@ -1949,6 +2137,10 @@ WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* 
 WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+/* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
+ * only where every live reference is reachable from the runtime's roots. */
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
                                                       const wasm_module_t* mod,
@@ -4114,6 +4306,7 @@ WASM_PRIVATE double wasm__sqrt_f64(double value) {
 
 /* BEGIN src/types/references.c */
 
+
 #include <stdio.h>
 
 
@@ -4370,13 +4563,8 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
 
 static wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
                                                        uintptr_t handle) {
-    wasm__externref_box_t* box;
-
-    if (!rt || handle == (uintptr_t)0) return NULL;
-    for (box = rt->externref_boxes; box; box = box->next) {
-        if ((uintptr_t)box == handle) return box;
-    }
-    return NULL;
+    if (!rt || !wasm__handle_set_contains(&rt->externref_boxes, (const void*)handle)) return NULL;
+    return (wasm__externref_box_t*)handle;
 }
 
 static int wasm__is_host_anyref_value(const wasm_module_t* mod,
@@ -4407,8 +4595,11 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
     box = (wasm__externref_box_t*)WASM_MALLOC(sizeof(*box));
     if (!box) return WASM_ERR_OOM;
     box->value = value;
-    box->next = rt->externref_boxes;
-    rt->externref_boxes = box;
+    box->marked = 0;
+    if (wasm__handle_set_insert(&rt->externref_boxes, box) != WASM_OK) {
+        WASM_FREE(box);
+        return WASM_ERR_OOM;
+    }
 
     *out_value = wasm_externref((uintptr_t)box);
     return WASM_OK;
@@ -5901,6 +6092,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 
 
 
+
 #include <string.h>
 #include <stdio.h>
 
@@ -6102,8 +6294,11 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
         memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
 
-    object->next = rt->exception_objects;
-    rt->exception_objects = object;
+    if (wasm__handle_set_insert(&rt->exception_objects, object) != WASM_OK) {
+        WASM_FREE(object->values);
+        WASM_FREE(object);
+        return WASM_ERR_OOM;
+    }
 
     value = wasm_ref_null(WASM_TYPE_EXNREF);
     value.of.externref = (uintptr_t)object;
@@ -6111,9 +6306,14 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value) {
-    if (!value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
-    return (wasm__exception_object_t*)value->of.externref;
+WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
+                                                                       const wasm_value_t* value) {
+    void* handle;
+
+    if (!rt || !value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
+    handle = (void*)value->of.externref;
+    if (!wasm__handle_set_contains(&rt->exception_objects, handle)) return NULL;
+    return (wasm__exception_object_t*)handle;
 }
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
@@ -10690,6 +10890,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
 
 
+
 /* BEGIN src/exec/frames.h */
 #ifndef WASM_SRC_EXEC_FRAMES_H
 #define WASM_SRC_EXEC_FRAMES_H
@@ -10787,8 +10988,18 @@ typedef struct wasm__wasi_fd_entry_t {
     char* preopen_path;
 } wasm__wasi_fd_entry_t;
 
+/* Strings a guest reads through args_get or environ_get. Until the host sets a list, the
+ * WASM_WASI_ARG_* or WASM_WASI_ENV_* macros supply it. */
+typedef struct wasm__wasi_strings_t {
+    char** items;
+    uint32_t count;
+    int is_set;
+} wasm__wasi_strings_t;
+
 struct wasm__wasi_state_t {
     wasm__wasi_fd_entry_t fds[WASM__WASI_MAX_FDS];
+    wasm__wasi_strings_t args;
+    wasm__wasi_strings_t env;
 };
 
 #if defined(_WIN32)
@@ -10805,6 +11016,12 @@ WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode);
 
 WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry);
 
+WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings);
+
+/* Replaces strings with copies of values; on failure strings is unchanged. */
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+                                                 const char* const* values);
+
 WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
@@ -10816,6 +11033,11 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
                                             const char* host_path,
                                             const char* preopen_path,
                                             uint32_t* out_fd);
+
+/* Opens host_path, which must be a directory, as a preopen the guest sees as guest_path.
+ * Returns WASM_ERR_MALFORMED when host_path is missing or not a directory. */
+WASM_PRIVATE wasm_error_t wasm__wasi_state_preopen_dir(wasm_runtime_t* rt, const char* host_path,
+                                                      const char* guest_path);
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
 
@@ -10890,8 +11112,6 @@ WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_t
 WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_stat_t* st);
 
 WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st);
-
-WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig);
 #endif
 
 #endif /* WASM_PLATFORM_WASI_STATE_H */
@@ -11065,6 +11285,23 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+#define WASM__HANDLE_GC_MIN_THRESHOLD 1024u
+
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+    uint32_t threshold;
+    uint32_t live;
+
+    if (!rt) return;
+    threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
+    if (rt->externref_boxes.count + rt->exception_objects.count < threshold) return;
+
+    wasm_gc_collect(rt);
+    live = rt->externref_boxes.count + rt->exception_objects.count;
+    rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
+    if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
+        rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
 }
 
 static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
@@ -11344,8 +11581,6 @@ uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt) {
 
 void wasm_destroy(wasm_runtime_t* rt) {
     uint32_t i;
-    wasm__externref_box_t* box;
-    wasm__exception_object_t* exception_object;
 
     if (!rt) return;
 
@@ -11384,21 +11619,17 @@ void wasm_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->table_imports);
     WASM_FREE(rt->memory_imports);
     WASM_FREE(rt->tag_imports);
-    box = rt->externref_boxes;
-    while (box) {
-        wasm__externref_box_t* next = box->next;
-        WASM_FREE(box);
-        box = next;
-    }
-    exception_object = rt->exception_objects;
-    while (exception_object) {
-        wasm__exception_object_t* next = exception_object->next;
+    for (i = 0; i < rt->externref_boxes.capacity; i++) WASM_FREE(rt->externref_boxes.slots[i]);
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception_object = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (!exception_object) continue;
         WASM_FREE(exception_object->values);
         WASM_FREE(exception_object);
-        exception_object = next;
     }
-    rt->exception_objects = NULL;
-    rt->externref_boxes = NULL;
+    wasm__handle_set_free(&rt->exception_objects);
+    wasm__handle_set_free(&rt->externref_boxes);
+    rt->handle_gc_threshold = 0;
     WASM_FREE(rt->validator_stack);
     WASM_FREE(rt->validator_stack_reftypes);
     WASM_FREE(rt->validator_frames);
@@ -17827,33 +18058,84 @@ WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
 
 
 
+
+
 #include <string.h>
 
-/* Objects marked but not yet scanned; an explicit stack keeps deep object graphs off the C stack. */
+/* Objects marked but not yet scanned; explicit stacks keep deep object graphs off the C stack. */
 typedef struct wasm__gc_mark_stack_t {
+    wasm_runtime_t* rt;
     wasm_gc_header_t** items;
     size_t count;
     size_t capacity;
+    wasm__exception_object_t** exceptions;
+    size_t exception_count;
+    size_t exception_capacity;
     int failed;
 } wasm__gc_mark_stack_t;
+
+/* Doubles a full mark stack of pointers; returns NULL and records the failure when out of memory. */
+static void* wasm__gc_grow(wasm__gc_mark_stack_t* stack, void* items, size_t* capacity) {
+    size_t new_capacity = *capacity ? *capacity * 2u : 64u;
+    void* grown = wasm__realloc_array(items, new_capacity, sizeof(void*));
+
+    if (!grown) {
+        stack->failed = 1;
+        return NULL;
+    }
+    *capacity = new_capacity;
+    return grown;
+}
+
+static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value);
+
+static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_t* value) {
+    void* handle = (void*)value->of.externref;
+
+    if (!handle) return;
+    if (wasm__uses_externref_storage(value->type)) {
+        wasm__externref_box_t* box;
+
+        if (!wasm__handle_set_contains(&stack->rt->externref_boxes, handle)) return;
+        box = (wasm__externref_box_t*)handle;
+        if (box->marked) return;
+        box->marked = 1;
+        /* A box holds an anyref, never another box or an exception, so this does not recurse. */
+        wasm__gc_mark_value(stack, &box->value);
+    } else {
+        wasm__exception_object_t* exception;
+
+        if (!wasm__handle_set_contains(&stack->rt->exception_objects, handle)) return;
+        exception = (wasm__exception_object_t*)handle;
+        if (exception->marked) return;
+        if (stack->exception_count == stack->exception_capacity) {
+            wasm__exception_object_t** exceptions = (wasm__exception_object_t**)wasm__gc_grow(
+                stack, stack->exceptions, &stack->exception_capacity);
+
+            if (!exceptions) return;
+            stack->exceptions = exceptions;
+        }
+        exception->marked = 1;
+        stack->exceptions[stack->exception_count++] = exception;
+    }
+}
 
 static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value) {
     wasm_gc_header_t* object;
 
+    if (!value) return;
+    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) {
+        wasm__gc_mark_handle(stack, value);
+        return;
+    }
     if (!wasm__is_heap_gc_ref_value(value)) return;
     object = (wasm_gc_header_t*)value->of.gc_obj;
     if (!object || object->marked) return;
     if (stack->count == stack->capacity) {
-        size_t new_capacity = stack->capacity ? stack->capacity * 2u : 64u;
-        wasm_gc_header_t** items =
-            (wasm_gc_header_t**)wasm__realloc_array(stack->items, new_capacity, sizeof(*items));
+        wasm_gc_header_t** items = (wasm_gc_header_t**)wasm__gc_grow(stack, stack->items, &stack->capacity);
 
-        if (!items) {
-            stack->failed = 1;
-            return;
-        }
+        if (!items) return;
         stack->items = items;
-        stack->capacity = new_capacity;
     }
     object->marked = 1;
     stack->items[stack->count++] = object;
@@ -17920,13 +18202,21 @@ static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t*
 }
 
 static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
-    while (stack->count > 0u && !stack->failed) wasm__gc_scan_object(stack, stack->items[--stack->count]);
+    while (!stack->failed) {
+        if (stack->count > 0u) {
+            wasm__gc_scan_object(stack, stack->items[--stack->count]);
+        } else if (stack->exception_count > 0u) {
+            wasm__exception_object_t* exception = stack->exceptions[--stack->exception_count];
+
+            wasm__gc_mark_values(stack, exception->values, exception->num_values);
+        } else {
+            break;
+        }
+    }
 }
 
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
-    wasm__exception_object_t* exception_object;
-    wasm__externref_box_t* box;
     uint32_t i;
 
     if (!rt) return;
@@ -17935,12 +18225,6 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
-    }
-    for (box = rt->externref_boxes; box; box = box->next) {
-        wasm__gc_mark_value(stack, &box->value);
-    }
-    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
-        wasm__gc_mark_values(stack, exception_object->values, exception_object->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -18031,8 +18315,6 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
-    wasm__exception_object_t* exception_object;
-    wasm__externref_box_t* box;
     uint32_t i;
 
     if (!rt) return;
@@ -18042,11 +18324,15 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
     }
-    for (box = rt->externref_boxes; box; box = box->next) {
-        wasm__gc_forward_value(rt, &box->value);
+    for (i = 0; i < rt->externref_boxes.capacity; i++) {
+        wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
+
+        if (box) wasm__gc_forward_value(rt, &box->value);
     }
-    for (exception_object = rt->exception_objects; exception_object; exception_object = exception_object->next) {
-        wasm__gc_forward_values(rt, exception_object->values, exception_object->num_values);
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (exception) wasm__gc_forward_values(rt, exception->values, exception->num_values);
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -18078,6 +18364,40 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     }
 }
 
+static int wasm__gc_box_is_marked(void* handle) {
+    return ((wasm__externref_box_t*)handle)->marked;
+}
+
+static int wasm__gc_exception_is_marked(void* handle) {
+    return ((wasm__exception_object_t*)handle)->marked;
+}
+
+static void wasm__gc_free_box(void* handle) {
+    WASM_FREE(handle);
+}
+
+static void wasm__gc_free_exception(void* handle) {
+    wasm__exception_object_t* exception = (wasm__exception_object_t*)handle;
+
+    WASM_FREE(exception->values);
+    WASM_FREE(exception);
+}
+
+static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->externref_boxes.capacity; i++) {
+        wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
+
+        if (box) box->marked = 0;
+    }
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (exception) exception->marked = 0;
+    }
+}
+
 void wasm_gc_collect(wasm_runtime_t* rt) {
     wasm_gc_header_t* object;
     wasm_gc_header_t* new_allocations = NULL;
@@ -18087,15 +18407,22 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
     int has_live = 0;
     wasm__gc_mark_stack_t stack;
 
-    if (!rt || !rt->gc_heap) return;
+    if (!rt) return;
 
     for (object = rt->gc_allocations; object; object = object->next_alloc) object->marked = 0;
+    wasm__gc_clear_handle_marks(rt);
 
     memset(&stack, 0, sizeof(stack));
+    stack.rt = rt;
     wasm__gc_mark_runtime_roots(&stack, rt);
     wasm__gc_drain_mark_stack(&stack);
     WASM_FREE(stack.items);
+    WASM_FREE(stack.exceptions);
     if (stack.failed) return;
+
+    wasm__handle_set_filter(&rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
+    wasm__handle_set_filter(&rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
+    if (!rt->gc_heap) return;
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->marked) {
             has_live = 1;
@@ -18818,12 +19145,14 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm_module_t* mod,
                     if (rt->sp + tag_type->num_params + 1u > rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
                     for (i = 0; i < tag_type->num_params; i++)
                         rt->stack[rt->sp++] = rt->pending_exception.values[i];
+                    wasm__gc_collect_handles_if_needed(rt);
                     err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
                     if (err != WASM_OK) return err;
                     rt->stack[rt->sp++] = exnref_value;
                 } else if (clause.kind == 0x03) {
                     wasm_value_t exnref_value;
 
+                    wasm__gc_collect_handles_if_needed(rt);
                     err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
                     if (err != WASM_OK) return err;
                     if (rt->sp >= rt->max_stack) return WASM_ERR_STACK_OVERFLOW;
@@ -19418,7 +19747,11 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
         }
         case 0x1A:
         case 0x1B: {
-            wasm_value_t value = WASM__POP(rt);
+            wasm_value_t value;
+
+            /* Collect while the operand is still on the stack, where the GC can see it. */
+            if (subop == 0x1B) wasm__gc_collect_handles_if_needed(rt);
+            value = WASM__POP(rt);
 
             if (subop == 0x1A) {
                 WASM__PUSH(rt, wasm__anyref_from_externref_value(rt, value));
@@ -21718,15 +22051,36 @@ WASM_INLINE wasm_error_t wasm__imm_memarg(wasm__reader_t* r, wasm__memarg_t* mem
     return wasm__read_memarg(r, memarg);
 }
 
+/* Calls a host import of type ft, whose type indices belong to mod. Results start as typed
+ * defaults, so a host may set only the payload, and must match ft when it returns. */
 static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
+                                           const wasm_functype_t* ft,
                                            wasm_host_func_t host_func,
                                            const wasm_value_t* args,
-                                           uint32_t num_args,
                                            wasm_value_t* results,
-                                           uint32_t num_results,
                                            void* userdata) {
-    if (!mod || !mod->rt || !host_func) return WASM_ERR_MALFORMED;
-    return host_func(mod, args, num_args, results, num_results, userdata);
+    wasm_error_t err;
+    uint32_t i;
+
+    if (!mod || !mod->rt || !ft || !host_func) return WASM_ERR_MALFORMED;
+    for (i = 0; i < ft->num_results; i++) {
+        const wasm_reftype_t* reftype = ft->result_reftypes ? &ft->result_reftypes[i] : NULL;
+
+        results[i] = wasm__is_ref_type(ft->results[i]) ? wasm__typed_ref_null(ft->results[i], reftype)
+                                                       : wasm__default_value(ft->results[i]);
+    }
+    err = host_func(mod, args, ft->num_params, results, ft->num_results, userdata);
+    if (err != WASM_OK) return err;
+    for (i = 0; i < ft->num_results; i++) {
+        const wasm_reftype_t* reftype = ft->result_reftypes ? &ft->result_reftypes[i] : NULL;
+
+        if (!wasm__runtime_value_matches_type(mod, &results[i], ft->results[i], reftype)) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "host function result %u does not match its declared type", (unsigned)i);
+            return WASM_ERR_TYPE_MISMATCH;
+        }
+    }
+    return WASM_OK;
 }
 
 /* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
@@ -22024,7 +22378,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             }
             case 0x0A: { /* throw_ref */
                 wasm_value_t exnref_value = WASM__POP(rt);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(&exnref_value);
+                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
 
                 if (!exn) WASM__TRAP(WASM_ERR_TRAP);
                 err = wasm__set_exception_state(&rt->pending_exception,
@@ -22110,12 +22464,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -22182,12 +22532,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -22238,12 +22584,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -22317,12 +22659,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -22393,12 +22731,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(call_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 call_args, cft->num_params,
-                                                 call_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
@@ -22464,12 +22798,8 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                             WASM__TRAP(WASM_ERR_OOM);
                         }
                     }
-                    if (cft->num_results > 0)
-                        memset(tail_results, 0, cft->num_results * sizeof(wasm_value_t));
                     WASM__SYNC_OFFSET();
-                    err = wasm__invoke_host_func(callee_mod, callee->host_func,
-                                                 tail_args, cft->num_params,
-                                                 tail_results, cft->num_results,
+                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
                                                  callee->host_userdata);
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
@@ -23062,9 +23392,8 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
 
     func = &mod->funcs[func_idx];
     if (func->is_import)
-        return wasm__invoke_host_func(mod, func->host_func,
-                                      args, num_args, results, num_results,
-                                      func->host_userdata);
+        return wasm__invoke_host_func(mod, wasm__module_functype(mod, func->type_idx), func->host_func,
+                                      args, results, func->host_userdata);
 
     err = wasm__push_call_frame(mod, func_idx, args, num_args, results, num_results);
     if (err != WASM_OK) goto cleanup;
@@ -23689,6 +24018,44 @@ WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry) {
     entry->host_fd = -1;
 }
 
+WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings) {
+    uint32_t i;
+
+    if (!strings) return;
+    for (i = 0; i < strings->count; i++) WASM_FREE(strings->items[i]);
+    WASM_FREE(strings->items);
+    memset(strings, 0, sizeof(*strings));
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+                                                 const char* const* values) {
+    wasm__wasi_strings_t copy;
+    uint32_t i;
+
+    if (!strings || (count > 0u && !values)) return WASM_ERR_MALFORMED;
+    memset(&copy, 0, sizeof(copy));
+    copy.is_set = 1;
+    if (count > 0u) {
+        copy.items = (char**)WASM_CALLOC(count, sizeof(char*));
+        if (!copy.items) return WASM_ERR_OOM;
+    }
+    for (i = 0; i < count; i++) {
+        if (!values[i]) {
+            wasm__wasi_strings_free(&copy);
+            return WASM_ERR_MALFORMED;
+        }
+        copy.items[i] = wasm__wasi_strdup(values[i]);
+        if (!copy.items[i]) {
+            wasm__wasi_strings_free(&copy);
+            return WASM_ERR_OOM;
+        }
+        copy.count = i + 1u;
+    }
+    wasm__wasi_strings_free(strings);
+    *strings = copy;
+    return WASM_OK;
+}
+
 WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
     uint32_t i;
     wasm__wasi_state_t* state;
@@ -23697,6 +24064,8 @@ WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
 
     state = rt->wasi_state;
     for (i = 0; i < WASM__WASI_MAX_FDS; i++) wasm__wasi_fd_entry_reset(&state->fds[i]);
+    wasm__wasi_strings_free(&state->args);
+    wasm__wasi_strings_free(&state->env);
     WASM_FREE(state);
     rt->wasi_state = NULL;
 }
@@ -23763,6 +24132,46 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
     WASM_FREE(copied_preopen_path);
     if (owns_host_fd && host_fd >= 0) (void)wasm__wasi_host_close(host_fd);
     return WASM_ERR_OOM;
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_state_preopen_dir(wasm_runtime_t* rt, const char* host_path,
+                                                      const char* guest_path) {
+    wasm__wasi_host_stat_t st;
+    int host_fd = -1;
+    int owns_host_fd = 0;
+
+    if (!rt || !rt->wasi_state || !host_path || !guest_path || !guest_path[0]) return WASM_ERR_MALFORMED;
+#if defined(_WIN32)
+    if (!wasm__wasi_windows_stat_path(host_path, &st)) return WASM_ERR_MALFORMED;
+#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+    {
+        int flags = O_RDONLY;
+
+#ifdef O_DIRECTORY
+        flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+        host_fd = open(host_path, flags);
+        if (host_fd < 0) return WASM_ERR_MALFORMED;
+        owns_host_fd = 1;
+        if (!wasm__wasi_host_fstat(host_fd, &st)) {
+            (void)wasm__wasi_host_close(host_fd);
+            return WASM_ERR_MALFORMED;
+        }
+    }
+#else
+    (void)st;
+    return WASM_ERR_MALFORMED;
+#endif
+    if (wasm__wasi_filetype_from_mode((int)st.st_mode) != WASM__WASI_FILETYPE_DIRECTORY) {
+        if (owns_host_fd) (void)wasm__wasi_host_close(host_fd);
+        return WASM_ERR_MALFORMED;
+    }
+    return wasm__wasi_state_add_fd(rt, host_fd, owns_host_fd, WASM__WASI_FILETYPE_DIRECTORY,
+                                   WASM__WASI_RIGHTS_ALL, WASM__WASI_RIGHTS_ALL, host_path, guest_path,
+                                   NULL);
 }
 
 WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt) {
@@ -24254,75 +24663,6 @@ WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm_
 #endif
 }
 
-WASM_PRIVATE int wasm__wasi_signal_to_host(uint32_t sig) {
-    switch (sig) {
-        case 0u:
-            return 0;
-#ifdef SIGHUP
-        case 1u:
-            return SIGHUP;
-#endif
-#ifdef SIGINT
-        case 2u:
-            return SIGINT;
-#endif
-#ifdef SIGQUIT
-        case 3u:
-            return SIGQUIT;
-#endif
-#ifdef SIGILL
-        case 4u:
-            return SIGILL;
-#endif
-#ifdef SIGTRAP
-        case 5u:
-            return SIGTRAP;
-#endif
-#ifdef SIGABRT
-        case 6u:
-            return SIGABRT;
-#endif
-#ifdef SIGBUS
-        case 7u:
-            return SIGBUS;
-#endif
-#ifdef SIGFPE
-        case 8u:
-            return SIGFPE;
-#endif
-#ifdef SIGKILL
-        case 9u:
-            return SIGKILL;
-#endif
-#ifdef SIGUSR1
-        case 10u:
-            return SIGUSR1;
-#endif
-#ifdef SIGSEGV
-        case 11u:
-            return SIGSEGV;
-#endif
-#ifdef SIGUSR2
-        case 12u:
-            return SIGUSR2;
-#endif
-#ifdef SIGPIPE
-        case 13u:
-            return SIGPIPE;
-#endif
-#ifdef SIGALRM
-        case 14u:
-            return SIGALRM;
-#endif
-#ifdef SIGTERM
-        case 15u:
-            return SIGTERM;
-#endif
-        default:
-            return -1;
-    }
-}
-
 #endif
 /* END src/platform/wasi_state.c */
 
@@ -24410,6 +24750,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
                                               wasm_value_t* results, uint32_t num_results,
                                               void* userdata);
 
+/* Clock subscriptions sleep until the earliest deadline; fd subscriptions report ready at once. */
+WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata);
+
 WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
                                              const wasm_value_t* args, uint32_t num_args,
                                              wasm_value_t* results, uint32_t num_results,
@@ -24429,8 +24775,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_clock_res_get(wasm_module_t* mod,
 #include <string.h>
 
 #if WASM_ENABLE_PLATFORM
-typedef uint32_t (*wasm__wasi_string_count_fn)(void);
-typedef const char* (*wasm__wasi_string_at_fn)(uint32_t index);
+typedef uint32_t (*wasm__wasi_string_count_fn)(const wasm_runtime_t* rt);
+typedef const char* (*wasm__wasi_string_at_fn)(const wasm_runtime_t* rt, uint32_t index);
 WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code) {
     if (results && num_results > 0) results[0] = wasm_i32((int32_t)errno_code);
 }
@@ -24538,7 +24884,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
     return WASM_OK;
 }
 
-static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
+static uint64_t wasm__wasi_string_list_size(const wasm_runtime_t* rt,
+                                            wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn) {
     uint32_t count;
     uint32_t i;
@@ -24546,9 +24893,9 @@ static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
 
     if (!count_fn || !at_fn) return UINT64_MAX;
 
-    count = count_fn();
+    count = count_fn(rt);
     for (i = 0; i < count; i++) {
-        const char* value = at_fn(i);
+        const char* value = at_fn(rt, i);
         size_t len = value ? strlen(value) : 0u;
 
         if ((uint64_t)len >= UINT64_MAX - total) return UINT64_MAX;
@@ -24558,19 +24905,25 @@ static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
     return total;
 }
 
-static uint32_t wasm__wasi_string_list_count_args(void) {
+static uint32_t wasm__wasi_string_list_count_args(const wasm_runtime_t* rt) {
+    if (rt && rt->wasi_state && rt->wasi_state->args.is_set) return rt->wasi_state->args.count;
     return wasm__platform_wasi_arg_count();
 }
 
-static const char* wasm__wasi_string_list_at_args(uint32_t index) {
+static const char* wasm__wasi_string_list_at_args(const wasm_runtime_t* rt, uint32_t index) {
+    if (rt && rt->wasi_state && rt->wasi_state->args.is_set)
+        return index < rt->wasi_state->args.count ? rt->wasi_state->args.items[index] : NULL;
     return wasm__platform_wasi_arg_at(index);
 }
 
-static uint32_t wasm__wasi_string_list_count_env(void) {
+static uint32_t wasm__wasi_string_list_count_env(const wasm_runtime_t* rt) {
+    if (rt && rt->wasi_state && rt->wasi_state->env.is_set) return rt->wasi_state->env.count;
     return wasm__platform_wasi_env_count();
 }
 
-static const char* wasm__wasi_string_list_at_env(uint32_t index) {
+static const char* wasm__wasi_string_list_at_env(const wasm_runtime_t* rt, uint32_t index) {
+    if (rt && rt->wasi_state && rt->wasi_state->env.is_set)
+        return index < rt->wasi_state->env.count ? rt->wasi_state->env.items[index] : NULL;
     return wasm__platform_wasi_env_at(index);
 }
 
@@ -24590,8 +24943,8 @@ static uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
     err = wasm__wasi_get_memory0(mod, "string sizes_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    count = count_fn ? count_fn() : 0u;
-    total_size = wasm__wasi_string_list_size(count_fn, at_fn);
+    count = count_fn ? count_fn(mod->rt) : 0u;
+    total_size = wasm__wasi_string_list_size(mod->rt, count_fn, at_fn);
     if (total_size == UINT64_MAX || total_size > UINT32_MAX) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -24626,8 +24979,8 @@ static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
     err = wasm__wasi_get_memory0(mod, "string get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    count = count_fn ? count_fn() : 0u;
-    strings_size = wasm__wasi_string_list_size(count_fn, at_fn);
+    count = count_fn ? count_fn(mod->rt) : 0u;
+    strings_size = wasm__wasi_string_list_size(mod->rt, count_fn, at_fn);
     if (strings_size == UINT64_MAX || strings_size > UINT32_MAX) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -24640,7 +24993,7 @@ static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
 
     cursor = data_ptr;
     for (i = 0; i < count; i++) {
-        const char* value = at_fn(i);
+        const char* value = at_fn(mod->rt, i);
         size_t len = value ? strlen(value) : 0u;
 
         wasm__store_le32(memory->data + entries_ptr + (size_t)i * 4u, cursor);
@@ -25184,6 +25537,121 @@ WASM_PRIVATE wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
     return WASM_OK;
 }
 
+#define WASM__WASI_SUBSCRIPTION_SIZE 48u
+#define WASM__WASI_EVENT_SIZE 32u
+#define WASM__WASI_EVENTTYPE_CLOCK 0u
+#define WASM__WASI_EVENTTYPE_FD_READ 1u
+#define WASM__WASI_EVENTTYPE_FD_WRITE 2u
+#define WASM__WASI_SUBCLOCKFLAGS_ABSTIME 1u
+#define WASM__WASI_CLOCK_COUNT 4u
+
+/* Nanoseconds until a clock subscription fires, measured from the snapshot in now; returns a WASI errno. */
+static uint32_t wasm__wasi_clock_remaining(const uint8_t* subscription, const uint64_t* now,
+                                           const int* now_ok, uint64_t* out_remaining) {
+    uint32_t clock_id = wasm__load_le32(subscription + 16u);
+    uint64_t timeout = wasm__load_le64(subscription + 24u);
+    uint16_t flags = wasm__load_le16(subscription + 40u);
+
+    if (clock_id >= WASM__WASI_CLOCK_COUNT) return WASM__WASI_ERRNO_INVAL;
+    if ((flags & WASM__WASI_SUBCLOCKFLAGS_ABSTIME) == 0u) {
+        *out_remaining = timeout;
+        return WASM__WASI_ERRNO_SUCCESS;
+    }
+    if (!now_ok[clock_id]) return WASM__WASI_ERRNO_NOTSUP;
+    *out_remaining = timeout > now[clock_id] ? timeout - now[clock_id] : 0u;
+    return WASM__WASI_ERRNO_SUCCESS;
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata) {
+    wasm_memory_t* memory;
+    uint64_t mem_size;
+    uint64_t now[WASM__WASI_CLOCK_COUNT];
+    int now_ok[WASM__WASI_CLOCK_COUNT];
+    uint64_t wait_ns = UINT64_MAX;
+    uint32_t in_ptr;
+    uint32_t out_ptr;
+    uint32_t count;
+    uint32_t nevents_ptr;
+    uint32_t nevents = 0;
+    uint32_t i;
+    int fd_ready = 0;
+    wasm_error_t err;
+
+    (void)userdata;
+
+    if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    err = wasm__wasi_get_memory0(mod, "poll_oneoff", &memory, &mem_size);
+    if (err != WASM_OK) return err;
+
+    in_ptr = (uint32_t)args[0].of.i32;
+    out_ptr = (uint32_t)args[1].of.i32;
+    count = (uint32_t)args[2].of.i32;
+    nevents_ptr = (uint32_t)args[3].of.i32;
+    if (count == 0u) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
+        return WASM_OK;
+    }
+    if (!wasm__range_in_bounds_u64((uint64_t)in_ptr, (uint64_t)count * WASM__WASI_SUBSCRIPTION_SIZE, mem_size) ||
+        !wasm__range_in_bounds_u64((uint64_t)out_ptr, (uint64_t)count * WASM__WASI_EVENT_SIZE, mem_size) ||
+        !wasm__range_in_bounds_u64((uint64_t)nevents_ptr, 4u, mem_size)) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        return WASM_OK;
+    }
+    for (i = 0; i < WASM__WASI_CLOCK_COUNT; i++) now_ok[i] = wasm__platform_wasi_clock_time_get(i, 0u, &now[i]);
+
+    for (i = 0; i < count; i++) {
+        const uint8_t* subscription = memory->data + in_ptr + (size_t)i * WASM__WASI_SUBSCRIPTION_SIZE;
+        uint8_t tag = subscription[8];
+        uint64_t remaining;
+
+        if (tag == WASM__WASI_EVENTTYPE_CLOCK) {
+            if (wasm__wasi_clock_remaining(subscription, now, now_ok, &remaining) != WASM__WASI_ERRNO_SUCCESS)
+                remaining = 0u;
+            if (remaining < wait_ns) wait_ns = remaining;
+        } else if (tag == WASM__WASI_EVENTTYPE_FD_READ || tag == WASM__WASI_EVENTTYPE_FD_WRITE) {
+            fd_ready = 1;
+        } else {
+            wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
+            return WASM_OK;
+        }
+    }
+    if (fd_ready) wait_ns = 0u;
+    if (wait_ns > 0u && !wasm__platform_sleep_ns(wait_ns)) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTSUP);
+        return WASM_OK;
+    }
+
+    for (i = 0; i < count; i++) {
+        const uint8_t* subscription = memory->data + in_ptr + (size_t)i * WASM__WASI_SUBSCRIPTION_SIZE;
+        uint8_t* event = memory->data + out_ptr + (size_t)nevents * WASM__WASI_EVENT_SIZE;
+        uint8_t tag = subscription[8];
+        uint32_t error = WASM__WASI_ERRNO_SUCCESS;
+
+        if (tag == WASM__WASI_EVENTTYPE_CLOCK) {
+            uint64_t remaining = 0u;
+
+            error = wasm__wasi_clock_remaining(subscription, now, now_ok, &remaining);
+            if (error == WASM__WASI_ERRNO_SUCCESS && remaining > wait_ns) continue;
+        } else {
+            wasm__wasi_fd_entry_t* entry = wasm__wasi_fd_entry(mod->rt, wasm__load_le32(subscription + 16u));
+
+            if (!entry || !wasm__wasi_entry_has_host(entry)) error = WASM__WASI_ERRNO_BADF;
+        }
+        memset(event, 0, WASM__WASI_EVENT_SIZE);
+        wasm__store_le64(event, wasm__load_le64(subscription));
+        wasm__store_le16(event + 8u, (uint16_t)error);
+        event[10] = tag;
+        nevents++;
+    }
+
+    wasm__store_le32(memory->data + nevents_ptr, nevents);
+    wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__wasi_clock_time_get(wasm_module_t* mod,
                                               const wasm_value_t* args, uint32_t num_args,
                                               wasm_value_t* results, uint32_t num_results,
@@ -25316,11 +25784,6 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
                                            const wasm_value_t* args, uint32_t num_args,
                                            wasm_value_t* results, uint32_t num_results,
                                            void* userdata);
-
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
 
 WASM_PRIVATE wasm_error_t wasm__wasi_sched_yield(wasm_module_t* mod,
                                            const wasm_value_t* args, uint32_t num_args,
@@ -25657,32 +26120,6 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
         }
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
     }
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata) {
-    int host_sig;
-
-    (void)mod;
-    (void)userdata;
-
-    if (!results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
-    if (args[0].of.i32 < 0) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        return WASM_OK;
-    }
-    host_sig = wasm__wasi_signal_to_host((uint32_t)args[0].of.i32);
-    if (host_sig < 0) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        return WASM_OK;
-    }
-    if (raise(host_sig) != 0)
-        wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
-    else
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
     return WASM_OK;
 }
 
@@ -26950,6 +27387,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
 
 
 
+
 #if WASM_ENABLE_PLATFORM
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
     wasm_error_t err;
@@ -27003,10 +27441,11 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
     WASM__BIND_WASI("path_rename", "iiiiii(i)", wasm__wasi_path_rename, NULL);
     WASM__BIND_WASI("path_symlink", "iiiii(i)", wasm__wasi_path_symlink, NULL);
     WASM__BIND_WASI("path_unlink_file", "iii(i)", wasm__wasi_path_unlink_file, NULL);
-    WASM__BIND_WASI("poll_oneoff", "iiii(i)", wasm__wasi_errno_stub,
-                    (void*)(uintptr_t)WASM__WASI_ERRNO_NOSYS);
+    WASM__BIND_WASI("poll_oneoff", "iiii(i)", wasm__wasi_poll_oneoff, NULL);
     WASM__BIND_WASI("proc_exit", "i(v)", wasm__wasi_proc_exit, NULL);
-    WASM__BIND_WASI("proc_raise", "i(i)", wasm__wasi_proc_raise, NULL);
+    /* Raising a host signal would let a guest stop or kill the embedding process. */
+    WASM__BIND_WASI("proc_raise", "i(i)", wasm__wasi_errno_stub,
+                    (void*)(uintptr_t)WASM__WASI_ERRNO_NOSYS);
     WASM__BIND_WASI("sched_yield", "(i)", wasm__wasi_sched_yield, NULL);
     WASM__BIND_WASI("random_get", "ii(i)", wasm__wasi_random_get, NULL);
     WASM__BIND_WASI("sock_accept", "iii(i)", wasm__wasi_errno_stub,
@@ -27021,6 +27460,43 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
 #undef WASM__BIND_WASI
 
     return WASM_OK;
+}
+
+static wasm_error_t wasm__wasi_set_strings(wasm_runtime_t* rt, int is_env, uint32_t count,
+                                           const char* const* values) {
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    err = wasm__wasi_state_ensure(rt);
+    if (err == WASM_OK)
+        err = wasm__wasi_strings_set(is_env ? &rt->wasi_state->env : &rt->wasi_state->args, count, values);
+    if (err != WASM_OK)
+        WASM__SET_ERR(rt, err, "cannot set WASI %s: %s", is_env ? "environment" : "arguments",
+                      err == WASM_ERR_OOM ? "out of memory" : "a string is NULL");
+    return err;
+}
+
+wasm_error_t wasm_wasi_set_args(wasm_runtime_t* rt, uint32_t argc, const char* const* argv) {
+    return wasm__wasi_set_strings(rt, 0, argc, argv);
+}
+
+wasm_error_t wasm_wasi_set_env(wasm_runtime_t* rt, uint32_t count, const char* const* env) {
+    return wasm__wasi_set_strings(rt, 1, count, env);
+}
+
+wasm_error_t wasm_wasi_preopen_dir(wasm_runtime_t* rt, const char* host_path, const char* guest_path) {
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    err = wasm__wasi_state_ensure(rt);
+    if (err == WASM_OK) err = wasm__wasi_state_preopen_dir(rt, host_path, guest_path);
+    if (err == WASM_ERR_OOM)
+        WASM__SET_ERR(rt, err, "cannot preopen '%s': out of memory or descriptors",
+                      host_path ? host_path : "");
+    else if (err != WASM_OK)
+        WASM__SET_ERR(rt, err, "cannot preopen '%s' as '%s': not an accessible directory",
+                      host_path ? host_path : "", guest_path ? guest_path : "");
+    return err;
 }
 
 #endif
@@ -27918,6 +28394,31 @@ wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt) {
     return WASM_ERR_MALFORMED;
 }
 
+static wasm_error_t wasm__wasi_requires_platform(wasm_runtime_t* rt) {
+    if (!rt) return WASM_ERR_MALFORMED;
+    WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s",
+                  "WASI configuration requires WASM_ENABLE_PLATFORM=1");
+    return WASM_ERR_MALFORMED;
+}
+
+wasm_error_t wasm_wasi_set_args(wasm_runtime_t* rt, uint32_t argc, const char* const* argv) {
+    (void)argc;
+    (void)argv;
+    return wasm__wasi_requires_platform(rt);
+}
+
+wasm_error_t wasm_wasi_set_env(wasm_runtime_t* rt, uint32_t count, const char* const* env) {
+    (void)count;
+    (void)env;
+    return wasm__wasi_requires_platform(rt);
+}
+
+wasm_error_t wasm_wasi_preopen_dir(wasm_runtime_t* rt, const char* host_path, const char* guest_path) {
+    (void)host_path;
+    (void)guest_path;
+    return wasm__wasi_requires_platform(rt);
+}
+
 wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
     if (!rt) return WASM_ERR_MALFORMED;
     WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s",
@@ -28720,6 +29221,13 @@ void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel) {
 
     rt->fuel = fuel;
     rt->fuel_enabled = 1;
+}
+
+void wasm_disable_fuel(wasm_runtime_t* rt) {
+    if (!rt) return;
+
+    rt->fuel = 0;
+    rt->fuel_enabled = 0;
 }
 
 uint64_t wasm_get_fuel(wasm_runtime_t* rt) {

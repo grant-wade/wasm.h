@@ -44,11 +44,6 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_allocate(wasm_module_t* mod,
                                            wasm_value_t* results, uint32_t num_results,
                                            void* userdata);
 
-WASM_PRIVATE wasm_error_t wasm__wasi_proc_raise(wasm_module_t* mod,
-                                          const wasm_value_t* args, uint32_t num_args,
-                                          wasm_value_t* results, uint32_t num_results,
-                                          void* userdata);
-
 WASM_PRIVATE wasm_error_t wasm__wasi_sched_yield(wasm_module_t* mod,
                                            const wasm_value_t* args, uint32_t num_args,
                                            wasm_value_t* results, uint32_t num_results,

@@ -1,4 +1,5 @@
 #include "references.h"
+#include "../handles.h"
 #include <stdio.h>
 #include "../internal/alloc.h"
 #include "../internal/gc_types.h"
@@ -183,13 +184,8 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
 
 static wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
                                                        uintptr_t handle) {
-    wasm__externref_box_t* box;
-
-    if (!rt || handle == (uintptr_t)0) return NULL;
-    for (box = rt->externref_boxes; box; box = box->next) {
-        if ((uintptr_t)box == handle) return box;
-    }
-    return NULL;
+    if (!rt || !wasm__handle_set_contains(&rt->externref_boxes, (const void*)handle)) return NULL;
+    return (wasm__externref_box_t*)handle;
 }
 
 static int wasm__is_host_anyref_value(const wasm_module_t* mod,
@@ -220,8 +216,11 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
     box = (wasm__externref_box_t*)WASM_MALLOC(sizeof(*box));
     if (!box) return WASM_ERR_OOM;
     box->value = value;
-    box->next = rt->externref_boxes;
-    rt->externref_boxes = box;
+    box->marked = 0;
+    if (wasm__handle_set_insert(&rt->externref_boxes, box) != WASM_OK) {
+        WASM_FREE(box);
+        return WASM_ERR_OOM;
+    }
 
     *out_value = wasm_externref((uintptr_t)box);
     return WASM_OK;

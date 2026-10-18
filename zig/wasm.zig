@@ -604,6 +604,24 @@ pub const Runtime = opaque {
         try check(c.wasm_bind_wasi_stubs(rt.raw()));
     }
 
+    /// Sets the strings the guest reads through WASI `args_get`, starting with its program name.
+    /// Needs the `platform` build option; the strings are copied.
+    pub fn setWasiArgs(rt: *Runtime, args: []const [*:0]const u8) Error!void {
+        try check(c.wasm_wasi_set_args(rt.raw(), @intCast(args.len), @ptrCast(args.ptr)));
+    }
+
+    /// Sets the `NAME=value` strings the guest reads through WASI `environ_get`. Needs the
+    /// `platform` build option; the strings are copied.
+    pub fn setWasiEnv(rt: *Runtime, env: []const [*:0]const u8) Error!void {
+        try check(c.wasm_wasi_set_env(rt.raw(), @intCast(env.len), @ptrCast(env.ptr)));
+    }
+
+    /// Lets the guest open files beneath the host directory `host_path`, which it sees as
+    /// `guest_path`. Needs the `platform` build option.
+    pub fn preopenDir(rt: *Runtime, host_path: [*:0]const u8, guest_path: [*:0]const u8) Error!void {
+        try check(c.wasm_wasi_preopen_dir(rt.raw(), host_path, guest_path));
+    }
+
     /// Binds Emscripten's `env` imports, some of which reach the host filesystem: use only with trusted
     /// modules. Needs the `platform` build option.
     pub fn bindEmscripten(rt: *Runtime) Error!void {
@@ -617,6 +635,11 @@ pub const Runtime = opaque {
     /// Limits execution to `fuel` units; calls fail with `error.OutOfFuel` once it runs out.
     pub fn setFuel(rt: *Runtime, fuel_units: u64) void {
         c.wasm_set_fuel(rt.raw(), fuel_units);
+    }
+
+    /// Stops metering until `setFuel` is called again.
+    pub fn disableFuel(rt: *Runtime) void {
+        c.wasm_disable_fuel(rt.raw());
     }
 
     pub fn fuel(rt: *Runtime) u64 {

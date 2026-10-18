@@ -164,6 +164,8 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
                                        host_log, NULL);
 ```
 
+Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
+
 Lower-level registration supports functions, globals, tables, memories, and tags. Use `wasm_module_set_userdata` and `wasm_module_get_userdata` for per-module host state.
 
 Enable platform compatibility helpers in the implementation translation unit:
@@ -181,7 +183,18 @@ wasm_bind_wasi_stubs(rt);
 wasm_bind_emscripten_stubs(rt);
 ```
 
-These bindings are partial. WASI exposes standard I/O but preopens no directories; path operations requiring directory capabilities return `BADF`. Emscripten forwards some filesystem operations to the host: bind it only for trusted modules.
+Configure WASI per runtime, before or after binding. The guest can open files only beneath preopened directories:
+
+```c
+static const char* const args[] = { "app", "input.txt" };
+static const char* const env[] = { "LANG=C" };
+
+wasm_wasi_set_args(rt, 2, args);
+wasm_wasi_set_env(rt, 1, env);
+wasm_wasi_preopen_dir(rt, "./data", "/data");
+```
+
+These bindings are partial. Without a preopen, path operations return `BADF`. `poll_oneoff` sleeps for clock subscriptions and reports file descriptor subscriptions ready at once. `proc_raise`, the socket calls, and the timestamp setters return `NOSYS`. Arguments and environment default to the `WASM_WASI_ARG_COUNT`, `WASM_WASI_ARG_AT`, `WASM_WASI_ENV_COUNT`, and `WASM_WASI_ENV_AT` macros, which return none unless defined. Emscripten forwards some filesystem operations to the host: bind it only for trusted modules.
 
 Strict C99 POSIX builds may need `_POSIX_C_SOURCE=200809L`; the repository build supplies it automatically.
 
@@ -198,6 +211,10 @@ wasm_error_t err = wasm_memory_read(mod, 0, guest_offset,
 Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, null-terminated string extraction. The `*_at` accessors expose direct memory data, size, and growth for a selected memory. Reacquire direct data pointers after `wasm_memory_grow_at`, because growth may relocate storage.
 
 Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
+
+## GC references
+
+The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A GC reference, converted `externref`, or `exnref` held only by the host is valid until the next collection: store values the host keeps in a global or table.
 
 ## Threads
 
@@ -249,6 +266,8 @@ if (err == WASM_ERR_OUT_OF_FUEL) {
     fprintf(stderr, "instruction budget exhausted\n");
 }
 ```
+
+`wasm_disable_fuel` turns metering off again.
 
 After a trap, use `wasm_dump_backtrace` or the raw call-frame accessors to inspect the captured Wasm stack.
 

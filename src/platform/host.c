@@ -1,4 +1,5 @@
 #include "host.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -319,4 +320,44 @@ WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id,
 }
 
 #endif
+#endif
+#if WASM_ENABLE_PLATFORM
+WASM_PRIVATE int wasm__platform_sleep_ns(uint64_t ns) {
+#if WASM__PLATFORM_WINDOWS
+    uint64_t ms = ns / 1000000u + (ns % 1000000u != 0u);
+
+    while (ms > 0u) {
+        DWORD chunk = ms > 0x7FFFFFFFu ? 0x7FFFFFFFu : (DWORD)ms;
+
+        Sleep(chunk);
+        ms -= chunk;
+    }
+    return 1;
+#elif WASM__PLATFORM_POSIX && defined(CLOCK_REALTIME)
+    struct timespec request;
+    struct timespec remaining;
+    uint64_t seconds = ns / 1000000000u;
+
+    request.tv_sec = (time_t)(seconds > 0x7FFFFFFFu ? 0x7FFFFFFFu : seconds);
+    request.tv_nsec = (long)(ns % 1000000000u);
+    while (nanosleep(&request, &remaining) != 0) {
+        if (errno != EINTR) return 0;
+        request = remaining;
+    }
+    return 1;
+#elif WASM__PLATFORM_POSIX
+    uint64_t seconds = ns / 1000000000u + (ns % 1000000000u != 0u);
+
+    while (seconds > 0u) {
+        unsigned int chunk = seconds > 0xFFFFu ? 0xFFFFu : (unsigned int)seconds;
+        unsigned int left = sleep(chunk);
+
+        seconds -= chunk - left;
+    }
+    return 1;
+#else
+    (void)ns;
+    return 0;
+#endif
+}
 #endif

@@ -1,4 +1,5 @@
 #include "module.h"
+#include "handles.h"
 #include "values.h"
 #include "types/references.h"
 #include "runtime.h"
@@ -205,8 +206,11 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
         memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
 
-    object->next = rt->exception_objects;
-    rt->exception_objects = object;
+    if (wasm__handle_set_insert(&rt->exception_objects, object) != WASM_OK) {
+        WASM_FREE(object->values);
+        WASM_FREE(object);
+        return WASM_ERR_OOM;
+    }
 
     value = wasm_ref_null(WASM_TYPE_EXNREF);
     value.of.externref = (uintptr_t)object;
@@ -214,9 +218,14 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_value_t* value) {
-    if (!value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
-    return (wasm__exception_object_t*)value->of.externref;
+WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
+                                                                       const wasm_value_t* value) {
+    void* handle;
+
+    if (!rt || !value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
+    handle = (void*)value->of.externref;
+    if (!wasm__handle_set_contains(&rt->exception_objects, handle)) return NULL;
+    return (wasm__exception_object_t*)handle;
 }
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {

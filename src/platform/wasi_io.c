@@ -10,8 +10,8 @@
 #include <string.h>
 
 #if WASM_ENABLE_PLATFORM
-typedef uint32_t (*wasm__wasi_string_count_fn)(void);
-typedef const char* (*wasm__wasi_string_at_fn)(uint32_t index);
+typedef uint32_t (*wasm__wasi_string_count_fn)(const wasm_runtime_t* rt);
+typedef const char* (*wasm__wasi_string_at_fn)(const wasm_runtime_t* rt, uint32_t index);
 WASM_PRIVATE void wasm__wasi_set_errno(wasm_value_t* results, uint32_t num_results, uint32_t errno_code) {
     if (results && num_results > 0) results[0] = wasm_i32((int32_t)errno_code);
 }
@@ -119,7 +119,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_get_memory0(wasm_module_t* mod,
     return WASM_OK;
 }
 
-static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
+static uint64_t wasm__wasi_string_list_size(const wasm_runtime_t* rt,
+                                            wasm__wasi_string_count_fn count_fn,
                                             wasm__wasi_string_at_fn at_fn) {
     uint32_t count;
     uint32_t i;
@@ -127,9 +128,9 @@ static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
 
     if (!count_fn || !at_fn) return UINT64_MAX;
 
-    count = count_fn();
+    count = count_fn(rt);
     for (i = 0; i < count; i++) {
-        const char* value = at_fn(i);
+        const char* value = at_fn(rt, i);
         size_t len = value ? strlen(value) : 0u;
 
         if ((uint64_t)len >= UINT64_MAX - total) return UINT64_MAX;
@@ -139,19 +140,25 @@ static uint64_t wasm__wasi_string_list_size(wasm__wasi_string_count_fn count_fn,
     return total;
 }
 
-static uint32_t wasm__wasi_string_list_count_args(void) {
+static uint32_t wasm__wasi_string_list_count_args(const wasm_runtime_t* rt) {
+    if (rt && rt->wasi_state && rt->wasi_state->args.is_set) return rt->wasi_state->args.count;
     return wasm__platform_wasi_arg_count();
 }
 
-static const char* wasm__wasi_string_list_at_args(uint32_t index) {
+static const char* wasm__wasi_string_list_at_args(const wasm_runtime_t* rt, uint32_t index) {
+    if (rt && rt->wasi_state && rt->wasi_state->args.is_set)
+        return index < rt->wasi_state->args.count ? rt->wasi_state->args.items[index] : NULL;
     return wasm__platform_wasi_arg_at(index);
 }
 
-static uint32_t wasm__wasi_string_list_count_env(void) {
+static uint32_t wasm__wasi_string_list_count_env(const wasm_runtime_t* rt) {
+    if (rt && rt->wasi_state && rt->wasi_state->env.is_set) return rt->wasi_state->env.count;
     return wasm__platform_wasi_env_count();
 }
 
-static const char* wasm__wasi_string_list_at_env(uint32_t index) {
+static const char* wasm__wasi_string_list_at_env(const wasm_runtime_t* rt, uint32_t index) {
+    if (rt && rt->wasi_state && rt->wasi_state->env.is_set)
+        return index < rt->wasi_state->env.count ? rt->wasi_state->env.items[index] : NULL;
     return wasm__platform_wasi_env_at(index);
 }
 
@@ -171,8 +178,8 @@ static uint32_t wasm__wasi_string_sizes_get(wasm_module_t* mod,
     err = wasm__wasi_get_memory0(mod, "string sizes_get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    count = count_fn ? count_fn() : 0u;
-    total_size = wasm__wasi_string_list_size(count_fn, at_fn);
+    count = count_fn ? count_fn(mod->rt) : 0u;
+    total_size = wasm__wasi_string_list_size(mod->rt, count_fn, at_fn);
     if (total_size == UINT64_MAX || total_size > UINT32_MAX) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -207,8 +214,8 @@ static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
     err = wasm__wasi_get_memory0(mod, "string get", &memory, &mem_size);
     if (err != WASM_OK) return err;
 
-    count = count_fn ? count_fn() : 0u;
-    strings_size = wasm__wasi_string_list_size(count_fn, at_fn);
+    count = count_fn ? count_fn(mod->rt) : 0u;
+    strings_size = wasm__wasi_string_list_size(mod->rt, count_fn, at_fn);
     if (strings_size == UINT64_MAX || strings_size > UINT32_MAX) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         return WASM_OK;
@@ -221,7 +228,7 @@ static uint32_t wasm__wasi_string_list_get(wasm_module_t* mod,
 
     cursor = data_ptr;
     for (i = 0; i < count; i++) {
-        const char* value = at_fn(i);
+        const char* value = at_fn(mod->rt, i);
         size_t len = value ? strlen(value) : 0u;
 
         wasm__store_le32(memory->data + entries_ptr + (size_t)i * 4u, cursor);
@@ -761,6 +768,121 @@ WASM_PRIVATE wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
         return WASM_OK;
     }
 
+    wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
+    return WASM_OK;
+}
+
+#define WASM__WASI_SUBSCRIPTION_SIZE 48u
+#define WASM__WASI_EVENT_SIZE 32u
+#define WASM__WASI_EVENTTYPE_CLOCK 0u
+#define WASM__WASI_EVENTTYPE_FD_READ 1u
+#define WASM__WASI_EVENTTYPE_FD_WRITE 2u
+#define WASM__WASI_SUBCLOCKFLAGS_ABSTIME 1u
+#define WASM__WASI_CLOCK_COUNT 4u
+
+/* Nanoseconds until a clock subscription fires, measured from the snapshot in now; returns a WASI errno. */
+static uint32_t wasm__wasi_clock_remaining(const uint8_t* subscription, const uint64_t* now,
+                                           const int* now_ok, uint64_t* out_remaining) {
+    uint32_t clock_id = wasm__load_le32(subscription + 16u);
+    uint64_t timeout = wasm__load_le64(subscription + 24u);
+    uint16_t flags = wasm__load_le16(subscription + 40u);
+
+    if (clock_id >= WASM__WASI_CLOCK_COUNT) return WASM__WASI_ERRNO_INVAL;
+    if ((flags & WASM__WASI_SUBCLOCKFLAGS_ABSTIME) == 0u) {
+        *out_remaining = timeout;
+        return WASM__WASI_ERRNO_SUCCESS;
+    }
+    if (!now_ok[clock_id]) return WASM__WASI_ERRNO_NOTSUP;
+    *out_remaining = timeout > now[clock_id] ? timeout - now[clock_id] : 0u;
+    return WASM__WASI_ERRNO_SUCCESS;
+}
+
+WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
+                                           const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results,
+                                           void* userdata) {
+    wasm_memory_t* memory;
+    uint64_t mem_size;
+    uint64_t now[WASM__WASI_CLOCK_COUNT];
+    int now_ok[WASM__WASI_CLOCK_COUNT];
+    uint64_t wait_ns = UINT64_MAX;
+    uint32_t in_ptr;
+    uint32_t out_ptr;
+    uint32_t count;
+    uint32_t nevents_ptr;
+    uint32_t nevents = 0;
+    uint32_t i;
+    int fd_ready = 0;
+    wasm_error_t err;
+
+    (void)userdata;
+
+    if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
+    err = wasm__wasi_get_memory0(mod, "poll_oneoff", &memory, &mem_size);
+    if (err != WASM_OK) return err;
+
+    in_ptr = (uint32_t)args[0].of.i32;
+    out_ptr = (uint32_t)args[1].of.i32;
+    count = (uint32_t)args[2].of.i32;
+    nevents_ptr = (uint32_t)args[3].of.i32;
+    if (count == 0u) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
+        return WASM_OK;
+    }
+    if (!wasm__range_in_bounds_u64((uint64_t)in_ptr, (uint64_t)count * WASM__WASI_SUBSCRIPTION_SIZE, mem_size) ||
+        !wasm__range_in_bounds_u64((uint64_t)out_ptr, (uint64_t)count * WASM__WASI_EVENT_SIZE, mem_size) ||
+        !wasm__range_in_bounds_u64((uint64_t)nevents_ptr, 4u, mem_size)) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        return WASM_OK;
+    }
+    for (i = 0; i < WASM__WASI_CLOCK_COUNT; i++) now_ok[i] = wasm__platform_wasi_clock_time_get(i, 0u, &now[i]);
+
+    for (i = 0; i < count; i++) {
+        const uint8_t* subscription = memory->data + in_ptr + (size_t)i * WASM__WASI_SUBSCRIPTION_SIZE;
+        uint8_t tag = subscription[8];
+        uint64_t remaining;
+
+        if (tag == WASM__WASI_EVENTTYPE_CLOCK) {
+            if (wasm__wasi_clock_remaining(subscription, now, now_ok, &remaining) != WASM__WASI_ERRNO_SUCCESS)
+                remaining = 0u;
+            if (remaining < wait_ns) wait_ns = remaining;
+        } else if (tag == WASM__WASI_EVENTTYPE_FD_READ || tag == WASM__WASI_EVENTTYPE_FD_WRITE) {
+            fd_ready = 1;
+        } else {
+            wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
+            return WASM_OK;
+        }
+    }
+    if (fd_ready) wait_ns = 0u;
+    if (wait_ns > 0u && !wasm__platform_sleep_ns(wait_ns)) {
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTSUP);
+        return WASM_OK;
+    }
+
+    for (i = 0; i < count; i++) {
+        const uint8_t* subscription = memory->data + in_ptr + (size_t)i * WASM__WASI_SUBSCRIPTION_SIZE;
+        uint8_t* event = memory->data + out_ptr + (size_t)nevents * WASM__WASI_EVENT_SIZE;
+        uint8_t tag = subscription[8];
+        uint32_t error = WASM__WASI_ERRNO_SUCCESS;
+
+        if (tag == WASM__WASI_EVENTTYPE_CLOCK) {
+            uint64_t remaining = 0u;
+
+            error = wasm__wasi_clock_remaining(subscription, now, now_ok, &remaining);
+            if (error == WASM__WASI_ERRNO_SUCCESS && remaining > wait_ns) continue;
+        } else {
+            wasm__wasi_fd_entry_t* entry = wasm__wasi_fd_entry(mod->rt, wasm__load_le32(subscription + 16u));
+
+            if (!entry || !wasm__wasi_entry_has_host(entry)) error = WASM__WASI_ERRNO_BADF;
+        }
+        memset(event, 0, WASM__WASI_EVENT_SIZE);
+        wasm__store_le64(event, wasm__load_le64(subscription));
+        wasm__store_le16(event + 8u, (uint16_t)error);
+        event[10] = tag;
+        nevents++;
+    }
+
+    wasm__store_le32(memory->data + nevents_ptr, nevents);
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
     return WASM_OK;
 }

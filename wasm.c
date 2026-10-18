@@ -15,13 +15,25 @@ typedef struct wasm_cli_options_t {
     int bind_emscripten;
     int fuel_set;
     uint64_t fuel;
+    const char** envs;  /* NAME=value entries from --env */
+    uint32_t num_envs;
+    char** dirs;        /* --dir values, as HOST or HOST::GUEST */
+    uint32_t num_dirs;
 } wasm_cli_options_t;
 
 static void wasm_cli_print_usage(FILE* stream, const char* argv0) {
     fprintf(stream,
-            "usage: %s [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args...]\n"
+            "usage: %s [options] <module.wasm> <command> [args...]\n"
+            "\n"
+            "options:\n"
+            "  --wasi                  bind the WASI preview1 imports\n"
+            "  --dir HOST[::GUEST]     let the guest open files under HOST, seen as GUEST (implies --wasi)\n"
+            "  --env NAME=VALUE        set a guest environment variable (implies --wasi)\n"
+            "  --emscripten            bind the Emscripten env imports (trusted modules only)\n"
+            "  --fuel N                limit execution to N instructions\n"
             "\n"
             "commands:\n"
+            "  run [args...]           call _start with WASI, passing args as the guest's argv\n"
             "  info\n"
             "  imports\n"
             "  exports\n"
@@ -1084,6 +1096,55 @@ static int wasm_cli_memory_string_cmd(wasm_module_t* mod, const char* memory_ind
     return 0;
 }
 
+static int wasm_cli_run(wasm_module_t* mod) {
+    wasm_error_t err = wasm_call(mod, "_start", NULL, 0, NULL, 0);
+
+    if (err == WASM_ERR_EXIT) return wasm_runtime_exit_code(mod->rt);
+    if (err != WASM_OK) {
+        fprintf(stderr, "run failed: %s\n", wasm_cli_error_text(mod->rt));
+        wasm_cli_print_backtrace(mod->rt);
+        return 1;
+    }
+    return 0;
+}
+
+static int wasm_cli_configure_wasi(wasm_runtime_t* rt, const wasm_cli_options_t* options,
+                                   const char* module_path, int guest_argc, char** guest_argv) {
+    const char** args;
+    uint32_t i;
+    wasm_error_t err;
+
+    args = (const char**)calloc((size_t)guest_argc + 1u, sizeof(*args));
+    if (!args) {
+        fprintf(stderr, "out of memory\n");
+        return 0;
+    }
+    args[0] = module_path;
+    for (i = 0; i < (uint32_t)guest_argc; i++) args[i + 1u] = guest_argv[i];
+    err = wasm_wasi_set_args(rt, (uint32_t)guest_argc + 1u, args);
+    free(args);
+    if (err == WASM_OK && options->num_envs > 0u) err = wasm_wasi_set_env(rt, options->num_envs, options->envs);
+    if (err != WASM_OK) {
+        fprintf(stderr, "failed to configure WASI: %s\n", wasm_cli_error_text(rt));
+        return 0;
+    }
+    for (i = 0; i < options->num_dirs; i++) {
+        char* host = options->dirs[i];
+        char* separator = strstr(host, "::");
+        const char* guest = host;
+
+        if (separator) {
+            *separator = '\0';
+            guest = separator + 2;
+        }
+        if (wasm_wasi_preopen_dir(rt, host, guest) != WASM_OK) {
+            fprintf(stderr, "%s\n", wasm_cli_error_text(rt));
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int main(int argc, char** argv) {
     wasm_cli_options_t options;
     int argi = 1;
@@ -1093,17 +1154,29 @@ int main(int argc, char** argv) {
     size_t bytes_len = 0u;
     wasm_runtime_t runtime;
     wasm_module_t* module = NULL;
+    int runtime_ready = 0;
     int exit_code = 1;
 
     options.bind_wasi = 0;
     options.bind_emscripten = 0;
     options.fuel_set = 0;
     options.fuel = 0;
+    options.envs = (const char**)calloc((size_t)argc, sizeof(*options.envs));
+    options.num_envs = 0;
+    options.dirs = (char**)calloc((size_t)argc, sizeof(*options.dirs));
+    options.num_dirs = 0;
+    if (!options.envs || !options.dirs) {
+        fprintf(stderr, "out of memory\n");
+        free(options.envs);
+        free(options.dirs);
+        return 1;
+    }
 
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--help") == 0 || strcmp(argv[argi], "-h") == 0) {
             wasm_cli_print_usage(stdout, argv[0]);
-            return 0;
+            exit_code = 0;
+            goto cleanup;
         }
         if (strcmp(argv[argi], "--wasi") == 0) {
             options.bind_wasi = 1;
@@ -1123,9 +1196,26 @@ int main(int argc, char** argv) {
         if (strcmp(argv[argi], "--fuel") == 0) {
             if (argi + 1 >= argc || !wasm_cli_parse_u64(argv[argi + 1], &options.fuel)) {
                 fprintf(stderr, "invalid fuel value\n");
-                return 2;
+                exit_code = 2;
+                goto cleanup;
             }
             options.fuel_set = 1;
+            argi += 2;
+            continue;
+        }
+        if (strcmp(argv[argi], "--env") == 0 || strcmp(argv[argi], "--dir") == 0) {
+            int is_env = argv[argi][2] == 'e';
+
+            if (argi + 1 >= argc || (is_env && !strchr(argv[argi + 1], '='))) {
+                fprintf(stderr, "%s requires %s\n", argv[argi], is_env ? "NAME=VALUE" : "HOST[::GUEST]");
+                exit_code = 2;
+                goto cleanup;
+            }
+            if (is_env)
+                options.envs[options.num_envs++] = argv[argi + 1];
+            else
+                options.dirs[options.num_dirs++] = argv[argi + 1];
+            options.bind_wasi = 1;
             argi += 2;
             continue;
         }
@@ -1134,23 +1224,25 @@ int main(int argc, char** argv) {
 
     if (argc - argi < 2) {
         wasm_cli_print_usage(stderr, argv[0]);
-        return 2;
+        exit_code = 2;
+        goto cleanup;
     }
 
     module_path = argv[argi++];
     command = argv[argi++];
+    if (strcmp(command, "run") == 0) options.bind_wasi = 1;
 
     bytes = wasm_cli_read_file(module_path, &bytes_len);
     if (!bytes) {
         fprintf(stderr, "failed to read %s: %s\n", module_path, strerror(errno));
-        return 1;
+        goto cleanup;
     }
 
     if (wasm_init(&runtime, NULL) != WASM_OK) {
         fprintf(stderr, "failed to initialize runtime\n");
-        free(bytes);
-        return 1;
+        goto cleanup;
     }
+    runtime_ready = 1;
 
     if (options.fuel_set) wasm_set_fuel(&runtime, options.fuel);
 
@@ -1161,6 +1253,9 @@ int main(int argc, char** argv) {
             fprintf(stderr, "failed to bind WASI stubs: %s\n", wasm_cli_error_text(&runtime));
             goto cleanup;
         }
+        if (!wasm_cli_configure_wasi(&runtime, &options, module_path,
+                                     strcmp(command, "run") == 0 ? argc - argi : 0, &argv[argi]))
+            goto cleanup;
     }
 
     if (options.bind_emscripten) {
@@ -1196,7 +1291,9 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    if (strcmp(command, "info") == 0) {
+    if (strcmp(command, "run") == 0) {
+        exit_code = wasm_cli_run(module);
+    } else if (strcmp(command, "info") == 0) {
         wasm_cli_print_summary(module, module_path);
         exit_code = 0;
     } else if (strcmp(command, "imports") == 0) {
@@ -1273,7 +1370,9 @@ int main(int argc, char** argv) {
 
 cleanup:
     wasm_free_module(module);
-    wasm_destroy(&runtime);
+    if (runtime_ready) wasm_destroy(&runtime);
     free(bytes);
+    free(options.envs);
+    free(options.dirs);
     return exit_code;
 }

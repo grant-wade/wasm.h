@@ -117,7 +117,7 @@ try rt.bindFuncContext("env", "accumulate", &counter, accumulate);
 - **Results:** a function may return `void`, a Wasm-typed value, or a tuple of them, optionally as an error union.
 - **Errors:** a returned error traps the calling Wasm code, with the error's name as the runtime's error message. Members of `wasm.Error` keep their meaning, such as `error.OutOfBounds`. Any other error becomes `error.Trap`.
 
-`bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
+`bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
 
 ## Memory, globals, and introspection
 

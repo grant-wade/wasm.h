@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "handles.h"
 #include "values.h"
 #include "module.h"
 #include "types/canonical.h"
@@ -158,6 +159,23 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+#define WASM__HANDLE_GC_MIN_THRESHOLD 1024u
+
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+    uint32_t threshold;
+    uint32_t live;
+
+    if (!rt) return;
+    threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
+    if (rt->externref_boxes.count + rt->exception_objects.count < threshold) return;
+
+    wasm_gc_collect(rt);
+    live = rt->externref_boxes.count + rt->exception_objects.count;
+    rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
+    if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
+        rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
 }
 
 static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
@@ -437,8 +455,6 @@ uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt) {
 
 void wasm_destroy(wasm_runtime_t* rt) {
     uint32_t i;
-    wasm__externref_box_t* box;
-    wasm__exception_object_t* exception_object;
 
     if (!rt) return;
 
@@ -477,21 +493,17 @@ void wasm_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->table_imports);
     WASM_FREE(rt->memory_imports);
     WASM_FREE(rt->tag_imports);
-    box = rt->externref_boxes;
-    while (box) {
-        wasm__externref_box_t* next = box->next;
-        WASM_FREE(box);
-        box = next;
-    }
-    exception_object = rt->exception_objects;
-    while (exception_object) {
-        wasm__exception_object_t* next = exception_object->next;
+    for (i = 0; i < rt->externref_boxes.capacity; i++) WASM_FREE(rt->externref_boxes.slots[i]);
+    for (i = 0; i < rt->exception_objects.capacity; i++) {
+        wasm__exception_object_t* exception_object = (wasm__exception_object_t*)rt->exception_objects.slots[i];
+
+        if (!exception_object) continue;
         WASM_FREE(exception_object->values);
         WASM_FREE(exception_object);
-        exception_object = next;
     }
-    rt->exception_objects = NULL;
-    rt->externref_boxes = NULL;
+    wasm__handle_set_free(&rt->exception_objects);
+    wasm__handle_set_free(&rt->externref_boxes);
+    rt->handle_gc_threshold = 0;
     WASM_FREE(rt->validator_stack);
     WASM_FREE(rt->validator_stack_reftypes);
     WASM_FREE(rt->validator_frames);

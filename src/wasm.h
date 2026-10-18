@@ -675,6 +675,13 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                  wasm_host_func_t callback, void* userdata);
 wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt);
 wasm_error_t wasm_bind_wasi_stubs(wasm_runtime_t* rt);
+/* WASI configuration for one runtime, usable before or after wasm_bind_wasi_stubs. The strings
+   are copied. These require WASM_ENABLE_PLATFORM and fail with WASM_ERR_MALFORMED without it. */
+wasm_error_t wasm_wasi_set_args(wasm_runtime_t* rt, uint32_t argc, const char* const* argv);
+/* Each entry has the form "NAME=value". */
+wasm_error_t wasm_wasi_set_env(wasm_runtime_t* rt, uint32_t count, const char* const* env);
+/* Lets the guest open files beneath the host directory host_path, which it sees as guest_path. */
+wasm_error_t wasm_wasi_preopen_dir(wasm_runtime_t* rt, const char* host_path, const char* guest_path);
 uint32_t wasm_memory_count(wasm_module_t* mod);
 wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
                               uint64_t offset, void* dst, size_t len);
@@ -757,6 +764,8 @@ uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
 wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
 void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
+/* Stops metering; calls run without a budget until wasm_set_fuel is called again. */
+void wasm_disable_fuel(wasm_runtime_t* rt);
 uint64_t wasm_get_fuel(wasm_runtime_t* rt);
 const wasm_runtime_t* wasm_module_runtime(const wasm_module_t* mod);
 void wasm_module_set_userdata(wasm_module_t* mod, void* userdata);

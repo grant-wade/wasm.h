@@ -76,6 +76,8 @@ WASM_PRIVATE uint32_t wasm__platform_wasi_env_count(void);
 WASM_PRIVATE const char* wasm__platform_wasi_env_at(uint32_t index);
 WASM_PRIVATE int wasm__platform_wasi_fill_random(void* dst, size_t len);
 WASM_PRIVATE int wasm__platform_wasi_clock_time_get(uint32_t clock_id, uint64_t precision, uint64_t* out_time);
+/* Blocks the calling thread for at least ns nanoseconds; returns 0 where sleeping is unsupported. */
+WASM_PRIVATE int wasm__platform_sleep_ns(uint64_t ns);
 #endif
 
 #endif /* WASM_PLATFORM_HOST_H */

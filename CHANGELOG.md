@@ -4,6 +4,22 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Security
+
+- WASI `proc_raise` returns `NOSYS`. It raised the requested signal in the host process, so a guest could stop or kill its embedder with `SIGKILL` or `SIGSEGV`.
+- Values a host function returns must match its import's result types; a mismatch fails the call with `WASM_ERR_TYPE_MISMATCH`. The interpreter pushed them unchecked, so a host returning an `i32` for an `anyref` result handed the guest an arbitrary pointer. Results now start as the zero or null value of their type, so callbacks that set only the payload keep working.
+
+### Added
+
+- `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
+- WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
+- `wasm_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
+- The CLI `run` command runs a WASI command's `_start` with the remaining arguments as its argv, and `--dir HOST[::GUEST]` and `--env NAME=VALUE` configure its WASI environment. With `--wasi`, `call` passes the module path as `argv[0]`.
+
+### Fixed
+
+- The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
+
 ## [1.2.0] - 2026-10-17
 
 ### Security

@@ -40,12 +40,12 @@ struct wasm__exception_object_t {
     uint64_t tag_identity;
     wasm_value_t* values;
     uint32_t num_values;
-    struct wasm__exception_object_t* next;
+    int marked;
 };
 
 struct wasm__externref_box_t {
     wasm_value_t value;
-    wasm__externref_box_t* next;
+    int marked;
 };
 
 #endif /* WASM_INTERNAL_GC_TYPES_H */
