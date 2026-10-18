@@ -101,6 +101,9 @@ WASM_PRIVATE wasm_value_t wasm__retag_value_for_declared_type(wasm_valtype_t dec
 
 WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type);
 
+/* Numeric values already carry their declared type tag, so only references need retagging. */
+WASM_PRIVATE_INLINE int wasm__is_numeric_valtype(wasm_valtype_t type);
+
 WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_s(double value);
 
 WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_u(double value);

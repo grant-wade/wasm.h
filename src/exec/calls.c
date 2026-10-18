@@ -12,8 +12,10 @@
 #include <string.h>
 
 WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
-    WASM_FREE(label->caught_values);
-    label->caught_values = NULL;
+    if (label->caught_values) {
+        WASM_FREE(label->caught_values);
+        label->caught_values = NULL;
+    }
     label->caught_tag = UINT32_MAX;
     label->caught_tag_identity = 0;
     label->caught_count = 0;
@@ -102,13 +104,14 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     wasm__init_call_frame(cf, mod, rt, func_idx, func, ft, locals, labels, results_dst, num_results);
     cf->arena_saved = arena_saved;
 
-    for (i = 0; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
     for (i = 0; i < ft->num_params && i < num_args; i++) {
-        cf->locals[i] = wasm__retag_value_for_declared_type(
-            ft->params[i],
-            ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
-            args[i]);
+        cf->locals[i] = wasm__is_numeric_valtype(ft->params[i])
+                            ? args[i]
+                            : wasm__retag_value_for_declared_type(ft->params[i],
+                                                                  ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
+                                                                  args[i]);
     }
+    for (; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
 
     return WASM_OK;
 }
@@ -135,10 +138,14 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     }
 
     for (i = 0; i < result_count; i++) {
-        result_values[i] = wasm__retag_value_for_declared_type(
-            cf->ft->results[i],
-            cf->ft->result_reftypes ? &cf->ft->result_reftypes[i] : NULL,
-            rt->stack[rt->sp - result_count + i]);
+        wasm_value_t value = rt->stack[rt->sp - result_count + i];
+
+        result_values[i] = wasm__is_numeric_valtype(cf->ft->results[i])
+                               ? value
+                               : wasm__retag_value_for_declared_type(
+                                     cf->ft->results[i],
+                                     cf->ft->result_reftypes ? &cf->ft->result_reftypes[i] : NULL,
+                                     value);
     }
 
     rt->sp = cf->sp_base;

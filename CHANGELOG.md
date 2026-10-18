@@ -4,6 +4,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Changed
+
+- The interpreter is about 25% faster on `wasm_bench` (release build). Single-byte immediates and the common memory-argument form decode inline, numeric locals, parameters, and results skip reference retagging, `br_table` no longer allocates, branches move results without a scratch buffer, block exits skip `free(NULL)`, frames record their position only when execution leaves them, and `call_indirect` and `call_ref` skip the subtype check when the types are identical.
+
 ### Security
 
 - WASI path operations accept only directories reached from a preopen. Standard I/O descriptors were treated as directory capabilities, so a guest could open, create, rename, or delete any host file through `path_open(0, "/abs/path")` and the other `path_*` calls. Guest paths, and symlink targets, must now be relative and must not climb above their directory with `..`; violations return `NOTCAPABLE`.

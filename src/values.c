@@ -496,6 +496,10 @@ WASM_PRIVATE wasm_value_t wasm__retag_value_for_declared_type(wasm_valtype_t dec
     return value;
 }
 
+WASM_PRIVATE_INLINE int wasm__is_numeric_valtype(wasm_valtype_t type) {
+    return type >= WASM_TYPE_V128 && type <= WASM_TYPE_I32;
+}
+
 WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type) {
     switch (type) {
         case WASM_TYPE_I32:

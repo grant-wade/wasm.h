@@ -244,23 +244,15 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
                                     wasm__reader_t* r,
                                     uint32_t* label_sp,
                                     uint32_t depth_l) {
-    wasm_value_t branch_values_buf[8];
-    wasm_value_t* branch_values = branch_values_buf;
     uint32_t branch_arity = (target->opcode == 0x03) ? target->param_arity : target->arity;
     uint32_t pop_count = (target->opcode == 0x03) ? depth_l : depth_l + 1;
     uint32_t i;
 
-    if (branch_arity > 8) {
-        branch_values = (wasm_value_t*)wasm__malloc_array(branch_arity, sizeof(wasm_value_t));
-        if (!branch_values) return WASM_ERR_OOM;
-    }
-
-    for (i = 0; i < branch_arity; i++) branch_values[i] = rt->stack[rt->sp - branch_arity + i];
-    rt->sp = target->sp_base;
-    for (i = 0; i < branch_arity; i++) rt->stack[rt->sp++] = branch_values[i];
+    if (rt->sp - branch_arity != target->sp_base && branch_arity > 0)
+        memmove(&rt->stack[target->sp_base], &rt->stack[rt->sp - branch_arity], branch_arity * sizeof(wasm_value_t));
+    rt->sp = target->sp_base + branch_arity;
     r->ptr = target->continuation;
 
-    if (branch_values != branch_values_buf) WASM_FREE(branch_values);
     for (i = 0; i < pop_count; i++) wasm__clear_label(&labels[*label_sp - 1 - i]);
     *label_sp -= pop_count;
 
@@ -268,19 +260,8 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
 }
 
 WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label) {
-    wasm_value_t result_values_buf[8];
-    wasm_value_t* result_values = result_values_buf;
-    uint32_t i;
-
-    if (label->arity > 8) {
-        result_values = (wasm_value_t*)wasm__malloc_array(label->arity, sizeof(wasm_value_t));
-        if (!result_values) return WASM_ERR_OOM;
-    }
-
-    for (i = 0; i < label->arity; i++) result_values[i] = rt->stack[rt->sp - label->arity + i];
-    rt->sp = label->sp_base;
-    for (i = 0; i < label->arity; i++) rt->stack[rt->sp++] = result_values[i];
-
-    if (result_values != result_values_buf) WASM_FREE(result_values);
+    if (rt->sp - label->arity != label->sp_base && label->arity > 0)
+        memmove(&rt->stack[label->sp_base], &rt->stack[rt->sp - label->arity], label->arity * sizeof(wasm_value_t));
+    rt->sp = label->sp_base + label->arity;
     return WASM_OK;
 }
