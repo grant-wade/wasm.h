@@ -8479,6 +8479,42 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     wasm_runtime_free(NULL);
 }
 
+WL_TEST(test_funcrefs_from_freed_modules_trap) {
+    static const uint8_t provider_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x00, 0x01,
+        0x70, 0x03, 0x03, 0x02, 0x00, 0x01, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x01, 0x09, 0x05, 0x01,
+        0x03, 0x00, 0x01, 0x00, 0x0a, 0x0b, 0x02, 0x04, 0x00, 0x41, 0x07, 0x0b, 0x04, 0x00, 0xd2, 0x00, 0x0b
+    };
+    static const uint8_t caller_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x70,
+        0x01, 0x7f, 0x03, 0x02, 0x01, 0x01, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07, 0x08, 0x01, 0x04, 0x63, 0x61,
+        0x6c, 0x6c, 0x00, 0x00, 0x0a, 0x0f, 0x01, 0x0d, 0x00, 0x41, 0x00, 0x20, 0x00, 0x26, 0x00, 0x41, 0x00, 0x11,
+        0x00, 0x00, 0x0b
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* provider;
+    wasm_module_t* caller;
+    wasm_value_t ref;
+    wasm_value_t result;
+
+    wasm_init(&rt);
+    provider = wasm_load(&rt, provider_bytes, sizeof(provider_bytes));
+    caller = wasm_load(&rt, caller_bytes, sizeof(caller_bytes));
+    WL_CHECK_MSG(t, provider != NULL && caller != NULL, "%s", rt.error_msg);
+    if (provider && caller) {
+        WASM_CHECK_OK(t, wasm_call(provider, "get", NULL, 0, &ref, 1));
+        WASM_CHECK_OK(t, wasm_call(caller, "call", &ref, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        wasm_free_module(provider);
+        provider = NULL;
+        WL_CHECK_MSG(t, wasm_call(caller, "call", &ref, 1, &result, 1) != WASM_OK, "%s",
+                     "expected a funcref into a freed module to trap");
+    }
+    wasm_free_module(provider);
+    wasm_free_module(caller);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15418,6 +15454,7 @@ int main(void) {
         { "load: function locals are limited by config", test_load_limits_function_locals },
         { "types: canonicalization dedupes thousands of types", test_canonicalization_dedupes_many_types },
         { "public api: NULL handles are rejected without crashing", test_public_api_tolerates_null_handles },
+        { "funcref: references into freed modules trap", test_funcrefs_from_freed_modules_trap },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

@@ -6178,7 +6178,7 @@ WASM_PRIVATE int wasm__resolve_func_ref(const wasm_runtime_t* rt,
                                   uint32_t ref_id,
                                   wasm_module_t** out_module,
                                   uint32_t* out_func_idx) {
-    if (!rt || ref_id >= rt->num_func_refs) return 0;
+    if (!rt || ref_id >= rt->num_func_refs || !rt->func_refs[ref_id].module) return 0;
     if (out_module) *out_module = rt->func_refs[ref_id].module;
     if (out_func_idx) *out_func_idx = rt->func_refs[ref_id].func_idx;
     return 1;
@@ -17346,6 +17346,9 @@ void wasm_free_module(wasm_module_t* mod) {
     if (mod->rt) {
         for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
             if (object->module == mod) object->module = NULL;
+        }
+        for (i = 0; i < mod->rt->num_func_refs; i++) {
+            if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }

@@ -308,7 +308,7 @@ WASM_PRIVATE int wasm__resolve_func_ref(const wasm_runtime_t* rt,
                                   uint32_t ref_id,
                                   wasm_module_t** out_module,
                                   uint32_t* out_func_idx) {
-    if (!rt || ref_id >= rt->num_func_refs) return 0;
+    if (!rt || ref_id >= rt->num_func_refs || !rt->func_refs[ref_id].module) return 0;
     if (out_module) *out_module = rt->func_refs[ref_id].module;
     if (out_func_idx) *out_func_idx = rt->func_refs[ref_id].func_idx;
     return 1;

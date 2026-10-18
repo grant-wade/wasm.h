@@ -253,6 +253,9 @@ void wasm_free_module(wasm_module_t* mod) {
         for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
             if (object->module == mod) object->module = NULL;
         }
+        for (i = 0; i < mod->rt->num_func_refs; i++) {
+            if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
+        }
         wasm__gc_unregister_module(mod->rt, mod);
     }
     for (i = 0; i < mod->num_types; i++) wasm__free_comptype(&mod->types[i]);
