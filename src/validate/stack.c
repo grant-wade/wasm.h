@@ -256,6 +256,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
     if (v->sp >= v->stack_capacity)
         return wasm__validator_error(v, at, "operand stack overflow");
     v->stack[v->sp++] = type;
+    if (v->sp > v->max_sp) v->max_sp = v->sp;
     if (ref_type && wasm__has_reftype_info(ref_type))
         v->stack_reftypes[v->sp - 1] = *ref_type;
     else

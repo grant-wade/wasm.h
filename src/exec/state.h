@@ -38,14 +38,7 @@ struct wasm__call_frame_t {
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
 #define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt, val)                \
-    do {                                   \
-        if ((rt)->sp >= (rt)->max_stack) { \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        (rt)->stack[(rt)->sp++] = (val);   \
-    } while (0)
+#define WASM__PUSH(rt, val) ((rt)->stack[(rt)->sp++] = (val))
 #define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
 #define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
 #define WASM__TRAP(code) \

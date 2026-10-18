@@ -2021,6 +2021,7 @@ struct wasm_func_t {
     uint32_t* op_offsets; /* for each translated instruction, its index in ops and bytecode offset */
     uint32_t num_op_offsets;
     uint32_t max_handlers; /* deepest nesting of try and try_table blocks */
+    uint32_t max_stack;    /* operand stack values the body needs at most */
     uint32_t max_label_depth;
     uint32_t funcref_id;
     int is_declared_ref;
@@ -11372,14 +11373,7 @@ struct wasm__call_frame_t {
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
 #define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt, val)                \
-    do {                                   \
-        if ((rt)->sp >= (rt)->max_stack) { \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        (rt)->stack[(rt)->sp++] = (val);   \
-    } while (0)
+#define WASM__PUSH(rt, val) ((rt)->stack[(rt)->sp++] = (val))
 #define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
 #define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
 #define WASM__TRAP(code) \
@@ -14122,6 +14116,7 @@ typedef struct wasm__validator_t {
     wasm_reftype_t* stack_reftypes;
     uint32_t stack_capacity;
     uint32_t sp;
+    uint32_t max_sp;
     wasm__val_frame_t* frames;
     uint32_t frame_capacity;
     uint32_t fp;
@@ -14605,6 +14600,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
     if (v->sp >= v->stack_capacity)
         return wasm__validator_error(v, at, "operand stack overflow");
     v->stack[v->sp++] = type;
+    if (v->sp > v->max_sp) v->max_sp = v->sp;
     if (ref_type && wasm__has_reftype_info(ref_type))
         v->stack_reftypes[v->sp - 1] = *ref_type;
     else
@@ -16584,8 +16580,10 @@ enum {
 #define WASM__CLAUSE_CATCH_ALL 1u
 #define WASM__CLAUSE_DELEGATE 2u
 
-/* heights[i] is the operand stack height before the instruction at byte offset i. */
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights);
+/* heights[i] is the operand stack height before the instruction at byte offset i, and max_height the
+ * greatest height the body reaches. */
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
+                                                   uint32_t max_height);
 
 WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm_func_t* dst, const wasm_func_t* src);
 
@@ -17269,6 +17267,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                      &branch_types,
                                                      &branch_reftypes,
                                                      &branch_count);
+                    if (entry_height + branch_count > v.max_sp) v.max_sp = entry_height + branch_count;
 
                     switch (clause.kind) {
                         case 0x00: {
@@ -18024,7 +18023,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                     (unsigned)ft->num_results);
         goto done;
     }
-    err = wasm__translate_function(mod, func_idx, heights);
+    err = wasm__translate_function(mod, func_idx, heights, v.max_sp);
     if (err != WASM_OK) {
         if (err == WASM_ERR_OOM)
             WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate translated code");
@@ -19191,6 +19190,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
+    if (func->max_stack > rt->max_stack - rt->sp) {
+        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)rt->max_stack);
+        return WASM_ERR_STACK_OVERFLOW;
+    }
     max_labels = func->max_label_depth ? func->max_label_depth : 1;
     if (max_labels > rt->max_labels) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
@@ -19848,7 +19851,8 @@ static void wasm__x_try_tables(wasm__translator_t* t) {
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights) {
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
+                                                   uint32_t max_height) {
     wasm__translator_t t;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_error_t err;
@@ -19870,6 +19874,7 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     func->op_offsets = t.offsets;
     func->num_op_offsets = t.num_offsets;
     func->max_handlers = t.max_handlers;
+    func->max_stack = max_height;
     t.ops = NULL;
     t.offsets = NULL;
     wasm__x_free(&t);
@@ -19897,6 +19902,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm
     dst->op_offsets = offsets;
     dst->num_op_offsets = src->num_op_offsets;
     dst->max_handlers = src->max_handlers;
+    dst->max_stack = src->max_stack;
     return WASM_OK;
 }
 
@@ -19908,6 +19914,7 @@ WASM_PRIVATE void wasm__free_translation(const wasm_allocator_t* a, wasm_func_t*
     func->num_ops = 0;
     func->num_op_offsets = 0;
     func->max_handlers = 0;
+    func->max_stack = 0;
 }
 
 WASM_PRIVATE uint32_t wasm__translated_offset(const wasm_func_t* func, const uint32_t* op) {
@@ -22432,16 +22439,8 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
             if (!(p)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);                                        \
         }                                                                                        \
     } while (0)
-#define WASM__SP_PUSH(val)                 \
-    do {                                   \
-        if (sp == stack_end) {             \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        *sp++ = (val);                     \
-    } while (0)
-/* Only after the same instruction has popped a slot. */
-#define WASM__SP_PUT(val) (*sp++ = (val))
+#define WASM__SP_PUSH(val) (*sp++ = (val))
+#define WASM__SP_PUSH(val) (*sp++ = (val))
 #define WASM__SP_POP() (*--sp)
 #define WASM__SP_TOP() (sp[-1])
 
@@ -22475,7 +22474,6 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
  * If resumable, fuel, interrupt, and yield stops leave the frames in place with rt->suspended set. */
 static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp, int resumable) {
     wasm_value_t* const stack = rt->stack;
-    wasm_value_t* const stack_end = rt->stack + rt->max_stack;
     wasm__call_frame_t* cf;
     wasm_module_t* mod;
     wasm_func_t* func;
@@ -22857,7 +22855,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             }
             WASM__CASE(0x1B): {
                 wasm_value_t c = WASM__SP_POP(), v2 = WASM__SP_POP(), v1 = WASM__SP_POP();
-                WASM__SP_PUT(c.of.i32 ? v1 : v2);
+                WASM__SP_PUSH(c.of.i32 ? v1 : v2);
                 WASM__NEXT();
             }
 
@@ -23250,7 +23248,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                     if (op == 0xD5) goto do_branch;
                     WASM__NEXT();
                 }
-                WASM__SP_PUT(wasm__runtime_cast_success_value(&target_ref, value));
+                WASM__SP_PUSH(wasm__runtime_cast_success_value(&target_ref, value));
                 if (op == 0xD6) goto do_branch;
                 WASM__NEXT();
             }
@@ -23272,270 +23270,270 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 
             WASM__CASE(0x45): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 == 0 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 == 0 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x46): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 == b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 == b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x47): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 != b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 != b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x48): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 < b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 < b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x49): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint32_t)a.of.i32 < (uint32_t)b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint32_t)a.of.i32 < (uint32_t)b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4A): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 > b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 > b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4B): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint32_t)a.of.i32 > (uint32_t)b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint32_t)a.of.i32 > (uint32_t)b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4C): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 <= b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 <= b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4D): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint32_t)a.of.i32 <= (uint32_t)b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint32_t)a.of.i32 <= (uint32_t)b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4E): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 >= b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 >= b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x4F): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint32_t)a.of.i32 >= (uint32_t)b.of.i32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint32_t)a.of.i32 >= (uint32_t)b.of.i32 ? 1 : 0));
                 WASM__NEXT();
             }
 
             /* i64 comparison */
             WASM__CASE(0x50): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 == 0 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 == 0 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x51): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 == b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 == b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x52): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 != b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 != b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x53): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 < b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 < b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x54): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint64_t)a.of.i64 < (uint64_t)b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint64_t)a.of.i64 < (uint64_t)b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x55): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 > b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 > b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x56): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint64_t)a.of.i64 > (uint64_t)b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint64_t)a.of.i64 > (uint64_t)b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x57): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 <= b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 <= b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x58): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint64_t)a.of.i64 <= (uint64_t)b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint64_t)a.of.i64 <= (uint64_t)b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x59): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i64 >= b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.i64 >= b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x5A): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((uint64_t)a.of.i64 >= (uint64_t)b.of.i64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32((uint64_t)a.of.i64 >= (uint64_t)b.of.i64 ? 1 : 0));
                 WASM__NEXT();
             }
 
             /* f32/f64 comparison */
             WASM__CASE(0x5B): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 == b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 == b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x5C): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 != b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 != b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x5D): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 < b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 < b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x5E): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 > b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 > b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x5F): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 <= b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 <= b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x60): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f32 >= b.of.f32 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f32 >= b.of.f32 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x61): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 == b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 == b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x62): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 != b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 != b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x63): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 < b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 < b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x64): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 > b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 > b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x65): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 <= b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 <= b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
             WASM__CASE(0x66): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.f64 >= b.of.f64 ? 1 : 0));
+                WASM__SP_PUSH(wasm_i32(a.of.f64 >= b.of.f64 ? 1 : 0));
                 WASM__NEXT();
             }
 
             /* i32 arithmetic */
             WASM__CASE(0x67): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((int32_t)wasm__clz32((uint32_t)a.of.i32)));
+                WASM__SP_PUSH(wasm_i32((int32_t)wasm__clz32((uint32_t)a.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x68): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((int32_t)wasm__ctz32((uint32_t)a.of.i32)));
+                WASM__SP_PUSH(wasm_i32((int32_t)wasm__ctz32((uint32_t)a.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x69): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((int32_t)wasm__popcnt32((uint32_t)a.of.i32)));
+                WASM__SP_PUSH(wasm_i32((int32_t)wasm__popcnt32((uint32_t)a.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x6A): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u32_bits((uint32_t)a.of.i32 + (uint32_t)b.of.i32));
+                WASM__SP_PUSH(wasm__u32_bits((uint32_t)a.of.i32 + (uint32_t)b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x6B): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u32_bits((uint32_t)a.of.i32 - (uint32_t)b.of.i32));
+                WASM__SP_PUSH(wasm__u32_bits((uint32_t)a.of.i32 - (uint32_t)b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x6C): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u32_bits((uint32_t)a.of.i32 * (uint32_t)b.of.i32));
+                WASM__SP_PUSH(wasm__u32_bits((uint32_t)a.of.i32 * (uint32_t)b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x6D): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
                 if (a.of.i32 == INT32_MIN && b.of.i32 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
-                WASM__SP_PUT(wasm_i32(a.of.i32 / b.of.i32));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 / b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x6E): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i32((int32_t)((uint32_t)a.of.i32 / (uint32_t)b.of.i32)));
+                WASM__SP_PUSH(wasm_i32((int32_t)((uint32_t)a.of.i32 / (uint32_t)b.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x6F): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i32((a.of.i32 == INT32_MIN && b.of.i32 == -1) ? 0 : a.of.i32 % b.of.i32));
+                WASM__SP_PUSH(wasm_i32((a.of.i32 == INT32_MIN && b.of.i32 == -1) ? 0 : a.of.i32 % b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x70): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i32) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i32((int32_t)((uint32_t)a.of.i32 % (uint32_t)b.of.i32)));
+                WASM__SP_PUSH(wasm_i32((int32_t)((uint32_t)a.of.i32 % (uint32_t)b.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x71): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 & b.of.i32));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 & b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x72): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 | b.of.i32));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 | b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x73): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32(a.of.i32 ^ b.of.i32));
+                WASM__SP_PUSH(wasm_i32(a.of.i32 ^ b.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0x74): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u32_bits((uint32_t)a.of.i32 << ((uint32_t)b.of.i32 & 31u)));
+                WASM__SP_PUSH(wasm__u32_bits((uint32_t)a.of.i32 << ((uint32_t)b.of.i32 & 31u)));
                 WASM__NEXT();
             }
             WASM__CASE(0x75): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u32_bits(wasm__shr_s32_bits((uint32_t)a.of.i32,
+                WASM__SP_PUSH(wasm__u32_bits(wasm__shr_s32_bits((uint32_t)a.of.i32,
                                                                   (uint32_t)b.of.i32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x76): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((int32_t)((uint32_t)a.of.i32 >> (b.of.i32 & 31))));
+                WASM__SP_PUSH(wasm_i32((int32_t)((uint32_t)a.of.i32 >> (b.of.i32 & 31))));
                 WASM__NEXT();
             }
             WASM__CASE(0x77): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 uint32_t k = (uint32_t)b.of.i32 & 31u;
-                WASM__SP_PUT(
+                WASM__SP_PUSH(
                            wasm__u32_bits(((uint32_t)a.of.i32 << k) |
                                           ((uint32_t)a.of.i32 >> ((32u - k) & 31u))));
                 WASM__NEXT();
@@ -23543,7 +23541,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(0x78): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 uint32_t k = (uint32_t)b.of.i32 & 31u;
-                WASM__SP_PUT(
+                WASM__SP_PUSH(
                            wasm__u32_bits(((uint32_t)a.of.i32 >> k) |
                                           ((uint32_t)a.of.i32 << ((32u - k) & 31u))));
                 WASM__NEXT();
@@ -23552,94 +23550,94 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             /* i64 arithmetic */
             WASM__CASE(0x79): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)wasm__clz64((uint64_t)a.of.i64)));
+                WASM__SP_PUSH(wasm_i64((int64_t)wasm__clz64((uint64_t)a.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x7A): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)wasm__ctz64((uint64_t)a.of.i64)));
+                WASM__SP_PUSH(wasm_i64((int64_t)wasm__ctz64((uint64_t)a.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x7B): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)wasm__popcnt64((uint64_t)a.of.i64)));
+                WASM__SP_PUSH(wasm_i64((int64_t)wasm__popcnt64((uint64_t)a.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x7C): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u64_bits((uint64_t)a.of.i64 + (uint64_t)b.of.i64));
+                WASM__SP_PUSH(wasm__u64_bits((uint64_t)a.of.i64 + (uint64_t)b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x7D): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u64_bits((uint64_t)a.of.i64 - (uint64_t)b.of.i64));
+                WASM__SP_PUSH(wasm__u64_bits((uint64_t)a.of.i64 - (uint64_t)b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x7E): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u64_bits((uint64_t)a.of.i64 * (uint64_t)b.of.i64));
+                WASM__SP_PUSH(wasm__u64_bits((uint64_t)a.of.i64 * (uint64_t)b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x7F): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
                 if (a.of.i64 == INT64_MIN && b.of.i64 == -1) WASM__TRAP(WASM_ERR_INT_OVERFLOW);
-                WASM__SP_PUT(wasm_i64(a.of.i64 / b.of.i64));
+                WASM__SP_PUSH(wasm_i64(a.of.i64 / b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x80): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i64((int64_t)((uint64_t)a.of.i64 / (uint64_t)b.of.i64)));
+                WASM__SP_PUSH(wasm_i64((int64_t)((uint64_t)a.of.i64 / (uint64_t)b.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x81): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i64((a.of.i64 == INT64_MIN && b.of.i64 == -1) ? 0 : a.of.i64 % b.of.i64));
+                WASM__SP_PUSH(wasm_i64((a.of.i64 == INT64_MIN && b.of.i64 == -1) ? 0 : a.of.i64 % b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x82): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 if (!b.of.i64) WASM__TRAP(WASM_ERR_DIV_BY_ZERO);
-                WASM__SP_PUT(wasm_i64((int64_t)((uint64_t)a.of.i64 % (uint64_t)b.of.i64)));
+                WASM__SP_PUSH(wasm_i64((int64_t)((uint64_t)a.of.i64 % (uint64_t)b.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x83): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64(a.of.i64 & b.of.i64));
+                WASM__SP_PUSH(wasm_i64(a.of.i64 & b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x84): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64(a.of.i64 | b.of.i64));
+                WASM__SP_PUSH(wasm_i64(a.of.i64 | b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x85): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64(a.of.i64 ^ b.of.i64));
+                WASM__SP_PUSH(wasm_i64(a.of.i64 ^ b.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0x86): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u64_bits((uint64_t)a.of.i64 << ((uint32_t)b.of.i64 & 63u)));
+                WASM__SP_PUSH(wasm__u64_bits((uint64_t)a.of.i64 << ((uint32_t)b.of.i64 & 63u)));
                 WASM__NEXT();
             }
             WASM__CASE(0x87): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm__u64_bits(wasm__shr_s64_bits((uint64_t)a.of.i64,
+                WASM__SP_PUSH(wasm__u64_bits(wasm__shr_s64_bits((uint64_t)a.of.i64,
                                                                   (uint32_t)b.of.i64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x88): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)((uint64_t)a.of.i64 >> (b.of.i64 & 63))));
+                WASM__SP_PUSH(wasm_i64((int64_t)((uint64_t)a.of.i64 >> (b.of.i64 & 63))));
                 WASM__NEXT();
             }
             WASM__CASE(0x89): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 uint32_t k = (uint32_t)b.of.i64 & 63u;
-                WASM__SP_PUT(
+                WASM__SP_PUSH(
                            wasm__u64_bits(((uint64_t)a.of.i64 << k) |
                                           ((uint64_t)a.of.i64 >> ((64u - k) & 63u))));
                 WASM__NEXT();
@@ -23647,7 +23645,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(0x8A): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
                 uint32_t k = (uint32_t)b.of.i64 & 63u;
-                WASM__SP_PUT(
+                WASM__SP_PUSH(
                            wasm__u64_bits(((uint64_t)a.of.i64 >> k) |
                                           ((uint64_t)a.of.i64 << ((64u - k) & 63u))));
                 WASM__NEXT();
@@ -23658,69 +23656,69 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t a = WASM__SP_POP();
                 uint32_t bits;
                 memcpy(&bits, &a.of.f32, sizeof(bits));
-                WASM__SP_PUT(wasm__f32_bits(bits & 0x7FFFFFFFu));
+                WASM__SP_PUSH(wasm__f32_bits(bits & 0x7FFFFFFFu));
                 WASM__NEXT();
             }
             WASM__CASE(0x8C): {
                 wasm_value_t a = WASM__SP_POP();
                 uint32_t bits;
                 memcpy(&bits, &a.of.f32, sizeof(bits));
-                WASM__SP_PUT(wasm__f32_bits(bits ^ 0x80000000u));
+                WASM__SP_PUSH(wasm__f32_bits(bits ^ 0x80000000u));
                 WASM__NEXT();
             }
             WASM__CASE(0x8D): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__ceil_f32(a.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__ceil_f32(a.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x8E): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__floor_f32(a.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__floor_f32(a.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x8F): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__trunc_f32(a.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__trunc_f32(a.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x90): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__nearest_f32(a.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__nearest_f32(a.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x91): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__sqrt_f32(a.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__sqrt_f32(a.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x92): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(a.of.f32 + b.of.f32));
+                WASM__SP_PUSH(wasm_f32(a.of.f32 + b.of.f32));
                 WASM__NEXT();
             }
             WASM__CASE(0x93): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(a.of.f32 - b.of.f32));
+                WASM__SP_PUSH(wasm_f32(a.of.f32 - b.of.f32));
                 WASM__NEXT();
             }
             WASM__CASE(0x94): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(a.of.f32 * b.of.f32));
+                WASM__SP_PUSH(wasm_f32(a.of.f32 * b.of.f32));
                 WASM__NEXT();
             }
             WASM__CASE(0x95): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(a.of.f32 / b.of.f32));
+                WASM__SP_PUSH(wasm_f32(a.of.f32 / b.of.f32));
                 WASM__NEXT();
             }
             WASM__CASE(0x96): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__f32_min(a.of.f32, b.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__f32_min(a.of.f32, b.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x97): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32(wasm__f32_max(a.of.f32, b.of.f32)));
+                WASM__SP_PUSH(wasm_f32(wasm__f32_max(a.of.f32, b.of.f32)));
                 WASM__NEXT();
             }
             WASM__CASE(0x98): {
@@ -23729,7 +23727,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 memcpy(&ab, &a.of.f32, 4);
                 memcpy(&bb, &b.of.f32, 4);
                 rb = (ab & 0x7FFFFFFFu) | (bb & 0x80000000u);
-                WASM__SP_PUT(wasm__f32_bits(rb));
+                WASM__SP_PUSH(wasm__f32_bits(rb));
                 WASM__NEXT();
             }
 
@@ -23738,69 +23736,69 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t a = WASM__SP_POP();
                 uint64_t bits;
                 memcpy(&bits, &a.of.f64, sizeof(bits));
-                WASM__SP_PUT(wasm__f64_bits(bits & UINT64_C(0x7FFFFFFFFFFFFFFF)));
+                WASM__SP_PUSH(wasm__f64_bits(bits & UINT64_C(0x7FFFFFFFFFFFFFFF)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9A): {
                 wasm_value_t a = WASM__SP_POP();
                 uint64_t bits;
                 memcpy(&bits, &a.of.f64, sizeof(bits));
-                WASM__SP_PUT(wasm__f64_bits(bits ^ UINT64_C(0x8000000000000000)));
+                WASM__SP_PUSH(wasm__f64_bits(bits ^ UINT64_C(0x8000000000000000)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9B): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__ceil_f64(a.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__ceil_f64(a.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9C): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__floor_f64(a.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__floor_f64(a.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9D): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__trunc_f64(a.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__trunc_f64(a.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9E): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__nearest_f64(a.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__nearest_f64(a.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0x9F): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__sqrt_f64(a.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__sqrt_f64(a.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0xA0): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(a.of.f64 + b.of.f64));
+                WASM__SP_PUSH(wasm_f64(a.of.f64 + b.of.f64));
                 WASM__NEXT();
             }
             WASM__CASE(0xA1): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(a.of.f64 - b.of.f64));
+                WASM__SP_PUSH(wasm_f64(a.of.f64 - b.of.f64));
                 WASM__NEXT();
             }
             WASM__CASE(0xA2): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(a.of.f64 * b.of.f64));
+                WASM__SP_PUSH(wasm_f64(a.of.f64 * b.of.f64));
                 WASM__NEXT();
             }
             WASM__CASE(0xA3): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(a.of.f64 / b.of.f64));
+                WASM__SP_PUSH(wasm_f64(a.of.f64 / b.of.f64));
                 WASM__NEXT();
             }
             WASM__CASE(0xA4): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__f64_min(a.of.f64, b.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__f64_min(a.of.f64, b.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0xA5): {
                 wasm_value_t b = WASM__SP_POP(), a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64(wasm__f64_max(a.of.f64, b.of.f64)));
+                WASM__SP_PUSH(wasm_f64(wasm__f64_max(a.of.f64, b.of.f64)));
                 WASM__NEXT();
             }
             WASM__CASE(0xA6): {
@@ -23809,14 +23807,14 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 memcpy(&ab, &a.of.f64, 8);
                 memcpy(&bb, &b.of.f64, 8);
                 rb = (ab & (uint64_t)0x7FFFFFFFFFFFFFFFull) | (bb & (uint64_t)0x8000000000000000ull);
-                WASM__SP_PUT(wasm__f64_bits(rb));
+                WASM__SP_PUSH(wasm__f64_bits(rb));
                 WASM__NEXT();
             }
 
             /* Conversions */
             WASM__CASE(0xA7): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i32((int32_t)a.of.i64));
+                WASM__SP_PUSH(wasm_i32((int32_t)a.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0xA8): {
@@ -23824,7 +23822,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i32_s((double)a.of.f32, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xA9): {
@@ -23832,7 +23830,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i32_u((double)a.of.f32, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xAA): {
@@ -23840,7 +23838,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i32_s(a.of.f64, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xAB): {
@@ -23848,17 +23846,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i32_u(a.of.f64, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xAC): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)a.of.i32));
+                WASM__SP_PUSH(wasm_i64((int64_t)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xAD): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_i64((int64_t)(uint32_t)a.of.i32));
+                WASM__SP_PUSH(wasm_i64((int64_t)(uint32_t)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xAE): {
@@ -23866,7 +23864,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i64_s((double)a.of.f32, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xAF): {
@@ -23874,7 +23872,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i64_u((double)a.of.f32, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xB0): {
@@ -23882,7 +23880,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i64_s(a.of.f64, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xB1): {
@@ -23890,57 +23888,57 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t value;
                 err = wasm__trunc_i64_u(a.of.f64, &value);
                 if (err != WASM_OK) goto cleanup;
-                WASM__SP_PUT(value);
+                WASM__SP_PUSH(value);
                 WASM__NEXT();
             }
             WASM__CASE(0xB2): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32((float)a.of.i32));
+                WASM__SP_PUSH(wasm_f32((float)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xB3): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32((float)(uint32_t)a.of.i32));
+                WASM__SP_PUSH(wasm_f32((float)(uint32_t)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xB4): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32((float)a.of.i64));
+                WASM__SP_PUSH(wasm_f32((float)a.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0xB5): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32((float)(uint64_t)a.of.i64));
+                WASM__SP_PUSH(wasm_f32((float)(uint64_t)a.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0xB6): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f32((float)a.of.f64));
+                WASM__SP_PUSH(wasm_f32((float)a.of.f64));
                 WASM__NEXT();
             }
             WASM__CASE(0xB7): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64((double)a.of.i32));
+                WASM__SP_PUSH(wasm_f64((double)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xB8): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64((double)(uint32_t)a.of.i32));
+                WASM__SP_PUSH(wasm_f64((double)(uint32_t)a.of.i32));
                 WASM__NEXT();
             }
             WASM__CASE(0xB9): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64((double)a.of.i64));
+                WASM__SP_PUSH(wasm_f64((double)a.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0xBA): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64((double)(uint64_t)a.of.i64));
+                WASM__SP_PUSH(wasm_f64((double)(uint64_t)a.of.i64));
                 WASM__NEXT();
             }
             WASM__CASE(0xBB): {
                 wasm_value_t a = WASM__SP_POP();
-                WASM__SP_PUT(wasm_f64((double)a.of.f32));
+                WASM__SP_PUSH(wasm_f64((double)a.of.f32));
                 WASM__NEXT();
             }
 
@@ -23949,26 +23947,26 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t a = WASM__SP_POP();
                 int32_t v;
                 memcpy(&v, &a.of.f32, 4);
-                WASM__SP_PUT(wasm_i32(v));
+                WASM__SP_PUSH(wasm_i32(v));
                 WASM__NEXT();
             }
             WASM__CASE(0xBD): {
                 wasm_value_t a = WASM__SP_POP();
                 int64_t v;
                 memcpy(&v, &a.of.f64, 8);
-                WASM__SP_PUT(wasm_i64(v));
+                WASM__SP_PUSH(wasm_i64(v));
                 WASM__NEXT();
             }
             WASM__CASE(0xBE): {
                 wasm_value_t a = WASM__SP_POP();
                 a.type = WASM_TYPE_F32;
-                WASM__SP_PUT(a);
+                WASM__SP_PUSH(a);
                 WASM__NEXT();
             }
             WASM__CASE(0xBF): {
                 wasm_value_t a = WASM__SP_POP();
                 a.type = WASM_TYPE_F64;
-                WASM__SP_PUT(a);
+                WASM__SP_PUSH(a);
                 WASM__NEXT();
             }
 
@@ -23977,35 +23975,35 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t a = WASM__SP_POP();
                 uint32_t value = (uint32_t)a.of.i32 & 0xFFu;
                 if (value & 0x80u) value |= 0xFFFFFF00u;
-                WASM__SP_PUT(wasm_i32((int32_t)value));
+                WASM__SP_PUSH(wasm_i32((int32_t)value));
                 WASM__NEXT();
             }
             WASM__CASE(0xC1): {
                 wasm_value_t a = WASM__SP_POP();
                 uint32_t value = (uint32_t)a.of.i32 & 0xFFFFu;
                 if (value & 0x8000u) value |= 0xFFFF0000u;
-                WASM__SP_PUT(wasm_i32((int32_t)value));
+                WASM__SP_PUSH(wasm_i32((int32_t)value));
                 WASM__NEXT();
             }
             WASM__CASE(0xC2): {
                 wasm_value_t a = WASM__SP_POP();
                 uint64_t value = (uint64_t)a.of.i64 & 0xFFu;
                 if (value & 0x80u) value |= 0xFFFFFFFFFFFFFF00ull;
-                WASM__SP_PUT(wasm_i64((int64_t)value));
+                WASM__SP_PUSH(wasm_i64((int64_t)value));
                 WASM__NEXT();
             }
             WASM__CASE(0xC3): {
                 wasm_value_t a = WASM__SP_POP();
                 uint64_t value = (uint64_t)a.of.i64 & 0xFFFFu;
                 if (value & 0x8000u) value |= 0xFFFFFFFFFFFF0000ull;
-                WASM__SP_PUT(wasm_i64((int64_t)value));
+                WASM__SP_PUSH(wasm_i64((int64_t)value));
                 WASM__NEXT();
             }
             WASM__CASE(0xC4): {
                 wasm_value_t a = WASM__SP_POP();
                 uint64_t value = (uint64_t)a.of.i64 & 0xFFFFFFFFull;
                 if (value & 0x80000000ull) value |= 0xFFFFFFFF00000000ull;
-                WASM__SP_PUT(wasm_i64((int64_t)value));
+                WASM__SP_PUSH(wasm_i64((int64_t)value));
                 WASM__NEXT();
             }
 
@@ -24169,7 +24167,6 @@ cleanup:
 
 #undef WASM__SP_TOP
 #undef WASM__SP_POP
-#undef WASM__SP_PUT
 #undef WASM__SP_PUSH
 #undef WASM__CALL_OUT
 #undef WASM__MEMORY_PTR

@@ -64,6 +64,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
+    if (func->max_stack > rt->max_stack - rt->sp) {
+        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)rt->max_stack);
+        return WASM_ERR_STACK_OVERFLOW;
+    }
     max_labels = func->max_label_depth ? func->max_label_depth : 1;
     if (max_labels > rt->max_labels) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,

@@ -7418,6 +7418,44 @@ WL_TEST(test_runtime_config_limits_operand_stack_validation) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_runtime_operand_stack_overflow_traps_at_call) {
+    /* rec(n) keeps one value on the stack per pending call and returns n + 1. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x02,
+        0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x65, 0x63, 0x00, 0x00, 0x0a, 0x17, 0x01, 0x15, 0x00, 0x41, 0x01,
+        0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 0x00, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x00, 0x0b, 0x6a, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 16;
+    cfg.max_call_depth = 1000;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "rec", &arg, 1, &result, 1));
+    WL_CHECK(t, result.of.i32 == 11);
+    arg = wasm_i32(100);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_ERR_STACK_OVERFLOW);
+    WL_CHECK(t, rt.sp == 0 && rt.call_frame_sp == 0);
+    arg = wasm_i32(5);
+    WASM_CHECK_OK(t, wasm_call(m, "rec", &arg, 1, &result, 1));
+    WL_CHECK(t, result.of.i32 == 6);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_runtime_config_limits_label_depth_validation) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -17457,6 +17495,7 @@ int main(void) {
         { "allocator: every failing allocation unwinds without leaks", test_allocation_failures_unwind_without_leaks },
         { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
         { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
+        { "runtime: operand stack overflow traps at the call that needs the space", test_runtime_operand_stack_overflow_traps_at_call },
         { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },
         { "runtime config: lazy validation defers body checks until first call", test_lazy_validation_defers_body_errors_until_first_call },
         { "runtime config: lazy validation still validates startup bodies at load", test_lazy_validation_still_runs_startup_bodies_at_load },

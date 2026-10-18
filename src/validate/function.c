@@ -676,6 +676,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                      &branch_types,
                                                      &branch_reftypes,
                                                      &branch_count);
+                    if (entry_height + branch_count > v.max_sp) v.max_sp = entry_height + branch_count;
 
                     switch (clause.kind) {
                         case 0x00: {
@@ -1431,7 +1432,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                     (unsigned)ft->num_results);
         goto done;
     }
-    err = wasm__translate_function(mod, func_idx, heights);
+    err = wasm__translate_function(mod, func_idx, heights, v.max_sp);
     if (err != WASM_OK) {
         if (err == WASM_ERR_OOM)
             WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate translated code");

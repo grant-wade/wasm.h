@@ -526,7 +526,8 @@ static void wasm__x_try_tables(wasm__translator_t* t) {
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights) {
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
+                                                   uint32_t max_height) {
     wasm__translator_t t;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_error_t err;
@@ -548,6 +549,7 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     func->op_offsets = t.offsets;
     func->num_op_offsets = t.num_offsets;
     func->max_handlers = t.max_handlers;
+    func->max_stack = max_height;
     t.ops = NULL;
     t.offsets = NULL;
     wasm__x_free(&t);
@@ -575,6 +577,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm
     dst->op_offsets = offsets;
     dst->num_op_offsets = src->num_op_offsets;
     dst->max_handlers = src->max_handlers;
+    dst->max_stack = src->max_stack;
     return WASM_OK;
 }
 
@@ -586,6 +589,7 @@ WASM_PRIVATE void wasm__free_translation(const wasm_allocator_t* a, wasm_func_t*
     func->num_ops = 0;
     func->num_op_offsets = 0;
     func->max_handlers = 0;
+    func->max_stack = 0;
 }
 
 WASM_PRIVATE uint32_t wasm__translated_offset(const wasm_func_t* func, const uint32_t* op) {

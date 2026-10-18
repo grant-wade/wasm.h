@@ -35,8 +35,10 @@ enum {
 #define WASM__CLAUSE_CATCH_ALL 1u
 #define WASM__CLAUSE_DELEGATE 2u
 
-/* heights[i] is the operand stack height before the instruction at byte offset i. */
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights);
+/* heights[i] is the operand stack height before the instruction at byte offset i, and max_height the
+ * greatest height the body reaches. */
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
+                                                   uint32_t max_height);
 
 WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm_func_t* dst, const wasm_func_t* src);
 

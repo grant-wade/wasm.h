@@ -15,6 +15,7 @@ struct wasm_func_t {
     uint32_t* op_offsets; /* for each translated instruction, its index in ops and bytecode offset */
     uint32_t num_op_offsets;
     uint32_t max_handlers; /* deepest nesting of try and try_table blocks */
+    uint32_t max_stack;    /* operand stack values the body needs at most */
     uint32_t max_label_depth;
     uint32_t funcref_id;
     int is_declared_ref;

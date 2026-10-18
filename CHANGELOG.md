@@ -52,6 +52,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
 - Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
+- A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 
 ### Fixed
 
