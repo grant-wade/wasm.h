@@ -504,7 +504,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             if (subop == 0x1A)
                 err = wasm__anyref_from_externref_value(rt, value, &converted);
             else
-                err = wasm__externref_from_anyref_value(rt, mod, value, &converted);
+                err = wasm__externref_from_anyref_value(rt, value, &converted);
             if (err != WASM_OK) goto cleanup;
             wasm__push_value(rt, &converted);
             break;

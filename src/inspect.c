@@ -107,7 +107,9 @@ wasm_error_t wasm_struct_get_field(const wasm_module_t* mod, wasm_value_t struct
         return WASM_ERR_MALFORMED;
     }
 
-    return wasm__gc_struct_get_field((const wasm_gc_struct_t*)header, type, field_idx, 0, out_val);
+    err = wasm__gc_struct_get_field((const wasm_gc_struct_t*)header, type, field_idx, 0, out_val);
+    if (err == WASM_OK) *out_val = wasm__anyref_to_host(mod->rt, *out_val);
+    return err;
 }
 
 wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
@@ -137,7 +139,8 @@ wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
                           "struct field %u is immutable", (unsigned)field_idx);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    err = wasm__anyref_from_host(mod->rt, &val);
+    if (err != WASM_OK) return err;
     return wasm__gc_struct_set_field((wasm_gc_struct_t*)header, type, field_idx, val);
 }
 
@@ -181,7 +184,9 @@ wasm_error_t wasm_array_get_elem(const wasm_module_t* mod, wasm_value_t array_re
         return WASM_ERR_MALFORMED;
     }
 
-    return wasm__gc_array_get((const wasm_gc_array_t*)header, type, index, 0, out_val);
+    err = wasm__gc_array_get((const wasm_gc_array_t*)header, type, index, 0, out_val);
+    if (err == WASM_OK) *out_val = wasm__anyref_to_host(mod->rt, *out_val);
+    return err;
 }
 
 wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
@@ -204,7 +209,8 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "array element is immutable");
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    err = wasm__anyref_from_host(mod->rt, &val);
+    if (err != WASM_OK) return err;
     return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
 }
 
@@ -365,7 +371,7 @@ static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_
         return WASM_ERR_OOM;
     }
     memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
-    return WASM_OK;
+    return wasm__values_from_host(mod->rt, *out_copy, count);
 }
 
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
@@ -395,7 +401,10 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
     }
 
     err = wasm__copy_host_values(mod, field_values, num_fields, &values);
-    if (err != WASM_OK) return err;
+    if (err != WASM_OK) {
+        wasm__free(&mod->rt->allocator, values);
+        return err;
+    }
     wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
     wasm__gc_pop_root(mod->rt, &root);
@@ -435,7 +444,10 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
     }
 
     err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
-    if (err != WASM_OK) return err;
+    if (err != WASM_OK) {
+        wasm__free(&mod->rt->allocator, values);
+        return err;
+    }
     wasm__gc_push_root(mod->rt, &root, &values, &num_elems);
     object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
     wasm__gc_pop_root(mod->rt, &root);

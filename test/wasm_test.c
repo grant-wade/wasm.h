@@ -15028,6 +15028,117 @@ WL_TEST(test_gc_host_externrefs_round_trip_through_anyref) {
     wasm_destroy(&rt);
 }
 
+#define WASM_TEST_HEAP_ARENA_SIZE (128u * 1024u)
+
+static int g_wasm_test_heap_arena_used[2];
+
+static uint8_t* wasm_test_heap_arena(int index) {
+    static uint8_t raw[2u * WASM_TEST_HEAP_ARENA_SIZE + 16u];
+    uintptr_t base = ((uintptr_t)raw + 15u) & ~(uintptr_t)15u;
+
+    return (uint8_t*)base + (size_t)index * WASM_TEST_HEAP_ARENA_SIZE;
+}
+
+static void* wasm_test_heap_alloc(void* ctx, size_t size, size_t align) {
+    int i;
+
+    if (align != 16u || size < 4096u || size > WASM_TEST_HEAP_ARENA_SIZE) return wasm_test_alloc(ctx, size, align);
+    for (i = 0; i < 2; i++) {
+        if (!g_wasm_test_heap_arena_used[i]) {
+            g_wasm_test_heap_arena_used[i] = 1;
+            return wasm_test_heap_arena(i);
+        }
+    }
+    return NULL;
+}
+
+static void* wasm_test_heap_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
+    if (p == wasm_test_heap_arena(0) || p == wasm_test_heap_arena(1)) return NULL;
+    return wasm_test_resize(ctx, p, old_size, new_size, align);
+}
+
+static void wasm_test_heap_free(void* ctx, void* p, size_t size, size_t align) {
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        if (p == wasm_test_heap_arena(i)) {
+            g_wasm_test_heap_arena_used[i] = 0;
+            return;
+        }
+    }
+    wasm_test_free(ctx, p, size, align);
+}
+
+WL_TEST(test_gc_host_refs_inside_a_later_heap_stay_host_values) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x27, 0x09, 0x5f, 0x01, 0x7e, 0x01, 0x60, 0x02, 0x6f,
+        0x6e, 0x00, 0x60, 0x00, 0x01, 0x6f, 0x60, 0x00, 0x01, 0x6e, 0x60, 0x01, 0x6e, 0x01, 0x7f, 0x60, 0x00, 0x01,
+        0x7f, 0x60, 0x01, 0x7e, 0x00, 0x60, 0x00, 0x01, 0x7e, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x09, 0x08, 0x01, 0x02,
+        0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x06, 0x11, 0x03, 0x6e, 0x01, 0xd0, 0x6e, 0x0b, 0x6e, 0x01, 0xd0, 0x6e,
+        0x0b, 0x63, 0x00, 0x01, 0xd0, 0x00, 0x0b, 0x07, 0x31, 0x07, 0x04, 0x6b, 0x65, 0x65, 0x70, 0x00, 0x00, 0x03,
+        0x65, 0x78, 0x74, 0x00, 0x01, 0x03, 0x61, 0x6e, 0x79, 0x00, 0x02, 0x05, 0x74, 0x65, 0x73, 0x74, 0x73, 0x00,
+        0x04, 0x03, 0x70, 0x69, 0x6e, 0x00, 0x05, 0x04, 0x6c, 0x69, 0x76, 0x65, 0x00, 0x06, 0x05, 0x63, 0x68, 0x75,
+        0x72, 0x6e, 0x00, 0x07, 0x0a, 0x75, 0x08, 0x0c, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0x24, 0x00, 0x20, 0x01, 0x24,
+        0x01, 0x0b, 0x06, 0x00, 0x23, 0x00, 0xfb, 0x1b, 0x0b, 0x04, 0x00, 0x23, 0x01, 0x0b, 0x22, 0x00, 0x20, 0x00,
+        0xfb, 0x15, 0x6e, 0x20, 0x00, 0xfb, 0x15, 0x6d, 0x41, 0x01, 0x74, 0x72, 0x20, 0x00, 0xfb, 0x15, 0x6b, 0x41,
+        0x02, 0x74, 0x20, 0x00, 0xfb, 0x15, 0x6c, 0x41, 0x03, 0x74, 0x72, 0x72, 0x0b, 0x0e, 0x00, 0x23, 0x00, 0x10,
+        0x03, 0x23, 0x01, 0x10, 0x03, 0x41, 0x04, 0x74, 0x72, 0x0b, 0x09, 0x00, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x24,
+        0x02, 0x0b, 0x08, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x0b, 0x15, 0x00, 0x03, 0x40, 0x20, 0x00, 0xad,
+        0xfb, 0x00, 0x00, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x0b,
+    };
+    static const wasm_allocator_t allocator = { NULL, wasm_test_heap_alloc, wasm_test_heap_resize,
+                                                wasm_test_heap_free };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m = NULL;
+    wasm_value_t args[2];
+    wasm_value_t result;
+    uintptr_t ext_bits;
+    uintptr_t any_bits;
+    int round;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    config.max_gc_heap_bytes = WASM_TEST_HEAP_ARENA_SIZE;
+    WASM_CHECK_OK(t, wasm__runtime_init(&rt, &allocator, &config));
+    WL_CHECK(t, rt.gc_heap == wasm_test_heap_arena(0));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        args[0] = wasm_i64(7);
+        WASM_CHECK_OK(t, wasm_call(m, "pin", args, 1, NULL, 0));
+        ext_bits = (uintptr_t)wasm_test_heap_arena(1);
+        any_bits = ext_bits + 64u;
+        args[0] = wasm_externref(ext_bits);
+        args[1] = wasm_externref(any_bits);
+        args[1].type = WASM_TYPE_ANYREF;
+        WASM_CHECK_OK(t, wasm_call(m, "keep", args, 2, NULL, 0));
+        for (round = 0; round < 6; round++) {
+            if (round % 2 == 0) {
+                wasm_gc_collect(&rt);
+            } else {
+                args[0] = wasm_i32(3000);
+                WASM_CHECK_OK(t, wasm_call(m, "churn", args, 1, NULL, 0));
+            }
+            WL_CHECK(t, rt.gc_heap == wasm_test_heap_arena(0) || rt.gc_heap == wasm_test_heap_arena(1));
+            WASM_CHECK_OK(t, wasm_call(m, "ext", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == ext_bits,
+                         "round %d: externref came back as %p", round, (void*)result.of.externref);
+            WASM_CHECK_OK(t, wasm_call(m, "any", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF && result.of.gc_ref == any_bits,
+                         "round %d: anyref came back as %p", round, (void*)result.of.gc_ref);
+            WASM_CHECK_OK(t, wasm_call(m, "tests", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.of.i32 == 0x11, "round %d: expected only ref.test any to succeed, mask 0x%x",
+                         round, (unsigned)result.of.i32);
+            WASM_CHECK_OK(t, wasm_call(m, "live", NULL, 0, &result, 1));
+            WASM_CHECK_I64(t, result.of.i64, 7);
+        }
+    }
+    wasm_module_free(m);
+    wasm__runtime_destroy(&rt);
+    WL_CHECK(t, !g_wasm_test_heap_arena_used[0] && !g_wasm_test_heap_arena_used[1]);
+}
+
 static const uint8_t wasm_test_init_pair_150000_bytes[] = {
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x04, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
         0x00, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x04, 0x03, 0x02,
@@ -17558,6 +17669,7 @@ int main(void) {
         { "gc: the heap grows to fit live data and keeps objects intact", test_gc_heap_grows_with_live_data },
         { "gc: heap growth stops at max_gc_heap_bytes with WASM_ERR_OOM", test_gc_heap_growth_respects_max_gc_heap_bytes },
         { "gc: host externrefs round-trip exactly through anyref and are never i31 or eq", test_gc_host_externrefs_round_trip_through_anyref },
+        { "gc: host references whose bits fall inside a later GC heap stay host values", test_gc_host_refs_inside_a_later_heap_stay_host_values },
         { "gc: init expressions keep their operands, globals, tables, and segments alive", test_gc_init_expressions_keep_their_operands_alive },
         { "gc: wasm_struct_new and wasm_array_new keep their inputs alive", test_gc_host_constructors_keep_their_inputs_alive },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },

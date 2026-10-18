@@ -7,6 +7,7 @@
 #include "../internal/alloc.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
+#include "../types/references.h"
 #include "../validate/function.h"
 #include "../values.h"
 #include <string.h>
@@ -152,6 +153,8 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                  ? args[i]
                                  : wasm__retag_value_for_declared_type(cf->ft->params[i], reftype, args[i]);
 
+        err = wasm__anyref_from_host(rt, &value);
+        if (err != WASM_OK) return err;
         wasm__slot_from_value(&cf->locals[cf->func->local_slots[i]], &value);
     }
     return WASM_OK;
@@ -187,7 +190,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     memset(cf, 0, sizeof(*cf));
 
     if (is_root) {
-        for (i = 0; i < result_count; i++) results_dst[i] = result_values[i];
+        for (i = 0; i < result_count; i++) results_dst[i] = wasm__anyref_to_host(rt, result_values[i]);
     } else {
         rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], result_values, result_count);
     }

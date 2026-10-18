@@ -194,7 +194,9 @@ static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
     if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_value_t));
     if (call_args && call_results) {
         wasm__values_from_slots(rt, ft->params, ft->param_reftypes, ft->num_params, args, call_args);
+        wasm__values_to_host(rt, call_args, ft->num_params);
         err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
+        if (err == WASM_OK) err = wasm__values_from_host(rt, call_results, ft->num_results);
         if (err == WASM_OK && wasm__valtypes_slots(ft->results, ft->num_results) > rt->max_stack - rt->sp)
             err = WASM_ERR_STACK_OVERFLOW;
         if (err == WASM_OK) rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], call_results, ft->num_results);
@@ -1807,6 +1809,7 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
                                         wasm_value_t* results, uint32_t num_results) {
     const wasm_functype_t* root_type;
     uint32_t expected = 0;
+    uint32_t slots;
     uint32_t i;
 
     if (rt->suspended == WASM_OK || rt->call_frame_sp == 0) {
@@ -1840,7 +1843,14 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
         return WASM_ERR_STACK_OVERFLOW;
     }
-    rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], host_results, expected);
+    for (i = 0, slots = 0; i < expected; i++) {
+        wasm_value_t value = host_results[i];
+        wasm_error_t err = wasm__anyref_from_host(rt, &value);
+
+        if (err != WASM_OK) return err;
+        slots += wasm__slot_from_value(&rt->stack[rt->sp + slots], &value);
+    }
+    rt->sp += slots;
     rt->call_frames[0].results_dst = results;
     rt->suspended = WASM_OK;
     rt->yield_module = NULL;

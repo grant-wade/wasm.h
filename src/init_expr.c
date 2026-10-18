@@ -501,7 +501,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                         err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_ANYREF, &value);
                         if (err != WASM_OK) break;
-                        err = wasm__externref_from_anyref_value(mod->rt, mod, value, &extern_value);
+                        err = wasm__externref_from_anyref_value(mod->rt, value, &extern_value);
                         if (err != WASM_OK) break;
                         err = wasm__init_expr_stack_push(&stack, extern_value);
                         break;

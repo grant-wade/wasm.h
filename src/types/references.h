@@ -24,14 +24,23 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
                                                            const wasm_value_t* value);
 
 WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
-                                                      wasm_module_t* mod,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value);
 
-/* A host externref keeps its bits unless they read as an i31, a heap object, or a box; those are boxed. */
+/* Boxes every non-null externref that does not wrap an anyref. */
 WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value);
+
+/* Boxes a host anyref that is not null, an i31, a heap object, or a box. */
+WASM_PRIVATE wasm_error_t wasm__anyref_from_host(wasm_runtime_t* rt, wasm_value_t* value);
+
+WASM_PRIVATE wasm_error_t wasm__values_from_host(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
+
+/* Returns the host value a boxed host anyref wraps, or value itself. */
+WASM_PRIVATE wasm_value_t wasm__anyref_to_host(const wasm_runtime_t* rt, wasm_value_t value);
+
+WASM_PRIVATE void wasm__values_to_host(const wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
 
 WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
                                        const wasm_value_t* value,

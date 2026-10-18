@@ -225,7 +225,7 @@ Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_tabl
 
 ## GC references
 
-The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A GC reference, an `externref` or `anyref` made by a conversion instruction, or an `exnref` held only by the host is valid until the next collection. Keep one longer with `wasm_ref_hold`, which returns a slot the collector keeps current, and read the reference from that slot when using it:
+The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A host value that reaches Wasm as an `anyref`, directly or through `any.convert_extern`, comes back to the host with its original bits. A GC reference, an `externref` made by `extern.convert_any`, or an `exnref` held only by the host is valid until the next collection. Keep one longer with `wasm_ref_hold`, which returns a slot the collector keeps current, and read the reference from that slot when using it:
 
 ```c
 wasm_value_t* held = wasm_ref_hold(rt, point);

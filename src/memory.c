@@ -245,7 +245,7 @@ wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64
         WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
         return WASM_ERR_OUT_OF_BOUNDS;
     }
-    *out_val = table->elems[index];
+    *out_val = wasm__anyref_to_host(mod->rt, table->elems[index]);
     return WASM_OK;
 }
 
@@ -261,6 +261,7 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     table->elems[index] = val;
     return WASM_OK;
 }
@@ -270,6 +271,7 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     uint64_t old_size;
 
     if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    if (wasm__anyref_from_host(mod->rt, &init) != WASM_OK) return -1;
     old_size = wasm__table_grow(mod->rt, table, delta, init);
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;
 }
@@ -313,7 +315,7 @@ wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx
     wasm_global_t* global = wasm__api_global(mod, global_idx);
 
     if (!global || !out_val) return WASM_ERR_MALFORMED;
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -329,6 +331,7 @@ wasm_error_t wasm_global_set_index(wasm_module_t* mod, uint32_t global_idx, wasm
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global %u type mismatch", (unsigned)global_idx);
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }
@@ -350,7 +353,7 @@ wasm_error_t wasm_global_get(const wasm_module_t* mod, const char* name, wasm_va
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -383,7 +386,7 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
                           "global '%s' type mismatch", name);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }

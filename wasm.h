@@ -3891,14 +3891,23 @@ WASM_PRIVATE const wasm_gc_header_t* wasm__runtime_get_gc_object(const wasm_modu
                                                            const wasm_value_t* value);
 
 WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
-                                                      wasm_module_t* mod,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value);
 
-/* A host externref keeps its bits unless they read as an i31, a heap object, or a box; those are boxed. */
+/* Boxes every non-null externref that does not wrap an anyref. */
 WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value);
+
+/* Boxes a host anyref that is not null, an i31, a heap object, or a box. */
+WASM_PRIVATE wasm_error_t wasm__anyref_from_host(wasm_runtime_t* rt, wasm_value_t* value);
+
+WASM_PRIVATE wasm_error_t wasm__values_from_host(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
+
+/* Returns the host value a boxed host anyref wraps, or value itself. */
+WASM_PRIVATE wasm_value_t wasm__anyref_to_host(const wasm_runtime_t* rt, wasm_value_t value);
+
+WASM_PRIVATE void wasm__values_to_host(const wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
 
 WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
                                        const wasm_value_t* value,
@@ -5029,13 +5038,6 @@ static wasm__externref_box_t* wasm__find_externref_box(const wasm_runtime_t* rt,
     return (wasm__externref_box_t*)handle;
 }
 
-static int wasm__is_host_anyref_value(const wasm_module_t* mod,
-                                      const wasm_value_t* value) {
-    if (!value || value->type != WASM_TYPE_ANYREF || value->of.gc_ref == (uintptr_t)0) return 0;
-    if ((value->of.gc_ref & WASM__GC_I31_TAG) != 0) return 0;
-    return wasm__runtime_get_gc_object(mod, value) == NULL;
-}
-
 static wasm_error_t wasm__new_externref_box(wasm_runtime_t* rt, wasm_value_t value, wasm__externref_box_t** out_box) {
     wasm__externref_box_t* box;
 
@@ -5052,8 +5054,53 @@ static wasm_error_t wasm__new_externref_box(wasm_runtime_t* rt, wasm_value_t val
     return WASM_OK;
 }
 
+static int wasm__is_unboxed_gc_ref(const wasm_runtime_t* rt, const wasm_value_t* value) {
+    if (!wasm__uses_gc_ref_storage(value->type) || value->of.gc_ref == (uintptr_t)0) return 1;
+    if ((value->of.gc_ref & WASM__GC_I31_TAG) != 0) return 1;
+    return wasm__gc_ptr_in_heap(rt, (const void*)value->of.gc_ref);
+}
+
+WASM_PRIVATE wasm_error_t wasm__anyref_from_host(wasm_runtime_t* rt, wasm_value_t* value) {
+    wasm__externref_box_t* box;
+    wasm_error_t err;
+
+    if (wasm__is_unboxed_gc_ref(rt, value) || wasm__find_externref_box(rt, value->of.gc_ref)) return WASM_OK;
+    err = wasm__new_externref_box(rt, wasm_externref(value->of.gc_ref), &box);
+    if (err != WASM_OK) {
+        WASM__SET_ERR(rt, err, "%s", "out of memory boxing a host anyref");
+        return err;
+    }
+    value->of.gc_ref = (uintptr_t)box;
+    return WASM_OK;
+}
+
+WASM_PRIVATE wasm_error_t wasm__values_from_host(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        wasm_error_t err = wasm__anyref_from_host(rt, &values[i]);
+
+        if (err != WASM_OK) return err;
+    }
+    return WASM_OK;
+}
+
+WASM_PRIVATE wasm_value_t wasm__anyref_to_host(const wasm_runtime_t* rt, wasm_value_t value) {
+    wasm__externref_box_t* box;
+
+    if (wasm__is_unboxed_gc_ref(rt, &value)) return value;
+    box = wasm__find_externref_box(rt, value.of.gc_ref);
+    if (box && wasm__uses_externref_storage(box->value.type)) value.of.gc_ref = box->value.of.externref;
+    return value;
+}
+
+WASM_PRIVATE void wasm__values_to_host(const wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
+    uint32_t i;
+
+    for (i = 0; i < count; i++) values[i] = wasm__anyref_to_host(rt, values[i]);
+}
+
 WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
-                                                      wasm_module_t* mod,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value) {
     wasm__externref_box_t* box;
@@ -5069,8 +5116,7 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
         *out_value = box->value;
         return WASM_OK;
     }
-    if (wasm__uses_externref_storage(value.type) || wasm__is_host_anyref_value(mod, &value)) {
-        value.type = WASM_TYPE_EXTERNREF;
+    if (wasm__uses_externref_storage(value.type)) {
         *out_value = value;
         return WASM_OK;
     }
@@ -5096,12 +5142,6 @@ WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
         *out_value = box->value;
         return WASM_OK;
     }
-    value.type = WASM_TYPE_ANYREF;
-    if (!box && (value.of.gc_ref & WASM__GC_I31_TAG) == 0 && !wasm__gc_ptr_in_heap(rt, (const void*)value.of.gc_ref)) {
-        *out_value = value;
-        return WASM_OK;
-    }
-
     value.type = WASM_TYPE_EXTERNREF;
     err = wasm__new_externref_box(rt, value, &box);
     if (err != WASM_OK) return err;
@@ -11398,7 +11438,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                         err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_ANYREF, &value);
                         if (err != WASM_OK) break;
-                        err = wasm__externref_from_anyref_value(mod->rt, mod, value, &extern_value);
+                        err = wasm__externref_from_anyref_value(mod->rt, value, &extern_value);
                         if (err != WASM_OK) break;
                         err = wasm__init_expr_stack_push(&stack, extern_value);
                         break;
@@ -19691,6 +19731,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
 
 
 
+
 #include <string.h>
 
 WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
@@ -19834,6 +19875,8 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                  ? args[i]
                                  : wasm__retag_value_for_declared_type(cf->ft->params[i], reftype, args[i]);
 
+        err = wasm__anyref_from_host(rt, &value);
+        if (err != WASM_OK) return err;
         wasm__slot_from_value(&cf->locals[cf->func->local_slots[i]], &value);
     }
     return WASM_OK;
@@ -19869,7 +19912,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     memset(cf, 0, sizeof(*cf));
 
     if (is_root) {
-        for (i = 0; i < result_count; i++) results_dst[i] = result_values[i];
+        for (i = 0; i < result_count; i++) results_dst[i] = wasm__anyref_to_host(rt, result_values[i]);
     } else {
         rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], result_values, result_count);
     }
@@ -21352,7 +21395,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             if (subop == 0x1A)
                 err = wasm__anyref_from_externref_value(rt, value, &converted);
             else
-                err = wasm__externref_from_anyref_value(rt, mod, value, &converted);
+                err = wasm__externref_from_anyref_value(rt, value, &converted);
             if (err != WASM_OK) goto cleanup;
             wasm__push_value(rt, &converted);
             break;
@@ -23018,7 +23061,9 @@ static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
     if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_value_t));
     if (call_args && call_results) {
         wasm__values_from_slots(rt, ft->params, ft->param_reftypes, ft->num_params, args, call_args);
+        wasm__values_to_host(rt, call_args, ft->num_params);
         err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
+        if (err == WASM_OK) err = wasm__values_from_host(rt, call_results, ft->num_results);
         if (err == WASM_OK && wasm__valtypes_slots(ft->results, ft->num_results) > rt->max_stack - rt->sp)
             err = WASM_ERR_STACK_OVERFLOW;
         if (err == WASM_OK) rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], call_results, ft->num_results);
@@ -24631,6 +24676,7 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
                                         wasm_value_t* results, uint32_t num_results) {
     const wasm_functype_t* root_type;
     uint32_t expected = 0;
+    uint32_t slots;
     uint32_t i;
 
     if (rt->suspended == WASM_OK || rt->call_frame_sp == 0) {
@@ -24664,7 +24710,14 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
         return WASM_ERR_STACK_OVERFLOW;
     }
-    rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], host_results, expected);
+    for (i = 0, slots = 0; i < expected; i++) {
+        wasm_value_t value = host_results[i];
+        wasm_error_t err = wasm__anyref_from_host(rt, &value);
+
+        if (err != WASM_OK) return err;
+        slots += wasm__slot_from_value(&rt->stack[rt->sp + slots], &value);
+    }
+    rt->sp += slots;
     rt->call_frames[0].results_dst = results;
     rt->suspended = WASM_OK;
     rt->yield_module = NULL;
@@ -30108,7 +30161,7 @@ wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64
         WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
         return WASM_ERR_OUT_OF_BOUNDS;
     }
-    *out_val = table->elems[index];
+    *out_val = wasm__anyref_to_host(mod->rt, table->elems[index]);
     return WASM_OK;
 }
 
@@ -30124,6 +30177,7 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     table->elems[index] = val;
     return WASM_OK;
 }
@@ -30133,6 +30187,7 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     uint64_t old_size;
 
     if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    if (wasm__anyref_from_host(mod->rt, &init) != WASM_OK) return -1;
     old_size = wasm__table_grow(mod->rt, table, delta, init);
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;
 }
@@ -30176,7 +30231,7 @@ wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx
     wasm_global_t* global = wasm__api_global(mod, global_idx);
 
     if (!global || !out_val) return WASM_ERR_MALFORMED;
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -30192,6 +30247,7 @@ wasm_error_t wasm_global_set_index(wasm_module_t* mod, uint32_t global_idx, wasm
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global %u type mismatch", (unsigned)global_idx);
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }
@@ -30213,7 +30269,7 @@ wasm_error_t wasm_global_get(const wasm_module_t* mod, const char* name, wasm_va
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -30246,7 +30302,7 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
                           "global '%s' type mismatch", name);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }
@@ -30620,7 +30676,9 @@ wasm_error_t wasm_struct_get_field(const wasm_module_t* mod, wasm_value_t struct
         return WASM_ERR_MALFORMED;
     }
 
-    return wasm__gc_struct_get_field((const wasm_gc_struct_t*)header, type, field_idx, 0, out_val);
+    err = wasm__gc_struct_get_field((const wasm_gc_struct_t*)header, type, field_idx, 0, out_val);
+    if (err == WASM_OK) *out_val = wasm__anyref_to_host(mod->rt, *out_val);
+    return err;
 }
 
 wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
@@ -30650,7 +30708,8 @@ wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
                           "struct field %u is immutable", (unsigned)field_idx);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    err = wasm__anyref_from_host(mod->rt, &val);
+    if (err != WASM_OK) return err;
     return wasm__gc_struct_set_field((wasm_gc_struct_t*)header, type, field_idx, val);
 }
 
@@ -30694,7 +30753,9 @@ wasm_error_t wasm_array_get_elem(const wasm_module_t* mod, wasm_value_t array_re
         return WASM_ERR_MALFORMED;
     }
 
-    return wasm__gc_array_get((const wasm_gc_array_t*)header, type, index, 0, out_val);
+    err = wasm__gc_array_get((const wasm_gc_array_t*)header, type, index, 0, out_val);
+    if (err == WASM_OK) *out_val = wasm__anyref_to_host(mod->rt, *out_val);
+    return err;
 }
 
 wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
@@ -30717,7 +30778,8 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "array element is immutable");
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    err = wasm__anyref_from_host(mod->rt, &val);
+    if (err != WASM_OK) return err;
     return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
 }
 
@@ -30878,7 +30940,7 @@ static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_
         return WASM_ERR_OOM;
     }
     memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
-    return WASM_OK;
+    return wasm__values_from_host(mod->rt, *out_copy, count);
 }
 
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
@@ -30908,7 +30970,10 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
     }
 
     err = wasm__copy_host_values(mod, field_values, num_fields, &values);
-    if (err != WASM_OK) return err;
+    if (err != WASM_OK) {
+        wasm__free(&mod->rt->allocator, values);
+        return err;
+    }
     wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
     wasm__gc_pop_root(mod->rt, &root);
@@ -30948,7 +31013,10 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
     }
 
     err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
-    if (err != WASM_OK) return err;
+    if (err != WASM_OK) {
+        wasm__free(&mod->rt->allocator, values);
+        return err;
+    }
     wasm__gc_push_root(mod->rt, &root, &values, &num_elems);
     object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
     wasm__gc_pop_root(mod->rt, &root);
