@@ -13570,6 +13570,74 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_gc_collect_marks_deep_object_chains_iteratively) {
+    enum { CHAIN_LENGTH = 250000 };
+    wasm_runtime_t rt;
+    wasm_module_t mod;
+    wasm_comptype_t types[1];
+    wasm_fieldtype_t fields[1];
+    wasm_global_t globals[1];
+    wasm_value_t head;
+    wasm_gc_header_t* object;
+    size_t object_size = 0;
+    uint32_t i;
+    uint32_t length = 0;
+
+    memset(&mod, 0, sizeof(mod));
+    memset(types, 0, sizeof(types));
+    memset(fields, 0, sizeof(fields));
+    memset(globals, 0, sizeof(globals));
+
+    wasm_init(&rt);
+
+    fields[0].storage.kind = WASM_STORAGE_VALTYPE;
+    fields[0].storage.of.valtype = WASM_TYPE_STRUCTREF;
+    types[0].kind = WASM_COMP_STRUCT;
+    types[0].of.struct_.num_fields = 1;
+    types[0].of.struct_.fields = fields;
+
+    mod.rt = &rt;
+    mod.types = types;
+    mod.num_types = 1;
+    mod.globals = globals;
+    mod.num_globals = 1;
+    globals[0].type = WASM_TYPE_STRUCTREF;
+    globals[0].value = wasm_ref_null(WASM_TYPE_STRUCTREF);
+    wasm__gc_register_module(&rt, &mod);
+
+    WL_CHECK_MSG(t, wasm__gc_struct_size(&types[0].of.struct_, &object_size), "%s",
+                 "expected struct size calculation to succeed");
+    WL_CHECK_MSG(t, wasm__gc_heap_init(&rt, object_size * (CHAIN_LENGTH + 16u)) == WASM_OK, "%s",
+                 "expected GC heap resize to succeed");
+
+    head = wasm_ref_null(WASM_TYPE_STRUCTREF);
+    for (i = 0; i < CHAIN_LENGTH; i++) {
+        wasm_gc_struct_t* node = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
+
+        if (!node || wasm__gc_struct_store_field(node, &types[0].of.struct_, 0, head) != WASM_OK) break;
+        head = wasm__gc_type_ref_value(&mod, 0, &node->header);
+    }
+    WL_CHECK_MSG(t, i == CHAIN_LENGTH, "expected %u chain allocations, got %u", (unsigned)CHAIN_LENGTH,
+                 (unsigned)i);
+    globals[0].value = head;
+
+    wasm_gc_collect(&rt);
+
+    object = globals[0].value.of.gc_obj;
+    while (object) {
+        wasm_value_t* next = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)object, &types[0].of.struct_, 0);
+
+        length++;
+        object = next && wasm__is_heap_gc_ref_value(next) ? next->of.gc_obj : NULL;
+    }
+    WL_CHECK_MSG(t, length == CHAIN_LENGTH, "expected the whole chain to survive, walked %u", (unsigned)length);
+    WL_CHECK_MSG(t, wasm_test_gc_allocation_count(&rt) == CHAIN_LENGTH, "expected %u live objects, got %u",
+                 (unsigned)CHAIN_LENGTH, (unsigned)wasm_test_gc_allocation_count(&rt));
+
+    wasm__gc_unregister_module(&rt, &mod);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     wasm_runtime_t rt;
     wasm_module_t mod;
@@ -15069,6 +15137,7 @@ int main(void) {
         { "wasmgc: const expressions support GC allocation ops", test_gc_const_expr_supports_gc_alloc_ops },
         { "wasmgc: GC accessors handle packed fields and array bounds", test_gc_accessors_handle_packed_fields_and_array_bounds },
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
+        { "GC: collection marks deep object chains without recursion", test_gc_collect_marks_deep_object_chains_iteratively },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
         { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },

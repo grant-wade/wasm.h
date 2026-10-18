@@ -15,6 +15,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Fixed
 
 - WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.
+- GC marking uses an explicit worklist instead of recursion, so collecting long object chains no longer overflows the native stack.
 - WASI `path_open` derives the host access mode from the requested rights, so directories and read-only files can be opened on POSIX hosts.
 
 ## [1.1.0] - 2026-10-17
