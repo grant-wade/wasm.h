@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include "exceptions.h"
 #include "frames.h"
-#include "interpreter.h"
 #include "../internal/alloc.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
@@ -60,9 +59,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_ERR_MALFORMED;
-    err = wasm__prepare_function(mod, func_idx);
-    if (err != WASM_OK) return err;
-
+    if (!func->control_targets) {
+        err = wasm__prepare_function(mod, func_idx);
+        if (err != WASM_OK) return err;
+    }
 
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
@@ -93,17 +93,44 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];
-    wasm__init_call_frame(cf, mod, rt, func_idx, func, ft, locals, labels, results_dst, num_results);
+    cf->module = mod;
+    cf->func_idx = func_idx;
+    cf->sp_base = rt->sp;
+    cf->locals = locals;
+    cf->labels = labels;
+    cf->lsp = 1;
+    cf->max_labels = max_labels;
+    cf->r.ptr = func->code;
+    cf->r.end = func->code + func->code_len;
+    cf->r.malformed = 0;
+    cf->func = func;
+    cf->ft = ft;
+    cf->results_dst = results_dst;
+    cf->num_results = num_results;
     cf->arena_saved = arena_saved;
+    cf->current_offset = 0;
+
+    labels[0].continuation = cf->r.end;
+    labels[0].handler_ptr = NULL;
+    labels[0].sp_base = cf->sp_base;
+    labels[0].param_arity = 0;
+    labels[0].arity = ft->num_results;
+    labels[0].caught_tag = UINT32_MAX;
+    labels[0].caught_tag_identity = 0;
+    labels[0].caught_count = 0;
+    labels[0].caught_values = NULL;
+    labels[0].delegate_depth = UINT32_MAX;
+    labels[0].opcode = 0x02;
+    labels[0].active_catch = 0;
 
     for (i = 0; i < ft->num_params && i < num_args; i++) {
-        cf->locals[i] = wasm__is_numeric_valtype(ft->params[i])
-                            ? args[i]
-                            : wasm__retag_value_for_declared_type(ft->params[i],
-                                                                  ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
-                                                                  args[i]);
+        locals[i] = wasm__is_numeric_valtype(ft->params[i])
+                        ? args[i]
+                        : wasm__retag_value_for_declared_type(ft->params[i],
+                                                              ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
+                                                              args[i]);
     }
-    for (; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
+    for (; i < func->num_locals; i++) locals[i] = wasm__default_value(func->locals[i]);
 
     return WASM_OK;
 }

@@ -18744,30 +18744,6 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
 /* END src/exec/exceptions.h */
 
 
-/* BEGIN src/exec/interpreter.h */
-#ifndef WASM_SRC_EXEC_INTERPRETER_H
-#define WASM_SRC_EXEC_INTERPRETER_H
-
-
-
-WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
-                                  wasm_module_t* mod,
-                                  wasm_runtime_t* rt,
-                                  uint32_t func_idx,
-                                  wasm_func_t* func,
-                                  wasm_functype_t* ft,
-                                  wasm_value_t* locals,
-                                  wasm__label_t* labels,
-                                  wasm_value_t* results_dst,
-                                  uint32_t num_results);
-
-WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
-                                 wasm_value_t* args, uint32_t num_args,
-                                 wasm_value_t* results, uint32_t num_results);
-
-#endif /* WASM_SRC_EXEC_INTERPRETER_H */
-/* END src/exec/interpreter.h */
-
 
 
 
@@ -18823,9 +18799,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     func = &mod->funcs[func_idx];
     if (func->is_import) return WASM_ERR_MALFORMED;
-    err = wasm__prepare_function(mod, func_idx);
-    if (err != WASM_OK) return err;
-
+    if (!func->control_targets) {
+        err = wasm__prepare_function(mod, func_idx);
+        if (err != WASM_OK) return err;
+    }
 
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
@@ -18856,17 +18833,44 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];
-    wasm__init_call_frame(cf, mod, rt, func_idx, func, ft, locals, labels, results_dst, num_results);
+    cf->module = mod;
+    cf->func_idx = func_idx;
+    cf->sp_base = rt->sp;
+    cf->locals = locals;
+    cf->labels = labels;
+    cf->lsp = 1;
+    cf->max_labels = max_labels;
+    cf->r.ptr = func->code;
+    cf->r.end = func->code + func->code_len;
+    cf->r.malformed = 0;
+    cf->func = func;
+    cf->ft = ft;
+    cf->results_dst = results_dst;
+    cf->num_results = num_results;
     cf->arena_saved = arena_saved;
+    cf->current_offset = 0;
+
+    labels[0].continuation = cf->r.end;
+    labels[0].handler_ptr = NULL;
+    labels[0].sp_base = cf->sp_base;
+    labels[0].param_arity = 0;
+    labels[0].arity = ft->num_results;
+    labels[0].caught_tag = UINT32_MAX;
+    labels[0].caught_tag_identity = 0;
+    labels[0].caught_count = 0;
+    labels[0].caught_values = NULL;
+    labels[0].delegate_depth = UINT32_MAX;
+    labels[0].opcode = 0x02;
+    labels[0].active_catch = 0;
 
     for (i = 0; i < ft->num_params && i < num_args; i++) {
-        cf->locals[i] = wasm__is_numeric_valtype(ft->params[i])
-                            ? args[i]
-                            : wasm__retag_value_for_declared_type(ft->params[i],
-                                                                  ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
-                                                                  args[i]);
+        locals[i] = wasm__is_numeric_valtype(ft->params[i])
+                        ? args[i]
+                        : wasm__retag_value_for_declared_type(ft->params[i],
+                                                              ft->param_reftypes ? &ft->param_reftypes[i] : NULL,
+                                                              args[i]);
     }
-    for (; i < func->num_locals; i++) cf->locals[i] = wasm__default_value(func->locals[i]);
+    for (; i < func->num_locals; i++) locals[i] = wasm__default_value(func->locals[i]);
 
     return WASM_OK;
 }
@@ -21402,6 +21406,18 @@ cleanup:
 
 /* BEGIN src/exec/interpreter.c */
 
+/* BEGIN src/exec/interpreter.h */
+#ifndef WASM_SRC_EXEC_INTERPRETER_H
+#define WASM_SRC_EXEC_INTERPRETER_H
+
+
+
+WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
+                                 wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results);
+
+#endif /* WASM_SRC_EXEC_INTERPRETER_H */
+/* END src/exec/interpreter.h */
 #include <stdio.h>
 
 
@@ -21581,6 +21597,35 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
+/* Calls host import func with the ft->num_params arguments at args, which sit just above rt->sp
+   where a reentrant call could overwrite them, and pushes its results. */
+static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
+                                               const wasm_functype_t* ft,
+                                               const wasm_func_t* func,
+                                               const wasm_value_t* args) {
+    wasm_runtime_t* rt = mod->rt;
+    wasm_value_t args_buf[8];
+    wasm_value_t results_buf[8];
+    wasm_value_t* call_args = args_buf;
+    wasm_value_t* call_results = results_buf;
+    wasm_error_t err = WASM_ERR_OOM;
+
+    if (ft->num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(ft->num_params, sizeof(wasm_value_t));
+    if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(ft->num_results, sizeof(wasm_value_t));
+    if (call_args && call_results) {
+        if (ft->num_params > 0) memcpy(call_args, args, ft->num_params * sizeof(wasm_value_t));
+        err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
+        if (err == WASM_OK && ft->num_results > rt->max_stack - rt->sp) err = WASM_ERR_STACK_OVERFLOW;
+        if (err == WASM_OK && ft->num_results > 0) {
+            memcpy(&rt->stack[rt->sp], call_results, ft->num_results * sizeof(wasm_value_t));
+            rt->sp += ft->num_results;
+        }
+    }
+    if (call_args != args_buf) WASM_FREE(call_args);
+    if (call_results != results_buf) WASM_FREE(call_results);
+    return err;
+}
+
 /* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
    already given up its frame, so that frame's handlers are skipped. Returns
    WASM__ERR_RESUME_FRAME once a handler is found. */
@@ -21616,10 +21661,17 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         sp = stack + rt->sp;                 \
         lsp = cf->lsp;                       \
     } while (0)
-#define WASM__LEAVE(value)   \
-    do {                     \
-        WASM__SAVE_STATE();  \
-        return (value);      \
+#define WASM__ENTER_FRAME()                                    \
+    do {                                                       \
+        cf = &rt->call_frames[rt->call_frame_sp - 1];          \
+        mod = cf->module;                                      \
+        func = cf->func;                                       \
+        labels = cf->labels;                                   \
+        locals = cf->locals;                                   \
+        max_labels = cf->max_labels;                           \
+        sp_base = cf->sp_base;                                 \
+        op_at = func->code + cf->current_offset;               \
+        WASM__LOAD_STATE();                                    \
     } while (0)
 /* Runs an out-of-line handler that reads immediates through cf->r and uses rt->sp. */
 #define WASM__CALL_OUT(expr)              \
@@ -21642,48 +21694,6 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
 #define WASM__SP_POP() (*--sp)
 #define WASM__SP_TOP() (sp[-1])
 
-WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
-                                  wasm_module_t* mod,
-                                  wasm_runtime_t* rt,
-                                  uint32_t func_idx,
-                                  wasm_func_t* func,
-                                  wasm_functype_t* ft,
-                                  wasm_value_t* locals,
-                                  wasm__label_t* labels,
-                                  wasm_value_t* results_dst,
-                                  uint32_t num_results) {
-    memset(cf, 0, sizeof(*cf));
-    cf->module = mod;
-    cf->func_idx = func_idx;
-    cf->sp_base = rt->sp;
-    cf->locals = locals;
-    cf->labels = labels;
-    cf->lsp = 0;
-    cf->max_labels = func->max_label_depth ? func->max_label_depth : 1;
-    cf->r.ptr = func->code;
-    cf->r.end = func->code + func->code_len;
-    cf->r.malformed = 0;
-    cf->func = func;
-    cf->ft = ft;
-    cf->results_dst = results_dst;
-    cf->num_results = num_results;
-    cf->arena_saved = wasm__arena_mark(rt);
-    cf->current_offset = 0;
-
-    labels[cf->lsp].continuation = cf->r.end;
-    labels[cf->lsp].handler_ptr = NULL;
-    labels[cf->lsp].sp_base = cf->sp_base;
-    labels[cf->lsp].param_arity = 0;
-    labels[cf->lsp].arity = ft->num_results;
-    labels[cf->lsp].caught_tag = UINT32_MAX;
-    labels[cf->lsp].caught_count = 0;
-    labels[cf->lsp].caught_values = NULL;
-    labels[cf->lsp].delegate_depth = UINT32_MAX;
-    labels[cf->lsp].opcode = 0x02;
-    labels[cf->lsp].active_catch = 0;
-    cf->lsp++;
-}
-
 #define WASM__PUSH_LABEL(cont, handler, params, results, opc) \
     do {                                                      \
         wasm__label_t* label_ = &labels[lsp++];               \
@@ -21698,24 +21708,22 @@ WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
         label_->active_catch = 0;                             \
     } while (0)
 
-static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
-                                      wasm__call_frame_t* cf,
-                                      wasm_module_t** next_module,
-                                      uint32_t* next_func_idx,
-                                      wasm_value_t** next_args,
-                                      uint32_t* next_num_args,
-                                      int* next_args_owned,
-                                      wasm_value_t* tail_args_buf,
-                                      uint32_t base_frame_sp) {
-    wasm_runtime_t* rt = mod->rt;
+/* Runs the frames above base_frame_sp until the lowest of them returns, which leaves its results
+   on top of the stack and returns WASM__ERR_RETURN_FRAME. */
+static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     wasm_value_t* const stack = rt->stack;
     wasm_value_t* const stack_end = rt->stack + rt->max_stack;
+    wasm__call_frame_t* cf;
+    wasm_module_t* mod;
     wasm_func_t* func;
     wasm__label_t* labels;
     wasm_value_t* locals;
     wasm_value_t* sp;
     const uint8_t* pc;
     const uint8_t* op_at;
+    wasm_module_t* call_mod;
+    wasm_functype_t* call_type;
+    uint32_t call_idx;
     uint32_t lsp;
     uint32_t max_labels;
     uint32_t branch_depth;
@@ -21723,15 +21731,7 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
     uint32_t i;
     wasm_error_t err = WASM_OK;
 
-    if (!cf) return WASM_ERR_MALFORMED;
-    func = cf->func;
-    labels = cf->labels;
-    locals = cf->locals;
-    max_labels = cf->max_labels;
-    sp_base = cf->sp_base;
-    WASM__LOAD_STATE();
-    op_at = pc;
-    if (pc >= cf->r.end) goto return_frame;
+    WASM__ENTER_FRAME();
 
     for (;;) {
         uint8_t op;
@@ -21897,395 +21897,63 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
             case 0x0F: /* return */
                 goto return_frame;
 
-            case 0x10: { /* call */
-                uint32_t ci = wasm__fetch_u32(&pc);
-                wasm_functype_t* cft;
-                wasm_value_t* call_args = tail_args_buf;
-                wasm_value_t call_results_buf[8];
-                wasm_value_t* call_results = call_results_buf;
-                wasm_func_t* callee;
-                int j;
-
-                if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &mod->funcs[ci];
-                cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!call_results) {
-                            if (call_args != tail_args_buf) WASM_FREE(call_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(mod, cft, callee->host_func, call_args, call_results,
-                                                 callee->host_userdata);
-                    if (call_args != tail_args_buf) WASM_FREE(call_args);
-                    if (err != WASM_OK) {
-                        if (call_results != call_results_buf) WASM_FREE(call_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(call_results[i]);
-                    if (call_results != call_results_buf) WASM_FREE(call_results);
-                    break;
-                }
-
-                if (next_module) *next_module = mod;
-                *next_func_idx = ci;
-                *next_args = call_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (call_args != tail_args_buf);
-                WASM__LEAVE(WASM__ERR_CALL_FRAME);
-                break;
-            }
-            case 0x11: { /* call_indirect */
-                uint32_t ti = wasm__fetch_u32(&pc), table_idx, ci;
-                uint64_t tvi;
-                wasm_module_t* callee_mod;
-                wasm_functype_t* cft;
-                wasm_func_t* callee;
-                wasm_table_t* table;
-                wasm_value_t call_results_buf[8], iv;
-                wasm_value_t* call_args = tail_args_buf;
-                wasm_value_t* call_results = call_results_buf;
-                int j;
-                table_idx = wasm__fetch_u32(&pc);
-                iv = WASM__SP_POP();
-                if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
-                table = wasm__table_at(mod, table_idx);
-                if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-                tvi = wasm__table_index_value(table, &iv);
-                if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
-                if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
-                if (!wasm__resolve_func_ref(rt, table->elems[tvi].of.funcref, &callee_mod, &ci))
-                    WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &callee_mod->funcs[ci];
-                cft = wasm__module_functype(mod, ti);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if ((callee_mod != mod || callee->type_idx != ti) &&
-                    !wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
-                    WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!call_results) {
-                            if (call_args != tail_args_buf) WASM_FREE(call_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
-                                                 callee->host_userdata);
-                    if (call_args != tail_args_buf) WASM_FREE(call_args);
-                    if (err != WASM_OK) {
-                        if (call_results != call_results_buf) WASM_FREE(call_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(call_results[i]);
-                    if (call_results != call_results_buf) WASM_FREE(call_results);
-                    break;
-                }
-
-                if (next_module) *next_module = callee_mod;
-                *next_func_idx = ci;
-                *next_args = call_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (call_args != tail_args_buf);
-                WASM__LEAVE(WASM__ERR_CALL_FRAME);
-                break;
-            }
-            case 0x12: { /* return_call */
-                uint32_t ci = wasm__fetch_u32(&pc);
-                wasm_functype_t* cft;
-                wasm_value_t* tail_args = tail_args_buf;
-                wasm_value_t tail_results_buf[8];
-                wasm_value_t* tail_results = tail_results_buf;
-                wasm_func_t* callee;
-                int j;
-
-                if (ci >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &mod->funcs[ci];
-                cft = wasm__module_functype(mod, mod->funcs[ci].type_idx);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!tail_results) {
-                            if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(mod, cft, callee->host_func, tail_args, tail_results,
-                                                 callee->host_userdata);
-                    if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                    if (err != WASM_OK) {
-                        if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-
-                    sp = stack + sp_base;
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(tail_results[i]);
-                    if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                    err = WASM__ERR_RETURN_FRAME;
-                    goto cleanup_frame;
-                }
-
-                sp = stack + sp_base;
-                if (next_module) *next_module = mod;
-                *next_func_idx = ci;
-                *next_args = tail_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (tail_args != tail_args_buf);
-                err = WASM__ERR_TAIL_CALL_FRAME;
-                goto cleanup_frame;
-            }
+            case 0x10: /* call */
+            case 0x12: /* return_call */
+                call_idx = wasm__fetch_u32(&pc);
+                call_mod = mod;
+                call_type = wasm__module_functype(mod, mod->funcs[call_idx].type_idx);
+                if (!call_type) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (op == 0x12) goto do_tail_call;
+                goto do_call;
+            case 0x11:   /* call_indirect */
             case 0x13: { /* return_call_indirect */
-                uint32_t ti = wasm__fetch_u32(&pc), table_idx, ci;
-                uint64_t tvi;
-                wasm_module_t* callee_mod;
-                wasm_functype_t* cft;
+                uint32_t type_idx = wasm__fetch_u32(&pc);
+                uint32_t table_idx = wasm__fetch_u32(&pc);
+                wasm_value_t index_value = WASM__SP_POP();
                 wasm_table_t* table;
-                wasm_value_t* tail_args = tail_args_buf;
-                wasm_value_t tail_results_buf[8];
-                wasm_value_t* tail_results = tail_results_buf;
-                wasm_value_t iv;
-                wasm_func_t* callee;
-                int j;
+                uint64_t elem_index;
 
-                table_idx = wasm__fetch_u32(&pc);
-                iv = WASM__SP_POP();
-                if (ti >= mod->num_types || table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
+                if (type_idx >= mod->num_types || table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-                tvi = wasm__table_index_value(table, &iv);
+                elem_index = wasm__table_index_value(table, &index_value);
                 if (table->reftype != WASM_TYPE_FUNCREF) WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-                if (tvi >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
-                if (wasm__is_null_ref(&table->elems[tvi])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
-                if (!wasm__resolve_func_ref(rt, table->elems[tvi].of.funcref, &callee_mod, &ci))
+                if (elem_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_UNDEFINED_ELEMENT);
+                if (wasm__is_null_ref(&table->elems[elem_index])) WASM__TRAP(WASM_ERR_UNINITIALIZED_TABLE);
+                if (!wasm__resolve_func_ref(rt, table->elems[elem_index].of.funcref, &call_mod, &call_idx))
                     WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &callee_mod->funcs[ci];
-                cft = wasm__module_functype(mod, ti);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-                if ((callee_mod != mod || callee->type_idx != ti) &&
-                    !wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
+                if (!call_mod || call_idx >= call_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                call_type = wasm__module_functype(mod, type_idx);
+                if (!call_type) WASM__TRAP(WASM_ERR_MALFORMED);
+                if ((call_mod != mod || call_mod->funcs[call_idx].type_idx != type_idx) &&
+                    !wasm__functype_is_subtype_across_modules(call_mod, call_mod->funcs[call_idx].type_idx, mod,
+                                                              type_idx))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-
-                if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!tail_results) {
-                            if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
-                                                 callee->host_userdata);
-                    if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                    if (err != WASM_OK) {
-                        if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-
-                    sp = stack + sp_base;
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(tail_results[i]);
-                    if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                    err = WASM__ERR_RETURN_FRAME;
-                    goto cleanup_frame;
-                }
-
-                sp = stack + sp_base;
-                if (next_module) *next_module = callee_mod;
-                *next_func_idx = ci;
-                *next_args = tail_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (tail_args != tail_args_buf);
-                err = WASM__ERR_TAIL_CALL_FRAME;
-                goto cleanup_frame;
+                if (op == 0x13) goto do_tail_call;
+                goto do_call;
             }
-            case 0x14: { /* call_ref */
-                uint32_t ti = wasm__fetch_u32(&pc), ci;
-                wasm_module_t* callee_mod;
-                wasm_functype_t* cft;
-                wasm_func_t* callee;
-                wasm_value_t funcref_value;
-                wasm_value_t* call_args = tail_args_buf;
-                wasm_value_t call_results_buf[8];
-                wasm_value_t* call_results = call_results_buf;
-                int j;
-
-                if (ti >= mod->num_types) WASM__TRAP(WASM_ERR_MALFORMED);
-                cft = wasm__module_functype(mod, ti);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-
-                funcref_value = WASM__SP_POP();
-                if (wasm__is_null_ref(&funcref_value)) {
-                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null function reference");
-                    err = WASM_ERR_TRAP;
-                    goto cleanup;
-                }
-                if (!wasm__resolve_func_ref(rt, funcref_value.of.funcref, &callee_mod, &ci))
-                    WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &callee_mod->funcs[ci];
-                if ((callee_mod != mod || callee->type_idx != ti) &&
-                    !wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
-                    WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-
-                if (cft->num_params > 8) {
-                    call_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!call_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) call_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        call_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!call_results) {
-                            if (call_args != tail_args_buf) WASM_FREE(call_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, call_args, call_results,
-                                                 callee->host_userdata);
-                    if (call_args != tail_args_buf) WASM_FREE(call_args);
-                    if (err != WASM_OK) {
-                        if (call_results != call_results_buf) WASM_FREE(call_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(call_results[i]);
-                    if (call_results != call_results_buf) WASM_FREE(call_results);
-                    break;
-                }
-
-                if (next_module) *next_module = callee_mod;
-                *next_func_idx = ci;
-                *next_args = call_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (call_args != tail_args_buf);
-                WASM__LEAVE(WASM__ERR_CALL_FRAME);
-            }
+            case 0x14:   /* call_ref */
             case 0x15: { /* return_call_ref */
-                uint32_t ti = wasm__fetch_u32(&pc), ci;
-                wasm_module_t* callee_mod;
-                wasm_functype_t* cft;
-                wasm_func_t* callee;
+                uint32_t type_idx = wasm__fetch_u32(&pc);
                 wasm_value_t funcref_value;
-                wasm_value_t* tail_args = tail_args_buf;
-                wasm_value_t tail_results_buf[8];
-                wasm_value_t* tail_results = tail_results_buf;
-                int j;
 
-                if (ti >= mod->num_types) WASM__TRAP(WASM_ERR_MALFORMED);
-                cft = wasm__module_functype(mod, ti);
-                if (!cft) WASM__TRAP(WASM_ERR_MALFORMED);
-
+                if (type_idx >= mod->num_types) WASM__TRAP(WASM_ERR_MALFORMED);
+                call_type = wasm__module_functype(mod, type_idx);
+                if (!call_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 funcref_value = WASM__SP_POP();
                 if (wasm__is_null_ref(&funcref_value)) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null function reference");
-                    err = WASM_ERR_TRAP;
-                    goto cleanup;
+                    WASM__TRAP(WASM_ERR_TRAP);
                 }
-                if (!wasm__resolve_func_ref(rt, funcref_value.of.funcref, &callee_mod, &ci))
+                if (!wasm__resolve_func_ref(rt, funcref_value.of.funcref, &call_mod, &call_idx))
                     WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!callee_mod || ci >= callee_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
-                callee = &callee_mod->funcs[ci];
-                if ((callee_mod != mod || callee->type_idx != ti) &&
-                    !wasm__functype_is_subtype_across_modules(callee_mod, callee->type_idx, mod, ti))
+                if (!call_mod || call_idx >= call_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
+                if ((call_mod != mod || call_mod->funcs[call_idx].type_idx != type_idx) &&
+                    !wasm__functype_is_subtype_across_modules(call_mod, call_mod->funcs[call_idx].type_idx, mod,
+                                                              type_idx))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
-
-                if (cft->num_params > 8) {
-                    tail_args = (wasm_value_t*)wasm__malloc_array(cft->num_params, sizeof(wasm_value_t));
-                    if (!tail_args) WASM__TRAP(WASM_ERR_OOM);
-                }
-                for (j = (int)cft->num_params - 1; j >= 0; j--) tail_args[j] = WASM__SP_POP();
-
-                if (callee->is_import) {
-                    if (cft->num_results > 8) {
-                        tail_results = (wasm_value_t*)wasm__malloc_array(cft->num_results, sizeof(wasm_value_t));
-                        if (!tail_results) {
-                            if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                            WASM__TRAP(WASM_ERR_OOM);
-                        }
-                    }
-                    WASM__SAVE_STATE();
-                    err = wasm__invoke_host_func(callee_mod, cft, callee->host_func, tail_args, tail_results,
-                                                 callee->host_userdata);
-                    if (tail_args != tail_args_buf) WASM_FREE(tail_args);
-                    if (err != WASM_OK) {
-                        if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
-                            return err;
-                        }
-                        goto cleanup;
-                    }
-
-                    sp = stack + sp_base;
-                    for (i = 0; i < cft->num_results; i++) WASM__SP_PUSH(tail_results[i]);
-                    if (tail_results != tail_results_buf) WASM_FREE(tail_results);
-                    err = WASM__ERR_RETURN_FRAME;
-                    goto cleanup_frame;
-                }
-
-                sp = stack + sp_base;
-                if (next_module) *next_module = callee_mod;
-                *next_func_idx = ci;
-                *next_args = tail_args;
-                *next_num_args = cft->num_params;
-                *next_args_owned = (tail_args != tail_args_buf);
-                err = WASM__ERR_TAIL_CALL_FRAME;
-                goto cleanup_frame;
+                if (op == 0x15) goto do_tail_call;
+                goto do_call;
             }
             case 0x1F: { /* try_table */
                 const uint8_t* immediate_start = pc;
@@ -23536,16 +23204,92 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
         continue;
     }
 
+    do_call:
+        if (call_mod->funcs[call_idx].is_import) {
+            sp -= call_type->num_params;
+            WASM__SAVE_STATE();
+            err = wasm__call_host_from_stack(call_mod, call_type, &call_mod->funcs[call_idx], sp);
+            sp = stack + rt->sp;
+            if (err == WASM_OK) continue;
+            if (err != WASM__ERR_EXCEPTION) goto cleanup;
+            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
+            if (err != WASM__ERR_RESUME_FRAME) return err;
+            goto resume_frame;
+        }
+        sp -= call_type->num_params;
+        WASM__SAVE_STATE();
+        err = wasm__push_call_frame(call_mod, call_idx, sp, call_type->num_params, NULL, 0);
+        if (err != WASM_OK) goto cleanup;
+        WASM__ENTER_FRAME();
+        continue;
+
+    do_tail_call: {
+        wasm_value_t* results_dst = cf->results_dst;
+        uint32_t num_results = cf->num_results;
+        uint32_t num_params = call_type->num_params;
+
+        if (call_mod->funcs[call_idx].is_import) {
+            sp -= num_params;
+            WASM__SAVE_STATE();
+            err = wasm__call_host_from_stack(call_mod, call_type, &call_mod->funcs[call_idx], sp);
+            sp = stack + rt->sp;
+            if (err == WASM_OK) goto return_frame;
+            if (err != WASM__ERR_EXCEPTION) goto cleanup;
+            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
+            if (err != WASM__ERR_RESUME_FRAME) return err;
+            goto resume_frame;
+        }
+        if (num_params > 0 && sp - num_params != stack + sp_base)
+            memmove(stack + sp_base, sp - num_params, num_params * sizeof(wasm_value_t));
+        sp = stack + sp_base;
+        wasm__drop_labels(labels, lsp, lsp);
+        lsp = 0;
+        WASM__SAVE_STATE();
+        wasm__arena_reset(rt, cf->arena_saved);
+        rt->call_frame_sp--;
+        err = wasm__push_call_frame(call_mod, call_idx, sp, num_params, results_dst, num_results);
+        if (err != WASM_OK) return err;
+        WASM__ENTER_FRAME();
+        continue;
+    }
+
     throw_pending:
         WASM__SAVE_STATE();
         err = wasm__handle_exception_frames(mod, base_frame_sp);
-        return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
+        if (err != WASM_OK) return err;
+    resume_frame:
+        WASM__ENTER_FRAME();
+        if (pc >= cf->r.end) goto return_frame;
+        continue;
+
+    return_frame:
+        if (rt->call_frame_sp == base_frame_sp + 1u) {
+            err = WASM__ERR_RETURN_FRAME;
+            goto cleanup;
+        }
+        {
+            const wasm_functype_t* ft = cf->ft;
+            wasm_value_t* dst = stack + sp_base;
+            wasm_value_t* src = sp - ft->num_results;
+
+            for (i = 0; i < ft->num_results; i++) {
+                dst[i] = wasm__is_numeric_valtype(ft->results[i])
+                             ? src[i]
+                             : wasm__retag_value_for_declared_type(
+                                   ft->results[i], ft->result_reftypes ? &ft->result_reftypes[i] : NULL, src[i]);
+            }
+            sp = dst + ft->num_results;
+            wasm__drop_labels(labels, lsp, lsp);
+            cf->lsp = 0;
+            wasm__arena_reset(rt, cf->arena_saved);
+            rt->call_frame_sp--;
+            rt->sp = (uint32_t)(sp - stack);
+            WASM__ENTER_FRAME();
+            continue;
+        }
     }
 
-return_frame:
-    err = WASM__ERR_RETURN_FRAME;
 cleanup:
-cleanup_frame:
     WASM__SAVE_STATE();
     while (cf->lsp > 0) {
         wasm__clear_label(&cf->labels[cf->lsp - 1]);
@@ -23561,7 +23305,7 @@ cleanup_frame:
 #undef WASM__SP_PUT
 #undef WASM__SP_PUSH
 #undef WASM__CALL_OUT
-#undef WASM__LEAVE
+#undef WASM__ENTER_FRAME
 #undef WASM__LOAD_STATE
 #undef WASM__SAVE_STATE
 
@@ -23571,13 +23315,7 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     wasm_runtime_t* rt = mod->rt;
     wasm_func_t* func;
     uint32_t base_frame_sp = rt->call_frame_sp;
-    wasm_value_t request_args_buf[8];
-    wasm_module_t* next_module = NULL;
-    wasm_value_t* next_args = NULL;
-    uint32_t next_func_idx = 0;
-    uint32_t next_num_args = 0;
-    int next_args_owned = 0;
-    wasm_error_t err = WASM_OK;
+    wasm_error_t err;
 
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
 
@@ -23587,79 +23325,11 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
                                       args, results, func->host_userdata);
 
     err = wasm__push_call_frame(mod, func_idx, args, num_args, results, num_results);
-    if (err != WASM_OK) goto cleanup;
-
-    while (rt->call_frame_sp > base_frame_sp) {
-        wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
-        wasm_module_t* frame_mod = cf->module ? cf->module : mod;
-
-        next_module = NULL;
-        next_args = NULL;
-        next_num_args = 0;
-        next_args_owned = 0;
-        next_func_idx = 0;
-
-        err = wasm__interp_loop(frame_mod, cf,
-                                &next_module,
-                                &next_func_idx, &next_args, &next_num_args,
-                                &next_args_owned, request_args_buf, base_frame_sp);
-
-        if (err == WASM__ERR_CALL_FRAME) {
-            err = wasm__push_call_frame(next_module ? next_module : frame_mod,
-                                        next_func_idx, next_args, next_num_args,
-                                        NULL, 0);
-            if (next_args_owned && next_args) {
-                WASM_FREE(next_args);
-                next_args = NULL;
-                next_args_owned = 0;
-            }
-            if (err != WASM_OK) goto cleanup;
-            continue;
-        }
-
-        if (err == WASM__ERR_TAIL_CALL_FRAME) {
-            wasm_value_t* next_results_dst = cf->results_dst;
-            uint32_t next_result_count = cf->num_results;
-
-            wasm__arena_reset(rt, cf->arena_saved);
-            memset(cf, 0, sizeof(*cf));
-            rt->call_frame_sp--;
-
-            err = wasm__push_call_frame(next_module ? next_module : frame_mod,
-                                        next_func_idx, next_args, next_num_args,
-                                        next_results_dst, next_result_count);
-            if (next_args_owned && next_args) {
-                WASM_FREE(next_args);
-                next_args = NULL;
-                next_args_owned = 0;
-            }
-            if (err != WASM_OK) goto cleanup;
-            continue;
-        }
-
-        if (next_args_owned && next_args) {
-            WASM_FREE(next_args);
-            next_args = NULL;
-            next_args_owned = 0;
-        }
-
-        if (err == WASM__ERR_RETURN_FRAME) {
-            err = wasm__finish_call_frame(rt, base_frame_sp);
-            if (err != WASM_OK) goto cleanup;
-            continue;
-        }
-
-        if (err == WASM__ERR_RESUME_FRAME) continue;
-
-        if (err == WASM__ERR_EXCEPTION) goto cleanup;
-
-        if (err != WASM_OK) goto cleanup;
-    }
-
-cleanup:
+    if (err != WASM_OK) return err;
+    err = wasm__interp_loop(rt, base_frame_sp);
+    if (err == WASM__ERR_RETURN_FRAME) err = wasm__finish_call_frame(rt, base_frame_sp);
     if (err != WASM_OK && rt->call_frame_sp > base_frame_sp)
         wasm__capture_backtrace(rt, base_frame_sp);
-    if (next_args_owned && next_args) WASM_FREE(next_args);
     while (rt->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
         wasm__clear_call_frame(cf);

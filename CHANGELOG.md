@@ -34,7 +34,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
-- The interpreter runs `wasm_bench` (release build) in 1.5 s instead of 2.4 s. The dispatch loop keeps its position, stack pointer, and label count in locals, decodes immediates without bounds checks once validation has passed, and runs numeric instructions in its own switch instead of a second, out-of-line one.
+- The interpreter runs `wasm_bench` (release build) in 1.3 s instead of 2.4 s. The dispatch loop keeps its position, stack pointer, and label count in locals, decodes immediates without bounds checks once validation has passed, and runs numeric instructions in its own switch instead of a second, out-of-line one. Calls between Wasm functions stay in the loop, move their arguments straight from the stack into the callee's locals, and validate each function only on its first call.
 
 ### Fixed
 
