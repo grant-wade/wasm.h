@@ -2005,8 +2005,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         wasm__call_frame_t* next;
 
         if (!callee->ops || rt->call_frame_sp >= rt->max_call_frames ||
-            callee->max_stack > rt->max_stack - (uint32_t)(sp - stack) || callee->max_label_depth > rt->max_labels ||
-            !chunk || callee->frame_bytes > chunk->size - chunk->used) {
+            callee->max_stack > rt->max_stack - (uint32_t)(sp - stack) || !chunk ||
+            callee->frame_bytes > chunk->size - chunk->used) {
             rt->sp = (uint32_t)(sp - stack);
             err = wasm__push_call_frame(call_mod, call_idx, sp, call_results_dst);
             if (err != WASM_OK) {
@@ -2022,7 +2022,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         next->func_idx = call_idx;
         next->sp_base = (uint32_t)(sp - stack);
         next->locals = locals = (wasm__slot_t*)((uint8_t*)chunk + WASM__ARENA_HEADER + chunk->used);
-        next->labels = labels = callee->max_handlers > 0 ? (wasm__label_t*)(locals + callee->num_local_slots) : NULL;
+        next->labels = labels = (wasm__label_t*)(locals + callee->num_local_slots);
         next->lsp = 0;
         next->pc = callee->ops;
         next->op_at = callee->ops;
