@@ -318,7 +318,7 @@ A yielding host function's results are passed to `wasm_runtime_resume`, which ch
 - Only the outermost call suspends. Calls made by host functions and start functions run by `wasm_load` or `wasm_instantiate` fail with the stop's code.
 - An interrupt observed inside a host function, such as WASI sleep, fails the call.
 - A host function that yields outside a suspendable call, including one called directly with `wasm_call_index`, fails it with `WASM_ERR_TRAP`.
-- A runtime holds one suspended call; until it is resumed or cancelled, other calls on the runtime, including start functions, fail with `WASM_ERR_MALFORMED`.
+- A runtime holds one suspended call; until it is resumed or cancelled, other calls on the runtime, including start functions, fail with `WASM_ERR_SUSPENDED`.
 - `wasm_module_free` on a module the suspended call runs, and `wasm_runtime_free`, cancel it.
 - References in suspended frames stay alive across collections, and `wasm_runtime_backtrace` and `wasm_runtime_call_frame` describe the suspended frames.
 

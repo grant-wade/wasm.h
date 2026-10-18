@@ -39,6 +39,8 @@ pub const Error = error{
     Interrupted,
     /// A host function returns it to suspend the calling Wasm code until `Runtime.resumeCall`.
     Yield,
+    /// The runtime holds a suspended call; resume or cancel it first.
+    Suspended,
 };
 
 const error_codes = .{
@@ -66,6 +68,7 @@ const error_codes = .{
     .{ c.WASM_ERR_EXIT, error.Exit },
     .{ c.WASM_ERR_INTERRUPTED, error.Interrupted },
     .{ c.WASM_YIELD, error.Yield },
+    .{ c.WASM_ERR_SUSPENDED, error.Suspended },
 };
 
 fn check(code: c.wasm_error_t) Error!void {
