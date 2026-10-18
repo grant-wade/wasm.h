@@ -141,16 +141,6 @@ WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func) {
     return WASM_OK;
 }
 
-WASM_PRIVATE const wasm__control_target_t* wasm__control_target_at(const wasm_func_t* func, const uint8_t* pc) {
-    uint32_t offset;
-
-    if (!func || !func->control_targets || !func->code || pc < func->code) return NULL;
-    offset = (uint32_t)(pc - func->code);
-    if (offset >= func->code_len) return NULL;
-    if (func->control_targets[offset].end_offset == UINT32_MAX) return NULL;
-    return &func->control_targets[offset];
-}
-
 WASM_PRIVATE wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod) {
     uint32_t i;
 

@@ -50,7 +50,6 @@
 #include "exec/gc.c"
 #include "exec/bulk.c"
 #include "exec/simd.c"
-#include "exec/numeric.c"
 #include "exec/atomic.c"
 #include "exec/interpreter.c"
 #include "call.c"

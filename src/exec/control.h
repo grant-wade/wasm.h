@@ -13,8 +13,6 @@ typedef struct wasm__try_clause_t {
 
 WASM_PRIVATE wasm_error_t wasm__build_control_targets(wasm_func_t* func);
 
-WASM_PRIVATE const wasm__control_target_t* wasm__control_target_at(const wasm_func_t* func, const uint8_t* pc);
-
 WASM_PRIVATE wasm_error_t wasm__build_module_control_targets(wasm_module_t* mod);
 
 WASM_PRIVATE wasm_error_t wasm__read_try_clause(const uint8_t* clause_ptr,

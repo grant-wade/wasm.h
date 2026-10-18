@@ -24,6 +24,4 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
                                     uint32_t* label_sp,
                                     uint32_t depth_l);
 
-WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label);
-
 #endif /* WASM_SRC_EXEC_EXCEPTIONS_H */

@@ -263,9 +263,3 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__leave_label(wasm_runtime_t* rt, const wasm__label_t* label) {
-    if (rt->sp - label->arity != label->sp_base && label->arity > 0)
-        memmove(&rt->stack[label->sp_base], &rt->stack[rt->sp - label->arity], label->arity * sizeof(wasm_value_t));
-    rt->sp = label->sp_base + label->arity;
-    return WASM_OK;
-}
