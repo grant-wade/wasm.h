@@ -17000,8 +17000,17 @@ WL_TEST(test_resume_yielding_host_imports) {
     wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
     WL_CHECK_MSG(t, backtrace[0] != '\0', "%s", "expected a backtrace while suspended");
 
-    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_MALFORMED);
+    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_SUSPENDED);
+    WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_SUSPENDED);
     WL_CHECK_MSG(t, strstr(rt.error_msg, "suspended") != NULL, "%s", rt.error_msg);
+    {
+        static const uint8_t start_module[] = {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+            0x01, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+        };
+        WL_CHECK(t, wasm_load(&rt, start_module, sizeof(start_module)) == NULL);
+        WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_SUSPENDED);
+    }
     WL_CHECK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1) == WASM_ERR_TYPE_MISMATCH);
     host_result = wasm_i64(7);
     WL_CHECK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1) == WASM_ERR_TYPE_MISMATCH);

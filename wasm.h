@@ -205,7 +205,9 @@ typedef enum wasm_error_t {
     /* The host stopped execution with wasm_runtime_interrupt. */
     WASM_ERR_INTERRUPTED,
     /* Returned by a host function to suspend the calling Wasm code; see wasm_runtime_resume. */
-    WASM_YIELD
+    WASM_YIELD,
+    /* The runtime holds a suspended call; see wasm_runtime_resume and wasm_runtime_cancel. */
+    WASM_ERR_SUSPENDED
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -24754,9 +24756,9 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
     wasm_runtime_clear_error(mod->rt);
     if (mod->rt->suspended != WASM_OK) {
-        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s",
+        WASM__SET_ERR(mod->rt, WASM_ERR_SUSPENDED, "%s",
                       "runtime has a suspended call; resume or cancel it first");
-        return WASM_ERR_MALFORMED;
+        return WASM_ERR_SUSPENDED;
     }
     wasm__clear_backtrace(mod->rt);
     if (mod->is_compiled) {
@@ -31013,6 +31015,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "exit";
         case WASM_YIELD:
             return "yielded";
+        case WASM_ERR_SUSPENDED:
+            return "runtime has a suspended call";
     }
     return "unknown error";
 }

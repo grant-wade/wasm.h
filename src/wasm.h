@@ -196,7 +196,9 @@ typedef enum wasm_error_t {
     /* The host stopped execution with wasm_runtime_interrupt. */
     WASM_ERR_INTERRUPTED,
     /* Returned by a host function to suspend the calling Wasm code; see wasm_runtime_resume. */
-    WASM_YIELD
+    WASM_YIELD,
+    /* The runtime holds a suspended call; see wasm_runtime_resume and wasm_runtime_cancel. */
+    WASM_ERR_SUSPENDED
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */

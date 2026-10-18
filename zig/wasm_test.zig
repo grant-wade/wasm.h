@@ -101,7 +101,7 @@ test "traps and fuel" {
     try expectEqualStrings("out of fuel", rt.errorMessage());
     try expectEqual(@as(u64, 0), rt.fuel());
     try expectEqual(wasm.Runtime.Suspension.out_of_fuel, rt.suspended().?);
-    try expectError(error.Malformed, div.call(.{ 9, 3 }));
+    try expectError(error.Suspended, div.call(.{ 9, 3 }));
     rt.cancel();
     try expectEqual(@as(?wasm.Runtime.Suspension, null), rt.suspended());
     try expectError(error.OutOfFuel, div.call(.{ 9, 3 }));

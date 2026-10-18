@@ -502,6 +502,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "exit";
         case WASM_YIELD:
             return "yielded";
+        case WASM_ERR_SUSPENDED:
+            return "runtime has a suspended call";
     }
     return "unknown error";
 }
