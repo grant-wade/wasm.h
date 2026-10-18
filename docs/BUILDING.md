@@ -61,6 +61,7 @@ Build individual targets with `./cbuild -t <target>`; `./cbuild --list` shows th
 | Target | Purpose |
 | --- | --- |
 | `wasm`, `wasm2api` | CLI and wrapper generator. |
+| `wasm_bench` | Interpreter micro-benchmarks from `bench/kernels.wat`; run a `--release` build. |
 | `wasm_runtime` | Modular static library. |
 | `wasm-header` | Regenerate the root `wasm.h` from `src/`. |
 | `wasm_test`, `wasm_modular_test`, `wl_test` | Native regression executables. |

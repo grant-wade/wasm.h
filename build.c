@@ -811,6 +811,7 @@ int main(int argc, char** argv) {
 
     target_t* wasm2api = native_executable("wasm2api", "wasm2api.c", header);
     native_executable("wasm", "wasm.c", header);
+    native_executable("wasm_bench", "bench/wasm_bench.c", header);
 
     target_t* wl_test = native_executable("wl_test", "test/wl_test.c", header);
     target_t* wasm_test = native_executable("wasm_test", "test/wasm_test.c", header);
