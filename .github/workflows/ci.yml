@@ -124,6 +124,46 @@ jobs:
       - name: Run native and specification tests
         run: ./cbuild $BUILD_FLAGS --test
 
+  freebsd:
+    name: FreeBSD / amd64 / ${{ matrix.config.build_type }} / platform=${{ matrix.config.platform }}
+    runs-on: [self-hosted, freebsd, amd64]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: sh
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        config:
+          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - {build_type: Debug, platform: 'ON', flags: ''}
+          - {build_type: Release, platform: 'OFF', flags: '--release --no-platform'}
+          - {build_type: Release, platform: 'ON', flags: '--release'}
+    env:
+      CC: cc
+      BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc --no-zig
+    steps:
+      - name: Check jail tools
+        run: |
+          test "$(uname -s)" = FreeBSD
+          test "$(uname -m)" = amd64
+          cc --version
+          git --version
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-wasm-tools
+      - name: Check committed header and bootstrap the build program
+        run: |
+          cc -o amalgamate tools/amalgamate.c
+          ./amalgamate --check
+          cc -o cbuild build.c
+      - name: Build runtime, CLI, and wrapper generator
+        run: ./cbuild $BUILD_FLAGS -j2
+      - name: Run native and specification tests
+        run: ./cbuild $BUILD_FLAGS --test -j2 --test-timeout=300
+
   windows:
     name: Windows / ${{ matrix.target.runner }} / ${{ matrix.target.arch }} / ${{ matrix.config.build_type }} / platform=${{ matrix.config.platform }}
     runs-on: ${{ matrix.target.runner }}

@@ -7,30 +7,39 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install on Linux or macOS
+    - name: Install on Unix
       if: runner.os != 'Windows'
-      shell: bash
+      shell: sh
       env:
         WASM_TOOLS_VERSION: ${{ inputs.version }}
       run: |
-        case "$RUNNER_ARCH" in
-          X64) arch=x86_64 ;;
-          ARM64) arch=aarch64 ;;
-          *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
-        esac
-        case "$RUNNER_OS" in
+        case "$(uname -s)" in
           Linux) platform=linux ;;
-          macOS) platform=macos ;;
-          *) echo "Unsupported runner OS: $RUNNER_OS" >&2; exit 1 ;;
+          Darwin) platform=macos ;;
+          FreeBSD) platform=freebsd ;;
+          *) echo "Unsupported runner OS: $(uname -s)" >&2; exit 1 ;;
         esac
-        archive="wasm-tools-${WASM_TOOLS_VERSION}-${arch}-${platform}"
-        destination="$RUNNER_TEMP/wasm-tools"
-        mkdir -p "$destination"
-        curl --fail --location --show-error --retry 3 \
-          "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${archive}.tar.gz" \
-          -o "$destination/archive.tar.gz"
-        tar -xzf "$destination/archive.tar.gz" -C "$destination"
-        bin="$destination/$archive"
+        if [ "$platform" = freebsd ]; then
+          destination="${XDG_CACHE_HOME:-$HOME/.cache}/wasm-tools/$WASM_TOOLS_VERSION"
+          bin="$destination/bin"
+          if [ "$("$bin/wasm-tools" --version 2>/dev/null || true)" != "wasm-tools $WASM_TOOLS_VERSION" ]; then
+            cargo install --locked --version "=$WASM_TOOLS_VERSION" --jobs 2 --root "$destination" wasm-tools
+          fi
+        else
+          case "$RUNNER_ARCH" in
+            X64) arch=x86_64 ;;
+            ARM64) arch=aarch64 ;;
+            *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          archive="wasm-tools-${WASM_TOOLS_VERSION}-${arch}-${platform}"
+          destination="$RUNNER_TEMP/wasm-tools"
+          mkdir -p "$destination"
+          curl --fail --location --show-error --retry 3 \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${archive}.tar.gz" \
+            -o "$destination/archive.tar.gz"
+          tar -xzf "$destination/archive.tar.gz" -C "$destination"
+          bin="$destination/$archive"
+        fi
         "$bin/wasm-tools" --version
         "$bin/wasm-tools" json-from-wast --help > /dev/null
         "$bin/wasm-tools" parse --help > /dev/null

@@ -1,8 +1,7 @@
-# Official hosted labels newer than actionlint 1.7.12's built-in inventory.
-# This is actionlint's label-extension setting, not a request for self-hosting.
-# https://docs.github.com/en/actions/reference/runners/github-hosted-runners
 self-hosted-runner:
   labels:
+    - freebsd
+    - amd64
     - ubuntu-26.04
     - ubuntu-26.04-arm
     - windows-11-vs2026-arm

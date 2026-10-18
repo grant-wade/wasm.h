@@ -116,7 +116,7 @@ To install, copy `wasm.h` into the application or an include directory.
 
 ## CI and fuzzing
 
-[ci.yml](../.github/workflows/ci.yml) defines the OS, architecture, and compiler matrix, header freshness check, ASan/LSan/UBSan runs, libFuzzer smoke tests, and the Zig package tests and cross-compilation. Emscripten fixtures run locally.
+[ci.yml](../.github/workflows/ci.yml) defines CI for Linux, macOS, Windows, and self-hosted FreeBSD, plus header freshness checks, ASan/LSan/UBSan runs, libFuzzer smoke tests, and Zig tests and cross-compilation. Emscripten fixtures run locally.
 
 To fuzz the module loader with Clang and ASan/UBSan:
 
