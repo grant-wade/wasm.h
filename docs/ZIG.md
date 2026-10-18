@@ -49,9 +49,22 @@ pub fn main() !void {
 
 `Runtime.init` takes a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
 
+For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memory and table at instantiation and on growth, and `max_function_locals` caps the locals a function may declare; 0 removes a limit:
+
+```zig
+const rt = try wasm.Runtime.init(.{ .max_memory_bytes = 64 * 1024 * 1024, .max_table_elements = 100_000 });
+```
+
 `Runtime.compile` decodes and validates without resolving imports or running code; the result supports introspection, and `Module.instantiate` creates independent instances of it.
 
-Errors are the `wasm.Error` set, one per `wasm_error_t` code; `Runtime.errorMessage` describes the most recent one.
+Errors are the `wasm.Error` set, one per `wasm_error_t` code; `Runtime.errorMessage` describes the most recent one. A guest that calls WASI `proc_exit` stops with `error.Exit`, and `Runtime.exitCode` returns its status:
+
+```zig
+start.call(.{}) catch |err| switch (err) {
+    error.Exit => std.process.exit(@intCast(rt.exitCode() & 0xFF)),
+    else => return err,
+};
+```
 
 ## Typed functions
 

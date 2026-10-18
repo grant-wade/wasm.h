@@ -16,7 +16,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The CLI `imports` command. The inspection commands compile instead of instantiating, so they no longer fail on modules with unbound imports or run start functions.
 - `wasm_bench`, interpreter micro-benchmarks for loops, memory access, calls, `br_table`, `call_indirect`, and floating point.
 - `wasm_exec_fuzzer`, a libFuzzer harness that instantiates each input with stubbed imports and calls its exports, and `wasm_exec_fuzz_replay`, which runs that harness over the seed corpus in `test/fuzz/corpus` as part of `./cbuild --test`.
-- `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. Zig maps it to `error.Exit` with `Runtime.exitCode`.
+- `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. In Zig, `error.Exit` and `Runtime.exitCode`.
+- Zig `Config` fields for `max_function_locals`, `max_memory_bytes`, and `max_table_elements`.
 
 ### Changed
 
