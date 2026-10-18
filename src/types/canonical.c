@@ -415,28 +415,163 @@ static int wasm__comptype_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint
     return result;
 }
 
+static uint64_t wasm__canonical_mix(uint64_t hash, uint64_t value) {
+    hash ^= value + UINT64_C(0x9E3779B97F4A7C15) + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+/* Hashes agree with wasm__canonical_recgroup_equal: references into the group hash by
+   position, earlier types by canonical id, and anything else by index. */
+static uint64_t wasm__canonical_hash_type_index(const wasm_module_t* mod,
+                                                const wasm_recgroup_t* group,
+                                                uint64_t hash,
+                                                uint32_t type_idx) {
+    if (wasm__canonical_group_contains_type(group, type_idx))
+        return wasm__canonical_mix(wasm__canonical_mix(hash, 1u), wasm__canonical_group_type_offset(group, type_idx));
+    if (type_idx < mod->num_types && mod->types[type_idx].canonical_id != 0)
+        return wasm__canonical_mix(wasm__canonical_mix(hash, 2u), mod->types[type_idx].canonical_id);
+    return wasm__canonical_mix(wasm__canonical_mix(hash, 3u), type_idx);
+}
+
+static uint64_t wasm__canonical_hash_reftype(const wasm_module_t* mod,
+                                             const wasm_recgroup_t* group,
+                                             uint64_t hash,
+                                             const wasm_reftype_t* ref) {
+    if (!wasm__has_reftype_info(ref)) return wasm__canonical_mix(hash, 0u);
+    hash = wasm__canonical_mix(hash, (uint64_t)ref->type);
+    hash = wasm__canonical_mix(hash, ((uint64_t)(ref->nullable != 0) << 1) | (uint64_t)(ref->has_type_index != 0));
+    if (ref->has_type_index) hash = wasm__canonical_hash_type_index(mod, group, hash, ref->type_index);
+    return hash;
+}
+
+static uint64_t wasm__canonical_hash_values(const wasm_module_t* mod,
+                                            const wasm_recgroup_t* group,
+                                            uint64_t hash,
+                                            uint32_t count,
+                                            const wasm_valtype_t* types,
+                                            const wasm_reftype_t* reftypes) {
+    uint32_t i;
+
+    hash = wasm__canonical_mix(hash, count);
+    for (i = 0; i < count; i++) {
+        hash = wasm__canonical_mix(hash, (uint64_t)types[i]);
+        if (wasm__is_ref_type(types[i]))
+            hash = wasm__canonical_hash_reftype(mod, group, hash, reftypes ? reftypes + i : NULL);
+    }
+    return hash;
+}
+
+static uint64_t wasm__canonical_hash_field(const wasm_module_t* mod,
+                                           const wasm_recgroup_t* group,
+                                           uint64_t hash,
+                                           const wasm_fieldtype_t* field) {
+    const wasm_storagetype_t* storage = &field->storage;
+
+    hash = wasm__canonical_mix(hash, (uint64_t)(field->is_mutable != 0));
+    hash = wasm__canonical_mix(hash, (uint64_t)storage->kind);
+    if (storage->kind == WASM_STORAGE_PACKED) return wasm__canonical_mix(hash, (uint64_t)storage->of.packed_type);
+    hash = wasm__canonical_mix(hash, (uint64_t)storage->of.valtype);
+    if (wasm__is_ref_type(storage->of.valtype)) hash = wasm__canonical_hash_reftype(mod, group, hash, &storage->ref_type);
+    return hash;
+}
+
+static uint64_t wasm__canonical_hash_recgroup(const wasm_module_t* mod, const wasm_recgroup_t* group) {
+    uint64_t hash = wasm__canonical_mix(0u, group->num_types);
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < group->num_types; i++) {
+        const wasm_comptype_t* type = &mod->types[group->first_type + i];
+
+        hash = wasm__canonical_mix(hash, (uint64_t)type->kind);
+        hash = wasm__canonical_mix(hash, (uint64_t)(type->is_final != 0));
+        hash = wasm__canonical_mix(hash, type->num_supertypes);
+        for (j = 0; j < type->num_supertypes; j++)
+            hash = wasm__canonical_hash_type_index(mod, group, hash, type->supertypes[j]);
+        switch (type->kind) {
+            case WASM_COMP_FUNC:
+                hash = wasm__canonical_hash_values(mod, group, hash, type->of.func.num_params,
+                                                   type->of.func.params, type->of.func.param_reftypes);
+                hash = wasm__canonical_hash_values(mod, group, hash, type->of.func.num_results,
+                                                   type->of.func.results, type->of.func.result_reftypes);
+                break;
+            case WASM_COMP_STRUCT:
+                hash = wasm__canonical_mix(hash, type->of.struct_.num_fields);
+                for (j = 0; j < type->of.struct_.num_fields; j++)
+                    hash = wasm__canonical_hash_field(mod, group, hash, &type->of.struct_.fields[j]);
+                break;
+            case WASM_COMP_ARRAY:
+                hash = wasm__canonical_hash_field(mod, group, hash, &type->of.array.field);
+                break;
+            default:
+                break;
+        }
+    }
+    return hash;
+}
+
 WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
     uint32_t i;
     uint32_t next_id = 1;
+    uint32_t* slots = NULL;
+    uint64_t* hashes = NULL;
+    size_t capacity = 1u;
+    size_t mask;
 
     if (!mod) return WASM_OK;
 
     for (i = 0; i < mod->num_types; i++) mod->types[i].canonical_id = 0;
 
-    for (i = 0; i < mod->num_types; i++) {
-        uint32_t j;
+    while (capacity < (size_t)mod->num_rec_groups * 2u) capacity <<= 1;
+    mask = capacity - 1u;
+    if (mod->num_rec_groups > 0) {
+        slots = (uint32_t*)WASM_CALLOC(capacity, sizeof(*slots));
+        hashes = (uint64_t*)wasm__malloc_array(mod->num_rec_groups, sizeof(*hashes));
+        if (!slots || !hashes) {
+            WASM_FREE(slots);
+            WASM_FREE(hashes);
+            return WASM_ERR_OOM;
+        }
+    }
 
-        for (j = 0; j < i; j++) {
-            if (wasm__comptype_equal(mod, i, j)) {
-                mod->types[i].canonical_id = mod->types[j].canonical_id;
+    /* Groups may refer only to themselves and earlier groups, so by the time a group is
+       hashed every type it references outside itself already has its canonical id. */
+    for (i = 0; i < mod->num_rec_groups; i++) {
+        const wasm_recgroup_t* group = &mod->rec_groups[i];
+        const wasm_recgroup_t* match = NULL;
+        size_t slot;
+        uint32_t k;
+
+        if (group->first_type > mod->num_types || group->num_types > mod->num_types - group->first_type) continue;
+        hashes[i] = wasm__canonical_hash_recgroup(mod, group);
+        for (slot = (size_t)hashes[i] & mask; slots[slot] != 0u; slot = (slot + 1u) & mask) {
+            const wasm_recgroup_t* other = &mod->rec_groups[slots[slot] - 1u];
+
+            if (hashes[slots[slot] - 1u] == hashes[i] && wasm__canonical_recgroup_equal(mod, group, other, NULL)) {
+                match = other;
                 break;
             }
         }
-
-        if (j == i) {
-            if (next_id == 0) return WASM_ERR_OOM;
-            mod->types[i].canonical_id = next_id++;
+        if (match) {
+            for (k = 0; k < group->num_types; k++)
+                mod->types[group->first_type + k].canonical_id = mod->types[match->first_type + k].canonical_id;
+            continue;
         }
+        if (group->num_types > UINT32_MAX - next_id) {
+            WASM_FREE(slots);
+            WASM_FREE(hashes);
+            return WASM_ERR_OOM;
+        }
+        for (k = 0; k < group->num_types; k++) mod->types[group->first_type + k].canonical_id = next_id++;
+        slots[slot] = i + 1u;
+    }
+    WASM_FREE(slots);
+    WASM_FREE(hashes);
+
+    for (i = 0; i < mod->num_types; i++) {
+        if (mod->types[i].canonical_id != 0) continue;
+        if (next_id == UINT32_MAX) return WASM_ERR_OOM;
+        mod->types[i].canonical_id = next_id++;
     }
 
     return WASM_OK;

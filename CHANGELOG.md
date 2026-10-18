@@ -16,6 +16,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Fixed
 
 - WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.
+- Type canonicalization hashes each rec group and compares it only with earlier groups of the same hash. It compared every pair of types and allocated a types² table for each comparison, so a 20 KB module with 2,000 types took over 30 seconds to load.
 - Validating functions with non-defaultable locals no longer clears local-initialization state for every possible block depth.
 - GC marking uses an explicit worklist instead of recursion, so collecting long object chains no longer overflows the native stack.
 - WASI `path_open` derives the host access mode from the requested rights, so directories and read-only files can be opened on POSIX hosts.

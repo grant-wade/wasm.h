@@ -8306,6 +8306,65 @@ WL_TEST(test_load_limits_function_locals) {
     wasm_destroy(&rt);
 }
 
+static size_t wasm_test_put_leb128_u32(uint8_t* out, uint32_t value) {
+    size_t n = 0;
+
+    do {
+        uint8_t byte = (uint8_t)(value & 0x7Fu);
+
+        value >>= 7;
+        if (value) byte |= 0x80u;
+        out[n++] = byte;
+    } while (value);
+    return n;
+}
+
+WL_TEST(test_canonicalization_dedupes_many_types) {
+    enum { DISTINCT = 2048, PARAMS = 11, TYPE_BYTES = PARAMS + 3 };
+    static const uint8_t header[] = { 0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 };
+    uint8_t* bytes = (uint8_t*)malloc(64u + (size_t)DISTINCT * 2u * TYPE_BYTES);
+    uint8_t count[5];
+    size_t count_len = wasm_test_put_leb128_u32(count, DISTINCT * 2u);
+    size_t len = 0;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t i;
+    uint32_t d;
+    uint32_t mismatches = 0;
+
+    WL_CHECK_MSG(t, bytes != NULL, "%s", "allocation failed");
+    if (!bytes) return;
+    memcpy(bytes, header, sizeof(header));
+    len = sizeof(header);
+    bytes[len++] = 1;
+    len += wasm_test_put_leb128_u32(bytes + len, (uint32_t)(count_len + (size_t)DISTINCT * 2u * TYPE_BYTES));
+    memcpy(bytes + len, count, count_len);
+    len += count_len;
+    for (i = 0; i < DISTINCT * 2u; i++) {
+        uint32_t bits = i % DISTINCT;
+
+        bytes[len++] = 0x60;
+        bytes[len++] = PARAMS;
+        for (d = 0; d < PARAMS; d++) bytes[len++] = (bits >> d) & 1u ? 0x7E : 0x7F;
+        bytes[len++] = 0;
+    }
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, bytes, len);
+    free(bytes);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        for (i = 0; i < DISTINCT; i++) {
+            if (m->types[i].canonical_id != m->types[i + DISTINCT].canonical_id) mismatches++;
+            if (i > 0 && m->types[i].canonical_id == m->types[i - 1u].canonical_id) mismatches++;
+        }
+        WL_CHECK_MSG(t, mismatches == 0, "expected identical types to share ids and distinct types not to, %u wrong",
+                     (unsigned)mismatches);
+    }
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15243,6 +15302,7 @@ int main(void) {
         { "validation: long i64 LEBs are rejected during load", test_validation_rejects_long_i64_leb128 },
         { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
         { "load: function locals are limited by config", test_load_limits_function_locals },
+        { "types: canonicalization dedupes thousands of types", test_canonicalization_dedupes_many_types },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
