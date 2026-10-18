@@ -138,6 +138,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
         entry->rights_base = rights_base;
         entry->rights_inheriting = rights_inheriting;
         entry->is_preopen = preopen_path ? 1 : 0;
+        entry->can_path = preopen_path != NULL || filetype == WASM__WASI_FILETYPE_DIRECTORY;
         entry->host_path = copied_host_path;
         entry->preopen_path = copied_preopen_path;
         if (out_fd) *out_fd = i;
@@ -200,18 +201,72 @@ static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      uint32_t len,
-                                      char** out_path) {
+WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+                                        uint64_t mem_size,
+                                        uint32_t ptr,
+                                        uint32_t len,
+                                        char** out_text) {
     uint8_t* bytes = NULL;
 
-    if (!out_path) return 0;
-    *out_path = NULL;
+    if (!out_text) return 0;
+    *out_text = NULL;
     if (!wasm__wasi_read_guest_bytes(memory, mem_size, ptr, len, &bytes)) return 0;
-    *out_path = (char*)bytes;
+    *out_text = (char*)bytes;
     return 1;
+}
+
+static int wasm__wasi_path_is_separator(char c) {
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t* out_depth) {
+    const char* p = path;
+
+    if (!path) return 0;
+    if (wasm__wasi_path_is_separator(path[0])) return 0;
+    while (*p) {
+        const char* start = p;
+        size_t len;
+
+        while (*p && !wasm__wasi_path_is_separator(*p)) {
+#if defined(_WIN32)
+            if (*p == ':') return 0;
+#endif
+            p++;
+        }
+        len = (size_t)(p - start);
+        if (len == 2u && start[0] == '.' && start[1] == '.') {
+            if (depth == 0u) return 0;
+            depth--;
+        } else if (len > 0u && !(len == 1u && start[0] == '.')) {
+            depth++;
+        }
+        while (wasm__wasi_path_is_separator(*p)) p++;
+    }
+    if (out_depth) *out_depth = depth;
+    return 1;
+}
+
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+                                           uint64_t mem_size,
+                                           uint32_t ptr,
+                                           uint32_t len,
+                                           char** out_path) {
+    char* path = NULL;
+
+    if (!out_path) return WASM__WASI_ERRNO_FAULT;
+    *out_path = NULL;
+    if (!wasm__wasi_read_guest_string(memory, mem_size, ptr, len, &path)) return WASM__WASI_ERRNO_FAULT;
+    if (strlen(path) != (size_t)len || !wasm__wasi_path_walk(path, 0u, NULL)) {
+        WASM_FREE(path);
+        return WASM__WASI_ERRNO_NOTCAPABLE;
+    }
+    *out_path = path;
+    return WASM__WASI_ERRNO_SUCCESS;
 }
 
 WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry) {
@@ -220,8 +275,12 @@ WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t*
     return entry->preopen_path;
 }
 
-WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry) {
+WASM_PRIVATE int wasm__wasi_entry_has_host(const wasm__wasi_fd_entry_t* entry) {
     return entry && (entry->host_fd >= 0 || wasm__wasi_entry_host_path(entry) != NULL);
+}
+
+WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry) {
+    return entry && entry->can_path && wasm__wasi_entry_has_host(entry);
 }
 
 WASM_PRIVATE int wasm__wasi_host_read(int fd, void* buf, size_t len, size_t* out_count) {

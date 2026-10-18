@@ -10586,6 +10586,7 @@ typedef struct wasm__wasi_fd_entry_t {
     int host_fd;
     int owns_host_fd;
     int is_preopen;
+    int can_path; /* directory reached from a preopen; only these accept path operations */
     uint8_t filetype;
     uint16_t fdflags;
     uint64_t rights_base;
@@ -10628,13 +10629,26 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint32_t fd);
 
-WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      uint32_t len,
-                                      char** out_path);
+WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+                                        uint64_t mem_size,
+                                        uint32_t ptr,
+                                        uint32_t len,
+                                        char** out_text);
+
+/* Walks the components of a guest path starting `depth` levels below a
+   preopen root. Fails for absolute paths and when `..` would leave the root. */
+WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t* out_depth);
+
+/* Reads a guest path that must stay beneath its directory; returns a WASI errno. */
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+                                           uint64_t mem_size,
+                                           uint32_t ptr,
+                                           uint32_t len,
+                                           char** out_path);
 
 WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry);
+
+WASM_PRIVATE int wasm__wasi_entry_has_host(const wasm__wasi_fd_entry_t* entry);
 
 WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry);
 
@@ -23293,6 +23307,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
         entry->rights_base = rights_base;
         entry->rights_inheriting = rights_inheriting;
         entry->is_preopen = preopen_path ? 1 : 0;
+        entry->can_path = preopen_path != NULL || filetype == WASM__WASI_FILETYPE_DIRECTORY;
         entry->host_path = copied_host_path;
         entry->preopen_path = copied_preopen_path;
         if (out_fd) *out_fd = i;
@@ -23355,18 +23370,72 @@ static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      uint32_t len,
-                                      char** out_path) {
+WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+                                        uint64_t mem_size,
+                                        uint32_t ptr,
+                                        uint32_t len,
+                                        char** out_text) {
     uint8_t* bytes = NULL;
 
-    if (!out_path) return 0;
-    *out_path = NULL;
+    if (!out_text) return 0;
+    *out_text = NULL;
     if (!wasm__wasi_read_guest_bytes(memory, mem_size, ptr, len, &bytes)) return 0;
-    *out_path = (char*)bytes;
+    *out_text = (char*)bytes;
     return 1;
+}
+
+static int wasm__wasi_path_is_separator(char c) {
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t* out_depth) {
+    const char* p = path;
+
+    if (!path) return 0;
+    if (wasm__wasi_path_is_separator(path[0])) return 0;
+    while (*p) {
+        const char* start = p;
+        size_t len;
+
+        while (*p && !wasm__wasi_path_is_separator(*p)) {
+#if defined(_WIN32)
+            if (*p == ':') return 0;
+#endif
+            p++;
+        }
+        len = (size_t)(p - start);
+        if (len == 2u && start[0] == '.' && start[1] == '.') {
+            if (depth == 0u) return 0;
+            depth--;
+        } else if (len > 0u && !(len == 1u && start[0] == '.')) {
+            depth++;
+        }
+        while (wasm__wasi_path_is_separator(*p)) p++;
+    }
+    if (out_depth) *out_depth = depth;
+    return 1;
+}
+
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+                                           uint64_t mem_size,
+                                           uint32_t ptr,
+                                           uint32_t len,
+                                           char** out_path) {
+    char* path = NULL;
+
+    if (!out_path) return WASM__WASI_ERRNO_FAULT;
+    *out_path = NULL;
+    if (!wasm__wasi_read_guest_string(memory, mem_size, ptr, len, &path)) return WASM__WASI_ERRNO_FAULT;
+    if (strlen(path) != (size_t)len || !wasm__wasi_path_walk(path, 0u, NULL)) {
+        WASM_FREE(path);
+        return WASM__WASI_ERRNO_NOTCAPABLE;
+    }
+    *out_path = path;
+    return WASM__WASI_ERRNO_SUCCESS;
 }
 
 WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry) {
@@ -23375,8 +23444,12 @@ WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t*
     return entry->preopen_path;
 }
 
-WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry) {
+WASM_PRIVATE int wasm__wasi_entry_has_host(const wasm__wasi_fd_entry_t* entry) {
     return entry && (entry->host_fd >= 0 || wasm__wasi_entry_host_path(entry) != NULL);
+}
+
+WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry) {
+    return entry && entry->can_path && wasm__wasi_entry_has_host(entry);
 }
 
 WASM_PRIVATE int wasm__wasi_host_read(int fd, void* buf, size_t len, size_t* out_count) {
@@ -24592,7 +24665,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
     fd = (uint32_t)args[0].of.i32;
     stat_ptr = (uint32_t)args[1].of.i32;
     entry = wasm__wasi_fd_entry(rt, fd);
-    if (!entry || !wasm__wasi_entry_can_path(entry)) {
+    if (!entry || !wasm__wasi_entry_has_host(entry)) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
@@ -24975,7 +25048,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_get(wasm_module_t* mod,
         return WASM_OK;
     }
     entry = wasm__wasi_fd_entry(rt, (uint32_t)args[0].of.i32);
-    if (!entry || !wasm__wasi_entry_can_path(entry)) {
+    if (!entry || !wasm__wasi_entry_has_host(entry)) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
@@ -25318,16 +25391,21 @@ static int wasm__wasi_dirflags_to_host(uint32_t flags) {
 
 #endif
 
-static int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags) {
+static int wasm__wasi_oflags_to_host(uint32_t oflags, uint32_t fdflags, uint64_t rights) {
     int host_flags = 0;
+    int can_read = (rights & 0x2u) != 0u;
+    int can_write = (rights & 0x40u) != 0u || (fdflags & 0x1u) != 0u;
 
 #ifdef O_BINARY
     host_flags |= O_BINARY;
 #endif
-    if ((fdflags & 0x1u) != 0u)
-        host_flags |= O_APPEND;
-    else
+    if ((oflags & 0x2u) != 0u || !can_write)
+        host_flags |= O_RDONLY;
+    else if (can_read)
         host_flags |= O_RDWR;
+    else
+        host_flags |= O_WRONLY;
+    if ((fdflags & 0x1u) != 0u) host_flags |= O_APPEND;
 #ifdef O_NONBLOCK
     if ((fdflags & 0x4u) != 0u) host_flags |= O_NONBLOCK;
 #endif
@@ -25434,6 +25512,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25450,8 +25529,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25491,6 +25570,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
     uint32_t out_ptr;
 
     (void)userdata;
@@ -25510,8 +25590,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
     }
     out_ptr = (uint32_t)args[4].of.i32;
     if (!wasm__range_in_bounds_u64((uint64_t)out_ptr, 64u, mem_size) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25558,6 +25638,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
     wasm__wasi_fd_entry_t* new_entry;
     char* old_path = NULL;
     char* new_path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25571,11 +25652,11 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &old_path) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[5].of.i32, (uint32_t)args[6].of.i32, &new_path)) {
+    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[5].of.i32, (uint32_t)args[6].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
         WASM_FREE(old_path);
         WASM_FREE(new_path);
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25623,6 +25704,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
     uint32_t opened_fd_ptr;
 
     (void)userdata;
@@ -25638,14 +25720,15 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
     }
     opened_fd_ptr = (uint32_t)args[8].of.i32;
     if (!wasm__range_in_bounds_u64((uint64_t)opened_fd_ptr, 4u, mem_size) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     {
         int host_fd = openat(entry->host_fd, path,
-                             wasm__wasi_oflags_to_host((uint32_t)args[4].of.i32, (uint32_t)args[7].of.i32),
+                             wasm__wasi_oflags_to_host((uint32_t)args[4].of.i32, (uint32_t)args[7].of.i32,
+                                                       (uint64_t)args[5].of.i64),
                              0666);
 
         if (host_fd < 0)
@@ -25674,7 +25757,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
     {
         char* full_path = NULL;
         uint32_t oflags = (uint32_t)args[4].of.i32;
-        int host_flags = wasm__wasi_oflags_to_host(oflags, (uint32_t)args[7].of.i32);
+        int host_flags = wasm__wasi_oflags_to_host(oflags, (uint32_t)args[7].of.i32, (uint64_t)args[5].of.i64);
         uint32_t new_fd = 0u;
         wasm__wasi_host_stat_t st;
         uint8_t filetype = WASM__WASI_FILETYPE_UNKNOWN;
@@ -25735,6 +25818,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25749,8 +25833,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
     }
     if (!wasm__range_in_bounds_u64((uint64_t)(uint32_t)args[3].of.i32, (uint64_t)(uint32_t)args[4].of.i32, mem_size) ||
         !wasm__range_in_bounds_u64((uint64_t)(uint32_t)args[5].of.i32, 4u, mem_size) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25805,6 +25889,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25817,8 +25902,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25867,6 +25952,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
     wasm__wasi_fd_entry_t* new_entry;
     char* old_path = NULL;
     char* new_path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25880,11 +25966,11 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &old_path) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[4].of.i32, (uint32_t)args[5].of.i32, &new_path)) {
+    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[4].of.i32, (uint32_t)args[5].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
         WASM_FREE(old_path);
         WASM_FREE(new_path);
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -25922,6 +26008,27 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
     return WASM_OK;
 }
 
+static int wasm__wasi_symlink_target_contained(const char* target, const char* link_path) {
+    uint32_t depth = 0u;
+    const char* last = link_path;
+    const char* p;
+    char* parent;
+    size_t parent_len;
+    int ok;
+
+    for (p = link_path; *p; p++) {
+        if (*p == '/' || *p == '\\') last = p;
+    }
+    parent_len = last == link_path ? 0u : (size_t)(last - link_path);
+    parent = (char*)WASM_MALLOC(parent_len + 1u);
+    if (!parent) return 0;
+    memcpy(parent, link_path, parent_len);
+    parent[parent_len] = 0;
+    ok = wasm__wasi_path_walk(parent, 0u, &depth) && wasm__wasi_path_walk(target, depth, NULL);
+    WASM_FREE(parent);
+    return ok;
+}
+
 WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
                                             const wasm_value_t* args, uint32_t num_args,
                                             wasm_value_t* results, uint32_t num_results,
@@ -25932,6 +26039,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
     wasm__wasi_fd_entry_t* entry;
     char* old_path = NULL;
     char* new_path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -25944,11 +26052,18 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[0].of.i32, (uint32_t)args[1].of.i32, &old_path) ||
-        !wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[3].of.i32, (uint32_t)args[4].of.i32, &new_path)) {
+    if (!wasm__wasi_read_guest_string(memory, mem_size, (uint32_t)args[0].of.i32, (uint32_t)args[1].of.i32, &old_path) ||
+        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[3].of.i32, (uint32_t)args[4].of.i32, &new_path)) !=
+            WASM__WASI_ERRNO_SUCCESS) {
         WASM_FREE(old_path);
         WASM_FREE(new_path);
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+        wasm__wasi_set_errno(results, num_results, path_errno);
+        return WASM_OK;
+    }
+    if (!wasm__wasi_symlink_target_contained(old_path, new_path)) {
+        WASM_FREE(old_path);
+        WASM_FREE(new_path);
+        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTCAPABLE);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
@@ -26008,6 +26123,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
     wasm_runtime_t* rt;
     wasm__wasi_fd_entry_t* entry;
     char* path = NULL;
+    uint32_t path_errno = WASM__WASI_ERRNO_FAULT;
 
     (void)userdata;
 
@@ -26020,8 +26136,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_FAULT);
+    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)

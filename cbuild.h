@@ -1666,9 +1666,7 @@ static int cbuild__flag_on_compile_commands(const char* v, void* u) {
 static int cbuild__flag_on_list(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
-    char buf[8192];
-    int pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "Available targets:");
+    cbuild__log(ctx, CBUILD_LOG_INFO, "Available targets:");
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
         if (!t->name) continue;
@@ -1693,10 +1691,9 @@ static int cbuild__flag_on_list(const char* v, void* u) {
                 type_str = "file_dep";
                 break;
         }
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n  %-20s  [%s]", t->name, type_str);
-        if (t->output_file) pos += snprintf(buf + pos, sizeof(buf) - pos, "  -> %s", t->output_file);
+        cbuild__log(ctx, CBUILD_LOG_INFO, "  %-20s  [%s]%s%s", t->name, type_str,
+                    t->output_file ? "  -> " : "", t->output_file ? t->output_file : "");
     }
-    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", buf);
     return CBUILD_FLAG_EXIT;
 }
 

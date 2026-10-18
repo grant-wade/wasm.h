@@ -691,7 +691,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_fdstat_get(wasm_module_t* mod,
     fd = (uint32_t)args[0].of.i32;
     stat_ptr = (uint32_t)args[1].of.i32;
     entry = wasm__wasi_fd_entry(rt, fd);
-    if (!entry || !wasm__wasi_entry_can_path(entry)) {
+    if (!entry || !wasm__wasi_entry_has_host(entry)) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }

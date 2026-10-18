@@ -53,6 +53,7 @@ typedef struct wasm__wasi_fd_entry_t {
     int host_fd;
     int owns_host_fd;
     int is_preopen;
+    int can_path; /* directory reached from a preopen; only these accept path operations */
     uint8_t filetype;
     uint16_t fdflags;
     uint64_t rights_base;
@@ -95,13 +96,26 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint32_t fd);
 
-WASM_PRIVATE int wasm__wasi_read_guest_path(wasm_memory_t* memory,
-                                      uint64_t mem_size,
-                                      uint32_t ptr,
-                                      uint32_t len,
-                                      char** out_path);
+WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+                                        uint64_t mem_size,
+                                        uint32_t ptr,
+                                        uint32_t len,
+                                        char** out_text);
+
+/* Walks the components of a guest path starting `depth` levels below a
+   preopen root. Fails for absolute paths and when `..` would leave the root. */
+WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t* out_depth);
+
+/* Reads a guest path that must stay beneath its directory; returns a WASI errno. */
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+                                           uint64_t mem_size,
+                                           uint32_t ptr,
+                                           uint32_t len,
+                                           char** out_path);
 
 WASM_PRIVATE const char* wasm__wasi_entry_host_path(const wasm__wasi_fd_entry_t* entry);
+
+WASM_PRIVATE int wasm__wasi_entry_has_host(const wasm__wasi_fd_entry_t* entry);
 
 WASM_PRIVATE int wasm__wasi_entry_can_path(const wasm__wasi_fd_entry_t* entry);
 

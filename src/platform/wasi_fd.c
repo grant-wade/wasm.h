@@ -157,7 +157,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_filestat_get(wasm_module_t* mod,
         return WASM_OK;
     }
     entry = wasm__wasi_fd_entry(rt, (uint32_t)args[0].of.i32);
-    if (!entry || !wasm__wasi_entry_can_path(entry)) {
+    if (!entry || !wasm__wasi_entry_has_host(entry)) {
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }

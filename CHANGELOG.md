@@ -4,6 +4,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Security
+
+- WASI path operations accept only directories reached from a preopen. Standard I/O descriptors were treated as directory capabilities, so a guest could open, create, rename, or delete any host file through `path_open(0, "/abs/path")` and the other `path_*` calls. Guest paths, and symlink targets, must now be relative and must not climb above their directory with `..`; violations return `NOTCAPABLE`.
+
+### Fixed
+
+- WASI `path_open` derives the host access mode from the requested rights, so directories and read-only files can be opened on POSIX hosts.
+
 ## [1.1.0] - 2026-10-17
 
 ### Added
