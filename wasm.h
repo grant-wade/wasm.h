@@ -21550,6 +21550,25 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
     return host_func(mod, args, num_args, results, num_results, userdata);
 }
 
+/* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
+   already given up its frame, so that frame's handlers are skipped. Returns
+   WASM__ERR_RESUME_FRAME once a handler is found. */
+static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
+                                                wasm__call_frame_t* cf,
+                                                uint32_t base_frame_sp,
+                                                int is_tail_call) {
+    wasm_error_t err;
+
+    if (is_tail_call) {
+        while (cf->lsp > 0) {
+            wasm__clear_label(&cf->labels[cf->lsp - 1]);
+            cf->lsp--;
+        }
+    }
+    err = wasm__handle_exception_frames(mod, base_frame_sp);
+    return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
+}
+
 WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
                                   wasm_module_t* mod,
                                   wasm_runtime_t* rt,
@@ -21908,18 +21927,11 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                                  callee->host_userdata);
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
-                        if (err == WASM__ERR_EXCEPTION) {
-                            err = wasm__handle_exception_frames(mod, base_frame_sp);
-                            if (err == WASM_OK) {
-                                if (call_results != call_results_buf) WASM_FREE(call_results);
-                                return WASM__ERR_RESUME_FRAME;
-                            }
-                            if (err == WASM__ERR_EXCEPTION) {
-                                if (call_results != call_results_buf) WASM_FREE(call_results);
-                                return err;
-                            }
-                        }
                         if (call_results != call_results_buf) WASM_FREE(call_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
                     for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
@@ -21986,6 +21998,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
                         if (call_results != call_results_buf) WASM_FREE(call_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
                     for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
@@ -22037,6 +22053,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
                         if (tail_results != tail_results_buf) WASM_FREE(tail_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
 
@@ -22110,6 +22130,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
                         if (tail_results != tail_results_buf) WASM_FREE(tail_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
 
@@ -22180,6 +22204,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (call_args != tail_args_buf) WASM_FREE(call_args);
                     if (err != WASM_OK) {
                         if (call_results != call_results_buf) WASM_FREE(call_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
                     for (i = 0; i < cft->num_results; i++) WASM__PUSH(rt, call_results[i]);
@@ -22245,6 +22273,10 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                     if (tail_args != tail_args_buf) WASM_FREE(tail_args);
                     if (err != WASM_OK) {
                         if (tail_results != tail_results_buf) WASM_FREE(tail_results);
+                        if (err == WASM__ERR_EXCEPTION) {
+                            err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
+                            if (err == WASM__ERR_RESUME_FRAME || err == WASM__ERR_EXCEPTION) return err;
+                        }
                         goto cleanup;
                     }
 
