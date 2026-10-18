@@ -51,9 +51,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
 - `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
-- Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
+- The interpreter runs `wasm_bench` about 10x faster than 1.2.0.
 - A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
-- Interpreter instructions read and write operand stack slots in place; `wasm_bench` takes about 1.3 s, down from 3.4 s.
 - `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two.
 - A NaN result of `f64.add`, `f64.sub`, `f64.mul`, or `f64.div` carries the payload of its first NaN operand, made quiet.
 
