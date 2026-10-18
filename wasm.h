@@ -79,15 +79,15 @@
  *   - 32-bit and 64-bit
  *
  * Targets: Wasm 1.0 plus selected post-MVP proposals
- *   - i32, i64, f32, f64, funcref, and externref values
+ *   - i32, i64, f32, f64, v128, funcref, externref, exnref, and GC reference values
  *   - Imports/exports, including imported and mutable globals
  *   - Multiple linear memories with bounds checks, indexed memory access, and memory.grow
  *   - Tables, call_indirect, and reference-type table operations
  *   - Block/loop/if/br/br_if/br_table control flow with multi-value support
- *   - Bulk memory, sign-extension ops, non-trapping float-to-int conversions, extended const exprs, tail calls, exceptions, SIMD, and GC
+ *   - Bulk memory, sign-extension ops, non-trapping float-to-int conversions, extended const exprs, tail calls, exceptions, SIMD, GC, and Memory64
  *   - Optional WASI stub bindings for common wasi_snapshot_preview1 imports
  *   - Load-time validation plus runtime-configurable feature gating
- *   - No threads
+ *   - Opt-in threads, wide arithmetic, custom page sizes, and compact imports
  *
  * MIT License
  *
@@ -152,9 +152,9 @@
 #endif
 
 #define WASM_H_VERSION_MAJOR 1
-#define WASM_H_VERSION_MINOR 1
+#define WASM_H_VERSION_MINOR 2
 #define WASM_H_VERSION_PATCH 0
-#define WASM_H_VERSION_STRING "1.1.0"
+#define WASM_H_VERSION_STRING "1.2.0"
 
 #ifndef UINT32_MAX
 #define UINT32_MAX 0xFFFFFFFFu
