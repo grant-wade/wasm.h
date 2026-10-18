@@ -510,6 +510,43 @@ static void add_spectest(const spec_env_t* env, const char* wast, const char* ou
     free(lock);
 }
 
+/* Runs the execution fuzzer's harness over the seed corpus, so its paths are exercised without libFuzzer. */
+static void fuzz_corpus_replay(target_t* header) {
+    static const char* const names[] = { "wasm-tools" };
+    char* wasm_tools = find_program(names, 1, NULL, 0);
+    if (!wasm_tools) {
+        if (opt.announce) printf("wasm-tools not found; skipping the fuzz corpus replay.\n");
+        return;
+    }
+
+    target_t* replay = native_executable("wasm_exec_fuzz_replay", "test/fuzz_wasm_exec.c", header);
+    cbuild_add_define(ctx, replay, "WASM_FUZZ_REPLAY=1");
+
+    char* dir = out_path("fuzz-corpus");
+    command_t* mkdir_corpus = cbuild_command_function(ctx, "create fuzz corpus directory", make_dir_command, dir);
+    char** wats = NULL;
+    int wat_count = 0;
+    cbuild_expand_wildcard("test/fuzz/corpus/*.wat", &wats, &wat_count);
+    const char** args = (const char**)calloc((size_t)wat_count + 1, sizeof(*args));
+    target_t** builds = (target_t**)calloc((size_t)wat_count + 1, sizeof(*builds));
+    for (int i = 0; i < wat_count; ++i) {
+        const char* base = strrchr(wats[i], '/');
+        char* stem = fmt("%s", base ? base + 1 : wats[i]);
+        char* dot = strrchr(stem, '.');
+        if (dot) *dot = '\0';
+        char* wasm = fmt("%s/%s.wasm", dir, stem);
+        builds[i] = cbuild_file_dep_target(ctx, fmt("fuzz-corpus.%s", stem), wasm);
+        cbuild_add_source(ctx, builds[i], wats[i]);
+        cbuild_target_add_command(ctx, builds[i], mkdir_corpus);
+        char* parse_argv[] = { wasm_tools, "parse", wats[i], "-o", wasm };
+        cbuild_target_add_command(ctx, builds[i], cbuild_command_argv(ctx, fmt("wasm-tools parse %s", wats[i]),
+                                                                       parse_argv, COUNT(parse_argv)));
+        args[i] = wasm;
+    }
+    test_t* test = add_test("wasm_exec_fuzz_replay", replay, args, wat_count, "unit", NULL);
+    for (int i = 0; i < wat_count; ++i) cbuild_test_add_dependency(ctx, test, builds[i]);
+}
+
 static void spectests(target_t* runner, target_t* modular_runner) {
     static const char* const names[] = { "wasm-tools" };
     char* wasm_tools = find_program(names, 1, NULL, 0);
@@ -725,7 +762,7 @@ static void read_options(int argc, char** argv) {
     cbuild_register_flag_bool(ctx, "no-zig", 0, CBUILD_FLAG_PRE,
                               "Skip the Zig package tests even when zig 0.17 is available", &bound_bool);
     cbuild_register_flag_bool(ctx, "fuzzer", 0, CBUILD_FLAG_PRE,
-                              "Also build the libFuzzer harness wasm_load_fuzzer (Clang)", &bound_bool);
+                              "Also build the libFuzzer harnesses wasm_load_fuzzer and wasm_exec_fuzzer (Clang)", &bound_bool);
     cbuild_register_flag_bool(ctx, "spec-proposals", 0, CBUILD_FLAG_PRE,
                               "Run spec proposal suites the runtime does not implement instead of skipping them",
                               &bound_bool);
@@ -843,6 +880,7 @@ int main(int argc, char** argv) {
     }
 
     spectests(spectest_runner, spectest_modular_runner);
+    fuzz_corpus_replay(header);
 
     char* emcc = find_emcc();
     if (emcc) {
@@ -862,6 +900,14 @@ int main(int argc, char** argv) {
         cbuild_add_cflags(ctx, fuzzer, "-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer");
         cbuild_add_ldflags(ctx, fuzzer, "-fsanitize=fuzzer,address,undefined");
         cbuild_add_link_target(ctx, fuzzer, header);
+
+        target_t* exec_fuzzer = cbuild_executable(ctx, "wasm_exec_fuzzer");
+        cbuild_add_source(ctx, exec_fuzzer, "test/fuzz_wasm_exec.c");
+        base_options(exec_fuzzer);
+        cbuild_add_include_dir(ctx, exec_fuzzer, ".");
+        cbuild_add_cflags(ctx, exec_fuzzer, "-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer");
+        cbuild_add_ldflags(ctx, exec_fuzzer, "-fsanitize=fuzzer,address,undefined");
+        cbuild_add_link_target(ctx, exec_fuzzer, header);
     }
 
     /* Last, so caller flags override the build type. */

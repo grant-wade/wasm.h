@@ -1,0 +1,15 @@
+(module
+  (type $node (struct (field $next (mut (ref null $node))) (field $v i32)))
+  (type $arr (array (mut i32)))
+  (global $head (mut (ref null $node)) (ref.null $node))
+  (func (export "build") (param i32) (local $n i32)
+    (loop $l
+      (global.set $head (struct.new $node (global.get $head) (local.get $n)))
+      (local.set $n (i32.add (local.get $n) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $n) (i32.const 500)))))
+  (func (export "array") (result i32) (local $a (ref $arr))
+    (local.set $a (array.new $arr (i32.const 3) (i32.const 64)))
+    (array.set $arr (local.get $a) (i32.const 5) (i32.const 9))
+    (array.get $arr (local.get $a) (i32.const 5)))
+  (func (export "cast") (result i32)
+    (ref.test (ref $node) (ref.i31 (i32.const 4)))))

@@ -14,6 +14,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_config_t.max_memory_bytes` (default unlimited) and `max_table_elements` (default 10,000,000) cap each memory and table at instantiation and on growth. A module could declare a table of 2³² elements and make loading write every one.
 - `wasm_compile` decodes and validates a module without resolving imports or running code, and `wasm_instantiate` creates instances of it without validating function bodies again. Zig exposes them as `Runtime.compile` and `Module.instantiate`.
 - The CLI `imports` command, and the inspection commands compile instead of instantiating: they no longer fail on modules with unbound imports or run start functions.
+- `wasm_exec_fuzzer`, a libFuzzer harness that instantiates each input with stubbed imports and calls its exports, and `wasm_exec_fuzz_replay`, which runs that harness over the seed corpus in `test/fuzz/corpus` as part of `./cbuild --test`.
 - `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. Zig maps it to `error.Exit` with `Runtime.exitCode`.
 
 ### Fixed

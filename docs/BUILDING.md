@@ -43,7 +43,7 @@ The build has no cache: options that shape it are read on every run, so pass the
 | `--no-werror` | off | Do not treat compiler warnings as errors. |
 | `--no-emcc` | off | Skip the Emscripten fixture tests even when `emcc` is available. |
 | `--no-zig` | off | Skip the Zig package tests even when `zig` 0.17 is available. |
-| `--fuzzer` | off | Also build the Clang/libFuzzer module-loader harness. |
+| `--fuzzer` | off | Also build the Clang/libFuzzer loader and execution harnesses. |
 | `--spec-proposals` | off | Run specification proposal suites the runtime does not implement instead of skipping them. |
 
 `./cbuild --help` lists these with cbuild's own options. For example, the CI sanitizer configuration is:
@@ -65,7 +65,8 @@ Build individual targets with `./cbuild -t <target>`; `./cbuild --list` shows th
 | `wasm-header` | Regenerate the root `wasm.h` from `src/`. |
 | `wasm_test`, `wasm_modular_test`, `wl_test` | Native regression executables. |
 | `session_math_demo` | Wrapper example; requires `emcc`. |
-| `wasm_load_fuzzer` | libFuzzer harness; requires `--fuzzer`. |
+| `wasm_load_fuzzer`, `wasm_exec_fuzzer` | libFuzzer harnesses; require `--fuzzer`. |
+| `wasm_exec_fuzz_replay` | Execution harness over `test/fuzz/corpus`, run as a unit test; requires `wasm-tools`. |
 
 `./cbuild --clean` removes the current configuration's build directory. `./cbuild --compile-commands` writes `compile_commands.json` there for clangd and similar tools. See [test/README.md](../test/README.md) for fixture development and specification-test skips.
 
@@ -121,4 +122,11 @@ To fuzz the module loader with Clang and ASan/UBSan:
 ```sh
 ./cbuild --fuzzer --cc=clang -t wasm_load_fuzzer
 ./build/debug/wasm_load_fuzzer -runs=10000 -max_len=65536
+```
+
+`wasm_exec_fuzzer` goes further: it compiles each input with every implemented proposal except threads enabled, stubs all its imports, instantiates it, and calls each exported function with zero arguments under a fuel budget and memory and table limits. Seed it with the modules `./cbuild --test` builds from `test/fuzz/corpus` into `build/debug/fuzz-corpus`:
+
+```sh
+./cbuild --fuzzer --cc=clang -t wasm_exec_fuzzer
+./build/debug/wasm_exec_fuzzer -max_len=65536 -timeout=30 build/debug/fuzz-corpus
 ```

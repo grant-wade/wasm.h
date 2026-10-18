@@ -240,13 +240,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang
+      - uses: ./.github/actions/setup-wasm-tools
       - name: Bootstrap the build program
         run: cc -o cbuild build.c
-      - name: Build and smoke-test fuzzer
+      - name: Build and smoke-test fuzzers
         run: |
           ./cbuild --fuzzer --cc=clang -t wasm_load_fuzzer
+          ./cbuild --fuzzer --cc=clang -t wasm_exec_fuzzer
           ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1 \
             ./build/debug/wasm_load_fuzzer -runs=2000 -max_len=65536 -rss_limit_mb=2048
+          mkdir -p build/exec-corpus
+          for wat in test/fuzz/corpus/*.wat; do
+            wasm-tools parse "$wat" -o "build/exec-corpus/$(basename "$wat" .wat).wasm"
+          done
+          ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1 \
+            ./build/debug/wasm_exec_fuzzer -runs=5000 -max_len=65536 -rss_limit_mb=2048 -timeout=30 build/exec-corpus
 
   zig:
     name: Zig 0.17 / ${{ matrix.runner }}

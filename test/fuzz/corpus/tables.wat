@@ -1,0 +1,15 @@
+(module
+  (type $u (func (result i32)))
+  (table $t 4 funcref)
+  (elem (table $t) (i32.const 0) func $a $b)
+  (func $a (result i32) (i32.const 1))
+  (func $b (result i32) (i32.const 2))
+  (func (export "dispatch") (param i32) (result i32)
+    (call_indirect $t (type $u) (local.get 0)))
+  (func (export "missing") (result i32) (call_indirect $t (type $u) (i32.const 3)))
+  (func (export "switch") (param i32) (result i32)
+    (block $c (block $b (block $a
+      (br_table $a $b $c (local.get 0)))
+      (return (i32.const 10)))
+      (return (i32.const 20)))
+    (i32.const 30)))
