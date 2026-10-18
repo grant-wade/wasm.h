@@ -318,6 +318,11 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
             return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
         return 0;
     }
+    if (len == 5) {
+        if (o[0] == 0x20 && o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x22 && o[4] == 0x21) return WASM__OP_LC_ADD_T_S;
+        if (o[0] == 0x21 && o[1] == 0x20 && o[2] == 0x41 && o[3] == 0x6A && o[4] == 0x22) return WASM__OP_S_LC_ADD_T;
+        return 0;
+    }
     if (o[0] == 0x20 && o[1] == 0x21 && o[2] == 0x20 && o[3] == 0x21) return WASM__OP_L_S_L_S;
     if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load32(o[3])) return WASM__OP_LC_LOAD32;
@@ -350,13 +355,13 @@ static void wasm__x_fuse(wasm__translator_t* t) {
     pick = cost + n + 1u;
     cost[n] = 0;
     for (i = n; i-- > 0;) {
-        uint32_t o[4] = { 0, 0, 0, 0 };
+        uint32_t o[5] = { 0, 0, 0, 0, 0 };
         uint32_t len;
 
         cost[i] = cost[i + 1u] + 1u;
         pick[i] = 0;
-        for (len = 0; len < 4u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
-        for (len = 4u; len >= 2u; len--) {
+        for (len = 0; len < 5u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
+        for (len = 5u; len >= 2u; len--) {
             uint32_t fused = i + len <= n ? wasm__x_fusion(o, len) : 0u;
 
             if (fused != 0 && cost[i + len] + 1u < cost[i]) {

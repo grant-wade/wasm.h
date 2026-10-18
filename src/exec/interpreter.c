@@ -1795,6 +1795,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 locals[pc[5]] = *sp++;
                 pc += 6;
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_ADD_T_S):
+                wasm__slot_set_u32(locals + pc[5], wasm__slot_u32(locals + pc[0]) + pc[2]);
+                locals[pc[7]] = locals[pc[5]];
+                pc += 8;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_S_LC_ADD_T):
+                locals[pc[0]] = sp[-1];
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(locals + pc[2]) + pc[4]);
+                locals[pc[7]] = sp[-1];
+                pc += 8;
+                WASM__NEXT();
             WASM__CASE(WASM__OP_LC_BIN_S):
                 wasm__slot_set_u32(locals + pc[5], wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]));
                 pc += 6;

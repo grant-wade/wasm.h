@@ -16830,6 +16830,8 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     X(L_BIN, 0x20, 2, 2)            \
     X(LC_ADD_S, 0x20, 4, 5)         \
     X(LC_ADD_T, 0x20, 4, 5)         \
+    X(LC_ADD_T_S, 0x20, 5, 7)       \
+    X(S_LC_ADD_T, 0x21, 5, 7)       \
     X(LC_BIN_S, 0x20, 4, 5)         \
     X(LL_BIN_S, 0x20, 4, 5)         \
     X(ADD_S, 0x6A, 2, 1)            \
@@ -20396,6 +20398,11 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
             return loop ? WASM__OP_L_CMP_BRIF_LOOP : WASM__OP_L_CMP_BRIF;
         return 0;
     }
+    if (len == 5) {
+        if (o[0] == 0x20 && o[1] == 0x41 && o[2] == 0x6A && o[3] == 0x22 && o[4] == 0x21) return WASM__OP_LC_ADD_T_S;
+        if (o[0] == 0x21 && o[1] == 0x20 && o[2] == 0x41 && o[3] == 0x6A && o[4] == 0x22) return WASM__OP_S_LC_ADD_T;
+        return 0;
+    }
     if (o[0] == 0x20 && o[1] == 0x21 && o[2] == 0x20 && o[3] == 0x21) return WASM__OP_L_S_L_S;
     if (o[0] != 0x20 || (o[1] != 0x20 && o[1] != 0x41)) return 0;
     if (o[1] == 0x41 && o[2] == 0x6A && wasm__x_is_load32(o[3])) return WASM__OP_LC_LOAD32;
@@ -20428,13 +20435,13 @@ static void wasm__x_fuse(wasm__translator_t* t) {
     pick = cost + n + 1u;
     cost[n] = 0;
     for (i = n; i-- > 0;) {
-        uint32_t o[4] = { 0, 0, 0, 0 };
+        uint32_t o[5] = { 0, 0, 0, 0, 0 };
         uint32_t len;
 
         cost[i] = cost[i + 1u] + 1u;
         pick[i] = 0;
-        for (len = 0; len < 4u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
-        for (len = 4u; len >= 2u; len--) {
+        for (len = 0; len < 5u && i + len < n; len++) o[len] = t->ops[t->offsets[(i + len) * 2u]];
+        for (len = 5u; len >= 2u; len--) {
             uint32_t fused = i + len <= n ? wasm__x_fusion(o, len) : 0u;
 
             if (fused != 0 && cost[i + len] + 1u < cost[i]) {
@@ -24939,6 +24946,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm__slot_set_u32(sp, wasm__slot_u32(locals + pc[0]) + pc[2]);
                 locals[pc[5]] = *sp++;
                 pc += 6;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_ADD_T_S):
+                wasm__slot_set_u32(locals + pc[5], wasm__slot_u32(locals + pc[0]) + pc[2]);
+                locals[pc[7]] = locals[pc[5]];
+                pc += 8;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_S_LC_ADD_T):
+                locals[pc[0]] = sp[-1];
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(locals + pc[2]) + pc[4]);
+                locals[pc[7]] = sp[-1];
+                pc += 8;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_LC_BIN_S):
                 wasm__slot_set_u32(locals + pc[5], wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]));

@@ -33,6 +33,8 @@
     X(L_BIN, 0x20, 2, 2)            \
     X(LC_ADD_S, 0x20, 4, 5)         \
     X(LC_ADD_T, 0x20, 4, 5)         \
+    X(LC_ADD_T_S, 0x20, 5, 7)       \
+    X(S_LC_ADD_T, 0x21, 5, 7)       \
     X(LC_BIN_S, 0x20, 4, 5)         \
     X(LL_BIN_S, 0x20, 4, 5)         \
     X(ADD_S, 0x6A, 2, 1)            \

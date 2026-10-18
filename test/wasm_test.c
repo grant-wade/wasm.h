@@ -17813,6 +17813,27 @@ WL_TEST(test_fused_ops_match_unfused_execution) {
         emit(&code, 0x6A);
         wasm_test_emit_local_op(&code, 0x21, 2);
     }
+    wasm_test_emit_local_op(&code, 0x20, 0);
+    wasm_test_emit_i32_const(&code, 7);
+    emit(&code, 0x6A);
+    wasm_test_emit_local_op(&code, 0x22, 3);
+    wasm_test_emit_local_op(&code, 0x21, 4);
+    wasm_test_emit_local_op(&code, 0x20, 3);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    emit(&code, 0x6C);
+    wasm_test_emit_local_op(&code, 0x21, 3);
+    wasm_test_emit_local_op(&code, 0x20, 1);
+    emit(&code, 0x69);
+    wasm_test_emit_local_op(&code, 0x21, 4);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    wasm_test_emit_i32_const(&code, 9);
+    emit(&code, 0x6A);
+    wasm_test_emit_local_op(&code, 0x22, 4);
+    wasm_test_emit_local_op(&code, 0x20, 3);
+    emit(&code, 0x73);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    emit(&code, 0x6A);
+    wasm_test_emit_mix(&code, 2, 0);
     wasm_test_emit_local_op(&code, 0x20, 2);
     wasm_test_emit_fused_module(&mod, 0x7F, 0x7F, i32_locals, sizeof(i32_locals), &code);
     values[0] = wasm_i32(0);
