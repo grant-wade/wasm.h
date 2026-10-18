@@ -85,7 +85,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     }
 
     {
-        wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
+        wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results);
         if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(mod->rt);
         return wasm__record_call_result(mod->rt, err);
     }

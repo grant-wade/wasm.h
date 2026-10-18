@@ -18,6 +18,7 @@ struct wasm_func_t {
     uint32_t max_stack;    /* operand stack slots the body needs at most */
     uint32_t* local_slots; /* slot offset of each local in the frame's locals */
     uint32_t num_local_slots;
+    uint32_t frame_bytes; /* frame arena bytes a call reserves for its locals, then its handler labels */
     uint32_t param_slots;
     uint32_t result_slots;
     uint32_t* stack_maps;     /* bytecode offset, bits index, and slot count of each map, by offset */
@@ -26,6 +27,8 @@ struct wasm_func_t {
     uint32_t num_stack_map_bits;
     uint32_t max_label_depth;
     uint32_t funcref_id;
+    uint64_t matched_module; /* identity of the last module whose type matched_type an indirect call matched */
+    uint32_t matched_type;
     int is_declared_ref;
     int is_import;
     wasm_host_func_t host_func;
@@ -34,6 +37,7 @@ struct wasm_func_t {
 
 struct wasm_module_t {
     wasm_runtime_t* rt;
+    uint64_t identity; /* unique among the modules of rt, never reused */
     void* host_userdata;
     uint8_t* module_bytes;
     size_t module_size;

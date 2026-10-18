@@ -6,6 +6,7 @@
 #include "../runtime.h"
 #include "../types/canonical.h"
 #include "../values.h"
+#include "state.h"
 #include <string.h>
 
 /* A block being translated; fixups chains unresolved target words as index + 1, 0 ending it. */
@@ -784,6 +785,9 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     func->max_stack = info->max_height;
     func->local_slots = t.local_slots;
     func->num_local_slots = t.num_local_slots;
+    func->frame_bytes = (uint32_t)(((size_t)t.num_local_slots * sizeof(wasm__slot_t) +
+                                    (size_t)t.max_handlers * sizeof(wasm__label_t) + WASM__ARENA_ALIGN - 1u) &
+                                   ~(WASM__ARENA_ALIGN - 1u));
     func->param_slots = wasm__valtypes_slots(ft->params, ft->num_params);
     func->result_slots = wasm__valtypes_slots(ft->results, ft->num_results);
     func->stack_maps = maps;
@@ -829,6 +833,7 @@ WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm
     dst->max_stack = src->max_stack;
     dst->local_slots = local_slots;
     dst->num_local_slots = src->num_local_slots;
+    dst->frame_bytes = src->frame_bytes;
     dst->param_slots = src->param_slots;
     dst->result_slots = src->result_slots;
     dst->stack_maps = maps;
@@ -854,6 +859,7 @@ WASM_PRIVATE void wasm__free_translation(const wasm_allocator_t* a, wasm_func_t*
     func->max_handlers = 0;
     func->max_stack = 0;
     func->num_local_slots = 0;
+    func->frame_bytes = 0;
     func->num_stack_maps = 0;
     func->num_stack_map_bits = 0;
 }

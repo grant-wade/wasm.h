@@ -18,7 +18,8 @@ static wasm_error_t wasm__linked_func_call(wasm_module_t* caller,
         return WASM_ERR_TRAP;
     }
     wasm__clear_backtrace(linked->module->rt);
-    return wasm__interp(linked->module, linked->func_idx, (wasm_value_t*)args, num_args, results, num_results);
+    (void)num_results;
+    return wasm__interp(linked->module, linked->func_idx, (wasm_value_t*)args, num_args, results);
 }
 
 static wasm_error_t wasm__register_export(wasm_runtime_t* rt, const char* module_name, wasm_module_t* mod,

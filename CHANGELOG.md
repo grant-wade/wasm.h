@@ -71,6 +71,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A host value passed to Wasm as an `externref` or `anyref` could be read as a GC object, and changed by a collection, once a later GC heap covered its address.
 - Loading a module whose function body ends where a block type should start read a byte past the module.
 - Validating a `br_table` or an unreachable `array.new_fixed` with a count near 2^32 took minutes.
+- A host import reached through `call_indirect` or `call_ref` from another module had its results checked against the calling module's type indices, so a valid reference result failed with `WASM_ERR_TYPE_MISMATCH`.
 
 ## [1.2.0] - 2026-10-17
 
