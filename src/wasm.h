@@ -431,7 +431,7 @@ typedef struct wasm_global_import_t {
     wasm_valtype_t type;
     wasm_reftype_t ref_type;
     int is_mutable;
-    wasm_value_t* value;
+    wasm_value_t* value; /* must not hold a host anyref; see wasm_global_set */
 } wasm_global_import_t;
 
 /* ── Export entry ──────────────────────────────────────────────────── */
@@ -570,7 +570,7 @@ void wasm_runtime_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 /* Keeps a reference alive across collections until wasm_ref_release. Returns a slot holding the
    value, which collections update when they move the object; read the reference from the slot
-   each time it is used. Returns NULL when out of memory. */
+   each time it is used. Returns NULL when out of memory. Do not store a host anyref in the slot. */
 wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value);
 void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
@@ -652,6 +652,7 @@ uint32_t wasm_global_count(const wasm_module_t* mod);
 wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx);
 const wasm_reftype_t* wasm_global_reftype(const wasm_module_t* mod, uint32_t global_idx);
 int wasm_global_is_mutable(const wasm_module_t* mod, uint32_t global_idx);
+/* Do not store a host anyref through the returned pointer; use wasm_global_set_index. */
 wasm_value_t* wasm_module_global(wasm_module_t* mod, uint32_t global_idx);
 wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
 /* Fails with WASM_ERR_TYPE_MISMATCH for immutable globals and values of the wrong type. */

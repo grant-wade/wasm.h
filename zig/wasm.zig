@@ -644,7 +644,8 @@ pub const Runtime = opaque {
     }
 
     /// Binds `value` as the import global `module_name.name`; its kind gives the global's type.
-    /// `value` must outlive every module that imports it, which read and write it in place.
+    /// `value` must outlive every module that imports it, which read and write it in place, and
+    /// must not hold a host anyref.
     pub fn bindGlobal(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, value: *Value, mutable: bool) Error!void {
         var imp = std.mem.zeroes(c.wasm_global_import_t);
         imp.module = module_name.ptr;
@@ -703,7 +704,7 @@ pub const Runtime = opaque {
     }
 
     /// Keeps `value` alive across collections until `release`. Read it through the returned
-    /// pointer, which collections update when they move the object.
+    /// pointer, which collections update when they move the object. Do not store a host anyref there.
     pub fn hold(rt: *Runtime, value: Value) Error!*Value {
         const held = c.wasm_ref_hold(rt.raw(), value.toC()) orelse return error.OutOfMemory;
         return @ptrCast(held);
