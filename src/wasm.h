@@ -492,6 +492,9 @@ typedef struct wasm_tag_import_t {
 #ifndef WASM_MAX_MEMORY_BYTES
 #define WASM_MAX_MEMORY_BYTES 0u
 #endif
+#ifndef WASM_MAX_GC_HEAP_BYTES
+#define WASM_MAX_GC_HEAP_BYTES 0u
+#endif
 #ifndef WASM_MAX_TABLE_ELEMENTS
 #define WASM_MAX_TABLE_ELEMENTS 10000000u
 #endif
@@ -511,6 +514,7 @@ typedef struct wasm_config_t {
     uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
     uint64_t max_total_memory_bytes; /* bytes across the linear memories the runtime's modules define */
     uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
+    uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */

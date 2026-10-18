@@ -49,7 +49,7 @@ pub fn main() !void {
 
 `Runtime.init` takes a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
 
-For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memory and table at instantiation and on growth, and `max_function_locals` caps the locals a function may declare; 0 removes a limit:
+For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memory and table at instantiation and on growth, `max_gc_heap_bytes` caps the GC heap, and `max_function_locals` caps the locals a function may declare; 0 removes a limit:
 
 ```zig
 const rt = try wasm.Runtime.init(.{ .max_memory_bytes = 64 * 1024 * 1024, .max_table_elements = 100_000 });

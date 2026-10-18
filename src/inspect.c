@@ -10,6 +10,7 @@
 #include "internal/alloc.h"
 #include "internal/gc_types.h"
 #include <stdio.h>
+#include <string.h>
 
 static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     switch (kind) {
@@ -354,11 +355,27 @@ void* wasm_module_userdata(const wasm_module_t* mod) {
     return mod ? mod->host_userdata : NULL;
 }
 
+static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_t* values, uint32_t count,
+                                           wasm_value_t** out_copy) {
+    *out_copy = NULL;
+    if (count == 0) return WASM_OK;
+    *out_copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
+    if (!*out_copy) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "out of memory copying GC object values");
+        return WASM_ERR_OOM;
+    }
+    memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
+    return WASM_OK;
+}
+
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref) {
     const wasm_structtype_t* st;
     wasm_gc_struct_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -377,13 +394,17 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
+    err = wasm__copy_host_values(mod, field_values, num_fields, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < st->num_fields; i++) {
-        wasm_error_t err = wasm__gc_struct_store_field(object, st, i, field_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < st->num_fields; i++)
+        err = wasm__gc_struct_store_field(object, st, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;
@@ -394,6 +415,9 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             wasm_value_t* out_ref) {
     const wasm_arraytype_t* at;
     wasm_gc_array_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -410,13 +434,17 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_MALFORMED;
     }
 
+    err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_elems);
     object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < num_elems; i++) {
-        wasm_error_t err = wasm__gc_array_store_element(object, at, i, elem_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < num_elems; i++)
+        err = wasm__gc_array_store_element(object, at, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;

@@ -75,6 +75,7 @@ config.max_function_locals = 50000;
 config.max_memory_bytes = 256u * 1024u * 1024u;
 config.max_total_memory_bytes = 1024u * 1024u * 1024u;
 config.max_table_elements = 1000000;
+config.max_gc_heap_bytes = 512u * 1024u * 1024u;
 
 rt = wasm_runtime_new(&config);
 ```
@@ -87,6 +88,7 @@ The remaining fields bound what a module can make the host allocate; 0 removes a
 - `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow` past the cap return -1. A shared memory reserves address space only up to this cap.
 - `max_total_memory_bytes` (default 0, unlimited) caps the linear memories that all of the runtime's instances define, together, in the same way. Memories the host creates and registers do not count.
 - `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
+- `max_gc_heap_bytes` (default 0, unlimited) caps the GC heap, including `initial_gc_heap_size`. The heap grows when a collection leaves too little room, and an allocation that needs more than the cap fails with `WASM_ERR_OOM`.
 
 Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
 
@@ -269,7 +271,7 @@ Names may contain arbitrary bytes. Use `wasm_export_name_bytes` and `wasm_find_e
 
 ## Errors, traps, and limits
 
-Most operations return `wasm_error_t`; loading returns `NULL` on failure. Read `wasm_runtime_error_message` immediately for details, or `wasm_error_string` for the generic error name.
+Most operations return `wasm_error_t`; loading returns `NULL` on failure. Loads and calls clear the previous error, and after a failure `wasm_runtime_last_error` returns its code and `wasm_runtime_error_message` describes it, such as `integer divide by zero` for a trap. `wasm_error_string` gives the generic error name.
 
 A guest that calls WASI `proc_exit` stops at once: the call (or `wasm_load`, from a start function) fails with `WASM_ERR_EXIT`, and `wasm_runtime_exit_code` returns the status it passed.
 

@@ -11,6 +11,7 @@
 #define WASM_FUZZ_MAX_CALLS 32u
 #define WASM_FUZZ_MAX_MEMORY_BYTES (1u * 1024u * 1024u)
 #define WASM_FUZZ_MAX_TABLE_ELEMENTS 4096u
+#define WASM_FUZZ_MAX_GC_HEAP_BYTES (16u * 1024u * 1024u)
 
 /* Host objects created to satisfy one input's imports. */
 typedef struct wasm_fuzz_stubs_t {
@@ -240,10 +241,10 @@ static void wasm_fuzz_instance_open(wasm_fuzz_instance_t* inst, const uint8_t* d
     config.frame_arena_size = 512u * 1024u;
     config.max_memory_bytes = WASM_FUZZ_MAX_MEMORY_BYTES;
     config.max_table_elements = WASM_FUZZ_MAX_TABLE_ELEMENTS;
+    config.max_gc_heap_bytes = WASM_FUZZ_MAX_GC_HEAP_BYTES;
 
     inst->rt = wasm_runtime_new(&config);
     if (!inst->rt || wasm_runtime_last_error(inst->rt) != WASM_OK) return;
-    /* Threads stay off: an atomic wait on a stubbed shared memory would block forever. */
     wasm_runtime_enable_all_features(inst->rt);
     wasm_runtime_disable_feature(inst->rt, WASM_FEATURE_THREADS);
 

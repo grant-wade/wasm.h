@@ -843,6 +843,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 
         segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
+        for (j = 0; j < segment->num_elems; j++)
+            segment->elems[j] = wasm__typed_ref_null(segment->elem_type, &segment->elem_ref_type);
 
         for (j = 0; j < segment->num_elems; j++) {
             wasm_value_t value;

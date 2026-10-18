@@ -8825,8 +8825,8 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
     WL_CHECK_MSG(t, compiled != NULL, "expected compile not to run the start function: %s", rt.error_msg);
     m = compiled ? wasm_instantiate(compiled) : NULL;
-    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE, "expected the start function to trap: %s",
-                 rt.error_msg);
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE && strstr(rt.error_msg, "unreachable"),
+                 "expected the start function to trap: %s", rt.error_msg);
     wasm_module_free(m);
     wasm_module_free(compiled);
     wasm_destroy(&rt);
@@ -8947,6 +8947,107 @@ WL_TEST(test_div_by_zero) {
 
     err = wasm_call(m, "f", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_DIV_BY_ZERO, "%s", "expected div by zero trap");
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static wasm_error_t wasm_test_host_trap(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    return WASM_ERR_TRAP;
+}
+
+static wasm_error_t wasm_test_host_refuse(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_set_error(mod->rt, WASM_ERR_TRAP, "host refused");
+    return WASM_ERR_TRAP;
+}
+
+static void wasm_test_expect_call_error(wl_test_ctx* t, const wasm_runtime_t* rt, const char* what, wasm_error_t err,
+                                        wasm_error_t expected, const char* message) {
+    WL_CHECK_MSG(t, err == expected, "%s: expected %s, got %s", what, wasm_error_string(expected),
+                 wasm_error_string(err));
+    WL_CHECK_MSG(t, wasm_runtime_last_error(rt) == err, "%s: last error %s does not match the returned code", what,
+                 wasm_error_string(wasm_runtime_last_error(rt)));
+    WL_CHECK_MSG(t, strcmp(wasm_runtime_error_message(rt), message) == 0, "%s: expected message '%s', got '%s'", what,
+                 message, wasm_runtime_error_message(rt));
+}
+
+WL_TEST(test_failed_calls_record_trap_codes_and_messages) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x19, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00,
+        0x00, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x72, 0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x00, 0x03, 0x07, 0x06, 0x00,
+        0x01, 0x02, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0d, 0x03,
+        0x01, 0x00, 0x00, 0x07, 0x3f, 0x08, 0x01, 0x74, 0x01, 0x00, 0x07, 0x75, 0x6e, 0x72, 0x65, 0x61, 0x63, 0x68,
+        0x00, 0x02, 0x03, 0x6f, 0x6f, 0x62, 0x00, 0x03, 0x03, 0x64, 0x69, 0x76, 0x00, 0x04, 0x04, 0x73, 0x70, 0x69,
+        0x6e, 0x00, 0x05, 0x05, 0x74, 0x68, 0x72, 0x6f, 0x77, 0x00, 0x06, 0x0b, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x72,
+        0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x07, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00, 0x00, 0x09, 0x07, 0x01, 0x00,
+        0x41, 0x00, 0x0b, 0x01, 0x02, 0x0a, 0x29, 0x06, 0x03, 0x00, 0x00, 0x0b, 0x09, 0x00, 0x41, 0xf0, 0xa2, 0x04,
+        0x28, 0x02, 0x00, 0x0b, 0x07, 0x00, 0x41, 0x01, 0x20, 0x00, 0x6d, 0x0b, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00,
+        0x0b, 0x0b, 0x04, 0x00, 0x08, 0x00, 0x0b, 0x04, 0x00, 0x10, 0x01, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_value_t ref;
+    int32_t out = 0;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "fail", "()", wasm_test_host_trap, NULL));
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "refuse", "()", wasm_test_host_refuse, NULL));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_test_expect_call_error(t, &rt, "unreachable", wasm_call(m, "unreach", NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "out-of-bounds load", wasm_call(m, "oob", NULL, 0, &result, 1),
+                                WASM_ERR_OUT_OF_BOUNDS, "out of bounds memory access");
+    arg = wasm_i32(0);
+    wasm_test_expect_call_error(t, &rt, "divide by zero", wasm_call(m, "div", &arg, 1, &result, 1),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+    arg = wasm_i32(1);
+    WASM_CHECK_OK(t, wasm_call(m, "div", &arg, 1, &result, 1));
+    WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_OK);
+    WL_CHECK(t, strcmp(wasm_runtime_error_message(&rt), "ok") == 0);
+
+    wasm_runtime_set_fuel(&rt, 5);
+    wasm_test_expect_call_error(t, &rt, "fuel", wasm_call(m, "spin", NULL, 0, NULL, 0), WASM_ERR_OUT_OF_FUEL,
+                                "out of fuel");
+    wasm_runtime_cancel(&rt);
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_test_expect_call_error(t, &rt, "uncaught exception", wasm_call(m, "throw", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "uncaught exception tag 0");
+
+    WASM_CHECK_OK(t, wasm_table_get(m, 0, 0, &ref));
+    wasm_test_expect_call_error(t, &rt, "wasm_call_ref", wasm_call_ref(&rt, ref, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_index", wasm_call_index(m, 2, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_fmt", wasm_call_fmt(m, "div", "i(i)", 0, &out),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+
+    wasm_test_expect_call_error(t, &rt, "host message", wasm_call(m, "call_refuse", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "host refused");
+    wasm_test_expect_call_error(t, &rt, "imported host function", wasm_call(m, "fail", NULL, 0, NULL, 0),
+                                WASM_ERR_TRAP, "trap");
 
     wasm_module_free(m);
     wasm_destroy(&rt);
@@ -14504,6 +14605,385 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     wasm_destroy(&rt);
 }
 
+static const uint8_t wasm_test_gc_growth_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1d, 0x06, 0x5f, 0x02, 0x7e, 0x00, 0x7e, 0x00, 0x5e,
+        0x63, 0x00, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x63, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x00, 0x00, 0x03, 0x05, 0x04, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x01, 0x63, 0x01, 0x01, 0xd0, 0x01,
+        0x0b, 0x07, 0x1e, 0x04, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x01, 0x05,
+        0x63, 0x68, 0x65, 0x63, 0x6b, 0x00, 0x02, 0x05, 0x63, 0x6c, 0x65, 0x61, 0x72, 0x00, 0x03, 0x0a, 0xb9, 0x01,
+        0x04, 0x31, 0x02, 0x01, 0x63, 0x01, 0x01, 0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x21, 0x01, 0x03, 0x40, 0x20,
+        0x01, 0x20, 0x02, 0x42, 0x01, 0x42, 0x02, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x02, 0x41, 0x01, 0x6a,
+        0x21, 0x02, 0x20, 0x02, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0xfb, 0x0f, 0x0b, 0x31, 0x01, 0x01,
+        0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x24, 0x00, 0x03, 0x40, 0x23, 0x00, 0x20, 0x01, 0x20, 0x01, 0xad, 0x20,
+        0x01, 0xad, 0x42, 0x03, 0x7e, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01,
+        0x20, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x23, 0x00, 0x0b, 0x4c, 0x02, 0x02, 0x7f, 0x01, 0x63, 0x00,
+        0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x23, 0x00, 0xfb, 0x0f, 0x4f, 0x0d, 0x01, 0x23, 0x00, 0x20, 0x00, 0xfb,
+        0x0b, 0x01, 0x21, 0x02, 0x20, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x00, 0xad, 0x51, 0x20, 0x02, 0xfb, 0x02,
+        0x00, 0x01, 0x20, 0x00, 0xad, 0x42, 0x03, 0x7e, 0x51, 0x71, 0x04, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21,
+        0x01, 0x0b, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x01, 0x0b, 0x06, 0x00,
+        0xd0, 0x01, 0x24, 0x00, 0x0b,
+};
+
+static wasm_module_t* wasm_test_gc_growth_load(wl_test_ctx* t, wasm_runtime_t* rt, const wasm_config_t* config) {
+    wasm_module_t* m;
+
+    wasm_init_config(rt, config);
+    m = wasm_load(rt, wasm_test_gc_growth_bytes, sizeof(wasm_test_gc_growth_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt->error_msg);
+    return m;
+}
+
+static int wasm_test_gc_held_array_intact(wasm_module_t* m, wasm_value_t array, uint32_t expected_len) {
+    uint32_t len = 0;
+    uint32_t i;
+
+    if (wasm_array_length(m, array, &len) != WASM_OK || len != expected_len) return 0;
+    for (i = 0; i < len; i++) {
+        wasm_value_t elem;
+        wasm_value_t first;
+        wasm_value_t second;
+
+        if (wasm_array_get_elem(m, array, i, &elem) != WASM_OK) return 0;
+        if (wasm_struct_get_field(m, elem, 0, &first) != WASM_OK ||
+            wasm_struct_get_field(m, elem, 1, &second) != WASM_OK)
+            return 0;
+        if (first.of.i64 != (int64_t)i || second.of.i64 != (int64_t)i * 3) return 0;
+    }
+    return 1;
+}
+
+WL_TEST(test_gc_heap_grows_with_live_data) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held;
+
+    wasm_config_default(&config);
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000000);
+        WL_CHECK_MSG(t, rt.gc_heap_size > (size_t)WASM_GC_HEAP_SIZE, "expected the heap to grow, size %zu",
+                     rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 64u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        size_t heap_size;
+
+        arg = wasm_i32(20000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 20000);
+        heap_size = rt.gc_heap_size;
+        WL_CHECK_MSG(t, heap_size > config.initial_gc_heap_size, "expected the heap to grow, size %zu", heap_size);
+
+        arg = wasm_i32(200000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        arg = wasm_i32(500000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WL_CHECK_MSG(t, rt.gc_heap_size > heap_size, "expected the heap to grow again, size %zu", rt.gc_heap_size);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 200000);
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 20000));
+            wasm_ref_release(&rt, held);
+        }
+
+        WASM_CHECK_OK(t, wasm_call(m, "clear", NULL, 0, NULL, 0));
+        wasm_gc_collect(&rt);
+        WL_CHECK_MSG(t, rt.gc_heap_size == config.initial_gc_heap_size,
+                     "expected an empty heap to shrink to its initial size, size %zu", rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 0;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_heap_growth_respects_max_gc_heap_bytes) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held = NULL;
+    wasm_error_t err;
+
+    wasm_config_default(&config);
+    WL_CHECK(t, config.max_gc_heap_bytes == 0u);
+    config.max_gc_heap_bytes = 1024u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        WL_CHECK_MSG(t, rt.gc_heap_size == 1024u * 1024u, "expected the initial heap to be capped, size %zu",
+                     rt.gc_heap_size);
+        arg = wasm_i32(2000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+
+        arg = wasm_i32(100000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected WASM_ERR_OOM, got %s", wasm_error_string(err));
+        WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_OOM);
+        WL_CHECK_MSG(t, strstr(wasm_runtime_error_message(&rt), "limit") != NULL, "unexpected message '%s'",
+                     wasm_runtime_error_message(&rt));
+        WL_CHECK(t, rt.gc_heap_size <= 1024u * 1024u);
+
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 2000);
+        if (held) WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+
+        arg = wasm_i32(1000000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected an array larger than the limit to fail, got %s",
+                     wasm_error_string(err));
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+            wasm_ref_release(&rt, held);
+        }
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_collection_skips_host_externrefs_converted_to_anyref) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x13, 0x04, 0x5f, 0x01, 0x7e, 0x00, 0x60, 0x01, 0x6f,
+        0x00, 0x60, 0x02, 0x6f, 0x7f, 0x01, 0x6f, 0x60, 0x00, 0x01, 0x6f, 0x03, 0x05, 0x04, 0x01, 0x02, 0x03, 0x03,
+        0x04, 0x04, 0x01, 0x6e, 0x00, 0x01, 0x06, 0x06, 0x01, 0x6e, 0x01, 0xd0, 0x6e, 0x0b, 0x07, 0x21, 0x04, 0x04,
+        0x6b, 0x65, 0x65, 0x70, 0x00, 0x00, 0x05, 0x63, 0x68, 0x75, 0x72, 0x6e, 0x00, 0x01, 0x06, 0x67, 0x6c, 0x6f,
+        0x62, 0x61, 0x6c, 0x00, 0x02, 0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x00, 0x03, 0x0a, 0x46, 0x04, 0x10, 0x00,
+        0x20, 0x00, 0xfb, 0x1a, 0x24, 0x00, 0x41, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0x26, 0x00, 0x0b, 0x23, 0x01, 0x01,
+        0x6e, 0x20, 0x00, 0xfb, 0x1a, 0x21, 0x02, 0x03, 0x40, 0x20, 0x01, 0xad, 0xfb, 0x00, 0x00, 0x1a, 0x20, 0x01,
+        0x41, 0x01, 0x6b, 0x21, 0x01, 0x20, 0x01, 0x0d, 0x00, 0x0b, 0x20, 0x02, 0xfb, 0x1b, 0x0b, 0x06, 0x00, 0x23,
+        0x00, 0xfb, 0x1b, 0x0b, 0x08, 0x00, 0x41, 0x00, 0x25, 0x00, 0xfb, 0x1b, 0x0b,
+    };
+    static int host_object;
+    const uintptr_t handles[] = { (uintptr_t)0x1234u, (uintptr_t)&host_object };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    size_t i;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    for (i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) {
+        wasm_value_t args[2];
+        wasm_value_t result = wasm_i32(0);
+
+        args[0] = wasm_externref(handles[i]);
+        args[1] = wasm_i32(5000);
+        WASM_CHECK_OK(t, wasm_call(m, "keep", args, 1, NULL, 0));
+        WASM_CHECK_OK(t, wasm_call(m, "churn", args, 2, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        wasm_gc_collect(&rt);
+        WASM_CHECK_OK(t, wasm_call(m, "global", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        WASM_CHECK_OK(t, wasm_call(m, "table", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+    }
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static const uint8_t wasm_test_init_pair_150000_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x04, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x04, 0x03, 0x02,
+        0x03, 0x03, 0x06, 0x1a, 0x01, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0xf0, 0x93, 0x09, 0xfb, 0x06, 0x00, 0x42,
+        0x09, 0x41, 0xf0, 0x93, 0x09, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x07, 0x13, 0x02, 0x06, 0x66, 0x69,
+        0x65, 0x6c, 0x64, 0x30, 0x00, 0x01, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x31, 0x00, 0x02, 0x0a, 0x26, 0x03,
+        0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x0a, 0x00, 0x23,
+        0x00, 0xfb, 0x02, 0x01, 0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x00, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00,
+        0x0b,
+};
+
+static const uint8_t wasm_test_init_pair_300000_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x04, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x04, 0x03, 0x02,
+        0x03, 0x03, 0x06, 0x1a, 0x01, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0xe0, 0xa7, 0x12, 0xfb, 0x06, 0x00, 0x42,
+        0x09, 0x41, 0xe0, 0xa7, 0x12, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x07, 0x13, 0x02, 0x06, 0x66, 0x69,
+        0x65, 0x6c, 0x64, 0x30, 0x00, 0x01, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x31, 0x00, 0x02, 0x0a, 0x26, 0x03,
+        0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x0a, 0x00, 0x23,
+        0x00, 0xfb, 0x02, 0x01, 0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x00, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00,
+        0x0b,
+};
+
+static const uint8_t wasm_test_init_sequence_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1f, 0x06, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x5e, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e,
+        0x60, 0x01, 0x7f, 0x01, 0x7e, 0x03, 0x0a, 0x09, 0x03, 0x04, 0x04, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x04,
+        0x18, 0x03, 0x40, 0x00, 0x63, 0x00, 0x00, 0x01, 0x42, 0x05, 0x41, 0xc0, 0x00, 0xfb, 0x06, 0x00, 0x0b, 0x63,
+        0x00, 0x00, 0x02, 0x63, 0x00, 0x00, 0x02, 0x06, 0x4f, 0x04, 0x63, 0x02, 0x00, 0x42, 0x17, 0x41, 0x80, 0x01,
+        0xfb, 0x06, 0x00, 0x41, 0x80, 0x02, 0xfb, 0x06, 0x02, 0x0b, 0x63, 0x00, 0x00, 0x42, 0x03, 0x41, 0x80, 0x04,
+        0xfb, 0x06, 0x00, 0x0b, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0x80, 0x08, 0xfb, 0x06, 0x00, 0x42, 0x09, 0x41,
+        0x80, 0x10, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x63, 0x02, 0x00, 0x42, 0x13, 0x41, 0x80, 0x20, 0xfb,
+        0x06, 0x00, 0x42, 0x15, 0x41, 0x80, 0xc0, 0x00, 0xfb, 0x06, 0x00, 0xfb, 0x08, 0x02, 0x02, 0x0b, 0x07, 0x4c,
+        0x08, 0x08, 0x72, 0x65, 0x70, 0x65, 0x61, 0x74, 0x65, 0x64, 0x00, 0x01, 0x06, 0x67, 0x6c, 0x6f, 0x62, 0x61,
+        0x6c, 0x00, 0x02, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x30, 0x00, 0x03, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64,
+        0x31, 0x00, 0x04, 0x05, 0x66, 0x69, 0x78, 0x65, 0x64, 0x00, 0x05, 0x07, 0x64, 0x65, 0x66, 0x61, 0x75, 0x6c,
+        0x74, 0x00, 0x06, 0x06, 0x61, 0x63, 0x74, 0x69, 0x76, 0x65, 0x00, 0x07, 0x07, 0x70, 0x61, 0x73, 0x73, 0x69,
+        0x76, 0x65, 0x00, 0x08, 0x09, 0x35, 0x02, 0x05, 0x63, 0x00, 0x02, 0x42, 0x0b, 0x41, 0x80, 0x80, 0x01, 0xfb,
+        0x06, 0x00, 0x0b, 0x42, 0x0d, 0x41, 0x80, 0x80, 0x02, 0xfb, 0x06, 0x00, 0x0b, 0x06, 0x01, 0x41, 0x00, 0x0b,
+        0x63, 0x00, 0x02, 0x42, 0x0f, 0x41, 0x80, 0x80, 0x04, 0xfb, 0x06, 0x00, 0x0b, 0x42, 0x11, 0x41, 0x80, 0x80,
+        0x08, 0xfb, 0x06, 0x00, 0x0b, 0x0a, 0x6f, 0x09, 0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01,
+        0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x10, 0x00, 0x23, 0x00, 0x23, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b,
+        0x02, 0x10, 0x00, 0x0b, 0x06, 0x00, 0x23, 0x01, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x01,
+        0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00, 0x0b, 0x0b, 0x00, 0x23,
+        0x03, 0x20, 0x00, 0xfb, 0x0b, 0x02, 0x10, 0x00, 0x0b, 0x08, 0x00, 0x41, 0x00, 0x25, 0x00, 0x10, 0x00, 0x0b,
+        0x08, 0x00, 0x20, 0x00, 0x25, 0x01, 0x10, 0x00, 0x0b, 0x12, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x02, 0xfc,
+        0x0c, 0x00, 0x02, 0x20, 0x00, 0x25, 0x02, 0x10, 0x00, 0x0b,
+};
+
+static int64_t wasm_test_call_i64(wl_test_ctx* t, wasm_module_t* m, const char* name, int32_t arg, int has_arg) {
+    wasm_value_t value = wasm_i32(arg);
+    wasm_value_t result = wasm_i64(-1);
+    wasm_error_t err = wasm_call(m, name, &value, has_arg ? 1u : 0u, &result, 1);
+
+    WL_CHECK_MSG(t, err == WASM_OK, "%s: %s", name, wasm_runtime_error_message(wasm_module_runtime(m)));
+    return result.of.i64;
+}
+
+WL_TEST(test_gc_init_expressions_keep_their_operands_alive) {
+    const uint8_t* pairs[] = { wasm_test_init_pair_150000_bytes, wasm_test_init_pair_300000_bytes };
+    const size_t pair_sizes[] = { sizeof(wasm_test_init_pair_150000_bytes), sizeof(wasm_test_init_pair_300000_bytes) };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    size_t i;
+
+    for (i = 0; i < 2; i++) {
+        wasm_init(&rt);
+        m = wasm_load(&rt, pairs[i], pair_sizes[i]);
+        WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+        if (m) {
+            WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field0", 0, 0), 7);
+            WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field1", 0, 0), 9);
+        }
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 0;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, wasm_test_init_sequence_bytes, sizeof(wasm_test_init_sequence_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "default", 0, 0), 5);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "repeated", 0, 0), 23);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "global", 0, 0), 3);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field0", 0, 0), 7);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field1", 0, 0), 9);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "fixed", 0, 1), 19);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "fixed", 1, 1), 21);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "passive", 0, 1), 11);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "passive", 1, 1), 13);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "active", 0, 1), 15);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "active", 1, 1), 17);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static int wasm_test_gc_heap_fits(const wasm_runtime_t* rt, size_t size) {
+    size_t offset = wasm__align_up_size(rt->gc_heap_offset, (size_t)WASM__ALIGNOF(wasm_value_t));
+
+    return offset <= rt->gc_heap_size && size <= rt->gc_heap_size - offset;
+}
+
+static int wasm_test_big_array_intact(wasm_module_t* m, wasm_value_t array, uint32_t expected_len) {
+    uint32_t len = 0;
+    uint32_t i;
+
+    if (wasm_array_length(m, array, &len) != WASM_OK || len != expected_len) return 0;
+    for (i = 0; i < len; i++) {
+        wasm_value_t elem;
+
+        if (wasm_array_get_elem(m, array, i, &elem) != WASM_OK || elem.of.i64 != (int64_t)i * 7) return 0;
+    }
+    return 1;
+}
+
+WL_TEST(test_gc_host_constructors_keep_their_inputs_alive) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x5e, 0x7e, 0x01, 0x5f, 0x01, 0x63, 0x00,
+        0x00, 0x5e, 0x63, 0x00, 0x00,
+    };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t elems[16];
+    wasm_value_t null_ref = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t array = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t outer = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t garbage;
+    wasm_value_t field;
+    size_t struct_size = 0;
+    size_t pair_size = 0;
+    uint32_t i;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm__gc_struct_size(wasm__module_const_structtype(m, 1), &struct_size));
+    WL_CHECK(t, wasm__gc_array_total_size(wasm__module_const_arraytype(m, 2), 1, &pair_size));
+    for (i = 0; i < 16; i++) elems[i] = wasm_i64((int64_t)i * 7);
+
+    WASM_CHECK_OK(t, wasm_array_new(m, 0, elems, 16, &array));
+    while (wasm_test_gc_heap_fits(&rt, struct_size)) WASM_CHECK_OK(t, wasm_struct_new(m, 1, &null_ref, 1, &garbage));
+    WASM_CHECK_OK(t, wasm_struct_new(m, 1, &array, 1, &outer));
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, outer, 0, &field));
+    WL_CHECK(t, field.of.gc_obj != array.of.gc_obj);
+    WL_CHECK(t, wasm_test_big_array_intact(m, field, 16));
+
+    WASM_CHECK_OK(t, wasm_array_new(m, 0, elems, 16, &array));
+    while (wasm_test_gc_heap_fits(&rt, pair_size)) WASM_CHECK_OK(t, wasm_array_new(m, 2, &null_ref, 1, &garbage));
+    WASM_CHECK_OK(t, wasm_array_new(m, 2, &array, 1, &outer));
+    WASM_CHECK_OK(t, wasm_array_get_elem(m, outer, 0, &field));
+    WL_CHECK(t, field.of.gc_obj != array.of.gc_obj);
+    WL_CHECK(t, wasm_test_big_array_intact(m, field, 16));
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -16774,6 +17254,11 @@ int main(void) {
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
         { "GC: collection marks deep object chains without recursion", test_gc_collect_marks_deep_object_chains_iteratively },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
+        { "gc: the heap grows to fit live data and keeps objects intact", test_gc_heap_grows_with_live_data },
+        { "gc: heap growth stops at max_gc_heap_bytes with WASM_ERR_OOM", test_gc_heap_growth_respects_max_gc_heap_bytes },
+        { "gc: collections skip host externrefs converted to anyref", test_gc_collection_skips_host_externrefs_converted_to_anyref },
+        { "gc: init expressions keep their operands, globals, tables, and segments alive", test_gc_init_expressions_keep_their_operands_alive },
+        { "gc: wasm_struct_new and wasm_array_new keep their inputs alive", test_gc_host_constructors_keep_their_inputs_alive },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
         { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },
         { "wasmgc: runtime executes segment-backed array ops", test_gc_runtime_executes_segment_backed_array_ops },
@@ -16839,6 +17324,7 @@ int main(void) {
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
+        { "public api: failed calls record the trap code and message", test_failed_calls_record_trap_codes_and_messages },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
         { "public api: fuel helpers meter finite execution", test_public_fuel_helpers_account_for_finite_calls },
         { "public api: fuel helpers stop infinite loops", test_public_fuel_helpers_trap_in_infinite_loop },

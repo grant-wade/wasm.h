@@ -89,14 +89,16 @@ test "traps and fuel" {
     const div = try mod.func("div", fn (i32, i32) i32);
     try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
     try expectError(error.DivByZero, div.call(.{ 1, 0 }));
+    try expectEqualStrings("integer divide by zero", rt.errorMessage());
     const frame = rt.callFrame(0).?;
     try expectEqual(@as(?*wasm.Module, mod), frame.module);
     try expectError(error.IntOverflow, div.call(.{ std.math.minInt(i32), -1 }));
-    try expect(rt.errorMessage().len > 0);
+    try expectEqualStrings("integer overflow", rt.errorMessage());
 
     rt.setFuel(10_000);
     const spin = try mod.func("spin", fn () void);
     try expectError(error.OutOfFuel, spin.call(.{}));
+    try expectEqualStrings("out of fuel", rt.errorMessage());
     try expectEqual(@as(u64, 0), rt.fuel());
     try expectEqual(wasm.Runtime.Suspension.out_of_fuel, rt.suspended().?);
     try expectError(error.Malformed, div.call(.{ 9, 3 }));

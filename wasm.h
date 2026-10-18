@@ -501,6 +501,9 @@ typedef struct wasm_tag_import_t {
 #ifndef WASM_MAX_MEMORY_BYTES
 #define WASM_MAX_MEMORY_BYTES 0u
 #endif
+#ifndef WASM_MAX_GC_HEAP_BYTES
+#define WASM_MAX_GC_HEAP_BYTES 0u
+#endif
 #ifndef WASM_MAX_TABLE_ELEMENTS
 #define WASM_MAX_TABLE_ELEMENTS 10000000u
 #endif
@@ -520,6 +523,7 @@ typedef struct wasm_config_t {
     uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
     uint64_t max_total_memory_bytes; /* bytes across the linear memories the runtime's modules define */
     uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
+    uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -2126,6 +2130,13 @@ typedef struct wasm__held_block_t {
     wasm__held_slot_t slots[WASM__HELD_BLOCK_SLOTS];
 } wasm__held_block_t;
 
+/* Values a C caller keeps alive across GC allocations; the collector marks and updates them. */
+typedef struct wasm__gc_root_t {
+    struct wasm__gc_root_t* prev;
+    wasm_value_t* const* values; /* address of the array, which may be reallocated while pushed */
+    const uint32_t* count;
+} wasm__gc_root_t;
+
 /* A function export registered by wasm_register_module, called through a host trampoline. */
 typedef struct wasm__linked_func_t {
     struct wasm__linked_func_t* next;
@@ -2178,11 +2189,14 @@ struct wasm_runtime_t {
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
+    size_t gc_heap_min_size;    /* size collections never shrink the heap below */
+    uint64_t max_gc_heap_bytes;
     wasm_gc_header_t* gc_allocations;
     wasm_module_t* gc_modules;
     wasm_module_t* failed_modules;
     wasm__handle_set_t externref_boxes;
     wasm__held_block_t* held_values;
+    wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
     uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
     wasm__arena_chunk_t* frame_arena;       /* innermost block */
@@ -2244,6 +2258,13 @@ WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* 
 WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+/* Roots the first *count values of *values until the matching wasm__gc_pop_root. Pops must
+ * happen in reverse order of pushes. */
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count);
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
 /* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
  * only where every live reference is reachable from the runtime's roots. */
@@ -10598,18 +10619,29 @@ WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
     return wasm__is_ref_type(value->type);
 }
 
+static wasm_error_t wasm__init_expr_stack_peek_expect(wasm_module_t* mod,
+                                                      const wasm__init_expr_stack_t* stack,
+                                                      wasm_valtype_t expected_type,
+                                                      const wasm_reftype_t* expected_ref,
+                                                      wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
+    value = stack->values[stack->size - 1];
+    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm__init_expr_stack_t* stack,
                                                      wasm_valtype_t expected_type,
                                                      const wasm_reftype_t* expected_ref,
                                                      wasm_value_t* out_value) {
-    wasm_value_t value;
+    wasm_error_t err = wasm__init_expr_stack_peek_expect(mod, stack, expected_type, expected_ref, out_value);
 
-    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
-    value = stack->values[--stack->size];
-    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
-    *out_value = value;
-    return WASM_OK;
+    if (err == WASM_OK) stack->size--;
+    return err;
 }
 
 static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
@@ -10674,9 +10706,11 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value) {
     wasm__init_expr_stack_t stack;
+    wasm__gc_root_t root;
     wasm_error_t err = WASM_OK;
 
     memset(&stack, 0, sizeof(stack));
+    wasm__gc_push_root(mod->rt, &root, &stack.values, &stack.size);
 
     for (;;) {
         uint8_t op;
@@ -10954,11 +10988,11 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                                 err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &length_value);
                                 if (err != WASM_OK) break;
-                                err = wasm__init_expr_stack_pop_expect(mod,
-                                                                       &stack,
-                                                                       expected_type,
-                                                                       &atype->field.storage.ref_type,
-                                                                       &init_value);
+                                err = wasm__init_expr_stack_peek_expect(mod,
+                                                                        &stack,
+                                                                        expected_type,
+                                                                        &atype->field.storage.ref_type,
+                                                                        &init_value);
                                 if (err != WASM_OK) break;
                                 if (length_value.of.i32 < 0) {
                                     err = WASM_ERR_OUT_OF_BOUNDS;
@@ -10970,6 +11004,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                     err = WASM_ERR_OOM;
                                     break;
                                 }
+                                init_value = stack.values[--stack.size];
                                 for (i = 0; i < count; i++) {
                                     err = wasm__gc_array_store_element(object, atype, i, init_value);
                                     if (err != WASM_OK) break;
@@ -11078,6 +11113,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
             *out_value = stack.values[0];
     }
 
+    wasm__gc_pop_root(mod->rt, &root);
     WASM_FREE(stack.values);
     return err;
 }
@@ -11215,6 +11251,17 @@ WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_modul
 
 #endif /* WASM_SRC_EXEC_INTERPRETER_H */
 /* END src/exec/interpreter.h */
+
+/* BEGIN src/gc.h */
+#ifndef WASM_GC_H
+#define WASM_GC_H
+
+
+/* Collects and resizes the heap to fit `request` more bytes; on failure the heap is unchanged. */
+WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request);
+
+#endif /* WASM_GC_H */
+/* END src/gc.h */
 
 /* BEGIN src/platform/wasi_state.h */
 #ifndef WASM_PLATFORM_WASI_STATE_H
@@ -11568,6 +11615,8 @@ WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr)
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     wasm__gc_heap_destroy(rt);
+    if (rt->max_gc_heap_bytes != 0 && size > rt->max_gc_heap_bytes) size = (size_t)rt->max_gc_heap_bytes;
+    rt->gc_heap_min_size = size;
     if (size == 0) return WASM_OK;
 
     rt->gc_heap = (uint8_t*)WASM_GC_ALLOC(size);
@@ -11577,6 +11626,18 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count) {
+    root->prev = rt->gc_roots;
+    root->values = values;
+    root->count = count;
+    rt->gc_roots = root;
+}
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root) {
+    rt->gc_roots = root->prev;
 }
 
 void wasm_runtime_interrupt(wasm_runtime_t* rt) {
@@ -11629,9 +11690,12 @@ static wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
 
     object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
     if (!object) {
-        wasm_gc_collect(rt);
+        if (wasm__gc_collect(rt, object_size) != WASM_OK) return NULL;
         object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
-        if (!object) return NULL;
+        if (!object) {
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "no room for a %zu-byte GC object", object_size);
+            return NULL;
+        }
     }
 
     memset(object, 0, object_size);
@@ -11762,6 +11826,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
     config->max_total_memory_bytes = 0;
     config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
+    config->max_gc_heap_bytes = (uint64_t)WASM_MAX_GC_HEAP_BYTES;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -11858,6 +11923,7 @@ WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_conf
     rt->max_memory_bytes = cfg.max_memory_bytes;
     rt->max_total_memory_bytes = cfg.max_total_memory_bytes;
     rt->max_table_elements = cfg.max_table_elements;
+    rt->max_gc_heap_bytes = cfg.max_gc_heap_bytes;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
@@ -13120,6 +13186,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 
         segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
+        for (j = 0; j < segment->num_elems; j++)
+            segment->elems[j] = wasm__typed_ref_null(segment->elem_type, &segment->elem_ref_type);
 
         for (j = 0; j < segment->num_elems; j++) {
             wasm_value_t value;
@@ -18293,6 +18361,7 @@ WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
 
 
 
+
 #include <string.h>
 
 /* Objects marked but not yet scanned; explicit stacks keep deep object graphs off the C stack. */
@@ -18363,7 +18432,7 @@ static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t
     }
     if (!wasm__is_heap_gc_ref_value(value)) return;
     object = (wasm_gc_header_t*)value->of.gc_obj;
-    if (!object || object->marked) return;
+    if (!wasm__gc_ptr_in_heap(stack->rt, object) || object->marked) return;
     if (stack->count == stack->capacity) {
         wasm_gc_header_t** items = (wasm_gc_header_t**)wasm__gc_grow(stack, stack->items, &stack->capacity);
 
@@ -18451,11 +18520,13 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_mark_values(stack, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_mark_values(stack, *root->values, *root->count);
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
@@ -18483,12 +18554,15 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_mark_value(stack, &table->default_value);
+            if (table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_mark_values(stack, segment->elems, segment->num_elems);
         }
     }
@@ -18555,11 +18629,13 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_forward_values(rt, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_values(rt, *root->values, *root->count);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
@@ -18597,13 +18673,15 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems)
-                wasm__gc_forward_values(rt, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_forward_value(rt, &table->default_value);
+            if (table->elems) wasm__gc_forward_values(rt, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_forward_values(rt, segment->elems, segment->num_elems);
         }
     }
@@ -18643,16 +18721,32 @@ static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
     }
 }
 
-void wasm_gc_collect(wasm_runtime_t* rt) {
+static int wasm__gc_live_bytes(const wasm_runtime_t* rt, size_t* out_live) {
+    const wasm_gc_header_t* object;
+    size_t live = 0;
+
+    for (object = rt->gc_allocations; object; object = object->next_alloc) {
+        if (!object->marked) continue;
+        live = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
+        if (live == (size_t)-1 || object->object_size > SIZE_MAX - live) return 0;
+        live += object->object_size;
+    }
+    *out_live = live;
+    return 1;
+}
+
+WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     wasm_gc_header_t* object;
     wasm_gc_header_t* new_allocations = NULL;
     wasm_gc_header_t* new_tail = NULL;
-    uint8_t* new_heap = NULL;
+    uint8_t* new_heap;
     size_t new_offset = 0;
-    int has_live = 0;
+    size_t live;
+    size_t needed;
+    size_t new_size;
     wasm__gc_mark_stack_t stack;
 
-    if (!rt) return;
+    if (!rt) return WASM_ERR_MALFORMED;
 
     for (object = rt->gc_allocations; object; object = object->next_alloc) object->marked = 0;
     wasm__gc_clear_handle_marks(rt);
@@ -18663,41 +18757,55 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
     wasm__gc_drain_mark_stack(&stack);
     WASM_FREE(stack.items);
     WASM_FREE(stack.exceptions);
-    if (stack.failed) return;
+    if (stack.failed) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory marking live GC objects");
+        return WASM_ERR_OOM;
+    }
 
     wasm__handle_set_filter(&rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
     wasm__handle_set_filter(&rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
-    if (!rt->gc_heap) return;
-    for (object = rt->gc_allocations; object; object = object->next_alloc) {
-        if (object->marked) {
-            has_live = 1;
-            break;
-        }
+
+    if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
+    needed = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
+    needed = needed == (size_t)-1 || request > SIZE_MAX - needed ? SIZE_MAX : needed + request;
+    if (needed == SIZE_MAX) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "GC heap cannot fit %zu more bytes", request);
+        return WASM_ERR_OOM;
+    }
+    new_size = live > SIZE_MAX - needed ? needed : needed + live;
+    if (new_size < rt->gc_heap_min_size) new_size = rt->gc_heap_min_size;
+    if (rt->max_gc_heap_bytes != 0 && new_size > rt->max_gc_heap_bytes) new_size = (size_t)rt->max_gc_heap_bytes;
+    if (needed > new_size) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "GC heap would exceed its limit of %llu bytes",
+                      (unsigned long long)rt->max_gc_heap_bytes);
+        return WASM_ERR_OOM;
     }
 
-    if (!has_live) {
+    if (live == 0 && new_size <= rt->gc_heap_size) {
+        new_heap = new_size > 0 && new_size < rt->gc_heap_size ? (uint8_t*)WASM_GC_ALLOC(new_size) : NULL;
+        if (new_heap || new_size == 0) {
+            WASM_GC_FREE(rt->gc_heap);
+            rt->gc_heap = new_heap;
+            rt->gc_heap_size = new_size;
+        }
         rt->gc_allocations = NULL;
         rt->gc_heap_offset = 0;
-        return;
+        return WASM_OK;
     }
 
-    new_heap = (uint8_t*)WASM_GC_ALLOC(rt->gc_heap_size);
-    if (!new_heap) return;
+    new_heap = (uint8_t*)WASM_GC_ALLOC(new_size);
+    if (!new_heap) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "failed to allocate a %zu-byte GC heap", new_size);
+        return WASM_ERR_OOM;
+    }
 
     for (object = rt->gc_allocations; object;) {
         wasm_gc_header_t* next = object->next_alloc;
 
         if (object->marked) {
             size_t aligned_offset = wasm__align_up_size(new_offset, (size_t)WASM__ALIGNOF(wasm_value_t));
-            wasm_gc_header_t* moved;
+            wasm_gc_header_t* moved = (wasm_gc_header_t*)(new_heap + aligned_offset);
 
-            if (aligned_offset == (size_t)-1 || aligned_offset > rt->gc_heap_size ||
-                object->object_size > rt->gc_heap_size - aligned_offset) {
-                WASM_GC_FREE(new_heap);
-                return;
-            }
-
-            moved = (wasm_gc_header_t*)(new_heap + aligned_offset);
             memcpy(moved, object, object->object_size);
             moved->marked = 0;
             moved->next_alloc = NULL;
@@ -18722,8 +18830,14 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
 
     WASM_GC_FREE(rt->gc_heap);
     rt->gc_heap = new_heap;
+    rt->gc_heap_size = new_size;
     rt->gc_heap_offset = new_offset;
     rt->gc_allocations = new_allocations;
+    return WASM_OK;
+}
+
+void wasm_gc_collect(wasm_runtime_t* rt) {
+    (void)wasm__gc_collect(rt, 0);
 }
 
 wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value) {
@@ -24006,6 +24120,14 @@ WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_modul
 #include <stdarg.h>
 #include <stdio.h>
 
+static wasm_error_t wasm__record_call_result(wasm_runtime_t* rt, wasm_error_t err) {
+    if (err == WASM_OK)
+        wasm_runtime_clear_error(rt);
+    else if (rt->last_error != err || rt->error_msg[0] == '\0')
+        WASM__SET_ERR(rt, err, "%s", wasm_error_string(err));
+    return err;
+}
+
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results) {
@@ -24013,6 +24135,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
     wasm_export_kind_t kind;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
     if (!func_name || !wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
         WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name ? func_name : "");
         return WASM_ERR_UNDEFINED_EXPORT;
@@ -24026,6 +24149,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
     if (mod->rt->suspended != WASM_OK) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s",
                       "runtime has a suspended call; resume or cancel it first");
@@ -24069,8 +24193,8 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 
     {
         wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
-        if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
-        return err;
+        if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(mod->rt);
+        return wasm__record_call_result(mod->rt, err);
     }
 }
 
@@ -24081,6 +24205,7 @@ wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
     uint32_t func_idx = 0;
 
     if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
     if (!wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) {
         WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "%s", "expected a non-null funcref");
         return WASM_ERR_TYPE_MISMATCH;
@@ -24314,6 +24439,7 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     wasm_error_t err;
 
     memset(&parsed_type, 0, sizeof(parsed_type));
+    if (mod && mod->rt) wasm_runtime_clear_error(mod->rt);
     if (!mod || !func_name || !fmt)
         return wasm__set_fmt_error(mod ? mod->rt : NULL, WASM_ERR_MALFORMED,
                                    "invalid format call arguments", NULL);
@@ -24483,10 +24609,11 @@ wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_re
     wasm_error_t err;
 
     if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
     wasm__clear_backtrace(rt);
     err = wasm__interp_resume(rt, host_results, num_host_results, results, num_results);
-    if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(rt);
-    return err;
+    if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(rt);
+    return wasm__record_call_result(rt, err);
 }
 
 void wasm_runtime_cancel(wasm_runtime_t* rt) {
@@ -29786,6 +29913,7 @@ void wasm_table_free(wasm_table_t* table) {
 
 
 #include <stdio.h>
+#include <string.h>
 
 static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     switch (kind) {
@@ -30130,11 +30258,27 @@ void* wasm_module_userdata(const wasm_module_t* mod) {
     return mod ? mod->host_userdata : NULL;
 }
 
+static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_t* values, uint32_t count,
+                                           wasm_value_t** out_copy) {
+    *out_copy = NULL;
+    if (count == 0) return WASM_OK;
+    *out_copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
+    if (!*out_copy) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "out of memory copying GC object values");
+        return WASM_ERR_OOM;
+    }
+    memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
+    return WASM_OK;
+}
+
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref) {
     const wasm_structtype_t* st;
     wasm_gc_struct_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -30153,13 +30297,17 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
+    err = wasm__copy_host_values(mod, field_values, num_fields, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < st->num_fields; i++) {
-        wasm_error_t err = wasm__gc_struct_store_field(object, st, i, field_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < st->num_fields; i++)
+        err = wasm__gc_struct_store_field(object, st, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;
@@ -30170,6 +30318,9 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             wasm_value_t* out_ref) {
     const wasm_arraytype_t* at;
     wasm_gc_array_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -30186,13 +30337,17 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_MALFORMED;
     }
 
+    err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_elems);
     object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < num_elems; i++) {
-        wasm_error_t err = wasm__gc_array_store_element(object, at, i, elem_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < num_elems; i++)
+        err = wasm__gc_array_store_element(object, at, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;

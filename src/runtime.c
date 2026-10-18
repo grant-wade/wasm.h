@@ -9,6 +9,7 @@
 #include "reader.h"
 #include "exec/frames.h"
 #include "exec/interpreter.h"
+#include "gc.h"
 #include "platform/wasi_state.h"
 #include "platform/emscripten.h"
 #include "internal/gc_types.h"
@@ -153,6 +154,8 @@ WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr)
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     wasm__gc_heap_destroy(rt);
+    if (rt->max_gc_heap_bytes != 0 && size > rt->max_gc_heap_bytes) size = (size_t)rt->max_gc_heap_bytes;
+    rt->gc_heap_min_size = size;
     if (size == 0) return WASM_OK;
 
     rt->gc_heap = (uint8_t*)WASM_GC_ALLOC(size);
@@ -162,6 +165,18 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count) {
+    root->prev = rt->gc_roots;
+    root->values = values;
+    root->count = count;
+    rt->gc_roots = root;
+}
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root) {
+    rt->gc_roots = root->prev;
 }
 
 void wasm_runtime_interrupt(wasm_runtime_t* rt) {
@@ -214,9 +229,12 @@ static wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
 
     object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
     if (!object) {
-        wasm_gc_collect(rt);
+        if (wasm__gc_collect(rt, object_size) != WASM_OK) return NULL;
         object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
-        if (!object) return NULL;
+        if (!object) {
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "no room for a %zu-byte GC object", object_size);
+            return NULL;
+        }
     }
 
     memset(object, 0, object_size);
@@ -347,6 +365,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
     config->max_total_memory_bytes = 0;
     config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
+    config->max_gc_heap_bytes = (uint64_t)WASM_MAX_GC_HEAP_BYTES;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -443,6 +462,7 @@ WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_conf
     rt->max_memory_bytes = cfg.max_memory_bytes;
     rt->max_total_memory_bytes = cfg.max_total_memory_bytes;
     rt->max_table_elements = cfg.max_table_elements;
+    rt->max_gc_heap_bytes = cfg.max_gc_heap_bytes;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
