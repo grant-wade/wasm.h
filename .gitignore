@@ -8,6 +8,10 @@ build-*/
 test/build/
 test/out/
 *.dSYM/
+
+# Object files from compiling sources outside the build directory
+*.o
+*.obj
 .idea/# Build program bootstrapped from build.c (and its self-rebuild leftovers)
 /cbuild
 /cbuild.exe
