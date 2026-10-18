@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     size_t k;
 
     if (repeats < 1) repeats = 1;
-    rt = wasm_runtime_new(NULL);
+    rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
     if (!rt || wasm_runtime_last_error(rt) != WASM_OK) {
         fprintf(stderr, "runtime init failed\n");
         wasm_runtime_free(rt);

@@ -94,7 +94,7 @@ WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count,
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    funcs = (wasm_func_t*)wasm__realloc_array(mod->funcs, (size_t)base + count, sizeof(wasm_func_t));
+    funcs = (wasm_func_t*)wasm__realloc_array(&mod->rt->allocator, mod->funcs, (size_t)base + count, sizeof(wasm_func_t));
     if (!funcs) return WASM_ERR_OOM;
 
     mod->funcs = funcs;
@@ -104,10 +104,10 @@ WASM_PRIVATE wasm_error_t wasm__append_funcs(wasm_module_t* mod, uint32_t count,
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_import_info(wasm_import_info_t* info) {
+WASM_PRIVATE void wasm__free_import_info(const wasm_allocator_t* a, wasm_import_info_t* info) {
     if (!info) return;
-    WASM_FREE((char*)info->module);
-    WASM_FREE((char*)info->name);
+    wasm__free(a, (char*)info->module);
+    wasm__free(a, (char*)info->name);
     wasm__clear_reftype(&info->ref_type);
     memset(info, 0, sizeof(*info));
 }
@@ -120,7 +120,7 @@ WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    infos = (wasm_import_info_t*)wasm__realloc_array(mod->imports, (size_t)base + count, sizeof(wasm_import_info_t));
+    infos = (wasm_import_info_t*)wasm__realloc_array(&mod->rt->allocator, mod->imports, (size_t)base + count, sizeof(wasm_import_info_t));
     if (!infos) return WASM_ERR_OOM;
 
     mod->imports = infos;
@@ -137,7 +137,7 @@ WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    globals = (wasm_global_t*)wasm__realloc_array(mod->globals, (size_t)base + count, sizeof(wasm_global_t));
+    globals = (wasm_global_t*)wasm__realloc_array(&mod->rt->allocator, mod->globals, (size_t)base + count, sizeof(wasm_global_t));
     if (!globals) return WASM_ERR_OOM;
 
     mod->globals = globals;
@@ -146,21 +146,22 @@ WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_exception_state(wasm__exception_state_t* ex) {
-    WASM_FREE(ex->values);
+WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex) {
+    wasm__free(a, ex->values);
     memset(ex, 0, sizeof(*ex));
 }
 
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(wasm__exception_state_t* ex,
+WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
+                                              wasm__exception_state_t* ex,
                                               uint32_t tag_index,
                                               uint64_t tag_identity,
                                               const wasm_value_t* values,
                                               uint32_t count) {
     wasm_value_t* copy = NULL;
 
-    wasm__free_exception_state(ex);
+    wasm__free_exception_state(a, ex);
     if (count > 0) {
-        copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
+        copy = (wasm_value_t*)wasm__malloc_array(a, count, sizeof(wasm_value_t));
         if (!copy) return WASM_ERR_OOM;
         memcpy(copy, values, count * sizeof(wasm_value_t));
     }
@@ -192,23 +193,23 @@ WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
 
     if (!rt || !ex || !out_value) return WASM_ERR_MALFORMED;
 
-    object = (wasm__exception_object_t*)WASM_CALLOC(1u, sizeof(*object));
+    object = (wasm__exception_object_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*object));
     if (!object) return WASM_ERR_OOM;
     object->tag_index = ex->tag_index;
     object->tag_identity = ex->tag_identity;
     object->num_values = ex->num_values;
     if (ex->num_values > 0) {
-        object->values = (wasm_value_t*)wasm__malloc_array(ex->num_values, sizeof(wasm_value_t));
+        object->values = (wasm_value_t*)wasm__malloc_array(&rt->allocator, ex->num_values, sizeof(wasm_value_t));
         if (!object->values) {
-            WASM_FREE(object);
+            wasm__free(&rt->allocator, object);
             return WASM_ERR_OOM;
         }
         memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
 
-    if (wasm__handle_set_insert(&rt->exception_objects, object) != WASM_OK) {
-        WASM_FREE(object->values);
-        WASM_FREE(object);
+    if (wasm__handle_set_insert(&rt->allocator, &rt->exception_objects, object) != WASM_OK) {
+        wasm__free(&rt->allocator, object->values);
+        wasm__free(&rt->allocator, object);
         return WASM_ERR_OOM;
     }
 
@@ -236,7 +237,7 @@ WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, 
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    tags = (wasm_tag_t*)wasm__realloc_array(mod->tags, (size_t)base + count, sizeof(wasm_tag_t));
+    tags = (wasm_tag_t*)wasm__realloc_array(&mod->rt->allocator, mod->tags, (size_t)base + count, sizeof(wasm_tag_t));
     if (!tags) return WASM_ERR_OOM;
 
     mod->tags = tags;
@@ -245,8 +246,8 @@ WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, 
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_data_segment(wasm_data_segment_t* segment) {
-    WASM_FREE(segment->bytes);
+WASM_PRIVATE void wasm__free_data_segment(const wasm_allocator_t* a, wasm_data_segment_t* segment) {
+    wasm__free(a, segment->bytes);
     memset(segment, 0, sizeof(*segment));
 }
 
@@ -280,7 +281,7 @@ static wasm_error_t wasm__runtime_register_func_ref(wasm_runtime_t* rt,
     if (rt->num_func_refs >= rt->cap_func_refs) {
         uint32_t new_cap = rt->cap_func_refs ? rt->cap_func_refs * 2u : 64u;
         wasm_func_ref_t* refs =
-            (wasm_func_ref_t*)wasm__realloc_array(rt->func_refs, new_cap, sizeof(*rt->func_refs));
+            (wasm_func_ref_t*)wasm__realloc_array(&rt->allocator, rt->func_refs, new_cap, sizeof(*rt->func_refs));
 
         if (!refs) return WASM_ERR_OOM;
         rt->func_refs = refs;

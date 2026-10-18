@@ -1416,6 +1416,7 @@ static int wasm2api_write_header(const char* header_path, const wasm2api_model_t
     fprintf(out, "typedef struct %s_init_options_t {\n", model->api_prefix);
     fputs("    wasm_runtime_t* runtime;\n", out);
     fputs("    const wasm_config_t* runtime_config;\n", out);
+    fputs("    const wasm_allocator_t* allocator;\n", out);
     if (has_imports) {
         fprintf(out, "    const %s_imports_t* imports;\n", model->api_prefix);
     }
@@ -1670,6 +1671,7 @@ static int wasm2api_write_source(const char* source_path,
     fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
     fputs("    wasm_runtime_t* rt = NULL;\n", out);
     fputs("    const wasm_config_t* runtime_config = NULL;\n", out);
+    fputs("    const wasm_allocator_t* allocator = wasm_libc_allocator();\n", out);
     fputs("    wasm_error_t err;\n", out);
     if (has_imports) {
         fprintf(out, "    const %s_imports_t* imports = NULL;\n", model->api_prefix);
@@ -1681,6 +1683,7 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    if (options) {\n", out);
     fputs("        rt = options->runtime;\n", out);
     fputs("        runtime_config = options->runtime_config;\n", out);
+    fputs("        if (options->allocator) allocator = options->allocator;\n", out);
     if (has_imports) {
         fputs("        imports = options->imports;\n", out);
     }
@@ -1688,7 +1691,7 @@ static int wasm2api_write_source(const char* source_path,
     fputs("    if (rt) {\n", out);
     fputs("        ctx->rt = rt;\n", out);
     fputs("    } else {\n", out);
-    fputs("        ctx->owned_rt = wasm_runtime_new(runtime_config);\n", out);
+    fputs("        ctx->owned_rt = wasm_runtime_new(allocator, runtime_config);\n", out);
     fputs("        ctx->rt = ctx->owned_rt;\n", out);
     fputs("        if (!ctx->rt) {\n", out);
         fprintf(out, "            %s_set_error(ctx, WASM_ERR_OOM, \"runtime creation failed\");\n",
@@ -2377,7 +2380,7 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    rt = wasm_runtime_new(NULL);
+    rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
     if (!rt) {
         fprintf(stderr, "wasm2api: runtime init failed\n");
         goto cleanup;

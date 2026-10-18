@@ -16,7 +16,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     config.initial_gc_heap_size = 256u * 1024u;
     config.frame_arena_size = 512u * 1024u;
 
-    runtime = wasm_runtime_new(&config);
+    runtime = wasm_runtime_new(wasm_libc_allocator(), &config);
     if (!runtime || wasm_runtime_last_error(runtime) != WASM_OK) {
         wasm_runtime_free(runtime);
         return 0;

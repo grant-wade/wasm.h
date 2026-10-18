@@ -22,8 +22,13 @@ WASM_PRIVATE const wasm_memory_t* wasm__memory_actual_const(const wasm_memory_t*
     return memory;
 }
 
+static size_t wasm__table_elems_bytes(const wasm_table_t* table) {
+    return (size_t)table->size * sizeof(wasm_value_t);
+}
+
 WASM_PRIVATE void wasm__free_table(wasm_table_t* table) {
-    if (!table->is_import) WASM_FREE(table->elems);
+    if (!table->is_import)
+        wasm__free_sized(&table->allocator, table->elems, wasm__table_elems_bytes(table), WASM__ALIGNOF(wasm_value_t));
     memset(table, 0, sizeof(*table));
 }
 
@@ -32,7 +37,7 @@ WASM_PRIVATE void wasm__free_memory(wasm_memory_t* memory) {
         if (memory->is_shared)
             wasm__platform_shared_release(memory->data, memory->reserved_bytes);
         else
-            WASM_FREE(memory->data);
+            wasm__free_sized(&memory->allocator, memory->data, (size_t)wasm__memory_byte_size(memory), WASM__BLOCK_ALIGN);
     }
     memset(memory, 0, sizeof(*memory));
 }
@@ -45,7 +50,7 @@ WASM_PRIVATE wasm_error_t wasm__append_tables(wasm_module_t* mod, uint32_t count
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    tables = (wasm_table_t*)wasm__realloc_array(mod->tables, (size_t)base + count, sizeof(wasm_table_t));
+    tables = (wasm_table_t*)wasm__realloc_array(&mod->rt->allocator, mod->tables, (size_t)base + count, sizeof(wasm_table_t));
     if (!tables) return WASM_ERR_OOM;
 
     mod->tables = tables;
@@ -62,7 +67,7 @@ WASM_PRIVATE wasm_error_t wasm__append_memories(wasm_module_t* mod, uint32_t cou
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    memories = (wasm_memory_t*)wasm__realloc_array(mod->memories, (size_t)base + count, sizeof(wasm_memory_t));
+    memories = (wasm_memory_t*)wasm__realloc_array(&mod->rt->allocator, mod->memories, (size_t)base + count, sizeof(wasm_memory_t));
     if (!memories) return WASM_ERR_OOM;
 
     mod->memories = memories;
@@ -185,7 +190,8 @@ WASM_PRIVATE uint64_t wasm__table_grow(const wasm_runtime_t* rt, wasm_table_t* t
     if ((rt && rt->max_table_elements != 0 && new_size > rt->max_table_elements) ||
         new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t)))
         return UINT64_MAX;
-    elems = (wasm_value_t*)wasm__realloc_array(table->elems, (size_t)new_size, sizeof(wasm_value_t));
+    elems = (wasm_value_t*)wasm__resize_sized(&table->allocator, table->elems, wasm__table_elems_bytes(table),
+                                              (size_t)new_size * sizeof(wasm_value_t), WASM__ALIGNOF(wasm_value_t));
     if (!elems) return UINT64_MAX;
     table->elems = elems;
     table->size = (uint32_t)new_size;
@@ -237,7 +243,7 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory, uint6
     if (memory->pages == 0) return WASM_OK;
     if (!wasm__memory_byte_size_fits_host(memory, &byte_size)) return WASM_ERR_OOM;
 
-    memory->data = (uint8_t*)WASM_CALLOC(1u, byte_size);
+    memory->data = (uint8_t*)wasm__alloc_zeroed_sized(&memory->allocator, byte_size, WASM__BLOCK_ALIGN);
     if (!memory->data) return WASM_ERR_OOM;
     return WASM_OK;
 }
@@ -255,7 +261,8 @@ WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table) {
     if ((uint64_t)elem_count * (uint64_t)sizeof(wasm_value_t) > (uint64_t)SIZE_MAX)
         return WASM_ERR_OOM;
 
-    table->elems = (wasm_value_t*)wasm__malloc_array(elem_count, sizeof(wasm_value_t));
+    table->elems = (wasm_value_t*)wasm__alloc_sized(&table->allocator, elem_count * sizeof(wasm_value_t),
+                                                   WASM__ALIGNOF(wasm_value_t));
     if (!table->elems) return WASM_ERR_OOM;
     for (i = 0; i < table->size; i++) table->elems[i] = table->default_value;
     return WASM_OK;
@@ -269,7 +276,7 @@ WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    segments = (wasm_data_segment_t*)wasm__realloc_array(mod->data_segments, (size_t)base + count, sizeof(wasm_data_segment_t));
+    segments = (wasm_data_segment_t*)wasm__realloc_array(&mod->rt->allocator, mod->data_segments, (size_t)base + count, sizeof(wasm_data_segment_t));
     if (!segments) return WASM_ERR_OOM;
 
     mod->data_segments = segments;
@@ -278,8 +285,8 @@ WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_custom_section(wasm_custom_section_t* section) {
-    WASM_FREE(section->name);
+WASM_PRIVATE void wasm__free_custom_section(const wasm_allocator_t* a, wasm_custom_section_t* section) {
+    wasm__free(a, section->name);
     memset(section, 0, sizeof(*section));
 }
 
@@ -291,7 +298,7 @@ WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint3
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    sections = (wasm_custom_section_t*)wasm__realloc_array(mod->custom_sections, (size_t)base + count, sizeof(wasm_custom_section_t));
+    sections = (wasm_custom_section_t*)wasm__realloc_array(&mod->rt->allocator, mod->custom_sections, (size_t)base + count, sizeof(wasm_custom_section_t));
     if (!sections) return WASM_ERR_OOM;
 
     mod->custom_sections = sections;
@@ -300,8 +307,8 @@ WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint3
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_elem_segment(wasm_elem_segment_t* segment) {
-    WASM_FREE(segment->elems);
+WASM_PRIVATE void wasm__free_elem_segment(const wasm_allocator_t* a, wasm_elem_segment_t* segment) {
+    wasm__free(a, segment->elems);
     memset(segment, 0, sizeof(*segment));
 }
 
@@ -313,7 +320,7 @@ WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_
     if (count == 0) return WASM_OK;
     if (count > UINT32_MAX - base) return WASM_ERR_OOM;
 
-    segments = (wasm_elem_segment_t*)wasm__realloc_array(mod->elem_segments, (size_t)base + count, sizeof(wasm_elem_segment_t));
+    segments = (wasm_elem_segment_t*)wasm__realloc_array(&mod->rt->allocator, mod->elem_segments, (size_t)base + count, sizeof(wasm_elem_segment_t));
     if (!segments) return WASM_ERR_OOM;
 
     mod->elem_segments = segments;

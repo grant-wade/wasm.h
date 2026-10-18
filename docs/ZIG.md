@@ -33,7 +33,7 @@ const std = @import("std");
 const wasm = @import("wasm");
 
 pub fn main() !void {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
     const mod = rt.load(bytes) catch |err| {
@@ -47,12 +47,12 @@ pub fn main() !void {
 }
 ```
 
-`Runtime.init` takes a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
+`Runtime.init` takes the `std.mem.Allocator` the runtime allocates everything from, which must outlive it, and a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
 
 For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memory and table at instantiation and on growth, and `max_function_locals` caps the locals a function may declare; 0 removes a limit:
 
 ```zig
-const rt = try wasm.Runtime.init(.{ .max_memory_bytes = 64 * 1024 * 1024, .max_table_elements = 100_000 });
+const rt = try wasm.Runtime.init(allocator, .{ .max_memory_bytes = 64 * 1024 * 1024, .max_table_elements = 100_000 });
 ```
 
 `Runtime.compile` decodes and validates without resolving imports or running code; the result supports introspection, and `Module.instantiate` creates independent instances of it.
@@ -144,15 +144,15 @@ The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and r
 A runtime and its modules belong to one thread at a time. To run Wasm on several threads:
 
 1. Give each thread its own runtime and enable `.threads` on each.
-2. Create a `wasm.SharedMemory`.
+2. Create a `wasm.SharedMemory`. Its allocator, and any allocator the runtimes share, must be thread-safe.
 3. Bind it with `bindMemory` in every runtime before loading.
 
 ```zig
-const shared = try wasm.SharedMemory.init(.{ .pages = 1, .max_pages = 16 });
+const shared = try wasm.SharedMemory.init(std.heap.smp_allocator, .{ .pages = 1, .max_pages = 16 });
 defer shared.deinit();
 
 // On each thread:
-const rt = try wasm.Runtime.init(.{});
+const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
 rt.enableFeatures(.{ .threads = true });
 try rt.bindMemory("env", "memory", shared.raw());
 ```
@@ -164,7 +164,7 @@ Free the shared memory only after every module that imports it. Shared memories 
 From a checkout:
 
 ```sh
-zig build test              # Zig wrapper tests, plus the modular C regression tests built by Zig
+zig build test              # Zig wrapper tests under std.testing.allocator, plus the modular C regression tests built by Zig
 zig build test -Doptimize=safe -Dplatform=false
 zig build cross             # compile for every target in cross_targets in build.zig
 ```

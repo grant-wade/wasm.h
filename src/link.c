@@ -30,7 +30,7 @@ static wasm_error_t wasm__register_export(wasm_runtime_t* rt, const char* module
             wasm_import_t desc;
 
             if (!type) return WASM_ERR_MALFORMED;
-            linked = (wasm__linked_func_t*)WASM_CALLOC(1u, sizeof(*linked));
+            linked = (wasm__linked_func_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*linked));
             if (!linked) return WASM_ERR_OOM;
             linked->module = mod;
             linked->func_idx = index;

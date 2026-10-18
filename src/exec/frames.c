@@ -7,14 +7,14 @@
 #include "../runtime.h"
 
 WASM_PRIVATE wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt) {
-    rt->call_frames = (wasm__call_frame_t*)WASM_CALLOC(rt->max_call_frames, sizeof(*rt->call_frames));
+    rt->call_frames = (wasm__call_frame_t*)wasm__calloc(&rt->allocator, rt->max_call_frames, sizeof(*rt->call_frames));
     if (!rt->call_frames) return WASM_ERR_OOM;
     rt->call_frame_sp = 0;
     return WASM_OK;
 }
 
 WASM_PRIVATE void wasm__call_frame_stack_destroy(wasm_runtime_t* rt) {
-    WASM_FREE(rt->call_frames);
+    wasm__free(&rt->allocator, rt->call_frames);
     rt->call_frames = NULL;
     rt->max_call_frames = 0;
     rt->call_frame_sp = 0;

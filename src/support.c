@@ -1,30 +1,133 @@
 #include "support.h"
 #include "internal/alloc.h"
+#include <stdlib.h>
 #include <string.h>
 
-#if defined(WASM__NEEDS_CALLOC_FALLBACK)
-WASM_PRIVATE void* wasm__calloc_fallback(size_t count, size_t size) {
-    size_t total;
-    void* ptr;
+#define WASM__ALLOC_HEADER WASM__ALLOC_ALIGN
 
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+/* Alignment malloc provides on the hosts the runtime targets. */
+#define WASM__LIBC_ALIGN (2u * sizeof(void*))
 
-    total = count * size;
-    ptr = WASM_MALLOC(total);
-    if (ptr) memset(ptr, 0, total);
-    return ptr;
+static void* wasm__libc_alloc(void* ctx, size_t size, size_t align) {
+    uint8_t* raw;
+    uintptr_t aligned;
+
+    (void)ctx;
+    if (align <= WASM__LIBC_ALIGN) return malloc(size);
+    if (size > SIZE_MAX - align - sizeof(void*)) return NULL;
+    raw = (uint8_t*)malloc(size + align - 1u + sizeof(void*));
+    if (!raw) return NULL;
+    aligned = ((uintptr_t)raw + sizeof(void*) + align - 1u) & ~(uintptr_t)(align - 1u);
+    memcpy((uint8_t*)aligned - sizeof(void*), &raw, sizeof(raw));
+    return (void*)aligned;
 }
 
-#endif
+static void wasm__libc_free(void* ctx, void* p, size_t size, size_t align) {
+    void* raw;
 
-WASM_PRIVATE void* wasm__malloc_array(size_t count, size_t size) {
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
-    return WASM_MALLOC(count * size);
+    (void)ctx;
+    (void)size;
+    if (align <= WASM__LIBC_ALIGN) {
+        free(p);
+        return;
+    }
+    memcpy(&raw, (uint8_t*)p - sizeof(void*), sizeof(raw));
+    free(raw);
 }
 
-WASM_PRIVATE void* wasm__realloc_array(void* ptr, size_t count, size_t size) {
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
-    return WASM_REALLOC(ptr, count * size);
+static void* wasm__libc_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
+    void* moved;
+
+    if (align <= WASM__LIBC_ALIGN) return realloc(p, new_size);
+    moved = wasm__libc_alloc(ctx, new_size, align);
+    if (!moved) return NULL;
+    memcpy(moved, p, old_size < new_size ? old_size : new_size);
+    wasm__libc_free(ctx, p, old_size, align);
+    return moved;
+}
+
+static const wasm_allocator_t wasm__libc_allocator = { NULL, wasm__libc_alloc, wasm__libc_resize, wasm__libc_free };
+
+const wasm_allocator_t* wasm_libc_allocator(void) {
+    return &wasm__libc_allocator;
+}
+
+WASM_PRIVATE int wasm__allocator_valid(const wasm_allocator_t* a) {
+    return a && a->alloc && a->resize && a->free;
+}
+
+static size_t wasm__block_size(const void* p) {
+    size_t size;
+
+    memcpy(&size, (const uint8_t*)p - WASM__ALLOC_HEADER, sizeof(size));
+    return size;
+}
+
+WASM_PRIVATE void* wasm__malloc(const wasm_allocator_t* a, size_t size) {
+    uint8_t* block;
+
+    if (size > SIZE_MAX - WASM__ALLOC_HEADER) return NULL;
+    block = (uint8_t*)a->alloc(a->ctx, size + WASM__ALLOC_HEADER, WASM__ALLOC_ALIGN);
+    if (!block) return NULL;
+    memcpy(block, &size, sizeof(size));
+    return block + WASM__ALLOC_HEADER;
+}
+
+WASM_PRIVATE void* wasm__calloc(const wasm_allocator_t* a, size_t count, size_t size) {
+    void* p;
+
+    if (size != 0 && count > SIZE_MAX / size) return NULL;
+    p = wasm__malloc(a, count * size);
+    if (p) memset(p, 0, count * size);
+    return p;
+}
+
+WASM_PRIVATE void* wasm__realloc(const wasm_allocator_t* a, void* p, size_t size) {
+    uint8_t* block;
+
+    if (!p) return wasm__malloc(a, size);
+    if (size > SIZE_MAX - WASM__ALLOC_HEADER) return NULL;
+    block = (uint8_t*)a->resize(a->ctx, (uint8_t*)p - WASM__ALLOC_HEADER, wasm__block_size(p) + WASM__ALLOC_HEADER,
+                                size + WASM__ALLOC_HEADER, WASM__ALLOC_ALIGN);
+    if (!block) return NULL;
+    memcpy(block, &size, sizeof(size));
+    return block + WASM__ALLOC_HEADER;
+}
+
+WASM_PRIVATE void* wasm__malloc_array(const wasm_allocator_t* a, size_t count, size_t size) {
+    if (size != 0 && count > SIZE_MAX / size) return NULL;
+    return wasm__malloc(a, count * size);
+}
+
+WASM_PRIVATE void* wasm__realloc_array(const wasm_allocator_t* a, void* p, size_t count, size_t size) {
+    if (size != 0 && count > SIZE_MAX / size) return NULL;
+    return wasm__realloc(a, p, count * size);
+}
+
+WASM_PRIVATE void wasm__free(const wasm_allocator_t* a, void* p) {
+    if (!p) return;
+    a->free(a->ctx, (uint8_t*)p - WASM__ALLOC_HEADER, wasm__block_size(p) + WASM__ALLOC_HEADER, WASM__ALLOC_ALIGN);
+}
+
+WASM_PRIVATE void* wasm__alloc_sized(const wasm_allocator_t* a, size_t size, size_t align) {
+    return a->alloc(a->ctx, size ? size : 1u, align);
+}
+
+WASM_PRIVATE void* wasm__alloc_zeroed_sized(const wasm_allocator_t* a, size_t size, size_t align) {
+    void* p = wasm__alloc_sized(a, size, align);
+
+    if (p) memset(p, 0, size);
+    return p;
+}
+
+WASM_PRIVATE void* wasm__resize_sized(const wasm_allocator_t* a, void* p, size_t old_size, size_t new_size,
+                                      size_t align) {
+    if (!p) return wasm__alloc_sized(a, new_size, align);
+    return a->resize(a->ctx, p, old_size ? old_size : 1u, new_size ? new_size : 1u, align);
+}
+
+WASM_PRIVATE void wasm__free_sized(const wasm_allocator_t* a, void* p, size_t size, size_t align) {
+    if (p) a->free(a->ctx, p, size ? size : 1u, align);
 }
 
 WASM_PRIVATE_INLINE int wasm__uses_funcref_storage(wasm_valtype_t type) {

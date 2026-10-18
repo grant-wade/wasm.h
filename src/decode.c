@@ -69,7 +69,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__
     if (err != WASM_OK) return err;
 
     section = &mod->custom_sections[section_index];
-    err = wasm__read_name_owned(r, &section->name);
+    err = wasm__read_name_owned(&mod->rt->allocator, r, &section->name);
     if (err != WASM_OK) return err;
 
     section->data = r->ptr;
@@ -102,6 +102,7 @@ static wasm_error_t wasm__read_memory_type(wasm_module_t* mod,
     }
 
     memset(memory, 0, sizeof(*memory));
+    memory->allocator = mod->rt->allocator;
     memory->is_64 = is_64;
     memory->is_shared = is_shared;
     memory->pages = wasm__read_leb128_u64(r);
@@ -138,6 +139,7 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     wasm_error_t err;
 
     memset(table, 0, sizeof(*table));
+    table->allocator = mod->rt->allocator;
     leading = wasm__read_u8(r);
     if (leading == 0x40u) {
         has_init_expr = 1;
@@ -399,11 +401,11 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
 
         if (mod->is_compiled) {
-            wasm_value_t* placeholder = (wasm_value_t*)WASM_MALLOC(sizeof(*placeholder));
+            wasm_value_t* placeholder = (wasm_value_t*)wasm__malloc(&mod->rt->allocator, sizeof(*placeholder));
 
             if (!placeholder) return WASM_ERR_OOM;
             if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) {
-                WASM_FREE(placeholder);
+                wasm__free(&mod->rt->allocator, placeholder);
                 return WASM_ERR_OOM;
             }
             *placeholder = wasm__default_value(type);
@@ -585,9 +587,9 @@ static wasm_error_t wasm__decode_compact_imports(wasm_module_t* mod,
         if (err != WASM_OK) return err;
         info = &mod->imports[import_index];
         info->type_index = UINT32_MAX;
-        info->module = wasm__strdup(module_name);
+        info->module = wasm__strdup(&mod->rt->allocator, module_name);
         if (!info->module) return WASM_ERR_OOM;
-        err = wasm__read_name_owned(r, &field_name);
+        err = wasm__read_name_owned(&mod->rt->allocator, r, &field_name);
         info->name = field_name;
         if (err != WASM_OK) return err;
 
@@ -621,27 +623,27 @@ WASM_PRIVATE wasm_error_t wasm__decode_import_section(wasm_module_t* mod, wasm__
         wasm_error_t err;
         uint8_t kind;
 
-        err = wasm__read_name_owned(r, &module_name);
+        err = wasm__read_name_owned(&mod->rt->allocator, r, &module_name);
         if (err != WASM_OK) return err;
-        err = wasm__read_name_owned_len(r, &field_name, &field_len);
+        err = wasm__read_name_owned_len(&mod->rt->allocator, r, &field_name, &field_len);
         if (err != WASM_OK) {
-            WASM_FREE(module_name);
+            wasm__free(&mod->rt->allocator, module_name);
             return err;
         }
         kind = wasm__read_u8(r);
 
         if (field_len == 0 && (kind == 0x7F || kind == 0x7E)) {
-            WASM_FREE(field_name);
+            wasm__free(&mod->rt->allocator, field_name);
             err = wasm__decode_compact_imports(mod, r, module_name, kind);
-            WASM_FREE(module_name);
+            wasm__free(&mod->rt->allocator, module_name);
             if (err != WASM_OK) return err;
             continue;
         }
 
         err = wasm__append_import_infos(mod, 1, &import_index);
         if (err != WASM_OK) {
-            WASM_FREE(module_name);
-            WASM_FREE(field_name);
+            wasm__free(&mod->rt->allocator, module_name);
+            wasm__free(&mod->rt->allocator, field_name);
             return err;
         }
         info = &mod->imports[import_index];
@@ -760,11 +762,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_tag_section(wasm_module_t* mod, wasm__rea
 WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__reader_t* r) {
     uint32_t count = wasm__read_count(r), i;
     wasm_error_t err;
-    mod->exports = (wasm_export_t*)WASM_CALLOC(count, sizeof(wasm_export_t));
+    mod->exports = (wasm_export_t*)wasm__calloc(&mod->rt->allocator, count, sizeof(wasm_export_t));
     if (!mod->exports) return WASM_ERR_OOM;
     mod->num_exports = count;
     for (i = 0; i < count; i++) {
-        err = wasm__read_name_owned_len(r, &mod->exports[i].name, &mod->exports[i].name_len);
+        err = wasm__read_name_owned_len(&mod->rt->allocator, r, &mod->exports[i].name, &mod->exports[i].name_len);
         if (err != WASM_OK) return err;
         mod->exports[i].kind = (wasm_export_kind_t)wasm__read_u8(r);
         mod->exports[i].index = wasm__read_leb128_u32(r);
@@ -841,7 +843,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
         segment->num_elems = wasm__read_count(r);
         if (segment->num_elems == 0) continue;
 
-        segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
+        segment->elems = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
 
         for (j = 0; j < segment->num_elems; j++) {
@@ -912,9 +914,9 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
             return WASM_ERR_MALFORMED;
         }
         mod->funcs[fidx].num_locals = all_locals;
-        mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
+        mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(&mod->rt->allocator, all_locals, sizeof(wasm_valtype_t));
         if (mod->funcs[fidx].locals)
-            mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)WASM_CALLOC(all_locals, sizeof(wasm_reftype_t));
+            mod->funcs[fidx].local_reftypes = (wasm_reftype_t*)wasm__calloc(&mod->rt->allocator, all_locals, sizeof(wasm_reftype_t));
         if (!mod->funcs[fidx].locals || !mod->funcs[fidx].local_reftypes) return WASM_ERR_OOM;
         for (p = 0; p < ft->num_params; p++) {
             mod->funcs[fidx].locals[p] = ft->params[p];
@@ -1007,7 +1009,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__re
         segment->size = wasm__read_leb128_u32(r);
         if (!wasm__has(r, segment->size)) return WASM_ERR_MALFORMED;
         if (segment->size > 0) {
-            segment->bytes = (uint8_t*)WASM_MALLOC(segment->size);
+            segment->bytes = (uint8_t*)wasm__malloc(&mod->rt->allocator, segment->size);
             if (!segment->bytes) return WASM_ERR_OOM;
             memcpy(segment->bytes, r->ptr, segment->size);
         }

@@ -223,6 +223,7 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
     session_math_ctx_t* ctx;
     wasm_runtime_t* rt = NULL;
     const wasm_config_t* runtime_config = NULL;
+    const wasm_allocator_t* allocator = wasm_libc_allocator();
     wasm_error_t err;
 
     if (!wasm_bytes) return NULL;
@@ -231,11 +232,12 @@ static session_math_ctx_t* session_math__init_ctx(const uint8_t* wasm_bytes, siz
     if (options) {
         rt = options->runtime;
         runtime_config = options->runtime_config;
+        if (options->allocator) allocator = options->allocator;
     }
     if (rt) {
         ctx->rt = rt;
     } else {
-        ctx->owned_rt = wasm_runtime_new(runtime_config);
+        ctx->owned_rt = wasm_runtime_new(allocator, runtime_config);
         ctx->rt = ctx->owned_rt;
         if (!ctx->rt) {
             session_math_set_error(ctx, WASM_ERR_OOM, "runtime creation failed");

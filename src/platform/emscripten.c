@@ -18,8 +18,8 @@ struct wasm__emscripten_state_t {
 
 WASM_PRIVATE void wasm__emscripten_state_destroy(wasm_runtime_t* rt) {
     if (!rt || !rt->emscripten_state) return;
-    WASM_FREE(rt->emscripten_state->memory.data);
-    WASM_FREE(rt->emscripten_state);
+    wasm__free_memory(&rt->emscripten_state->memory);
+    wasm__free(&rt->allocator, rt->emscripten_state);
     rt->emscripten_state = NULL;
 }
 
@@ -153,7 +153,8 @@ static wasm_error_t wasm__emscripten_return_i32(wasm_value_t* results,
     return WASM_OK;
 }
 
-static int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
+static int wasm__emscripten_read_guest_string(const wasm_allocator_t* a,
+                                              wasm_memory_t* memory,
                                               uint64_t mem_size,
                                               uint32_t ptr,
                                               char** out_string) {
@@ -170,7 +171,7 @@ static int wasm__emscripten_read_guest_string(wasm_memory_t* memory,
     end = (const uint8_t*)memchr(start, 0, available);
     if (!end) return 0;
     len = (size_t)(end - start);
-    copy = (char*)WASM_MALLOC(len + 1u);
+    copy = (char*)wasm__malloc(a, len + 1u);
     if (!copy) return 0;
     if (len > 0u) memcpy(copy, start, len);
     copy[len] = '\0';
@@ -226,29 +227,31 @@ WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* 
             return WASM_ERR_OOM;
         }
         state->memory.pages = old_size / WASM_PAGE_SIZE;
-        new_data = (uint8_t*)WASM_REALLOC(state->memory.data, new_size);
-        if (!new_data && new_size > 0u) return WASM_ERR_OOM;
+        new_data = (uint8_t*)wasm__resize_sized(&state->memory.allocator, state->memory.data, old_size, new_size,
+                                                WASM__BLOCK_ALIGN);
+        if (!new_data) return WASM_ERR_OOM;
         if (new_size > old_size) memset(new_data + old_size, 0, new_size - old_size);
         state->memory.data = new_data;
         state->memory.pages = min_pages;
         return WASM_OK;
     }
 
-    state = (wasm__emscripten_state_t*)WASM_CALLOC(1u, sizeof(*state));
+    state = (wasm__emscripten_state_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*state));
     if (!state) return WASM_ERR_OOM;
+    state->memory.allocator = rt->allocator;
 
     state->memory.pages = min_pages;
     state->memory.max_pages = max_pages;
     state->memory.is_64 = is_64;
     if (!wasm__memory_byte_size_fits_host(&state->memory, &new_size)) {
-        WASM_FREE(state);
+        wasm__free(&rt->allocator, state);
         WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "builtin emscripten memory import too large");
         return WASM_ERR_OOM;
     }
     if (new_size > 0u) {
-        state->memory.data = (uint8_t*)WASM_CALLOC(1u, new_size);
+        state->memory.data = (uint8_t*)wasm__alloc_zeroed_sized(&rt->allocator, new_size, WASM__BLOCK_ALIGN);
         if (!state->memory.data) {
-            WASM_FREE(state);
+            wasm__free(&rt->allocator, state);
             return WASM_ERR_OOM;
         }
     }
@@ -262,8 +265,8 @@ WASM_PRIVATE wasm_error_t wasm__ensure_emscripten_memory_import(wasm_runtime_t* 
     if (wasm_register_memory_import(rt, &import_desc) != WASM_OK) {
         wasm_error_t err = rt->last_error;
 
-        WASM_FREE(state->memory.data);
-        WASM_FREE(state);
+        wasm__free_memory(&state->memory);
+        wasm__free(&rt->allocator, state);
         rt->emscripten_state = NULL;
         return err != WASM_OK ? err : WASM_ERR_MALFORMED;
     }
@@ -453,7 +456,7 @@ static wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[1].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_faccessat", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[1].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = faccessat(args[0].of.i32, path, args[2].of.i32, args[3].of.i32);
@@ -461,7 +464,7 @@ static wasm_error_t wasm__emscripten_syscall_faccessat(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
@@ -499,7 +502,7 @@ static wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 2 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[0].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_chmod", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[0].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[0].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = chmod(path, (mode_t)(uint32_t)args[1].of.i32);
@@ -507,7 +510,7 @@ static wasm_error_t wasm__emscripten_syscall_chmod(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
@@ -565,7 +568,7 @@ static wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 4 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[1].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_openat", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[1].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = openat(args[0].of.i32, path, args[2].of.i32, (mode_t)(uint32_t)args[3].of.i32);
@@ -573,7 +576,7 @@ static wasm_error_t wasm__emscripten_syscall_openat(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc >= 0 ? rc : wasm__emscripten_neg_errno(errno));
 }
 
@@ -668,7 +671,7 @@ static wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[1].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_mkdirat", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[1].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = mkdirat(args[0].of.i32, path, (mode_t)(uint32_t)args[2].of.i32);
@@ -676,7 +679,7 @@ static wasm_error_t wasm__emscripten_syscall_mkdirat(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
@@ -697,13 +700,13 @@ static wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
     if (args[1].of.i32 < 0 || args[2].of.i32 < 0 || args[3].of.i32 < 0)
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EINVAL));
     if (wasm__wasi_get_memory0(mod, "__syscall_readlinkat", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[1].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 
     buf_ptr = (uint32_t)args[2].of.i32;
     buf_len = (uint32_t)args[3].of.i32;
     if (!wasm__range_in_bounds_u64((uint64_t)buf_ptr, (uint64_t)buf_len, mem_size)) {
-        WASM_FREE(path);
+        wasm__free(&mod->rt->allocator, path);
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     }
 
@@ -716,7 +719,7 @@ static wasm_error_t wasm__emscripten_syscall_readlinkat(wasm_module_t* mod,
 #else
     rc_value = wasm__emscripten_neg_errno(ENOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc_value);
 }
 
@@ -734,7 +737,7 @@ static wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 1 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[0].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_rmdir", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[0].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[0].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = rmdir(path);
@@ -742,7 +745,7 @@ static wasm_error_t wasm__emscripten_syscall_rmdir(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 
@@ -760,7 +763,7 @@ static wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
     if (!mod || !args || !results || num_args != 3 || num_results != 1) return WASM_ERR_TYPE_MISMATCH;
     if (args[1].of.i32 < 0) return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
     if (wasm__wasi_get_memory0(mod, "__syscall_unlinkat", &memory, &mem_size) != WASM_OK) return WASM_ERR_MALFORMED;
-    if (!wasm__emscripten_read_guest_string(memory, mem_size, (uint32_t)args[1].of.i32, &path))
+    if (!wasm__emscripten_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, &path))
         return wasm__emscripten_return_i32(results, num_results, wasm__emscripten_neg_errno(EFAULT));
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     rc = unlinkat(args[0].of.i32, path, args[2].of.i32);
@@ -768,7 +771,7 @@ static wasm_error_t wasm__emscripten_syscall_unlinkat(wasm_module_t* mod,
     rc = -1;
     errno = ENOSYS;
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return wasm__emscripten_return_i32(results, num_results, rc == 0 ? 0 : wasm__emscripten_neg_errno(errno));
 }
 

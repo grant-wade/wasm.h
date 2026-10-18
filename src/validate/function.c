@@ -58,7 +58,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     v.max_fp = 1;
 
     if (mod->rt->validator_heights_capacity < func->code_len) {
-        heights = (uint32_t*)wasm__realloc_array(mod->rt->validator_heights, func->code_len, sizeof(uint32_t));
+        heights = (uint32_t*)wasm__realloc_array(&mod->rt->allocator, mod->rt->validator_heights, func->code_len, sizeof(uint32_t));
         if (!heights) {
             wasm__validator_destroy(&v);
             return wasm__set_validation_error(mod->rt, func_idx, 0, "failed to allocate validator state");
@@ -384,11 +384,11 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     wasm_reftype_t* merged_reftypes = NULL;
 
                     if (branch_count != 0) {
-                        merged_types = (wasm_valtype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_types));
-                        merged_reftypes = (wasm_reftype_t*)wasm__malloc_array((size_t)branch_count, sizeof(*merged_reftypes));
+                        merged_types = (wasm_valtype_t*)wasm__malloc_array(&mod->rt->allocator, (size_t)branch_count, sizeof(*merged_types));
+                        merged_reftypes = (wasm_reftype_t*)wasm__malloc_array(&mod->rt->allocator, (size_t)branch_count, sizeof(*merged_reftypes));
                         if (!merged_types || !merged_reftypes) {
-                            WASM_FREE(merged_types);
-                            WASM_FREE(merged_reftypes);
+                            wasm__free(&mod->rt->allocator, merged_types);
+                            wasm__free(&mod->rt->allocator, merged_reftypes);
                             WASM__SET_ERR(v.mod->rt, WASM_ERR_OOM, "%s",
                                           "failed to allocate br_table validator state");
                             err = WASM_ERR_OOM;
@@ -412,8 +412,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                             uint32_t candidate_count;
 
                             if (depth >= v.fp) {
-                                WASM_FREE(merged_types);
-                                WASM_FREE(merged_reftypes);
+                                wasm__free(&mod->rt->allocator, merged_types);
+                                wasm__free(&mod->rt->allocator, merged_reftypes);
                                 return wasm__validator_error(&v, at, "br_table depth %u out of range", (unsigned)depth);
                             }
                             wasm__validator_branch_signature(&v.frames[v.fp - 1 - depth],
@@ -430,8 +430,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                             merged_types,
                                                             merged_reftypes)) {
                                 if (!(frame->unreachable && v.sp == frame->height && branch_count == candidate_count)) {
-                                    WASM_FREE(merged_types);
-                                    WASM_FREE(merged_reftypes);
+                                    wasm__free(&mod->rt->allocator, merged_types);
+                                    wasm__free(&mod->rt->allocator, merged_reftypes);
                                     return wasm__validator_error(&v, at,
                                                                  "br_table targets do not share the same signature");
                                 }
@@ -443,8 +443,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                             merged_types,
                                                             merged_reftypes,
                                                             branch_count);
-                    WASM_FREE(merged_types);
-                    WASM_FREE(merged_reftypes);
+                    wasm__free(&mod->rt->allocator, merged_types);
+                    wasm__free(&mod->rt->allocator, merged_reftypes);
                     if (err != WASM_OK) return err;
                 }
                 wasm__validator_mark_unreachable(&v);

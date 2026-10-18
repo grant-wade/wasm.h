@@ -37,7 +37,7 @@ int main(void) {
 	wasm_module_t* mod;
 	int32_t result = 0;
 
-	rt = wasm_runtime_new(NULL);
+	rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
 	if (!rt) return 1;
 
 	mod = wasm_load(rt, wasm_bytes, sizeof(wasm_bytes));
@@ -108,7 +108,7 @@ See the [build guide](docs/BUILDING.md) for options, dependencies, modular linki
 The repository is also a Zig 0.17 package. It builds the runtime with Zig's C compiler and provides a `wasm` module with typed calls and host functions:
 
 ```zig
-const rt = try wasm.Runtime.init(.{});
+const rt = try wasm.Runtime.init(allocator, .{});
 defer rt.deinit();
 const mod = try rt.load(bytes);
 defer mod.deinit();
@@ -178,7 +178,7 @@ Output is `<prefix>.h` and `<prefix>.c`. Wrappers support `i32`, `i64`, `f32`, `
 | `--include-export`, `--include-prefix` | Include matching names; overrides defaults. |
 | `--exclude-export`, `--exclude-prefix` | Exclude matching names. |
 
-Wrappers cache export indices and own a runtime by default. Use `*_init_options_t` to supply a runtime, configuration, or import bindings. An imports struct is emitted for host functions and globals. Memory helpers use the exported memory, preferring an export named `memory`.
+Wrappers cache export indices and own a runtime by default. Use `*_init_options_t` to supply a runtime, configuration, allocator for the owned runtime (`wasm_libc_allocator()` by default), or import bindings. An imports struct is emitted for host functions and globals. Memory helpers use the exported memory, preferring an export named `memory`.
 
 Non-singleton output also provides `*_api_t` with `ctx`, `owns_ctx`, and `vtable`. `*_api_init` and `*_api_init_embedded` create owned contexts; `*_api_from_ctx` borrows one. `*_api_free` frees only owned contexts. Call through `api.vtable->method(&api, ...)` or the flat `*_func(ctx, ...)` API.
 

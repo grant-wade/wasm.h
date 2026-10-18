@@ -11,6 +11,7 @@ typedef struct session_math_api_t session_math_api_t;
 typedef struct session_math_init_options_t {
     wasm_runtime_t* runtime;
     const wasm_config_t* runtime_config;
+    const wasm_allocator_t* allocator;
 } session_math_init_options_t;
 struct session_math_api_t {
 };

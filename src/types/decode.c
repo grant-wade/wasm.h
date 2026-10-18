@@ -1,6 +1,7 @@
 #include "decode.h"
 #include "../module.h"
 #include "../internal/alloc.h"
+#include "../runtime.h"
 #include "../portable.h"
 #include "../reader.h"
 #include "references.h"
@@ -19,7 +20,7 @@ WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count,
 
     base = mod->num_types;
     new_count = (size_t)base + (size_t)count;
-    types = (wasm_comptype_t*)wasm__realloc_array(mod->types, new_count, sizeof(*types));
+    types = (wasm_comptype_t*)wasm__realloc_array(&mod->rt->allocator, mod->types, new_count, sizeof(*types));
     if (!types) return WASM_ERR_OOM;
 
     mod->types = types;
@@ -42,7 +43,7 @@ WASM_PRIVATE wasm_error_t wasm__append_rec_groups(wasm_module_t* mod, uint32_t c
 
     base = mod->num_rec_groups;
     new_count = (size_t)base + (size_t)count;
-    groups = (wasm_recgroup_t*)wasm__realloc_array(mod->rec_groups, new_count, sizeof(*groups));
+    groups = (wasm_recgroup_t*)wasm__realloc_array(&mod->rt->allocator, mod->rec_groups, new_count, sizeof(*groups));
     if (!groups) return WASM_ERR_OOM;
 
     mod->rec_groups = groups;
@@ -57,8 +58,8 @@ static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r,
 
     ft->num_params = wasm__read_count(r);
     if (ft->num_params > 0) {
-        ft->params = (wasm_valtype_t*)wasm__malloc_array(ft->num_params, sizeof(wasm_valtype_t));
-        if (ft->params) ft->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_params, sizeof(wasm_reftype_t));
+        ft->params = (wasm_valtype_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_params, sizeof(wasm_valtype_t));
+        if (ft->params) ft->param_reftypes = (wasm_reftype_t*)wasm__calloc(&mod->rt->allocator, ft->num_params, sizeof(wasm_reftype_t));
         if (!ft->params || !ft->param_reftypes) return WASM_ERR_OOM;
     }
     for (p = 0; p < ft->num_params; p++) {
@@ -72,8 +73,8 @@ static wasm_error_t wasm__decode_functype(wasm_module_t* mod, wasm__reader_t* r,
         if (err != WASM_OK) return err;
     }
     if (ft->num_results > 0) {
-        ft->results = (wasm_valtype_t*)wasm__malloc_array(ft->num_results, sizeof(wasm_valtype_t));
-        if (ft->results) ft->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(ft->num_results, sizeof(wasm_reftype_t));
+        ft->results = (wasm_valtype_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_valtype_t));
+        if (ft->results) ft->result_reftypes = (wasm_reftype_t*)wasm__calloc(&mod->rt->allocator, ft->num_results, sizeof(wasm_reftype_t));
         if (!ft->results || !ft->result_reftypes) return WASM_ERR_OOM;
     }
     for (p = 0; p < ft->num_results; p++) {
@@ -131,7 +132,7 @@ static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
             type->kind = WASM_COMP_STRUCT;
             type->of.struct_.num_fields = wasm__read_count(r);
             if (type->of.struct_.num_fields > 0) {
-                type->of.struct_.fields = (wasm_fieldtype_t*)WASM_CALLOC(
+                type->of.struct_.fields = (wasm_fieldtype_t*)wasm__calloc(&mod->rt->allocator, 
                     type->of.struct_.num_fields, sizeof(wasm_fieldtype_t));
                 if (!type->of.struct_.fields) return WASM_ERR_OOM;
             }
@@ -170,7 +171,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
         type->is_final = (opcode == 0x4F);
         type->num_supertypes = wasm__read_count(r);
         if (type->num_supertypes > 0) {
-            type->supertypes = (uint32_t*)wasm__malloc_array(type->num_supertypes, sizeof(uint32_t));
+            type->supertypes = (uint32_t*)wasm__malloc_array(&mod->rt->allocator, type->num_supertypes, sizeof(uint32_t));
             if (!type->supertypes) return WASM_ERR_OOM;
         }
         for (i = 0; i < type->num_supertypes; i++)

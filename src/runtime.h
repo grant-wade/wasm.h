@@ -62,6 +62,7 @@ struct wasm_func_ref_t {
 };
 
 struct wasm_runtime_t {
+    wasm_allocator_t allocator;
     wasm_import_t* imports;
     uint32_t num_imports;
     uint32_t cap_imports;
@@ -132,7 +133,8 @@ struct wasm_runtime_t {
     wasm__emscripten_state_t* emscripten_state;
 };
 
-WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_config_t* config);
+WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_allocator_t* allocator,
+                                             const wasm_config_t* config);
 
 WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt);
 

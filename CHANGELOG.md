@@ -17,6 +17,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_shared_memory_free` is now `wasm_memory_free`, which also frees memories from the new `wasm_memory_new`.
 - `frame_arena_size` (and `WASM_FRAME_ARENA_SIZE`, now 256 KiB) sets the size of each block of call frame storage. The runtime allocated the largest frame times the call depth limit up front, up to about 750 MB for a module with large frames, and a nested call needing more failed with `WASM_ERR_CALL_STACK_EXHAUSTED`. Blocks are now added as calls nest and released as they return, and running out of memory for a frame fails with `WASM_ERR_OOM`.
 - `wasm_error_t` has a new last member, `WASM_ERR_INTERRUPTED`.
+- `wasm_runtime_new` takes a required `wasm_allocator_t` before the configuration; `wasm_libc_allocator()` returns one over `malloc`.
+- `WASM_MALLOC`, `WASM_REALLOC`, `WASM_FREE`, `WASM_CALLOC`, `WASM_GC_ALLOC`, and `WASM_GC_FREE` are removed.
+- `wasm_memory_new`, `wasm_shared_memory_new`, and `wasm_table_new` take an allocator as their first argument.
+- Generated `wasm2api` options have an `allocator` field, defaulting to `wasm_libc_allocator()`.
+- In Zig, `Runtime.init` and `SharedMemory.init` take a `std.mem.Allocator` first.
 
 ### Security
 
@@ -25,6 +30,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `wasm_runtime_allocator` returns a runtime's copy of its allocator.
 - `wasm_runtime_interrupt` stops a running call from any thread with `WASM_ERR_INTERRUPTED`, at the next loop iteration, function entry, `memory.atomic.wait`, or WASI sleep. In Zig, `Runtime.interrupt` and `error.Interrupted`.
 - `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold` and `release`.
 - `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.

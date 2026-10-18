@@ -8,13 +8,14 @@
 #include "../types/canonical.h"
 #include <string.h>
 
-static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
+static wasm_error_t wasm__copy_exception_to_label(const wasm_allocator_t* a,
+                                                  wasm__label_t* label,
                                                   const wasm__exception_state_t* ex) {
     wasm_value_t* copy = NULL;
 
     wasm__clear_label(label);
     if (ex->num_values > 0) {
-        copy = (wasm_value_t*)wasm__malloc_array(ex->num_values, sizeof(wasm_value_t));
+        copy = (wasm_value_t*)wasm__malloc_array(a, ex->num_values, sizeof(wasm_value_t));
         if (!copy) return WASM_ERR_OOM;
         memcpy(copy, ex->values, ex->num_values * sizeof(wasm_value_t));
     }
@@ -22,6 +23,7 @@ static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
     label->caught_tag = ex->tag_index;
     label->caught_tag_identity = ex->tag_identity;
     label->caught_values = copy;
+    label->caught_allocator = a;
     label->caught_count = ex->num_values;
     label->active_catch = 1;
     return WASM_OK;
@@ -29,7 +31,7 @@ static wasm_error_t wasm__copy_exception_to_label(wasm__label_t* label,
 
 WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     WASM__SET_ERR(rt, WASM_ERR_TRAP, "uncaught exception tag %u", (unsigned)rt->pending_exception.tag_index);
-    wasm__free_exception_state(&rt->pending_exception);
+    wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
     return WASM_ERR_TRAP;
 }
 
@@ -97,7 +99,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
 
         wasm__unwind_labels(cf, idx);
         rt->sp = label->sp_base;
-        *out_err = wasm__copy_exception_to_label(label, &rt->pending_exception);
+        *out_err = wasm__copy_exception_to_label(&rt->allocator, label, &rt->pending_exception);
         if (*out_err != WASM_OK) return 1;
         if (clause[0] == WASM__CLAUSE_CATCH) {
             if (rt->sp + label->caught_count > rt->max_stack) {
@@ -106,7 +108,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
             }
             for (j = 0; j < label->caught_count; j++) rt->stack[rt->sp++] = label->caught_values[j];
         }
-        wasm__free_exception_state(&rt->pending_exception);
+        wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
         cf->pc = cf->func->ops + clause[2];
         *out_err = WASM_OK;
         return 1;
@@ -158,7 +160,7 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
             }
             rt->stack[rt->sp++] = exnref_value;
         }
-        wasm__free_exception_state(&rt->pending_exception);
+        wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
         *out_err = wasm__branch_frame(cf, clause + 2);
         return 1;
     }

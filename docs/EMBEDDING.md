@@ -11,10 +11,10 @@ Elsewhere, include `wasm.h` without `WASM_IMPL`. For modular linking, see the [b
 
 ## Runtime and module lifetime
 
-`wasm_runtime_t` and `wasm_module_t` are opaque. `wasm_runtime_new` returns NULL when allocation fails or the configuration is invalid.
+`wasm_runtime_t` and `wasm_module_t` are opaque. `wasm_runtime_new` takes an allocator (see [Custom allocators](#custom-allocators)) and a configuration, which may be NULL for the defaults, and returns NULL when allocation fails or either is invalid.
 
 ```c
-wasm_runtime_t* rt = wasm_runtime_new(NULL);
+wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
 wasm_module_t* mod;
 
 if (!rt) return 1;
@@ -76,7 +76,7 @@ config.max_memory_bytes = 256u * 1024u * 1024u;
 config.max_total_memory_bytes = 1024u * 1024u * 1024u;
 config.max_table_elements = 1000000;
 
-rt = wasm_runtime_new(&config);
+rt = wasm_runtime_new(wasm_libc_allocator(), &config);
 ```
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return.
@@ -161,7 +161,7 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
 
-Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
+Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, which take an allocator, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
 
 ### Linking modules
 
@@ -237,11 +237,11 @@ wasm_ref_release(rt, held);
 With `WASM_FEATURE_THREADS` enabled, modules can declare shared memories and use the atomic instructions. A runtime and the modules loaded into it belong to one thread at a time; shared memories are what threads have in common. To run Wasm on several threads, give each thread its own runtime, load the module into each, and import the same shared memory everywhere:
 
 ```c
-wasm_memory_t* memory = wasm_shared_memory_new(1, 16, 0); /* pages, max pages, is_64 */
+wasm_memory_t* memory = wasm_shared_memory_new(wasm_libc_allocator(), 1, 16, 0); /* pages, max pages, is_64 */
 wasm_memory_import_t imp = { "env", "memory", memory };
 
 /* On each thread: */
-wasm_runtime_t* rt = wasm_runtime_new(NULL);
+wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
 wasm_runtime_enable_feature(rt, WASM_FEATURE_THREADS);
 wasm_register_memory_import(rt, &imp);
 wasm_module_t* mod = wasm_load(rt, bytes, len);
@@ -297,15 +297,17 @@ fputs(trace, stderr);
 
 ## Custom allocators
 
-Define allocator overrides before the implementation include:
+A runtime allocates all of its memory through the `wasm_allocator_t` passed to `wasm_runtime_new`. `wasm_libc_allocator()` returns one over `malloc`, `realloc`, and `free` that honors any alignment. The runtime copies the struct; `ctx` must outlive the runtime.
 
 ```c
-#define WASM_MALLOC(sz)      app_malloc(sz)
-#define WASM_REALLOC(p, sz)  app_realloc((p), (sz))
-#define WASM_FREE(p)         app_free(p)
-#define WASM_CALLOC(n, sz)   app_calloc((n), (sz))
-#define WASM_GC_ALLOC(sz)    app_gc_alloc(sz)
-#define WASM_GC_FREE(p)      app_gc_free(p)
-#define WASM_IMPL
-#include "wasm.h"
+static void* app_alloc(void* ctx, size_t size, size_t align);
+static void* app_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align);
+static void app_free(void* ctx, void* p, size_t size, size_t align);
+
+static const wasm_allocator_t app_allocator = { &app_heap, app_alloc, app_resize, app_free };
+wasm_runtime_t* rt = wasm_runtime_new(&app_allocator, NULL);
 ```
+
+`size` and `new_size` are never 0, `p` is never NULL, and `align` is a power of two. `free` and `resize` receive the size and alignment the block was allocated with. `resize` returns the block, possibly moved, or NULL and leaves the old block intact. `wasm_runtime_allocator` returns the runtime's copy.
+
+`wasm_memory_new` and `wasm_table_new` take an allocator the same way, which also grows and frees the object. `wasm_shared_memory_new` reserves the memory's data from the operating system and uses its allocator for bookkeeping. An allocator used by runtimes on several threads must be thread-safe.

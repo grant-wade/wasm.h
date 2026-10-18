@@ -14,6 +14,7 @@
 #include <stdio.h>
 
 typedef struct wasm__init_expr_stack_t {
+    const wasm_allocator_t* allocator;
     wasm_value_t* values;
     uint32_t size;
     uint32_t cap;
@@ -22,7 +23,7 @@ typedef struct wasm__init_expr_stack_t {
 static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
     if (stack->size >= stack->cap) {
         uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->values, new_cap, sizeof(wasm_value_t));
+        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->allocator, stack->values, new_cap, sizeof(wasm_value_t));
         if (!values) return WASM_ERR_OOM;
         stack->values = values;
         stack->cap = new_cap;
@@ -121,6 +122,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
     wasm_error_t err = WASM_OK;
 
     memset(&stack, 0, sizeof(stack));
+    stack.allocator = &mod->rt->allocator;
 
     for (;;) {
         uint8_t op;
@@ -522,6 +524,6 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
             *out_value = stack.values[0];
     }
 
-    WASM_FREE(stack.values);
+    wasm__free(&mod->rt->allocator, stack.values);
     return err;
 }

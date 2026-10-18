@@ -12,7 +12,7 @@ static const uint8_t wasm_core_test_bytes[] = {
 };
 
 int main(void) {
-    wasm_runtime_t* rt = wasm_runtime_new(NULL);
+    wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
     wasm_module_t* mod;
     int32_t result = 0;
     int failed = 0;

@@ -200,8 +200,8 @@ static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
     wasm_value_t* call_results = results_buf;
     wasm_error_t err = WASM_ERR_OOM;
 
-    if (ft->num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(ft->num_params, sizeof(wasm_value_t));
-    if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(ft->num_results, sizeof(wasm_value_t));
+    if (ft->num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_params, sizeof(wasm_value_t));
+    if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_value_t));
     if (call_args && call_results) {
         if (ft->num_params > 0) memcpy(call_args, args, ft->num_params * sizeof(wasm_value_t));
         err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
@@ -211,8 +211,8 @@ static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
             rt->sp += ft->num_results;
         }
     }
-    if (call_args != args_buf) WASM_FREE(call_args);
-    if (call_results != results_buf) WASM_FREE(call_results);
+    if (call_args != args_buf) wasm__free(&mod->rt->allocator, call_args);
+    if (call_results != results_buf) wasm__free(&mod->rt->allocator, call_results);
     return err;
 }
 
@@ -489,23 +489,23 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
                 if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (tag_type->num_params > 8) {
-                    payload = (wasm_value_t*)wasm__malloc_array(tag_type->num_params, sizeof(wasm_value_t));
+                    payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
                 }
                 for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = WASM__SP_POP();
-                err = wasm__set_exception_state(&rt->pending_exception,
+                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
                                                 tag_index,
                                                 mod->tags[tag_index].identity,
                                                 payload,
                                                 tag_type->num_params);
-                if (payload != payload_buf) WASM_FREE(payload);
+                if (payload != payload_buf) wasm__free(&rt->allocator, payload);
                 if (err != WASM_OK) goto cleanup;
                 goto throw_pending;
             }
             WASM__CASE(0x09): { /* rethrow */
                 uint32_t target_index = lsp - 1u - *pc++;
 
-                err = wasm__set_exception_state(&rt->pending_exception,
+                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
                                                 labels[target_index].caught_tag,
                                                 labels[target_index].caught_tag_identity,
                                                 labels[target_index].caught_values,
@@ -523,7 +523,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
 
                 if (!exn) WASM__TRAP(WASM_ERR_TRAP);
-                err = wasm__set_exception_state(&rt->pending_exception,
+                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
                                                 exn->tag_index,
                                                 exn->tag_identity,
                                                 exn->values,
