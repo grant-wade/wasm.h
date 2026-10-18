@@ -10,11 +10,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `wasm_config_t.max_function_locals` (default 50,000, `WASM_MAX_FUNCTION_LOCALS`) limits the locals a function may declare; 0 removes the limit. A 30-byte module could declare hundreds of millions of locals and make loading allocate gigabytes.
 - `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. Zig maps it to `error.Exit` with `Runtime.exitCode`.
 
 ### Fixed
 
 - WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.
+- Validating functions with non-defaultable locals no longer clears local-initialization state for every possible block depth.
 - GC marking uses an explicit worklist instead of recursion, so collecting long object chains no longer overflows the native stack.
 - WASI `path_open` derives the host access mode from the requested rights, so directories and read-only files can be opened on POSIX hosts.
 

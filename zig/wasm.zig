@@ -347,6 +347,8 @@ pub const Config = struct {
     frame_arena_size: ?usize = null,
     /// Defer validating each function body until its first call.
     lazy_validation: ?bool = null,
+    /// Locals per function, parameters included; 0 is unlimited.
+    max_function_locals: ?u32 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
@@ -460,6 +462,7 @@ pub const Runtime = opaque {
         if (config.initial_gc_heap_size) |v| cfg.initial_gc_heap_size = v;
         if (config.frame_arena_size) |v| cfg.frame_arena_size = v;
         if (config.lazy_validation) |v| cfg.lazy_validation = @intFromBool(v);
+        if (config.max_function_locals) |v| cfg.max_function_locals = v;
         const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
         check(c.wasm_runtime_last_error(rt.raw())) catch |err| {
             rt.deinit();

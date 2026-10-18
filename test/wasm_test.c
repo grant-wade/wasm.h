@@ -8246,6 +8246,66 @@ WL_TEST(test_validation_rejects_invalid_load_alignment) {
 
 /* ── Test 6: error handling ─────────────────────────────────────── */
 
+static void wasm_test_build_locals_module(wasm_builder_t* mod, uint32_t local_count) {
+    wasm_builder_t sec = { 0 };
+    wasm_builder_t body = { 0 };
+
+    emit_header(mod);
+    emit_leb128_u32(&sec, 1);
+    emit(&sec, 0x60);
+    emit_leb128_u32(&sec, 0);
+    emit_leb128_u32(&sec, 0);
+    emit_section(mod, 1, sec.buf, sec.len);
+
+    sec.len = 0;
+    emit_leb128_u32(&sec, 1);
+    emit_leb128_u32(&sec, 0);
+    emit_section(mod, 3, sec.buf, sec.len);
+
+    sec.len = 0;
+    emit_leb128_u32(&body, 1);
+    emit_leb128_u32(&body, local_count);
+    emit(&body, 0x7F);
+    emit(&body, 0x0B);
+    emit_leb128_u32(&sec, 1);
+    emit_leb128_u32(&sec, body.len);
+    emit_bytes(&sec, body.buf, body.len);
+    emit_section(mod, 10, sec.buf, sec.len);
+}
+
+WL_TEST(test_load_limits_function_locals) {
+    wasm_builder_t at_limit = { 0 };
+    wasm_builder_t over_limit = { 0 };
+    wasm_builder_t huge = { 0 };
+    wasm_runtime_t rt;
+    wasm_config_t config;
+    wasm_module_t* m;
+
+    wasm_test_build_locals_module(&at_limit, WASM_MAX_FUNCTION_LOCALS);
+    wasm_test_build_locals_module(&over_limit, WASM_MAX_FUNCTION_LOCALS + 1u);
+    wasm_test_build_locals_module(&huge, 400000000u);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, at_limit.buf, at_limit.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    wasm_free_module(m);
+    m = wasm_load(&rt, over_limit.buf, over_limit.len);
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "too many locals"),
+                 "expected the locals limit to reject the module, got: %s", rt.error_msg);
+    m = wasm_load(&rt, huge.buf, huge.len);
+    WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "too many locals"),
+                 "expected a 400M-local function to be rejected, got: %s", rt.error_msg);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.max_function_locals = 0;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, over_limit.buf, over_limit.len);
+    WL_CHECK_MSG(t, m != NULL, "expected max_function_locals = 0 to lift the limit: %s", rt.error_msg);
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15182,6 +15242,7 @@ int main(void) {
         { "validation: long i32 LEBs are rejected during load", test_validation_rejects_long_i32_leb128 },
         { "validation: long i64 LEBs are rejected during load", test_validation_rejects_long_i64_leb128 },
         { "memory: zero max blocks later growth", test_memory_grow_respects_zero_max },
+        { "load: function locals are limited by config", test_load_limits_function_locals },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

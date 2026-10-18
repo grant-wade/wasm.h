@@ -154,8 +154,6 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
             rt->validator_local_init_entry_bits = entry_bits;
             rt->validator_local_init_capacity = bytes;
         }
-        memset(rt->validator_local_init_bits, 0, bytes);
-        memset(rt->validator_local_init_entry_bits, 0, bytes);
         v->local_init_bits = rt->validator_local_init_bits;
         v->local_init_entry_bits = rt->validator_local_init_entry_bits;
         for (i = 0; i < frame_capacity; i++) {

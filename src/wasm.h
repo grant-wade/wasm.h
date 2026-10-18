@@ -602,6 +602,9 @@ typedef struct wasm__exception_state_t {
 #ifndef WASM_GC_HEAP_SIZE
 #define WASM_GC_HEAP_SIZE (4u * 1024u * 1024u)
 #endif
+#ifndef WASM_MAX_FUNCTION_LOCALS
+#define WASM_MAX_FUNCTION_LOCALS 50000u
+#endif
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE                                           \
         ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u) >                   \
@@ -617,6 +620,8 @@ typedef struct wasm_config_t {
     size_t initial_gc_heap_size;
     size_t frame_arena_size;
     int lazy_validation;
+    /* Limits for untrusted modules; 0 means unlimited. */
+    uint32_t max_function_locals; /* locals per function, parameters included */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */

@@ -870,6 +870,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
             return WASM_ERR_MALFORMED;
         }
         all_locals = ft->num_params + total_locals;
+        if (mod->rt->max_function_locals != 0 && all_locals > mod->rt->max_function_locals) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "too many locals: %u exceeds the limit of %u",
+                          (unsigned)all_locals, (unsigned)mod->rt->max_function_locals);
+            return WASM_ERR_MALFORMED;
+        }
         mod->funcs[fidx].num_locals = all_locals;
         mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
         if (mod->funcs[fidx].locals)

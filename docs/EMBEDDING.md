@@ -57,11 +57,14 @@ config.max_labels = 4096;
 config.initial_gc_heap_size = 2u * 1024u * 1024u;
 config.frame_arena_size = 4u * 1024u * 1024u;
 config.lazy_validation = 0;
+config.max_function_locals = 50000;
 
 rt = wasm_runtime_new(&config);
 ```
 
 With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
+
+`max_function_locals` rejects functions that declare more locals, parameters included, so a small module cannot make `wasm_load` allocate gigabytes. Set it to 0 to remove the limit.
 
 All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_enable_feature` or `wasm_enable_all_features`. Set feature flags before loading with `wasm_disable_feature`, `wasm_enable_feature`, or `wasm_runtime_set_enabled_features`.
 

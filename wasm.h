@@ -611,6 +611,9 @@ typedef struct wasm__exception_state_t {
 #ifndef WASM_GC_HEAP_SIZE
 #define WASM_GC_HEAP_SIZE (4u * 1024u * 1024u)
 #endif
+#ifndef WASM_MAX_FUNCTION_LOCALS
+#define WASM_MAX_FUNCTION_LOCALS 50000u
+#endif
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE                                           \
         ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u) >                   \
@@ -626,6 +629,8 @@ typedef struct wasm_config_t {
     size_t initial_gc_heap_size;
     size_t frame_arena_size;
     int lazy_validation;
+    /* Limits for untrusted modules; 0 means unlimited. */
+    uint32_t max_function_locals; /* locals per function, parameters included */
 } wasm_config_t;
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -1861,6 +1866,7 @@ struct wasm_runtime_t {
     int fuel_enabled;
     uint32_t enabled_features;
     int lazy_validation;
+    uint32_t max_function_locals;
     wasm_error_t last_error;
     char error_msg[256];
     int32_t exit_code;
@@ -10988,6 +10994,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->initial_gc_heap_size = (size_t)WASM_GC_HEAP_SIZE;
     config->frame_arena_size = (size_t)WASM_FRAME_ARENA_SIZE;
     config->lazy_validation = 0;
+    config->max_function_locals = WASM_MAX_FUNCTION_LOCALS;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
@@ -11070,6 +11077,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     rt->max_call_frames = cfg.max_call_depth;
     rt->max_labels = cfg.max_labels;
     rt->lazy_validation = cfg.lazy_validation != 0;
+    rt->max_function_locals = cfg.max_function_locals;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
@@ -12348,6 +12356,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_code_section(wasm_module_t* mod, wasm__re
             return WASM_ERR_MALFORMED;
         }
         all_locals = ft->num_params + total_locals;
+        if (mod->rt->max_function_locals != 0 && all_locals > mod->rt->max_function_locals) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "too many locals: %u exceeds the limit of %u",
+                          (unsigned)all_locals, (unsigned)mod->rt->max_function_locals);
+            return WASM_ERR_MALFORMED;
+        }
         mod->funcs[fidx].num_locals = all_locals;
         mod->funcs[fidx].locals = (wasm_valtype_t*)wasm__malloc_array(all_locals, sizeof(wasm_valtype_t));
         if (mod->funcs[fidx].locals)
@@ -13394,8 +13407,6 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
             rt->validator_local_init_entry_bits = entry_bits;
             rt->validator_local_init_capacity = bytes;
         }
-        memset(rt->validator_local_init_bits, 0, bytes);
-        memset(rt->validator_local_init_entry_bits, 0, bytes);
         v->local_init_bits = rt->validator_local_init_bits;
         v->local_init_entry_bits = rt->validator_local_init_entry_bits;
         for (i = 0; i < frame_capacity; i++) {
