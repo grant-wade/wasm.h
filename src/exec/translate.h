@@ -9,13 +9,24 @@
  * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
  * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
  * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
- * load. */
+ * load. ADD, AND, XOR, SHL, SHR_U, ROTL, and MUL are those instructions on i64 after J and on i32
+ * otherwise. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
+    X(LC_AND, 0x20, 3, 4)           \
+    X(LC_XOR, 0x20, 3, 4)           \
+    X(LC_SHL, 0x20, 3, 4)           \
+    X(LC_SHR_U, 0x20, 3, 4)         \
+    X(LC_ROTL, 0x20, 3, 4)          \
     X(LC_BIN, 0x20, 3, 4)           \
     X(LL_ADD, 0x20, 3, 4)           \
     X(LL_BIN, 0x20, 3, 4)           \
     X(C_ADD, 0x41, 2, 2)            \
+    X(C_AND, 0x41, 2, 2)            \
+    X(C_XOR, 0x41, 2, 2)            \
+    X(C_SHL, 0x41, 2, 2)            \
+    X(C_SHR_U, 0x41, 2, 2)          \
+    X(C_ROTL, 0x41, 2, 2)           \
     X(C_BIN, 0x41, 2, 2)            \
     X(L_ADD, 0x20, 2, 2)            \
     X(L_BIN, 0x20, 2, 2)            \
@@ -43,7 +54,11 @@
     X(L_F64BIN, 0x20, 2, 2)         \
     X(LL_F64BIN, 0x20, 3, 4)        \
     X(D_F64BIN, 0x44, 2, 3)         \
+    X(J_ADD, 0x42, 2, 3)            \
     X(J_I64BIN, 0x42, 2, 3)         \
+    X(LJ_AND, 0x20, 3, 5)           \
+    X(LJ_MUL, 0x20, 3, 5)           \
+    X(LJ_SHR_U, 0x20, 3, 5)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
     X(L_T, 0x20, 2, 2)

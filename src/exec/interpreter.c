@@ -1710,6 +1710,29 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) + pc[2]);
                 pc += 4;
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_AND):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) & pc[2]);
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_XOR):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) ^ pc[2]);
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_SHL):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) << (pc[2] & 31u));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_SHR_U):
+                wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) >> (pc[2] & 31u));
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LC_ROTL): {
+                uint32_t a = wasm__slot_u32(locals + pc[0]);
+
+                wasm__slot_set_u32(sp++, (a << (pc[2] & 31u)) | (a >> ((32u - (pc[2] & 31u)) & 31u)));
+                pc += 4;
+                WASM__NEXT();
+            }
             WASM__CASE(WASM__OP_LC_BIN):
                 wasm__slot_set_u32(sp++, wasm__i32_binop(pc[3], wasm__slot_u32(locals + pc[0]), pc[2]));
                 pc += 4;
@@ -1727,6 +1750,29 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) + pc[0]);
                 pc += 2;
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_C_AND):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) & pc[0]);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_XOR):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) ^ pc[0]);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_SHL):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) << (pc[0] & 31u));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_SHR_U):
+                wasm__slot_set_u32(sp - 1, wasm__slot_u32(sp - 1) >> (pc[0] & 31u));
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_C_ROTL): {
+                uint32_t a = wasm__slot_u32(sp - 1);
+
+                wasm__slot_set_u32(sp - 1, (a << (pc[0] & 31u)) | (a >> ((32u - (pc[0] & 31u)) & 31u)));
+                pc += 2;
+                WASM__NEXT();
+            }
             WASM__CASE(WASM__OP_C_BIN):
                 wasm__slot_set_u32(sp - 1, wasm__i32_binop(pc[1], wasm__slot_u32(sp - 1), pc[0]));
                 pc += 2;
@@ -1896,10 +1942,26 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 pc += 3;
                 WASM__NEXT();
             }
+            WASM__CASE(WASM__OP_J_ADD):
+                wasm__slot_set_u64(sp - 1, wasm__slot_u64(sp - 1) + ((uint64_t)pc[0] | ((uint64_t)pc[1] << 32)));
+                pc += 3;
+                WASM__NEXT();
             WASM__CASE(WASM__OP_J_I64BIN):
                 wasm__slot_set_u64(sp - 1, wasm__i64_binop(pc[2], wasm__slot_u64(sp - 1),
                                                            (uint64_t)pc[0] | ((uint64_t)pc[1] << 32)));
                 pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LJ_AND):
+                wasm__slot_set_u64(sp++, wasm__slot_u64(locals + pc[0]) & ((uint64_t)pc[2] | ((uint64_t)pc[3] << 32)));
+                pc += 5;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LJ_MUL):
+                wasm__slot_set_u64(sp++, wasm__slot_u64(locals + pc[0]) * ((uint64_t)pc[2] | ((uint64_t)pc[3] << 32)));
+                pc += 5;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LJ_SHR_U):
+                wasm__slot_set_u64(sp++, wasm__slot_u64(locals + pc[0]) >> (pc[2] & 63u));
+                pc += 5;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_LJ_I64BIN):
                 wasm__slot_set_u64(sp++, wasm__i64_binop(pc[4], wasm__slot_u64(locals + pc[0]),

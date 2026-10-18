@@ -244,18 +244,40 @@ static int wasm__x_is_f64_bin(uint32_t op) {
     return op >= 0xA0 && op <= 0xA3;
 }
 
+/* Returns the fused op that runs i32.const and then op, or local.get, i32.const, and op if lc;
+ * 0 if none does. */
+static uint32_t wasm__x_const_bin(uint32_t op, int lc) {
+    switch (op) {
+        case 0x6A:
+            return lc ? WASM__OP_LC_ADD : WASM__OP_C_ADD;
+        case 0x71:
+            return lc ? WASM__OP_LC_AND : WASM__OP_C_AND;
+        case 0x73:
+            return lc ? WASM__OP_LC_XOR : WASM__OP_C_XOR;
+        case 0x74:
+            return lc ? WASM__OP_LC_SHL : WASM__OP_C_SHL;
+        case 0x76:
+            return lc ? WASM__OP_LC_SHR_U : WASM__OP_C_SHR_U;
+        case 0x77:
+            return lc ? WASM__OP_LC_ROTL : WASM__OP_C_ROTL;
+        default:
+            if (!wasm__x_is_i32_bin(op)) return 0;
+            return lc ? WASM__OP_LC_BIN : WASM__OP_C_BIN;
+    }
+}
+
 /* Returns the fused op that runs the len instructions with translated opcodes o, or 0. */
 static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
     int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
     int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
 
     if (len == 2) {
-        if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
-        if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
+        if (o[0] == 0x41 && wasm__x_const_bin(o[1], 0)) return wasm__x_const_bin(o[1], 0);
         if (o[0] == 0x20 && o[1] == 0x6A) return WASM__OP_L_ADD;
         if (o[0] == 0x20 && wasm__x_is_i32_bin(o[1])) return WASM__OP_L_BIN;
         if (o[0] == 0x20 && wasm__x_is_f64_bin(o[1])) return WASM__OP_L_F64BIN;
         if (o[0] == 0x44 && wasm__x_is_f64_bin(o[1])) return WASM__OP_D_F64BIN;
+        if (o[0] == 0x42 && o[1] == 0x7C) return WASM__OP_J_ADD;
         if (o[0] == 0x42 && wasm__x_is_i64_bin(o[1])) return WASM__OP_J_I64BIN;
         if (o[0] == 0x20 && o[1] == 0x21) return WASM__OP_L_S;
         if (o[0] == 0x20 && o[1] == 0x22) return WASM__OP_L_T;
@@ -270,11 +292,13 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         return 0;
     }
     if (len == 3) {
-        if (o[0] == 0x20 && o[1] == 0x41 && o[2] == 0x6A) return WASM__OP_LC_ADD;
-        if (o[0] == 0x20 && o[1] == 0x41 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LC_BIN;
+        if (o[0] == 0x20 && o[1] == 0x41 && wasm__x_const_bin(o[2], 1)) return wasm__x_const_bin(o[2], 1);
         if (o[0] == 0x20 && o[1] == 0x20 && o[2] == 0x6A) return WASM__OP_LL_ADD;
         if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_i32_bin(o[2])) return WASM__OP_LL_BIN;
         if (o[0] == 0x20 && o[1] == 0x20 && wasm__x_is_f64_bin(o[2])) return WASM__OP_LL_F64BIN;
+        if (o[0] == 0x20 && o[1] == 0x42 && o[2] == 0x83) return WASM__OP_LJ_AND;
+        if (o[0] == 0x20 && o[1] == 0x42 && o[2] == 0x7E) return WASM__OP_LJ_MUL;
+        if (o[0] == 0x20 && o[1] == 0x42 && o[2] == 0x88) return WASM__OP_LJ_SHR_U;
         if (o[0] == 0x20 && o[1] == 0x42 && wasm__x_is_i64_bin(o[2])) return WASM__OP_LJ_I64BIN;
         if (o[0] == 0x41 && wasm__x_is_i32_cmp(o[1]) && brif)
             return loop ? WASM__OP_C_CMP_BRIF_LOOP : WASM__OP_C_CMP_BRIF;
