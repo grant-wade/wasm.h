@@ -14603,6 +14603,169 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     wasm_destroy(&rt);
 }
 
+static const uint8_t wasm_test_gc_growth_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1d, 0x06, 0x5f, 0x02, 0x7e, 0x00, 0x7e, 0x00, 0x5e,
+        0x63, 0x00, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x63, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x00, 0x00, 0x03, 0x05, 0x04, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x01, 0x63, 0x01, 0x01, 0xd0, 0x01,
+        0x0b, 0x07, 0x1e, 0x04, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x01, 0x05,
+        0x63, 0x68, 0x65, 0x63, 0x6b, 0x00, 0x02, 0x05, 0x63, 0x6c, 0x65, 0x61, 0x72, 0x00, 0x03, 0x0a, 0xb9, 0x01,
+        0x04, 0x31, 0x02, 0x01, 0x63, 0x01, 0x01, 0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x21, 0x01, 0x03, 0x40, 0x20,
+        0x01, 0x20, 0x02, 0x42, 0x01, 0x42, 0x02, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x02, 0x41, 0x01, 0x6a,
+        0x21, 0x02, 0x20, 0x02, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0xfb, 0x0f, 0x0b, 0x31, 0x01, 0x01,
+        0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x24, 0x00, 0x03, 0x40, 0x23, 0x00, 0x20, 0x01, 0x20, 0x01, 0xad, 0x20,
+        0x01, 0xad, 0x42, 0x03, 0x7e, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01,
+        0x20, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x23, 0x00, 0x0b, 0x4c, 0x02, 0x02, 0x7f, 0x01, 0x63, 0x00,
+        0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x23, 0x00, 0xfb, 0x0f, 0x4f, 0x0d, 0x01, 0x23, 0x00, 0x20, 0x00, 0xfb,
+        0x0b, 0x01, 0x21, 0x02, 0x20, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x00, 0xad, 0x51, 0x20, 0x02, 0xfb, 0x02,
+        0x00, 0x01, 0x20, 0x00, 0xad, 0x42, 0x03, 0x7e, 0x51, 0x71, 0x04, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21,
+        0x01, 0x0b, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x01, 0x0b, 0x06, 0x00,
+        0xd0, 0x01, 0x24, 0x00, 0x0b,
+};
+
+static wasm_module_t* wasm_test_gc_growth_load(wl_test_ctx* t, wasm_runtime_t* rt, const wasm_config_t* config) {
+    wasm_module_t* m;
+
+    wasm_init_config(rt, config);
+    m = wasm_load(rt, wasm_test_gc_growth_bytes, sizeof(wasm_test_gc_growth_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt->error_msg);
+    return m;
+}
+
+static int wasm_test_gc_held_array_intact(wasm_module_t* m, wasm_value_t array, uint32_t expected_len) {
+    uint32_t len = 0;
+    uint32_t i;
+
+    if (wasm_array_length(m, array, &len) != WASM_OK || len != expected_len) return 0;
+    for (i = 0; i < len; i++) {
+        wasm_value_t elem;
+        wasm_value_t first;
+        wasm_value_t second;
+
+        if (wasm_array_get_elem(m, array, i, &elem) != WASM_OK) return 0;
+        if (wasm_struct_get_field(m, elem, 0, &first) != WASM_OK ||
+            wasm_struct_get_field(m, elem, 1, &second) != WASM_OK)
+            return 0;
+        if (first.of.i64 != (int64_t)i || second.of.i64 != (int64_t)i * 3) return 0;
+    }
+    return 1;
+}
+
+WL_TEST(test_gc_heap_grows_with_live_data) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held;
+
+    wasm_config_default(&config);
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000000);
+        WL_CHECK_MSG(t, rt.gc_heap_size > (size_t)WASM_GC_HEAP_SIZE, "expected the heap to grow, size %zu",
+                     rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 64u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        size_t heap_size;
+
+        arg = wasm_i32(20000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 20000);
+        heap_size = rt.gc_heap_size;
+        WL_CHECK_MSG(t, heap_size > config.initial_gc_heap_size, "expected the heap to grow, size %zu", heap_size);
+
+        arg = wasm_i32(200000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        arg = wasm_i32(500000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WL_CHECK_MSG(t, rt.gc_heap_size > heap_size, "expected the heap to grow again, size %zu", rt.gc_heap_size);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 200000);
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 20000));
+            wasm_ref_release(&rt, held);
+        }
+
+        WASM_CHECK_OK(t, wasm_call(m, "clear", NULL, 0, NULL, 0));
+        wasm_gc_collect(&rt);
+        WL_CHECK_MSG(t, rt.gc_heap_size == config.initial_gc_heap_size,
+                     "expected an empty heap to shrink to its initial size, size %zu", rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 0;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_heap_growth_respects_max_gc_heap_bytes) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held = NULL;
+    wasm_error_t err;
+
+    wasm_config_default(&config);
+    WL_CHECK(t, config.max_gc_heap_bytes == 0u);
+    config.max_gc_heap_bytes = 1024u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        WL_CHECK_MSG(t, rt.gc_heap_size == 1024u * 1024u, "expected the initial heap to be capped, size %zu",
+                     rt.gc_heap_size);
+        arg = wasm_i32(2000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+
+        arg = wasm_i32(100000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected WASM_ERR_OOM, got %s", wasm_error_string(err));
+        WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_OOM);
+        WL_CHECK_MSG(t, strstr(wasm_runtime_error_message(&rt), "limit") != NULL, "unexpected message '%s'",
+                     wasm_runtime_error_message(&rt));
+        WL_CHECK(t, rt.gc_heap_size <= 1024u * 1024u);
+
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 2000);
+        if (held) WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+
+        arg = wasm_i32(1000000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected an array larger than the limit to fail, got %s",
+                     wasm_error_string(err));
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+            wasm_ref_release(&rt, held);
+        }
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_runtime_executes_struct_array_i31_and_conversion_ops) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -16492,6 +16655,8 @@ int main(void) {
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
         { "GC: collection marks deep object chains without recursion", test_gc_collect_marks_deep_object_chains_iteratively },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
+        { "gc: the heap grows to fit live data and keeps objects intact", test_gc_heap_grows_with_live_data },
+        { "gc: heap growth stops at max_gc_heap_bytes with WASM_ERR_OOM", test_gc_heap_growth_respects_max_gc_heap_bytes },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
         { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },
         { "wasmgc: runtime executes segment-backed array ops", test_gc_runtime_executes_segment_backed_array_ops },

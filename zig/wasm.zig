@@ -358,6 +358,8 @@ pub const Config = struct {
     max_total_memory_bytes: ?u64 = null,
     /// Elements per table, at instantiation and on growth; 0 is unlimited.
     max_table_elements: ?u64 = null,
+    /// Bytes the GC heap may grow to, capping `initial_gc_heap_size`; 0 is unlimited.
+    max_gc_heap_bytes: ?u64 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
@@ -483,6 +485,7 @@ pub const Runtime = opaque {
         if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
         if (config.max_total_memory_bytes) |v| cfg.max_total_memory_bytes = v;
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
+        if (config.max_gc_heap_bytes) |v| cfg.max_gc_heap_bytes = v;
         if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
         return @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
     }

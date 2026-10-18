@@ -1,3 +1,4 @@
+#include "gc.h"
 #include "wasm.h"
 #include "handles.h"
 #include "exec/state.h"
@@ -360,16 +361,32 @@ static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
     }
 }
 
-void wasm_gc_collect(wasm_runtime_t* rt) {
+static int wasm__gc_live_bytes(const wasm_runtime_t* rt, size_t* out_live) {
+    const wasm_gc_header_t* object;
+    size_t live = 0;
+
+    for (object = rt->gc_allocations; object; object = object->next_alloc) {
+        if (!object->marked) continue;
+        live = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
+        if (live == (size_t)-1 || object->object_size > SIZE_MAX - live) return 0;
+        live += object->object_size;
+    }
+    *out_live = live;
+    return 1;
+}
+
+WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     wasm_gc_header_t* object;
     wasm_gc_header_t* new_allocations = NULL;
     wasm_gc_header_t* new_tail = NULL;
-    uint8_t* new_heap = NULL;
+    uint8_t* new_heap;
     size_t new_offset = 0;
-    int has_live = 0;
+    size_t live;
+    size_t needed;
+    size_t new_size;
     wasm__gc_mark_stack_t stack;
 
-    if (!rt) return;
+    if (!rt) return WASM_ERR_MALFORMED;
 
     for (object = rt->gc_allocations; object; object = object->next_alloc) object->marked = 0;
     wasm__gc_clear_handle_marks(rt);
@@ -380,41 +397,55 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
     wasm__gc_drain_mark_stack(&stack);
     WASM_FREE(stack.items);
     WASM_FREE(stack.exceptions);
-    if (stack.failed) return;
+    if (stack.failed) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory marking live GC objects");
+        return WASM_ERR_OOM;
+    }
 
     wasm__handle_set_filter(&rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
     wasm__handle_set_filter(&rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
-    if (!rt->gc_heap) return;
-    for (object = rt->gc_allocations; object; object = object->next_alloc) {
-        if (object->marked) {
-            has_live = 1;
-            break;
-        }
+
+    if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
+    needed = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
+    needed = needed == (size_t)-1 || request > SIZE_MAX - needed ? SIZE_MAX : needed + request;
+    if (needed == SIZE_MAX) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "GC heap cannot fit %zu more bytes", request);
+        return WASM_ERR_OOM;
+    }
+    new_size = live > SIZE_MAX - needed ? needed : needed + live;
+    if (new_size < rt->gc_heap_min_size) new_size = rt->gc_heap_min_size;
+    if (rt->max_gc_heap_bytes != 0 && new_size > rt->max_gc_heap_bytes) new_size = (size_t)rt->max_gc_heap_bytes;
+    if (needed > new_size) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "GC heap would exceed its limit of %llu bytes",
+                      (unsigned long long)rt->max_gc_heap_bytes);
+        return WASM_ERR_OOM;
     }
 
-    if (!has_live) {
+    if (live == 0 && new_size <= rt->gc_heap_size) {
+        new_heap = new_size > 0 && new_size < rt->gc_heap_size ? (uint8_t*)WASM_GC_ALLOC(new_size) : NULL;
+        if (new_heap || new_size == 0) {
+            WASM_GC_FREE(rt->gc_heap);
+            rt->gc_heap = new_heap;
+            rt->gc_heap_size = new_size;
+        }
         rt->gc_allocations = NULL;
         rt->gc_heap_offset = 0;
-        return;
+        return WASM_OK;
     }
 
-    new_heap = (uint8_t*)WASM_GC_ALLOC(rt->gc_heap_size);
-    if (!new_heap) return;
+    new_heap = (uint8_t*)WASM_GC_ALLOC(new_size);
+    if (!new_heap) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "failed to allocate a %zu-byte GC heap", new_size);
+        return WASM_ERR_OOM;
+    }
 
     for (object = rt->gc_allocations; object;) {
         wasm_gc_header_t* next = object->next_alloc;
 
         if (object->marked) {
             size_t aligned_offset = wasm__align_up_size(new_offset, (size_t)WASM__ALIGNOF(wasm_value_t));
-            wasm_gc_header_t* moved;
+            wasm_gc_header_t* moved = (wasm_gc_header_t*)(new_heap + aligned_offset);
 
-            if (aligned_offset == (size_t)-1 || aligned_offset > rt->gc_heap_size ||
-                object->object_size > rt->gc_heap_size - aligned_offset) {
-                WASM_GC_FREE(new_heap);
-                return;
-            }
-
-            moved = (wasm_gc_header_t*)(new_heap + aligned_offset);
             memcpy(moved, object, object->object_size);
             moved->marked = 0;
             moved->next_alloc = NULL;
@@ -439,8 +470,14 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
 
     WASM_GC_FREE(rt->gc_heap);
     rt->gc_heap = new_heap;
+    rt->gc_heap_size = new_size;
     rt->gc_heap_offset = new_offset;
     rt->gc_allocations = new_allocations;
+    return WASM_OK;
+}
+
+void wasm_gc_collect(wasm_runtime_t* rt) {
+    (void)wasm__gc_collect(rt, 0);
 }
 
 wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value) {

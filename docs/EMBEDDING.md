@@ -75,6 +75,7 @@ config.max_function_locals = 50000;
 config.max_memory_bytes = 256u * 1024u * 1024u;
 config.max_total_memory_bytes = 1024u * 1024u * 1024u;
 config.max_table_elements = 1000000;
+config.max_gc_heap_bytes = 512u * 1024u * 1024u;
 
 rt = wasm_runtime_new(&config);
 ```
@@ -87,6 +88,7 @@ The remaining fields bound what a module can make the host allocate; 0 removes a
 - `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow` past the cap return -1. A shared memory reserves address space only up to this cap.
 - `max_total_memory_bytes` (default 0, unlimited) caps the linear memories that all of the runtime's instances define, together, in the same way. Memories the host creates and registers do not count.
 - `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
+- `max_gc_heap_bytes` (default 0, unlimited) caps the GC heap, including `initial_gc_heap_size`. The heap grows when a collection leaves too little room, and an allocation that needs more than the cap fails with `WASM_ERR_OOM`.
 
 Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
 

@@ -11,6 +11,7 @@
 #define WASM_FUZZ_MAX_CALLS 32u
 #define WASM_FUZZ_MAX_MEMORY_BYTES (1u * 1024u * 1024u)
 #define WASM_FUZZ_MAX_TABLE_ELEMENTS 4096u
+#define WASM_FUZZ_MAX_GC_HEAP_BYTES (16u * 1024u * 1024u)
 
 /* Host objects created to satisfy one input's imports. */
 typedef struct wasm_fuzz_stubs_t {
@@ -256,6 +257,7 @@ static void wasm_fuzz_exec_one(const uint8_t* data, size_t size) {
     config.frame_arena_size = 512u * 1024u;
     config.max_memory_bytes = WASM_FUZZ_MAX_MEMORY_BYTES;
     config.max_table_elements = WASM_FUZZ_MAX_TABLE_ELEMENTS;
+    config.max_gc_heap_bytes = WASM_FUZZ_MAX_GC_HEAP_BYTES;
 
     runtime = wasm_runtime_new(&config);
     if (!runtime || wasm_runtime_last_error(runtime) != WASM_OK) {

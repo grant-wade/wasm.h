@@ -101,6 +101,8 @@ struct wasm_runtime_t {
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
+    size_t gc_heap_min_size;    /* size collections never shrink the heap below */
+    uint64_t max_gc_heap_bytes;
     wasm_gc_header_t* gc_allocations;
     wasm_module_t* gc_modules;
     wasm_module_t* failed_modules;

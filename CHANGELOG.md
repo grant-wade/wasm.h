@@ -31,6 +31,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_index` and `wasm_global_set_index`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
 - `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, and `wasm_memory_base` and `wasm_memory_length` read a memory handle's data and size.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
+- `wasm_config_t.max_gc_heap_bytes` caps the GC heap. In Zig, `Config.max_gc_heap_bytes`.
 - Backtraces name each frame's module and function from the `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`, and `wasm_func_name` and `wasm_module_name` return those names.
 - `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
 - WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
@@ -49,6 +50,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `array.new` popped its initial value before allocating the array, so a collection during that allocation missed the value, and the array was filled with a reference into the freed heap.
 - The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
 - Calls that trap set `wasm_runtime_last_error` and `wasm_runtime_error_message`, which reported `ok` after a trap.
+- The GC heap grows to hold live objects and allocations larger than its initial size, which failed with `WASM_ERR_OOM` once about 4 MiB was live.
 
 ## [1.2.0] - 2026-10-17
 
