@@ -28,8 +28,10 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
                                                       wasm_value_t value,
                                                       wasm_value_t* out_value);
 
-WASM_PRIVATE wasm_value_t wasm__anyref_from_externref_value(const wasm_runtime_t* rt,
-                                                      wasm_value_t value);
+/* A host externref keeps its bits unless they read as an i31, a heap object, or a box; those are boxed. */
+WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
+                                                      wasm_value_t value,
+                                                      wasm_value_t* out_value);
 
 WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
                                        const wasm_value_t* value,

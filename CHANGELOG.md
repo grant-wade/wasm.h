@@ -63,6 +63,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A collection skips anyref values made by `any.convert_extern` from host `externref` values, which it dereferenced as GC objects and crashed on.
 - Collections during instantiation keep the GC objects that constant expressions are building; globals, tables, and element segments could end up referring to freed or reused objects.
 - `wasm_struct_new` and `wasm_array_new` keep the references they are given alive while allocating, which a collection during that allocation left pointing at freed objects.
+- `extern.convert_any` returns exactly the host `externref` that `any.convert_extern` received; odd values such as 1 came back as a different pointer and tested as `i31ref` in between.
 
 ## [1.2.0] - 2026-10-17
 

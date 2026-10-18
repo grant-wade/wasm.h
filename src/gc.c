@@ -40,19 +40,26 @@ static void* wasm__gc_grow(wasm__gc_mark_stack_t* stack, void* items, size_t* ca
 
 static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value);
 
+static void wasm__gc_mark_box(wasm__gc_mark_stack_t* stack, uintptr_t handle) {
+    while (handle && wasm__handle_set_contains(&stack->rt->externref_boxes, (const void*)handle)) {
+        wasm__externref_box_t* box = (wasm__externref_box_t*)handle;
+
+        if (box->marked) return;
+        box->marked = 1;
+        if (!wasm__uses_externref_storage(box->value.type)) {
+            wasm__gc_mark_value(stack, &box->value);
+            return;
+        }
+        handle = box->value.of.externref;
+    }
+}
+
 static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_t* value) {
     void* handle = (void*)value->of.externref;
 
     if (!handle) return;
     if (wasm__uses_externref_storage(value->type)) {
-        wasm__externref_box_t* box;
-
-        if (!wasm__handle_set_contains(&stack->rt->externref_boxes, handle)) return;
-        box = (wasm__externref_box_t*)handle;
-        if (box->marked) return;
-        box->marked = 1;
-        /* A box holds an anyref, never another box or an exception, so this does not recurse. */
-        wasm__gc_mark_value(stack, &box->value);
+        wasm__gc_mark_box(stack, value->of.externref);
     } else {
         wasm__exception_object_t* exception;
 
@@ -81,7 +88,11 @@ static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t
     }
     if (!wasm__is_heap_gc_ref_value(value)) return;
     object = (wasm_gc_header_t*)value->of.gc_obj;
-    if (!wasm__gc_ptr_in_heap(stack->rt, object) || object->marked) return;
+    if (!wasm__gc_ptr_in_heap(stack->rt, object)) {
+        wasm__gc_mark_box(stack, value->of.gc_ref);
+        return;
+    }
+    if (object->marked) return;
     if (stack->count == stack->capacity) {
         wasm_gc_header_t** items = (wasm_gc_header_t**)wasm__gc_grow(stack, stack->items, &stack->capacity);
 

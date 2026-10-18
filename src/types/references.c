@@ -195,24 +195,10 @@ static int wasm__is_host_anyref_value(const wasm_module_t* mod,
     return wasm__runtime_get_gc_object(mod, value) == NULL;
 }
 
-WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
-                                                      wasm_module_t* mod,
-                                                      wasm_value_t value,
-                                                      wasm_value_t* out_value) {
+static wasm_error_t wasm__new_externref_box(wasm_runtime_t* rt, wasm_value_t value, wasm__externref_box_t** out_box) {
     wasm__externref_box_t* box;
 
-    if (!out_value) return WASM_ERR_MALFORMED;
-    if (wasm__is_null_ref(&value)) {
-        *out_value = wasm_ref_null(WASM_TYPE_EXTERNREF);
-        return WASM_OK;
-    }
-    if (wasm__uses_externref_storage(value.type) || wasm__is_host_anyref_value(mod, &value)) {
-        value.type = WASM_TYPE_EXTERNREF;
-        *out_value = value;
-        return WASM_OK;
-    }
     if (!rt) return WASM_ERR_MALFORMED;
-
     box = (wasm__externref_box_t*)wasm__malloc(&rt->allocator, sizeof(*box));
     if (!box) return WASM_ERR_OOM;
     box->value = value;
@@ -221,21 +207,67 @@ WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
         wasm__free(&rt->allocator, box);
         return WASM_ERR_OOM;
     }
+    *out_box = box;
+    return WASM_OK;
+}
 
+WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
+                                                      wasm_module_t* mod,
+                                                      wasm_value_t value,
+                                                      wasm_value_t* out_value) {
+    wasm__externref_box_t* box;
+    wasm_error_t err;
+
+    if (!out_value) return WASM_ERR_MALFORMED;
+    if (wasm__is_null_ref(&value)) {
+        *out_value = wasm_ref_null(WASM_TYPE_EXTERNREF);
+        return WASM_OK;
+    }
+    box = wasm__uses_gc_ref_storage(value.type) ? wasm__find_externref_box(rt, value.of.gc_ref) : NULL;
+    if (box && wasm__uses_externref_storage(box->value.type)) {
+        *out_value = box->value;
+        return WASM_OK;
+    }
+    if (wasm__uses_externref_storage(value.type) || wasm__is_host_anyref_value(mod, &value)) {
+        value.type = WASM_TYPE_EXTERNREF;
+        *out_value = value;
+        return WASM_OK;
+    }
+
+    err = wasm__new_externref_box(rt, value, &box);
+    if (err != WASM_OK) return err;
     *out_value = wasm_externref((uintptr_t)box);
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_value_t wasm__anyref_from_externref_value(const wasm_runtime_t* rt,
-                                                      wasm_value_t value) {
+WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
+                                                      wasm_value_t value,
+                                                      wasm_value_t* out_value) {
     wasm__externref_box_t* box;
+    wasm_error_t err;
 
-    if (wasm__is_null_ref(&value)) return wasm_ref_null(WASM_TYPE_ANYREF);
+    if (wasm__is_null_ref(&value)) {
+        *out_value = wasm_ref_null(WASM_TYPE_ANYREF);
+        return WASM_OK;
+    }
     box = wasm__find_externref_box(rt, value.of.externref);
-    if (box) return box->value;
-
+    if (box && !wasm__uses_externref_storage(box->value.type)) {
+        *out_value = box->value;
+        return WASM_OK;
+    }
     value.type = WASM_TYPE_ANYREF;
-    return value;
+    if (!box && (value.of.gc_ref & WASM__GC_I31_TAG) == 0 && !wasm__gc_ptr_in_heap(rt, (const void*)value.of.gc_ref)) {
+        *out_value = value;
+        return WASM_OK;
+    }
+
+    value.type = WASM_TYPE_EXTERNREF;
+    err = wasm__new_externref_box(rt, value, &box);
+    if (err != WASM_OK) return err;
+    memset(out_value, 0, sizeof(*out_value));
+    out_value->type = WASM_TYPE_ANYREF;
+    out_value->of.gc_ref = (uintptr_t)box;
+    return WASM_OK;
 }
 
 WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
