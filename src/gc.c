@@ -167,6 +167,7 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
 
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
+    wasm__held_block_t* held;
     uint32_t i;
 
     if (!rt) return;
@@ -175,6 +176,11 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
+    }
+    for (held = rt->held_values; held; held = held->next) {
+        for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
+            if (held->slots[i].in_use) wasm__gc_mark_value(stack, &held->slots[i].value);
+        }
     }
     for (i = 0; i < rt->call_frame_sp; i++) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
@@ -265,6 +271,7 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
+    wasm__held_block_t* held;
     uint32_t i;
 
     if (!rt) return;
@@ -278,6 +285,11 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
 
         if (box) wasm__gc_forward_value(rt, &box->value);
+    }
+    for (held = rt->held_values; held; held = held->next) {
+        for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
+            if (held->slots[i].in_use) wasm__gc_forward_value(rt, &held->slots[i].value);
+        }
     }
     for (i = 0; i < rt->exception_objects.capacity; i++) {
         wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
@@ -429,4 +441,40 @@ void wasm_gc_collect(wasm_runtime_t* rt) {
     rt->gc_heap = new_heap;
     rt->gc_heap_offset = new_offset;
     rt->gc_allocations = new_allocations;
+}
+
+wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value) {
+    wasm__held_block_t* block;
+    uint32_t i;
+
+    if (!rt) return NULL;
+    for (block = rt->held_values; block; block = block->next) {
+        for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
+            if (!block->slots[i].in_use) goto found;
+        }
+    }
+    block = (wasm__held_block_t*)WASM_CALLOC(1u, sizeof(*block));
+    if (!block) return NULL;
+    block->next = rt->held_values;
+    rt->held_values = block;
+    i = 0;
+found:
+    block->slots[i].value = value;
+    block->slots[i].in_use = 1;
+    return &block->slots[i].value;
+}
+
+void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held) {
+    wasm__held_block_t* block;
+    uint32_t i;
+
+    if (!rt || !held) return;
+    for (block = rt->held_values; block; block = block->next) {
+        for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
+            if (&block->slots[i].value != held) continue;
+            block->slots[i].in_use = 0;
+            block->slots[i].value = wasm_i32(0);
+            return;
+        }
+    }
 }

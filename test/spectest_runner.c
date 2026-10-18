@@ -78,11 +78,6 @@ typedef struct spec_value_t {
     spec_float_expectation_t v128_lane_expectation[4];
 } spec_value_t;
 
-typedef struct spec_forward_func_t {
-    wasm_module_t* module;
-    uint32_t func_index;
-} spec_forward_func_t;
-
 typedef struct spec_named_module_t {
     char* name;
     wasm_module_t* module;
@@ -121,9 +116,6 @@ typedef struct spec_harness_t {
     spec_named_module_t* named_modules;
     size_t num_named_modules;
     size_t cap_named_modules;
-    spec_forward_func_t* forwarded_funcs;
-    size_t num_forwarded_funcs;
-    size_t cap_forwarded_funcs;
     wasm_module_t* last_module;
     const char* json_path;
     const char* wasm_tools_path;
@@ -884,37 +876,6 @@ static void spec_module_source_dispose(spec_module_source_t* source) {
     free(source->compiler_output);
     memset(source, 0, sizeof(*source));
     source->compiler_exit = -1;
-}
-
-static int spec_harness_reserve_forwarders(spec_harness_t* harness, size_t count) {
-    spec_forward_func_t* funcs;
-    size_t cap;
-
-    if (harness->num_forwarded_funcs + count <= harness->cap_forwarded_funcs) return 1;
-    cap = harness->cap_forwarded_funcs ? harness->cap_forwarded_funcs * 2u : 16u;
-    while (cap < harness->num_forwarded_funcs + count) cap *= 2u;
-    funcs = (spec_forward_func_t*)realloc(harness->forwarded_funcs, cap * sizeof(*funcs));
-    if (!funcs) return 0;
-    harness->forwarded_funcs = funcs;
-    harness->cap_forwarded_funcs = cap;
-    return 1;
-}
-
-static wasm_error_t spec_forward_import_call(wasm_module_t* mod,
-                                             const wasm_value_t* args,
-                                             uint32_t num_args,
-                                             wasm_value_t* results,
-                                             uint32_t num_results,
-                                             void* userdata) {
-    spec_forward_func_t* forward = (spec_forward_func_t*)userdata;
-    (void)mod;
-    if (forward->module && forward->module->rt) wasm__clear_backtrace(forward->module->rt);
-    return wasm__interp(forward->module,
-                        forward->func_index,
-                        (wasm_value_t*)args,
-                        num_args,
-                        results,
-                        num_results);
 }
 
 static wasm_error_t spec_spectest_print_stub(wasm_module_t* mod,
@@ -2310,122 +2271,17 @@ static int spec_validate_wasm(spec_harness_t* harness,
     return ok;
 }
 
-static int spec_bind_export(spec_harness_t* harness,
-                            const char* module_name,
-                            wasm_module_t* module,
-                            const char* export_name,
-                            wasm_export_kind_t kind,
-                            uint32_t index,
-                            char* error_text,
-                            size_t error_size) {
-    wasm_error_t err;
-
-    if (kind == WASM_EXPORT_FUNC) {
-        const wasm_functype_t* type = wasm_func_functype(module, index);
-        wasm_import_t import_desc;
-        spec_forward_func_t* forward;
-
-        if (!type) {
-            spec_set_error(error_text, error_size, "missing function type for export '%s'", export_name);
-            return 0;
-        }
-        if (!spec_harness_reserve_forwarders(harness, 1u)) {
-            spec_set_error(error_text, error_size, "out of memory storing forwarded function");
-            return 0;
-        }
-        forward = &harness->forwarded_funcs[harness->num_forwarded_funcs++];
-        forward->module = module;
-        forward->func_index = index;
-        memset(&import_desc, 0, sizeof(import_desc));
-        import_desc.module = module_name;
-        import_desc.name = export_name;
-        import_desc.type = *type;
-        import_desc.type_module = module;
-        import_desc.type_index = module->funcs[index].type_idx;
-        import_desc.has_type_context = 1;
-        import_desc.func = spec_forward_import_call;
-        import_desc.userdata = forward;
-        err = wasm__register_import_internal(&harness->runtime, &import_desc, 0);
-    } else if (kind == WASM_EXPORT_GLOBAL) {
-        const wasm_reftype_t* ref_type = wasm_global_reftype(module, index);
-        wasm_global_import_t import_desc;
-
-        memset(&import_desc, 0, sizeof(import_desc));
-        import_desc.module = module_name;
-        import_desc.name = export_name;
-        import_desc.type = wasm_global_type(module, index);
-        if (ref_type) import_desc.ref_type = *ref_type;
-        import_desc.is_mutable = wasm_global_is_mutable(module, index);
-        import_desc.value = wasm_global_value_ref_at(module, index);
-        err = wasm_register_global_import(&harness->runtime, &import_desc);
-    } else if (kind == WASM_EXPORT_TABLE) {
-        wasm_table_import_t import_desc;
-
-        memset(&import_desc, 0, sizeof(import_desc));
-        import_desc.module = module_name;
-        import_desc.name = export_name;
-        import_desc.table = wasm_table_ref_at(module, index);
-        err = wasm_register_table_import(&harness->runtime, &import_desc);
-    } else if (kind == WASM_EXPORT_MEM) {
-        wasm_memory_import_t import_desc;
-
-        memset(&import_desc, 0, sizeof(import_desc));
-        import_desc.module = module_name;
-        import_desc.name = export_name;
-        import_desc.memory = wasm_memory_ref_at(module, index);
-        err = wasm_register_memory_import(&harness->runtime, &import_desc);
-    } else if (kind == WASM_EXPORT_TAG) {
-        const wasm_functype_t* type = wasm_tag_functype(module, index);
-        wasm_tag_import_t import_desc;
-
-        if (!type) {
-            spec_set_error(error_text, error_size, "missing tag type for export '%s'", export_name);
-            return 0;
-        }
-        memset(&import_desc, 0, sizeof(import_desc));
-        import_desc.module = module_name;
-        import_desc.name = export_name;
-        import_desc.type = *type;
-        import_desc.type_module = module;
-        import_desc.type_index = module->tags[index].type_idx;
-        import_desc.has_type_context = 1;
-        import_desc.identity = module->tags[index].identity;
-        err = wasm_register_tag_import(&harness->runtime, &import_desc);
-    } else {
-        spec_set_error(error_text, error_size, "unsupported export kind for '%s'", export_name);
-        return 0;
-    }
-
-    if (err != WASM_OK) {
-        spec_set_error(error_text, error_size, "%s", spec_runtime_error_text(&harness->runtime, err));
-        return 0;
-    }
-
-    return 1;
-}
-
 static int spec_register_module_exports(spec_harness_t* harness,
                                         const char* module_name,
                                         wasm_module_t* module,
                                         char* error_text,
                                         size_t error_size) {
-    uint32_t i;
+    wasm_error_t err = wasm_register_module(&harness->runtime, module_name, module);
 
-    for (i = 0; i < wasm_export_count(module); i++) {
-        const uint8_t* export_name_bytes;
-        size_t export_name_len = 0u;
-        const char* export_name = wasm_export_name(module, i);
-        wasm_export_kind_t kind = wasm_export_kind(module, i);
-        uint32_t index = wasm_export_index(module, i);
-
-        export_name_bytes = wasm_export_name_bytes(module, i, &export_name_len);
-        if (export_name_bytes && memchr(export_name_bytes, '\0', export_name_len) != NULL) continue;
-
-        if (!spec_bind_export(harness, module_name, module, export_name, kind, index,
-                              error_text, error_size))
-            return 0;
+    if (err != WASM_OK) {
+        spec_set_error(error_text, error_size, "%s", spec_runtime_error_text(&harness->runtime, err));
+        return 0;
     }
-
     return 1;
 }
 
@@ -3207,7 +3063,6 @@ static void spec_harness_destroy(spec_harness_t* harness) {
     free(harness->owned_modules);
     free(harness->module_definitions);
     free(harness->named_modules);
-    free(harness->forwarded_funcs);
     free(harness->json_dir);
     free((void*)harness->source_filename);
 

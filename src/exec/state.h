@@ -2,6 +2,7 @@
 #define WASM_EXEC_STATE_H
 
 #include "../reader.h"
+#include "../runtime.h"
 
 typedef struct wasm__label_t {
     const uint8_t* continuation;
@@ -30,7 +31,7 @@ struct wasm__call_frame_t {
     wasm_functype_t* ft;
     wasm_value_t* results_dst;
     uint32_t num_results;
-    size_t arena_saved;
+    wasm__arena_mark_t arena_saved;
     uint32_t current_offset;
 };
 #define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
@@ -53,5 +54,23 @@ struct wasm__call_frame_t {
         err = (code);    \
         goto cleanup;    \
     } while (0)
+
+/* Bulk instructions pay for their size on top of the unit every instruction costs: one more
+ * unit per WASM__FUEL_BYTES_PER_UNIT bytes or WASM__FUEL_ELEMS_PER_UNIT elements they touch. */
+#define WASM__FUEL_BYTES_PER_UNIT 64u
+#define WASM__FUEL_ELEMS_PER_UNIT 8u
+#define WASM__CHARGE_FUEL(rt, units)                    \
+    do {                                                \
+        if ((rt)->fuel_enabled) {                       \
+            uint64_t wasm__units = (uint64_t)(units);   \
+            if ((rt)->fuel < wasm__units) {             \
+                (rt)->fuel = 0;                         \
+                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);       \
+            }                                           \
+            (rt)->fuel -= wasm__units;                  \
+        }                                               \
+    } while (0)
+#define WASM__CHARGE_BYTES(rt, bytes) WASM__CHARGE_FUEL(rt, (uint64_t)(bytes) / WASM__FUEL_BYTES_PER_UNIT)
+#define WASM__CHARGE_ELEMS(rt, count) WASM__CHARGE_FUEL(rt, (uint64_t)(count) / WASM__FUEL_ELEMS_PER_UNIT)
 
 #endif /* WASM_EXEC_STATE_H */

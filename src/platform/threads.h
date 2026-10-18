@@ -4,9 +4,13 @@
 #include "../internal/config.h"
 
 /* Blocks until a notify at p or until timeout_ns elapses (negative waits forever), comparing the value
-   at p with expected first. Returns 0 when woken, 1 when the value differs, 2 on timeout, and -1 when
-   the wait would block but thread support is unavailable. */
-WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns);
+   at p with expected first. Returns 0 when woken, 1 when the value differs, 2 on timeout, 3 when
+   *interrupt is nonzero, and -1 when the wait would block but thread support is unavailable. */
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns,
+                                            const size_t* interrupt);
+
+/* Wakes every blocked waiter so each rechecks its interrupt flag; waiters not interrupted keep waiting. */
+WASM_PRIVATE void wasm__platform_atomic_wake_all(void);
 
 /* Wakes up to count waiters blocked at p and returns how many were woken. */
 WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count);

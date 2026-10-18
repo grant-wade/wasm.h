@@ -168,7 +168,51 @@ WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
+WASM_PRIVATE uint64_t wasm__table_grow(const wasm_runtime_t* rt, wasm_table_t* table, uint64_t delta,
+                                       wasm_value_t init) {
+    uint64_t old_size;
+    uint64_t new_size;
+    wasm_value_t* elems;
+    uint64_t i;
+
+    table = wasm__table_actual(table);
+    if (!table) return UINT64_MAX;
+    old_size = table->size;
+    if (delta == 0) return old_size;
+    if ((table->max_size != UINT64_MAX && delta > table->max_size - old_size) || delta > UINT32_MAX - old_size)
+        return UINT64_MAX;
+    new_size = old_size + delta;
+    if ((rt && rt->max_table_elements != 0 && new_size > rt->max_table_elements) ||
+        new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t)))
+        return UINT64_MAX;
+    elems = (wasm_value_t*)wasm__realloc_array(table->elems, (size_t)new_size, sizeof(wasm_value_t));
+    if (!elems) return UINT64_MAX;
+    table->elems = elems;
+    table->size = (uint32_t)new_size;
+    for (i = old_size; i < new_size; i++) table->elems[i] = init;
+    return old_size;
+}
+
+WASM_PRIVATE uint64_t wasm__runtime_memory_bytes(const wasm_runtime_t* rt) {
+    const wasm_module_t* mod;
+    uint64_t total = 0;
+    uint32_t i;
+
+    if (!rt) return 0;
+    for (mod = rt->gc_modules; mod; mod = mod->gc_next) {
+        if (mod->is_compiled) continue;
+        for (i = 0; i < mod->num_memories; i++) {
+            uint64_t bytes;
+
+            if (mod->memories[i].is_import) continue;
+            bytes = wasm__memory_byte_size(&mod->memories[i]);
+            total = bytes > UINT64_MAX - total ? UINT64_MAX : total + bytes;
+        }
+    }
+    return total;
+}
+
+WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory, uint64_t limit_bytes) {
     size_t byte_size;
 
     memory = wasm__memory_actual(memory);
@@ -179,6 +223,7 @@ WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory) {
         uint64_t min_bytes = memory->pages * (uint64_t)wasm__memory_page_size(memory);
         if (memory->max_pages != 0 && max_bytes / memory->max_pages != wasm__memory_page_size(memory))
             max_bytes = UINT64_MAX;
+        if (limit_bytes != 0 && max_bytes > limit_bytes) max_bytes = limit_bytes > min_bytes ? limit_bytes : min_bytes;
         memory->data = wasm__platform_shared_reserve(min_bytes, max_bytes, &memory->reserved_bytes);
         if (!memory->data) return WASM_ERR_OOM;
         if (!wasm__platform_shared_commit(memory->data, min_bytes)) {

@@ -137,7 +137,7 @@ WASM_PRIVATE void wasm__init_call_frame(wasm__call_frame_t* cf,
     cf->ft = ft;
     cf->results_dst = results_dst;
     cf->num_results = num_results;
-    cf->arena_saved = rt->frame_arena_offset;
+    cf->arena_saved = wasm__arena_mark(rt);
     cf->current_offset = 0;
 
     labels[cf->lsp].continuation = cf->r.end;
@@ -1229,6 +1229,12 @@ static wasm_error_t wasm__interp_loop(wasm_module_t* mod,
                                           mem_idx,
                                           memory->is_64 ? (uint64_t)d.of.i64
                                                         : (uint64_t)(uint32_t)d.of.i32);
+                if (res >= 0) {
+                    uint64_t page_size = memory->page_size ? memory->page_size : WASM_PAGE_SIZE;
+                    uint64_t pages = memory->is_64 ? (uint64_t)d.of.i64 : (uint64_t)(uint32_t)d.of.i32;
+
+                    WASM__CHARGE_BYTES(rt, pages * page_size);
+                }
                 WASM__PUSH(rt, memory->is_64 ? wasm_i64(res) : wasm_i32((int32_t)res));
                 break;
             }

@@ -112,7 +112,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_atomic(wasm_module_t* mod, wasm__call_frame
             WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "expected shared memory");
             WASM__TRAP(WASM_ERR_TRAP);
         }
-        result = wasm__platform_atomic_wait(p, size, wasm__atomic_operand(operand, type), replacement.of.i64);
+        result = wasm__platform_atomic_wait(p, size, wasm__atomic_operand(operand, type), replacement.of.i64,
+                                            &rt->interrupt_requested);
+        if (result == 3 && wasm__runtime_take_interrupt(rt)) WASM__TRAP(WASM_ERR_INTERRUPTED);
         if (result < 0) {
             WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "atomic wait would block without thread support");
             WASM__TRAP(WASM_ERR_TRAP);

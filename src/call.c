@@ -6,6 +6,8 @@
 #include "exec/interpreter.h"
 #include "types/references.h"
 #include "module.h"
+#include "support.h"
+#include "values.h"
 #include "internal/alloc.h"
 #include <string.h>
 #include <stdarg.h>
@@ -72,6 +74,24 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
         if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
         return err;
     }
+}
+
+wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
+                           const wasm_value_t* args, uint32_t num_args,
+                           wasm_value_t* results, uint32_t num_results) {
+    wasm_module_t* mod = NULL;
+    uint32_t func_idx = 0;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    if (!wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) {
+        WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "%s", "expected a non-null funcref");
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    if (!wasm__resolve_func_ref(rt, funcref.of.funcref, &mod, &func_idx) || !mod) {
+        WASM__SET_ERR(rt, WASM_ERR_UNDEFINED_ELEMENT, "%s", "funcref does not refer to a live function");
+        return WASM_ERR_UNDEFINED_ELEMENT;
+    }
+    return wasm_call_index(mod, func_idx, args, num_args, results, num_results);
 }
 
 static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,

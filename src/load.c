@@ -244,6 +244,12 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     if (mod->num_memories > 0) {
         uint32_t mi;
 
+        if (rt->max_total_memory_bytes != 0 && wasm__runtime_memory_bytes(rt) > rt->max_total_memory_bytes) {
+            err = WASM_ERR_OOM;
+            WASM__SET_ERR(rt, err, "memories exceed the runtime's limit of %llu bytes",
+                          (unsigned long long)rt->max_total_memory_bytes);
+            WASM__LOAD_FAIL("init_memory_storage");
+        }
         for (mi = 0; mi < mod->num_memories; mi++) {
             wasm_memory_t* memory = &mod->memories[mi];
 
@@ -254,7 +260,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                               (unsigned long long)memory->pages, (unsigned long long)rt->max_memory_bytes);
                 WASM__LOAD_FAIL("init_memory_storage");
             }
-            err = wasm__init_memory_storage(memory);
+            err = wasm__init_memory_storage(memory, rt->max_memory_bytes);
             if (err != WASM_OK) {
                 WASM__LOAD_FAIL("init_memory_storage");
             }
@@ -317,6 +323,7 @@ wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
 
 void wasm_free_module(wasm_module_t* mod) {
     wasm_gc_header_t* object;
+    wasm__linked_func_t* linked;
     uint32_t i;
     if (!mod) return;
     if (mod->rt) {
@@ -325,6 +332,9 @@ void wasm_free_module(wasm_module_t* mod) {
         }
         for (i = 0; i < mod->rt->num_func_refs; i++) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
+        }
+        for (linked = mod->rt->linked_funcs; linked; linked = linked->next) {
+            if (linked->module == mod) linked->module = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }
@@ -349,6 +359,11 @@ void wasm_free_module(wasm_module_t* mod) {
     WASM_FREE(mod->globals);
     WASM_FREE(mod->tags);
     for (i = 0; i < mod->num_custom_sections; i++) wasm__free_custom_section(&mod->custom_sections[i]);
+    if (mod->func_names) {
+        for (i = 0; i < mod->num_funcs; i++) WASM_FREE(mod->func_names[i]);
+        WASM_FREE(mod->func_names);
+    }
+    WASM_FREE(mod->module_name);
     WASM_FREE(mod->custom_sections);
     for (i = 0; i < mod->num_data_segments; i++) wasm__free_data_segment(&mod->data_segments[i]);
     WASM_FREE(mod->data_segments);

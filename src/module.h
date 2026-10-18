@@ -48,6 +48,9 @@ struct wasm_module_t {
     wasm_memory_t* memories;
     wasm_custom_section_t* custom_sections;
     uint32_t num_custom_sections;
+    char** func_names; /* from the "name" section, read on first use; NULL entries are unnamed */
+    char* module_name;
+    int names_loaded;
     wasm_data_segment_t* data_segments;
     uint32_t num_data_segments;
     wasm_elem_segment_t* elem_segments;

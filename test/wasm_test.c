@@ -7525,11 +7525,11 @@ WL_TEST(test_runtime_config_limits_call_depth_and_backtrace) {
     WL_CHECK_MSG(t, wasm_get_call_stack_depth(&rt) == 4,
                  "expected backtrace depth 4, got %u",
                  (unsigned)wasm_get_call_stack_depth(&rt));
-    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, &func_idx, &offset));
+    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset));
     WL_CHECK_MSG(t, func_idx == 0, "expected top backtrace function 0, got %u", (unsigned)func_idx);
-    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 3, &func_idx, &offset));
+    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 3, NULL, &func_idx, &offset));
     WL_CHECK_MSG(t, func_idx == 0, "expected deepest captured function 0, got %u", (unsigned)func_idx);
-    WL_CHECK_MSG(t, wasm_get_call_frame_info(&rt, 4, &func_idx, &offset) == WASM_ERR_MALFORMED,
+    WL_CHECK_MSG(t, wasm_get_call_frame_info(&rt, 4, NULL, &func_idx, &offset) == WASM_ERR_MALFORMED,
                  "%s",
                  "expected querying beyond configured backtrace depth to fail");
 
@@ -7539,35 +7539,44 @@ WL_TEST(test_runtime_config_limits_call_depth_and_backtrace) {
 
 WL_TEST(test_frame_arena_allocator) {
     wasm_runtime_t rt;
+    wasm__arena_mark_t start;
+    wasm__arena_mark_t middle;
     void* first;
     void* second;
     void* third;
+    void* big;
 
     memset(&rt, 0, sizeof(rt));
 
     WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
-    WL_CHECK_MSG(t, rt.frame_arena != NULL, "%s", "expected arena storage");
-    WL_CHECK_MSG(t, rt.frame_arena_size == 64, "expected arena size 64, got %zu", rt.frame_arena_size);
-    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected zero offset, got %zu", rt.frame_arena_offset);
+    WL_CHECK_MSG(t, rt.frame_arena != NULL, "%s", "expected a first arena block");
+    WL_CHECK_MSG(t, rt.frame_arena_size == 64, "expected block size 64, got %zu", rt.frame_arena_size);
+    start = wasm__arena_mark(&rt);
 
     first = wasm__arena_alloc(&rt, 1);
     second = wasm__arena_alloc(&rt, 8);
-    WL_CHECK_MSG(t, first != NULL, "%s", "expected first arena allocation to succeed");
-    WL_CHECK_MSG(t, second != NULL, "%s", "expected second arena allocation to succeed");
-    WL_CHECK_MSG(t, ((uintptr_t)first % sizeof(void*)) == 0, "%s", "expected aligned first allocation");
-    WL_CHECK_MSG(t, ((uintptr_t)second % sizeof(void*)) == 0, "%s", "expected aligned second allocation");
+    WL_CHECK_MSG(t, first != NULL && second != NULL, "%s", "expected small allocations to succeed");
+    WL_CHECK_MSG(t, ((uintptr_t)second - (uintptr_t)first) % 16u == 0, "%s", "expected aligned allocations");
+    middle = wasm__arena_mark(&rt);
 
-    wasm__arena_reset(&rt, 0);
-    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected reset offset 0, got %zu", rt.frame_arena_offset);
+    big = wasm__arena_alloc(&rt, 1000);
+    WL_CHECK_MSG(t, big != NULL, "%s", "expected an oversized allocation to add a block");
+    WL_CHECK(t, rt.frame_arena != start.chunk && rt.frame_arena->prev == start.chunk);
+    memset(big, 0xAB, 1000);
 
-    third = wasm__arena_alloc(&rt, 64);
-    WL_CHECK_MSG(t, third == rt.frame_arena, "%s", "expected reset to rewind to the arena base");
-    WL_CHECK_MSG(t, wasm__arena_alloc(&rt, 1) == NULL, "%s", "expected exhaustion to return NULL");
+    wasm__arena_reset(&rt, middle);
+    WL_CHECK(t, rt.frame_arena == start.chunk && rt.frame_arena_spare != NULL);
+    third = wasm__arena_alloc(&rt, 16);
+    WL_CHECK_MSG(t, third != NULL && third != first && third != second, "%s",
+                 "expected allocation after the middle mark");
+    WL_CHECK(t, wasm__arena_alloc(&rt, 1000) == big);
+
+    wasm__arena_reset(&rt, start);
+    WL_CHECK(t, wasm__arena_alloc(&rt, 1) == first);
 
     wasm__arena_destroy(&rt);
-    WL_CHECK_MSG(t, rt.frame_arena == NULL, "%s", "expected arena destroy to clear storage");
-    WL_CHECK_MSG(t, rt.frame_arena_size == 0, "expected arena size 0, got %zu", rt.frame_arena_size);
-    WL_CHECK_MSG(t, rt.frame_arena_offset == 0, "expected arena offset 0, got %zu", rt.frame_arena_offset);
+    WL_CHECK_MSG(t, rt.frame_arena == NULL && rt.frame_arena_spare == NULL, "%s",
+                 "expected arena destroy to free every block");
 }
 
 WL_TEST(test_runtime_grows_frame_arena_for_execution) {
@@ -7577,9 +7586,6 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
     wasm_value_t result;
     wasm_error_t err;
     wasm_config_t cfg;
-    size_t frame_bytes = 0;
-    size_t expected_size = 0;
-    size_t required_size = 0;
 
     emit_header(&mod);
 
@@ -7631,7 +7637,7 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
 
     wasm_config_default(&cfg);
     cfg.max_call_depth = 2;
-    cfg.frame_arena_size = 64;
+    cfg.frame_arena_size = 16;
     wasm_init_config(&rt, &cfg);
 
     m = wasm_load(&rt, mod.buf, mod.len);
@@ -7641,31 +7647,12 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
         return;
     }
 
-    WL_CHECK_MSG(t, wasm__module_frame_arena_requirement(m, &required_size), "%s", "expected arena sizing for module to succeed");
-    WL_CHECK_MSG(t, wasm__frame_storage_size(m->funcs[0].num_locals, m->funcs[0].max_label_depth ? m->funcs[0].max_label_depth : 1u, &frame_bytes),
-                 "%s",
-                 "expected frame sizing for function to succeed");
-    WL_CHECK_MSG(t, wasm__size_mul(frame_bytes, (size_t)cfg.max_call_depth, &expected_size),
-                 "%s",
-                 "expected frame arena requirement multiplication to succeed");
-    if (expected_size < cfg.frame_arena_size) expected_size = cfg.frame_arena_size;
-    WL_CHECK_MSG(t, required_size == expected_size,
-                 "expected arena requirement %zu, got %zu",
-                 expected_size,
-                 required_size);
-    WL_CHECK_MSG(t, rt.frame_arena_size == cfg.frame_arena_size,
-                 "expected load to preserve undersized arena until execution, got %zu",
-                 rt.frame_arena_size);
-
+    /* The frame outgrows the 16-byte block, so the call adds a block and drops it on return. */
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
-    if (err == WASM_OK) {
-        WASM_CHECK_I32(t, result.of.i32, 7);
-        WL_CHECK_MSG(t, rt.frame_arena_size >= required_size,
-                     "expected runtime arena to grow to at least %zu bytes, got %zu",
-                     required_size,
-                     rt.frame_arena_size);
-    }
+    if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 7);
+    WL_CHECK(t, rt.frame_arena != NULL && rt.frame_arena->prev == NULL && rt.frame_arena->used == 0u);
+    WL_CHECK(t, rt.frame_arena_spare != NULL && rt.frame_arena_spare->size > 16u);
 
     wasm_free_module(m);
     wasm_destroy(&rt);
@@ -8427,7 +8414,10 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_memory_data(NULL) == NULL);
     WL_CHECK(t, wasm_memory_size(NULL) == 0);
     WL_CHECK(t, wasm_memory_grow(NULL, 1) < 0);
-    wasm_shared_memory_free(NULL);
+    wasm_memory_free(NULL);
+    wasm_table_free(NULL);
+    WL_CHECK(t, wasm_memory_new(2, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(WASM_TYPE_I32, 1, 1) == NULL);
     WL_CHECK(t, wasm_table_count(NULL) == 0);
     WL_CHECK(t, wasm_table_ref_at(NULL, 0) == NULL);
     (void)wasm_table_type(NULL, 0);
@@ -8475,7 +8465,7 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_array_set_elem(NULL, value, 0, value) != WASM_OK);
     wasm_dump_backtrace(NULL, text, sizeof(text));
     WL_CHECK(t, wasm_get_call_stack_depth(NULL) == 0);
-    WL_CHECK(t, wasm_get_call_frame_info(NULL, 0, &index, &out_u32) != WASM_OK);
+    WL_CHECK(t, wasm_get_call_frame_info(NULL, 0, NULL, &index, &out_u32) != WASM_OK);
     wasm_set_fuel(NULL, 1);
     wasm_disable_fuel(NULL);
     WL_CHECK(t, wasm_get_fuel(NULL) == 0);
@@ -8696,6 +8686,27 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
         WASM_CHECK_I32(t, result.of.i32, -1);
     }
     wasm_free_module(m);
+    wasm_destroy(&rt);
+
+    /* Each instance of grow_bytes starts with 2 pages; the runtime allows 5 in total. */
+    wasm_config_default(&config);
+    WL_CHECK(t, config.max_total_memory_bytes == 0u);
+    config.max_total_memory_bytes = 5u * WASM_PAGE_SIZE;
+    wasm_init_config(&rt, &config);
+    {
+        wasm_module_t* first = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
+        wasm_module_t* second = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
+
+        WL_CHECK_MSG(t, first != NULL && second != NULL, "%s", rt.error_msg);
+        m = wasm_load(&rt, grow_bytes, sizeof(grow_bytes));
+        WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_OOM && strstr(rt.error_msg, "runtime's limit"),
+                     "expected a third instance to exceed the runtime limit, got: %s", rt.error_msg);
+        WL_CHECK(t, wasm_memory_grow(first, 1) == 2);
+        WL_CHECK(t, wasm_memory_grow(first, 1) == -1);
+        wasm_free_module(second);
+        WL_CHECK(t, wasm_memory_grow(first, 2) == 3);
+        wasm_free_module(first);
+    }
     wasm_destroy(&rt);
 }
 
@@ -9026,21 +9037,21 @@ WL_TEST(test_public_backtrace_helpers_capture_traps) {
 
     WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 3);
 
-    err = wasm_get_call_frame_info(&rt, 0, &func_idx, &offset);
+    err = wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 2);
         WASM_CHECK_I32(t, (int32_t)offset, 0);
     }
 
-    err = wasm_get_call_frame_info(&rt, 1, &func_idx, &offset);
+    err = wasm_get_call_frame_info(&rt, 1, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 1);
         WASM_CHECK_I32(t, (int32_t)offset, 0);
     }
 
-    err = wasm_get_call_frame_info(&rt, 2, &func_idx, &offset);
+    err = wasm_get_call_frame_info(&rt, 2, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 0);
@@ -9055,7 +9066,7 @@ WL_TEST(test_public_backtrace_helpers_capture_traps) {
     WL_CHECK_MSG(t, strstr(backtrace, "#2 func[0] at offset 0x0000") != NULL,
                  "%s", "expected root frame in formatted backtrace");
 
-    err = wasm_get_call_frame_info(&rt, 3, &func_idx, &offset);
+    err = wasm_get_call_frame_info(&rt, 3, NULL, &func_idx, &offset);
     WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED, "%s", "expected out-of-range frame query rejection");
 
     bad_arg = wasm_i32(7);
@@ -9223,7 +9234,7 @@ WL_TEST(test_public_fuel_helpers_trap_in_infinite_loop) {
     WASM_CHECK_I64(t, (int64_t)wasm_get_fuel(&rt), 0);
     WASM_CHECK_I32(t, (int32_t)wasm_get_call_stack_depth(&rt), 1);
 
-    err = wasm_get_call_frame_info(&rt, 0, &func_idx, &offset);
+    err = wasm_get_call_frame_info(&rt, 0, NULL, &func_idx, &offset);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
         WASM_CHECK_I32(t, (int32_t)func_idx, 0);
@@ -12791,7 +12802,7 @@ cleanup:
         if (workers[i].mod) wasm_free_module(workers[i].mod);
         if (workers[i].initialized) (wasm_destroy)(&workers[i].rt);
     }
-    wasm_shared_memory_free(memory);
+    wasm_memory_free(memory);
 }
 #endif
 
@@ -15905,6 +15916,304 @@ WL_TEST(test_host_results_must_match_the_import_type) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_bulk_fuel_and_array_new_rooting) {
+    /* fill(n) runs memory.fill over n bytes; churn(n) builds n arrays of 64 copies of a new
+     * struct holding the loop counter and sums each array's last element's field. A struct kept
+     * alive across the loop makes every collection copy the heap and free the old one. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x12, 0x04, 0x5f, 0x01, 0x7f, 0x00, 0x5e, 0x63, 0x00,
+        0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x02, 0x03, 0x05, 0x03, 0x01,
+        0x00, 0x01, 0x07, 0x10, 0x02, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x00, 0x05, 0x63, 0x68, 0x75, 0x72, 0x6e,
+        0x00, 0x01, 0x0a, 0x4a, 0x02, 0x0b, 0x00, 0x41, 0x00, 0x41, 0x00, 0x20, 0x00, 0xfc, 0x0b, 0x00, 0x0b, 0x3c,
+        0x02, 0x01, 0x7f, 0x01, 0x63, 0x00, 0x41, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x02, 0x03, 0x40, 0x20, 0x01, 0x20,
+        0x00, 0xfb, 0x00, 0x00, 0x41, 0xc0, 0x00, 0xfb, 0x06, 0x01, 0x41, 0x3f, 0xfb, 0x0b, 0x01, 0xfb, 0x02, 0x00,
+        0x00, 0x6a, 0x21, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x20, 0x02,
+        0xfb, 0x02, 0x00, 0x00, 0x6a, 0x0b,
+    };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_set_fuel(&rt, 100);
+    arg = wasm_i32(64 * 50);
+    WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, NULL, 0));
+    WL_CHECK_MSG(t, wasm_get_fuel(&rt) < 50u, "expected 3200 bytes to cost 50 units, %u left",
+                 (unsigned)wasm_get_fuel(&rt));
+    wasm_set_fuel(&rt, 100);
+    arg = wasm_i32(65536);
+    WL_CHECK(t, wasm_call(m, "fill", &arg, 1, NULL, 0) == WASM_ERR_OUT_OF_FUEL);
+    wasm_disable_fuel(&rt);
+
+    /* A held struct survives the collections below and follows the object as it moves. */
+    {
+        wasm_value_t field = wasm_i32(99);
+        wasm_value_t point;
+        wasm_value_t original;
+        wasm_value_t* held;
+
+        WASM_CHECK_OK(t, wasm_struct_new(m, 0, &field, 1, &point));
+        original = point;
+        held = wasm_ref_hold(&rt, point);
+        WL_CHECK(t, held != NULL);
+
+        /* Each array needs about 1.5 KB, so the heap is collected every few iterations. */
+        arg = wasm_i32(200);
+        WASM_CHECK_OK(t, wasm_call(m, "churn", &arg, 1, &result, 1));
+        WL_CHECK_MSG(t, result.of.i32 == 200 * 201 / 2, "expected each array to hold its struct, got %d",
+                     (int)result.of.i32);
+
+        if (held) {
+            WL_CHECK(t, held->of.gc_obj != original.of.gc_obj);
+            WASM_CHECK_OK(t, wasm_struct_get_field(m, *held, 0, &field));
+            WL_CHECK(t, field.of.i32 == 99);
+            wasm_ref_release(&rt, held);
+        }
+        wasm_ref_release(&rt, NULL);
+        WL_CHECK(t, wasm_ref_hold(NULL, point) == NULL);
+    }
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+#if defined(WASM_TEST_THREADS)
+static void wasm_test_interrupt_later(void* arg) {
+#if defined(_WIN32)
+    Sleep(20);
+#else
+    struct timespec delay = { 0, 20000000L };
+
+    nanosleep(&delay, NULL);
+#endif
+    wasm_runtime_interrupt((wasm_runtime_t*)arg);
+}
+#endif
+
+WL_TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
+    /* spin() loops forever, call() returns a callee's 7, and wait() waits forever on shared memory. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x00, 0x00,
+        0x03, 0x05, 0x04, 0x00, 0x01, 0x00, 0x00, 0x05, 0x04, 0x01, 0x03, 0x01, 0x01, 0x07, 0x16, 0x03, 0x04, 0x73,
+        0x70, 0x69, 0x6e, 0x00, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x02, 0x04, 0x77, 0x61, 0x69, 0x74, 0x00,
+        0x03, 0x0a, 0x20, 0x04, 0x04, 0x00, 0x41, 0x07, 0x0b, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b, 0x04,
+        0x00, 0x10, 0x00, 0x0b, 0x0c, 0x00, 0x41, 0x00, 0x41, 0x00, 0x42, 0x7f, 0xfe, 0x01, 0x02, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    wasm_enable_feature(&rt, WASM_FEATURE_THREADS);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_runtime_interrupt(&rt);
+    WL_CHECK(t, wasm_call(m, "call", NULL, 0, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "interrupted") != NULL, "%s", rt.error_msg);
+    WASM_CHECK_OK(t, wasm_call(m, "call", NULL, 0, &result, 1));
+    WL_CHECK(t, result.of.i32 == 7);
+
+#if defined(WASM_TEST_THREADS)
+    {
+        static const char* const exports[] = { "spin", "wait" };
+        uint32_t i;
+
+        for (i = 0; i < 2u; i++) {
+            wasm_test_thread_start_t start;
+            wasm_test_thread_t thread;
+
+            start.fn = wasm_test_interrupt_later;
+            start.arg = &rt;
+            WL_CHECK(t, wasm_test_thread_spawn(&thread, &start));
+            WL_CHECK_MSG(t, wasm_call(m, exports[i], NULL, 0, &result, i) == WASM_ERR_INTERRUPTED,
+                         "expected %s to be interrupted: %s", exports[i], rt.error_msg);
+            wasm_test_thread_join(thread);
+        }
+    }
+#endif
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_register_module_links_instances_and_host_objects) {
+    /* a exports double(x) = 2x, mutable global g = 1, immutable global k = 5, table t holding double,
+     * and memory m whose first byte is 100. b imports all of them; run() returns
+     * double(g) + m[0] + table.size(t). c imports only double. e imports host.mem and host.tab and
+     * grows them. */
+    static const uint8_t a_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x02,
+        0x01, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x06, 0x0b, 0x02, 0x7f, 0x01,
+        0x41, 0x01, 0x0b, 0x7f, 0x00, 0x41, 0x05, 0x0b, 0x07, 0x1a, 0x05, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65,
+        0x00, 0x00, 0x01, 0x67, 0x03, 0x00, 0x01, 0x6b, 0x03, 0x01, 0x01, 0x74, 0x01, 0x00, 0x01, 0x6d, 0x02, 0x00,
+        0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41, 0x02,
+        0x6c, 0x0b, 0x0b, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x64,
+    };
+    static const uint8_t b_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0a, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x00,
+        0x01, 0x7f, 0x02, 0x22, 0x04, 0x01, 0x61, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x00, 0x01, 0x61,
+        0x01, 0x67, 0x03, 0x7f, 0x01, 0x01, 0x61, 0x01, 0x74, 0x01, 0x70, 0x00, 0x02, 0x01, 0x61, 0x01, 0x6d, 0x02,
+        0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01, 0x0a, 0x12, 0x01,
+        0x10, 0x00, 0x23, 0x00, 0x10, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x6a, 0xfc, 0x10, 0x00, 0x6a, 0x0b,
+    };
+    static const uint8_t c_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x0c,
+        0x01, 0x01, 0x61, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x0f,
+        0x01, 0x0b, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x01, 0x0a, 0x08, 0x01,
+        0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+    };
+    static const uint8_t e_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x1b,
+        0x02, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x03, 0x6d, 0x65, 0x6d, 0x02, 0x01, 0x01, 0x02, 0x04, 0x68, 0x6f, 0x73,
+        0x74, 0x03, 0x74, 0x61, 0x62, 0x01, 0x70, 0x00, 0x01, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07, 0x17, 0x02, 0x08,
+        0x67, 0x72, 0x6f, 0x77, 0x5f, 0x6d, 0x65, 0x6d, 0x00, 0x00, 0x08, 0x67, 0x72, 0x6f, 0x77, 0x5f, 0x74, 0x61,
+        0x62, 0x00, 0x01, 0x0a, 0x12, 0x02, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b, 0x09, 0x00, 0xd0, 0x70, 0x20,
+        0x00, 0xfc, 0x0f, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* a;
+    wasm_module_t* b;
+    wasm_module_t* c;
+    wasm_module_t* e;
+    wasm_memory_t* memory;
+    wasm_table_t* table;
+    wasm_memory_import_t memory_import;
+    wasm_table_import_t table_import;
+    wasm_value_t value;
+    wasm_value_t ref;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    a = wasm_load(&rt, a_bytes, sizeof(a_bytes));
+    WL_CHECK_MSG(t, a != NULL, "%s", rt.error_msg);
+    if (!a) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_register_module(&rt, "a", a));
+    b = wasm_load(&rt, b_bytes, sizeof(b_bytes));
+    c = wasm_load(&rt, c_bytes, sizeof(c_bytes));
+    WL_CHECK_MSG(t, b != NULL && c != NULL, "%s", rt.error_msg);
+
+    WASM_CHECK_OK(t, wasm_global_set_at(a, 0, wasm_i32(21)));
+    WL_CHECK(t, wasm_global_set_at(a, 1, wasm_i32(6)) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_global_set_at(a, 0, wasm_i64(21)) == WASM_ERR_TYPE_MISMATCH);
+    WASM_CHECK_OK(t, wasm_global_get_at(a, 1, &value));
+    WL_CHECK(t, value.of.i32 == 5);
+    WL_CHECK(t, wasm_global_get_at(a, 2, &value) == WASM_ERR_MALFORMED);
+
+    WL_CHECK(t, wasm_table_size(a, 0) == 2u);
+    WASM_CHECK_OK(t, wasm_table_get(a, 0, 0, &ref));
+    arg = wasm_i32(5);
+    WASM_CHECK_OK(t, wasm_call_ref(&rt, ref, &arg, 1, &result, 1));
+    WL_CHECK(t, result.of.i32 == 10);
+    WASM_CHECK_OK(t, wasm_table_get(a, 0, 1, &value));
+    WL_CHECK(t, wasm_call_ref(&rt, value, &arg, 1, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_table_grow(a, 0, 1, ref) == 2);
+    WL_CHECK(t, wasm_table_grow(a, 0, 1, wasm_i32(0)) == -1);
+    WASM_CHECK_OK(t, wasm_table_set(a, 0, 1, ref));
+    WL_CHECK(t, wasm_table_set(a, 0, 1, wasm_i32(0)) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_table_get(a, 0, 3, &value) == WASM_ERR_OUT_OF_BOUNDS);
+
+    if (b) {
+        WASM_CHECK_OK(t, wasm_call(b, "run", NULL, 0, &result, 1));
+        WL_CHECK_MSG(t, result.of.i32 == 42 + 100 + 3, "expected 145, got %d", (int)result.of.i32);
+        wasm_free_module(b);
+    }
+    wasm_free_module(a);
+    if (c) {
+        arg = wasm_i32(4);
+        WL_CHECK(t, wasm_call(c, "call_double", &arg, 1, &result, 1) == WASM_ERR_TRAP);
+        WL_CHECK_MSG(t, strstr(rt.error_msg, "freed module") != NULL, "%s", rt.error_msg);
+        wasm_free_module(c);
+    }
+
+    memory = wasm_memory_new(1, 2, 0);
+    table = wasm_table_new(WASM_TYPE_FUNCREF, 1, UINT32_MAX);
+    WL_CHECK(t, memory != NULL && table != NULL);
+    memset(&memory_import, 0, sizeof(memory_import));
+    memory_import.module = "host";
+    memory_import.name = "mem";
+    memory_import.memory = memory;
+    memset(&table_import, 0, sizeof(table_import));
+    table_import.module = "host";
+    table_import.name = "tab";
+    table_import.table = table;
+    WASM_CHECK_OK(t, wasm_register_memory_import(&rt, &memory_import));
+    WASM_CHECK_OK(t, wasm_register_table_import(&rt, &table_import));
+    e = wasm_load(&rt, e_bytes, sizeof(e_bytes));
+    WL_CHECK_MSG(t, e != NULL, "%s", rt.error_msg);
+    if (e) {
+        arg = wasm_i32(1);
+        WASM_CHECK_OK(t, wasm_call(e, "grow_mem", &arg, 1, &result, 1));
+        WL_CHECK(t, result.of.i32 == 1 && memory->pages == 2u);
+        WASM_CHECK_OK(t, wasm_call(e, "grow_mem", &arg, 1, &result, 1));
+        WL_CHECK(t, result.of.i32 == -1);
+        arg = wasm_i32(3);
+        WASM_CHECK_OK(t, wasm_call(e, "grow_tab", &arg, 1, &result, 1));
+        WL_CHECK(t, result.of.i32 == 1 && table->size == 4u);
+        wasm_free_module(e);
+    }
+    wasm_memory_free(memory);
+    wasm_table_free(table);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_backtraces_name_modules_and_functions) {
+    /* (module $demo (func $inner unreachable) (func $outer (export "outer") call $inner)) */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
+        0x00, 0x07, 0x09, 0x01, 0x05, 0x6f, 0x75, 0x74, 0x65, 0x72, 0x00, 0x01, 0x0a, 0x0a, 0x02, 0x03, 0x00, 0x00,
+        0x0b, 0x04, 0x00, 0x10, 0x00, 0x0b, 0x00, 0x1d, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x05, 0x04, 0x64, 0x65,
+        0x6d, 0x6f, 0x01, 0x0f, 0x02, 0x00, 0x05, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x01, 0x05, 0x6f, 0x75, 0x74, 0x65,
+        0x72,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_module_t* frame_module = NULL;
+    uint32_t func_idx = 0;
+    char trace[256];
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm_module_name(m) && strcmp(wasm_module_name(m), "demo") == 0);
+    WL_CHECK(t, wasm_func_name(m, 1) && strcmp(wasm_func_name(m, 1), "outer") == 0);
+    WL_CHECK(t, wasm_func_name(m, 2) == NULL);
+
+    WL_CHECK(t, wasm_call(m, "outer", NULL, 0, NULL, 0) == WASM_ERR_UNREACHABLE);
+    WASM_CHECK_OK(t, wasm_get_call_frame_info(&rt, 0, &frame_module, &func_idx, NULL));
+    WL_CHECK(t, frame_module == m && func_idx == 0u);
+    wasm_dump_backtrace(&rt, trace, sizeof(trace));
+    WL_CHECK_MSG(t, strstr(trace, "#0 demo!inner (func[0]) at offset") != NULL &&
+                        strstr(trace, "#1 demo!outer (func[1]) at offset") != NULL,
+                 "unexpected backtrace:\n%s", trace);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_gc_collects_unreachable_externref_boxes_and_exnrefs) {
     /* boxes(n) converts n i31refs to externref and keeps one boxed struct alive;
      * exns(n) catches n exceptions with catch_all_ref and drops each exnref. */
@@ -16083,7 +16392,11 @@ int main(void) {
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
+        { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
+        { "public api: register_module links instances; table, global, funcref, and host object APIs", test_register_module_links_instances_and_host_objects },
+        { "backtrace: frames name their module and function from the name section", test_backtraces_name_modules_and_functions },
         { "gc: unreachable externref boxes and exnrefs are freed", test_gc_collects_unreachable_externref_boxes_and_exnrefs },
+        { "gc: bulk instructions pay fuel for their size; array.new and held values stay rooted", test_bulk_fuel_and_array_new_rooting },
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },

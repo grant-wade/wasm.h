@@ -213,7 +213,7 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Custom Page Sizes | Implemented, opt-in (`WASM_FEATURE_CUSTOM_PAGE_SIZES`) |
 | Compact Import Section | Implemented, opt-in (`WASM_FEATURE_COMPACT_IMPORTS`) |
 | Threads | Implemented, opt-in (`WASM_FEATURE_THREADS`); see [Threads](docs/EMBEDDING.md#threads) |
-| Extended Name Section | Not applicable: name sections are ignored, so malformed ones never reject a module |
+| Extended Name Section | Not applicable: only module and function names are read, for backtraces, and malformed name sections never reject a module |
 | Branch Hinting | Not implemented |
 
 Opt-in proposals have not been standardized yet; enable them with `wasm_enable_feature` or `wasm_enable_all_features`.

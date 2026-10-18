@@ -36,6 +36,7 @@ pub const Error = error{
     OutOfFuel,
     Trap,
     Exit,
+    Interrupted,
 };
 
 const error_codes = .{
@@ -61,6 +62,7 @@ const error_codes = .{
     .{ c.WASM_ERR_OUT_OF_FUEL, error.OutOfFuel },
     .{ c.WASM_ERR_TRAP, error.Trap },
     .{ c.WASM_ERR_EXIT, error.Exit },
+    .{ c.WASM_ERR_INTERRUPTED, error.Interrupted },
 };
 
 fn check(code: c.wasm_error_t) Error!void {
@@ -344,6 +346,7 @@ pub const Config = struct {
     max_call_depth: ?u32 = null,
     max_labels: ?u32 = null,
     initial_gc_heap_size: ?usize = null,
+    /// Bytes per block of call frame storage; blocks are added as calls nest.
     frame_arena_size: ?usize = null,
     /// Defer validating each function body until its first call.
     lazy_validation: ?bool = null,
@@ -351,6 +354,8 @@ pub const Config = struct {
     max_function_locals: ?u32 = null,
     /// Bytes per linear memory, at instantiation and on growth; 0 is unlimited.
     max_memory_bytes: ?u64 = null,
+    /// Bytes across the linear memories the runtime's modules define; 0 is unlimited.
+    max_total_memory_bytes: ?u64 = null,
     /// Elements per table, at instantiation and on growth; 0 is unlimited.
     max_table_elements: ?u64 = null,
 };
@@ -447,8 +452,16 @@ pub const TypeKind = enum(c.wasm_comptype_kind_t) {
 };
 
 pub const CallFrame = struct {
+    module: ?*Module,
     func_index: u32,
     offset: u32,
+
+    /// The function's name from its module's "name" section.
+    pub fn funcName(frame: CallFrame) ?[:0]const u8 {
+        const mod = frame.module orelse return null;
+        const name = c.wasm_func_name(mod.raw(), frame.func_index) orelse return null;
+        return span(name);
+    }
 };
 
 fn span(ptr: [*c]const u8) [:0]const u8 {
@@ -468,6 +481,7 @@ pub const Runtime = opaque {
         if (config.lazy_validation) |v| cfg.lazy_validation = @intFromBool(v);
         if (config.max_function_locals) |v| cfg.max_function_locals = v;
         if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
+        if (config.max_total_memory_bytes) |v| cfg.max_total_memory_bytes = v;
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
         const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
         check(c.wasm_runtime_last_error(rt.raw())) catch |err| {
@@ -632,9 +646,26 @@ pub const Runtime = opaque {
         c.wasm_gc_collect(rt.raw());
     }
 
+    /// Keeps `value` alive across collections until `release`. Read it through the returned
+    /// pointer, which collections update when they move the object.
+    pub fn hold(rt: *Runtime, value: Value) Error!*Value {
+        const held = c.wasm_ref_hold(rt.raw(), value.toC()) orelse return error.OutOfMemory;
+        return @ptrCast(held);
+    }
+
+    pub fn release(rt: *Runtime, held: *Value) void {
+        c.wasm_ref_release(rt.raw(), @ptrCast(held));
+    }
+
     /// Limits execution to `fuel` units; calls fail with `error.OutOfFuel` once it runs out.
     pub fn setFuel(rt: *Runtime, fuel_units: u64) void {
         c.wasm_set_fuel(rt.raw(), fuel_units);
+    }
+
+    /// Makes the running call, or the next one, fail with `error.Interrupted` at its next loop
+    /// iteration, function entry, atomic wait, or WASI sleep. Safe to call from any thread.
+    pub fn interrupt(rt: *Runtime) void {
+        c.wasm_runtime_interrupt(rt.raw());
     }
 
     /// Stops metering until `setFuel` is called again.
@@ -664,7 +695,9 @@ pub const Runtime = opaque {
 
     pub fn callFrame(rt: *Runtime, depth: u32) ?CallFrame {
         var frame: CallFrame = undefined;
-        check(c.wasm_get_call_frame_info(rt.raw(), depth, &frame.func_index, &frame.offset)) catch return null;
+        var mod: ?*c.wasm_module_t = null;
+        check(c.wasm_get_call_frame_info(rt.raw(), depth, &mod, &frame.func_index, &frame.offset)) catch return null;
+        frame.module = @ptrCast(mod);
         return frame;
     }
 };
@@ -1043,7 +1076,7 @@ pub const SharedMemory = opaque {
     }
 
     pub fn deinit(memory: *SharedMemory) void {
-        c.wasm_shared_memory_free(memory.raw());
+        c.wasm_memory_free(memory.raw());
     }
 
     pub fn raw(memory: *SharedMemory) *c.wasm_memory_t {

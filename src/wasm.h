@@ -197,7 +197,9 @@ typedef enum wasm_error_t {
     WASM_ERR_OUT_OF_FUEL,
     WASM_ERR_TRAP,
     /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
-    WASM_ERR_EXIT
+    WASM_ERR_EXIT,
+    /* The host stopped execution with wasm_runtime_interrupt. */
+    WASM_ERR_INTERRUPTED
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -612,11 +614,7 @@ typedef struct wasm__exception_state_t {
 #define WASM_MAX_TABLE_ELEMENTS 10000000u
 #endif
 #ifndef WASM_FRAME_ARENA_SIZE
-#define WASM_FRAME_ARENA_SIZE                                           \
-        ((((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u) >                   \
-            (size_t)(4u * 1024u * 1024u))                                     \
-                 ? ((size_t)WASM_MAX_CALL_DEPTH * (size_t)1024u)                \
-                 : (size_t)(4u * 1024u * 1024u))
+#define WASM_FRAME_ARENA_SIZE (256u * 1024u)
 #endif
 
 typedef struct wasm_config_t {
@@ -624,11 +622,12 @@ typedef struct wasm_config_t {
     uint32_t max_call_depth;
     uint32_t max_labels;
     size_t initial_gc_heap_size;
-    size_t frame_arena_size;
+    size_t frame_arena_size; /* bytes per block of call frame storage; blocks are added as calls nest */
     int lazy_validation;
     /* Limits for untrusted modules; 0 means unlimited. */
     uint32_t max_function_locals; /* locals per function, parameters included */
     uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
+    uint64_t max_total_memory_bytes; /* bytes across the linear memories the runtime's modules define */
     uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
 } wasm_config_t;
 
@@ -643,6 +642,10 @@ const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
 int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
+/* Asks the call running in rt to stop with WASM_ERR_INTERRUPTED; safe to call from any thread.
+   Execution stops at the next loop iteration, function entry, atomic wait, or WASI sleep. If no
+   call is running, the next one stops at its first such point. */
+void wasm_runtime_interrupt(wasm_runtime_t* rt);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
@@ -650,10 +653,19 @@ wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_i
 wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_import_t* imp);
 wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_import_t* imp);
 wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_t* imp);
+/* Makes every export of mod, an instance in rt, importable by modules loaded later under the
+   module name name. Imports bind to mod's own functions, globals, tables, memories, and tags, so
+   mod must outlive the modules that import from it; calls into a freed mod trap. */
+wasm_error_t wasm_register_module(wasm_runtime_t* rt, const char* name, wasm_module_t* mod);
 void wasm_enable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
+/* Keeps a reference alive across collections until wasm_ref_release. Returns a slot holding the
+   value, which collections update when they move the object; read the reference from the slot
+   each time it is used. Returns NULL when out of memory. */
+wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value);
+void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
 /* Decodes and validates a module without resolving imports, allocating memories or tables, or
    running code. The result supports the introspection functions but cannot be called; pass it
@@ -670,6 +682,10 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results);
 wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char* fmt, ...);
+/* Calls the function a funcref refers to, such as one read from a table or returned by a call. */
+wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
+                           const wasm_value_t* args, uint32_t num_args,
+                           wasm_value_t* results, uint32_t num_results);
 wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                  const char* func_name, const char* fmt,
                                  wasm_host_func_t callback, void* userdata);
@@ -695,20 +711,37 @@ uint64_t wasm_memory_size_at(wasm_module_t* mod, uint32_t memory_index);
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 uint8_t* wasm_memory_data(wasm_module_t* mod);
 uint64_t wasm_memory_size(wasm_module_t* mod);
+/* Creates a zeroed memory for hosts to register with wasm_register_memory_import. It must outlive
+   every module that imports it. Growth reallocates its data with WASM_REALLOC. */
+wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
 /* Creates a shared memory (threads proposal) for hosts to register as an import in several runtimes,
    each used by its own thread. It must outlive every module that imports it. */
 wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
-void wasm_shared_memory_free(wasm_memory_t* memory);
+/* Frees a memory from wasm_memory_new or wasm_shared_memory_new. */
+void wasm_memory_free(wasm_memory_t* memory);
 int64_t wasm_memory_grow(wasm_module_t* mod, uint64_t delta_pages);
 uint32_t wasm_table_count(wasm_module_t* mod);
 wasm_table_t* wasm_table_ref_at(wasm_module_t* mod, uint32_t table_idx);
 wasm_valtype_t wasm_table_type(wasm_module_t* mod, uint32_t table_idx);
 const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx);
+uint64_t wasm_table_size(wasm_module_t* mod, uint32_t table_idx);
+wasm_error_t wasm_table_get(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val);
+/* Stores val, which must match the table's element type. */
+wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t val);
+/* Adds delta elements set to init and returns the previous size, or -1 if the table cannot grow. */
+int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
+/* Creates a table of size null references for hosts to register with wasm_register_table_import;
+   max_size UINT32_MAX means no maximum. It must outlive every module that imports it. */
+wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size);
+void wasm_table_free(wasm_table_t* table);
 uint32_t wasm_global_count(wasm_module_t* mod);
 wasm_valtype_t wasm_global_type(wasm_module_t* mod, uint32_t global_idx);
 const wasm_reftype_t* wasm_global_reftype(wasm_module_t* mod, uint32_t global_idx);
 int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx);
 wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx);
+wasm_error_t wasm_global_get_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
+/* Fails with WASM_ERR_TYPE_MISMATCH for immutable globals and values of the wrong type. */
+wasm_error_t wasm_global_set_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val);
 wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val);
 wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t val);
 uint32_t wasm_import_count(wasm_module_t* mod);
@@ -734,6 +767,9 @@ const wasm_fieldtype_t* wasm_struct_type_field(wasm_module_t* mod, uint32_t type
                                                uint32_t field_idx);
 const wasm_fieldtype_t* wasm_array_type_field(wasm_module_t* mod, uint32_t type_idx);
 uint32_t wasm_func_count(wasm_module_t* mod);
+/* Names from the module's "name" custom section, or NULL when it has none. */
+const char* wasm_func_name(wasm_module_t* mod, uint32_t func_idx);
+const char* wasm_module_name(wasm_module_t* mod);
 const wasm_functype_t* wasm_func_functype(wasm_module_t* mod, uint32_t func_idx);
 uint32_t wasm_func_param_count(wasm_module_t* mod, uint32_t func_idx);
 uint32_t wasm_func_result_count(wasm_module_t* mod, uint32_t func_idx);
@@ -761,7 +797,10 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
                                  uint32_t index, wasm_value_t val);
 void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size);
 uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt);
-wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
+/* Describes the frame depth levels below the innermost one of the running or last trapped call:
+   its module, function index, and byte offset within the function's body. Outputs may be NULL;
+   the module stays valid only while it is not freed. */
+wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
                                       uint32_t* out_func_idx, uint32_t* out_offset);
 void wasm_set_fuel(wasm_runtime_t* rt, uint64_t fuel);
 /* Stops metering; calls run without a budget until wasm_set_fuel is called again. */

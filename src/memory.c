@@ -5,6 +5,7 @@
 #include "types/canonical.h"
 #include "types/references.h"
 #include "runtime.h"
+#include "values.h"
 #include "internal/alloc.h"
 #include "atomics.h"
 #include "platform/threads.h"
@@ -176,6 +177,12 @@ int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t 
     np = old + delta_pages;
     if (mod->rt && mod->rt->max_memory_bytes != 0 && np > mod->rt->max_memory_bytes / wasm__memory_page_size(memory))
         return -1;
+    if (mod->rt && mod->rt->max_total_memory_bytes != 0) {
+        uint64_t total = wasm__runtime_memory_bytes(mod->rt);
+        uint64_t limit = mod->rt->max_total_memory_bytes;
+
+        if (total > limit || delta_pages > (limit - total) / wasm__memory_page_size(memory)) return -1;
+    }
     if (memory->is_shared) return wasm__shared_memory_grow(memory, delta_pages);
     if (np > memory->max_pages) return -1;
     memory->pages = old;
@@ -228,6 +235,56 @@ const wasm_reftype_t* wasm_table_reftype(wasm_module_t* mod, uint32_t table_idx)
     return table ? &table->reftype_info : NULL;
 }
 
+static wasm_table_t* wasm__api_table(wasm_module_t* mod, uint32_t table_idx) {
+    wasm_table_t* table = (mod && !mod->is_compiled) ? wasm__table_at(mod, table_idx) : NULL;
+
+    if (!table && mod && mod->rt) WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "table %u not found", (unsigned)table_idx);
+    return table;
+}
+
+uint64_t wasm_table_size(wasm_module_t* mod, uint32_t table_idx) {
+    wasm_table_t* table = (mod && !mod->is_compiled) ? wasm__table_at(mod, table_idx) : NULL;
+
+    return table ? table->size : 0;
+}
+
+wasm_error_t wasm_table_get(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t* out_val) {
+    wasm_table_t* table = wasm__api_table(mod, table_idx);
+
+    if (!table || !out_val) return WASM_ERR_MALFORMED;
+    if (index >= table->size) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
+        return WASM_ERR_OUT_OF_BOUNDS;
+    }
+    *out_val = table->elems[index];
+    return WASM_OK;
+}
+
+wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t val) {
+    wasm_table_t* table = wasm__api_table(mod, table_idx);
+
+    if (!table) return WASM_ERR_MALFORMED;
+    if (index >= table->size) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
+        return WASM_ERR_OUT_OF_BOUNDS;
+    }
+    if (!wasm__runtime_value_matches_type(mod, &val, table->reftype, &table->reftype_info)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    table->elems[index] = val;
+    return WASM_OK;
+}
+
+int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init) {
+    wasm_table_t* table = wasm__api_table(mod, table_idx);
+    uint64_t old_size;
+
+    if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    old_size = wasm__table_grow(mod->rt, table, delta, init);
+    return old_size == UINT64_MAX ? -1 : (int64_t)old_size;
+}
+
 uint32_t wasm_global_count(wasm_module_t* mod) {
     return mod ? mod->num_globals : 0;
 }
@@ -253,6 +310,38 @@ wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx) 
     if (!mod || mod->is_compiled || global_idx >= mod->num_globals) return NULL;
     global = &mod->globals[global_idx];
     return global->is_import ? global->import_value : &global->value;
+}
+
+static wasm_global_t* wasm__api_global(wasm_module_t* mod, uint32_t global_idx) {
+    if (!mod || mod->is_compiled || global_idx >= mod->num_globals) {
+        if (mod && mod->rt) WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "global %u not found", (unsigned)global_idx);
+        return NULL;
+    }
+    return &mod->globals[global_idx];
+}
+
+wasm_error_t wasm_global_get_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val) {
+    wasm_global_t* global = wasm__api_global(mod, global_idx);
+
+    if (!global || !out_val) return WASM_ERR_MALFORMED;
+    *out_val = wasm__global_get_value(global);
+    return WASM_OK;
+}
+
+wasm_error_t wasm_global_set_at(wasm_module_t* mod, uint32_t global_idx, wasm_value_t val) {
+    wasm_global_t* global = wasm__api_global(mod, global_idx);
+
+    if (!global) return WASM_ERR_MALFORMED;
+    if (!global->is_mutable) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)global_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    if (!wasm__runtime_value_matches_type(mod, &val, global->type, &global->ref_type)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global %u type mismatch", (unsigned)global_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    wasm__global_set_value(global, val);
+    return WASM_OK;
 }
 
 wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t* out_val) {
@@ -493,6 +582,22 @@ const wasm_functype_t* wasm_tag_functype(wasm_module_t* mod, uint32_t tag_idx) {
     return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
 }
 
+wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
+    wasm_memory_t* memory;
+
+    if (pages > max_pages) return NULL;
+    memory = (wasm_memory_t*)WASM_CALLOC(1u, sizeof(*memory));
+    if (!memory) return NULL;
+    memory->pages = pages;
+    memory->max_pages = max_pages;
+    memory->is_64 = is_64 != 0;
+    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory, 0) != WASM_OK) {
+        WASM_FREE(memory);
+        return NULL;
+    }
+    return memory;
+}
+
 wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
     wasm_memory_t* memory;
 
@@ -503,15 +608,45 @@ wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is
     memory->max_pages = max_pages;
     memory->is_64 = is_64 != 0;
     memory->is_shared = 1;
-    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory) != WASM_OK) {
+    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory, 0) != WASM_OK) {
         WASM_FREE(memory);
         return NULL;
     }
     return memory;
 }
 
-void wasm_shared_memory_free(wasm_memory_t* memory) {
+void wasm_memory_free(wasm_memory_t* memory) {
     if (!memory) return;
     wasm__free_memory(memory);
     WASM_FREE(memory);
+}
+
+wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size) {
+    wasm_table_t* table;
+    uint32_t i;
+
+    if (!wasm__is_ref_type(elem_type) || size > max_size) return NULL;
+    table = (wasm_table_t*)WASM_CALLOC(1u, sizeof(*table));
+    if (!table) return NULL;
+    table->reftype = elem_type;
+    table->reftype_info.type = elem_type;
+    table->reftype_info.nullable = 1;
+    table->default_value = wasm_ref_null(elem_type);
+    table->size = size;
+    table->max_size = max_size;
+    if (size > 0) {
+        table->elems = (wasm_value_t*)wasm__malloc_array(size, sizeof(wasm_value_t));
+        if (!table->elems) {
+            WASM_FREE(table);
+            return NULL;
+        }
+        for (i = 0; i < size; i++) table->elems[i] = table->default_value;
+    }
+    return table;
+}
+
+void wasm_table_free(wasm_table_t* table) {
+    if (!table) return;
+    WASM_FREE(table->elems);
+    WASM_FREE(table);
 }

@@ -103,6 +103,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
             if (subop == 0x08) {
                 count = wasm__read_leb128_u32(&cf->r);
+                WASM__CHARGE_ELEMS(rt, count);
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
                 for (i = count; i > 0; i--) {
@@ -119,12 +120,15 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (subop == 0x06) {
                     wasm_value_t init_value;
 
-                    length_value = WASM__POP(rt);
-                    init_value = WASM__POP(rt);
+                    length_value = WASM__PEEK(rt);
                     if (length_value.of.i32 < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                     count = (uint32_t)length_value.of.i32;
+                    WASM__CHARGE_ELEMS(rt, count);
+                    /* Allocate while the initial value is still on the stack, where a collection can see it. */
                     object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                     if (!object) WASM__TRAP(WASM_ERR_OOM);
+                    rt->sp--;
+                    init_value = WASM__POP(rt);
                     for (i = 0; i < count; i++) {
                         err = wasm__gc_array_set(object, atype, i, init_value);
                         if (err != WASM_OK) goto cleanup;
@@ -133,6 +137,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     length_value = WASM__POP(rt);
                     if (length_value.of.i32 < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                     count = (uint32_t)length_value.of.i32;
+                    WASM__CHARGE_ELEMS(rt, count);
                     object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                     if (!object) WASM__TRAP(WASM_ERR_OOM);
                     for (i = 0; i < count; i++) {
@@ -166,6 +171,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 src_offset = (uint64_t)(uint32_t)offset_value.of.i32;
                 if (!wasm__range_in_bounds_u64(src_offset, byte_count, segment->size))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
 
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
@@ -200,6 +206,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (!segment->is_passive) WASM__TRAP(WASM_ERR_TRAP);
                 if (!wasm__range_in_bounds_u64(src_offset, count, segment->num_elems))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
 
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
@@ -301,6 +308,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 dst_index = (uint32_t)dst_value.of.i32;
                 if (!wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
                 for (i = 0; i < count; i++) {
                     err = wasm__gc_array_set(object, atype, dst_index + i, fill_value);
                     if (err != WASM_OK) goto cleanup;
@@ -345,6 +353,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (!wasm__range_in_bounds_u64(src_index, count, src_object->length) ||
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
 
                 if (count > 0 && object == src_object && dst_index > src_index) {
                     for (i = count; i > 0; i--) {
@@ -401,6 +410,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (!wasm__range_in_bounds_u64(src_offset, byte_count, segment->size) ||
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
 
                 for (i = 0; i < count; i++) {
                     wasm_value_t elem_value;
@@ -443,6 +453,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (!wasm__range_in_bounds_u64(src_index, count, segment->num_elems) ||
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                WASM__CHARGE_ELEMS(rt, count);
 
                 for (i = 0; i < count; i++) {
                     err = wasm__gc_array_set(object, atype, dst_index + i, segment->elems[src_index + i]);

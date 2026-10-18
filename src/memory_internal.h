@@ -50,7 +50,17 @@ WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
                                        uint64_t offset,
                                        uint64_t* out_addr);
 
-WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory);
+/* Allocates a memory's storage. A shared memory reserves room to grow, but no more than
+ * limit_bytes beyond its initial size when limit_bytes is nonzero. */
+WASM_PRIVATE wasm_error_t wasm__init_memory_storage(wasm_memory_t* memory, uint64_t limit_bytes);
+
+/* Grows table by delta elements set to init, within its maximum and rt's element limit. Returns
+ * the previous size, or UINT64_MAX when the table cannot grow. init must match the table's type. */
+WASM_PRIVATE uint64_t wasm__table_grow(const wasm_runtime_t* rt, wasm_table_t* table, uint64_t delta,
+                                       wasm_value_t init);
+
+/* Bytes across the linear memories that rt's modules define, not counting imported ones. */
+WASM_PRIVATE uint64_t wasm__runtime_memory_bytes(const wasm_runtime_t* rt);
 
 WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table);
 

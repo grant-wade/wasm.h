@@ -779,6 +779,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_random_get(wasm_module_t* mod,
 #define WASM__WASI_EVENTTYPE_FD_WRITE 2u
 #define WASM__WASI_SUBCLOCKFLAGS_ABSTIME 1u
 #define WASM__WASI_CLOCK_COUNT 4u
+#define WASM__WASI_SLEEP_SLICE_NS UINT64_C(10000000)
 
 /* Nanoseconds until a clock subscription fires, measured from the snapshot in now; returns a WASI errno. */
 static uint32_t wasm__wasi_clock_remaining(const uint8_t* subscription, const uint64_t* now,
@@ -806,6 +807,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
     uint64_t now[WASM__WASI_CLOCK_COUNT];
     int now_ok[WASM__WASI_CLOCK_COUNT];
     uint64_t wait_ns = UINT64_MAX;
+    uint64_t slept;
     uint32_t in_ptr;
     uint32_t out_ptr;
     uint32_t count;
@@ -854,9 +856,16 @@ WASM_PRIVATE wasm_error_t wasm__wasi_poll_oneoff(wasm_module_t* mod,
         }
     }
     if (fd_ready) wait_ns = 0u;
-    if (wait_ns > 0u && !wasm__platform_sleep_ns(wait_ns)) {
-        wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTSUP);
-        return WASM_OK;
+    /* Sleep in slices so wasm_runtime_interrupt can stop a long sleep. */
+    for (slept = 0u; slept < wait_ns;) {
+        uint64_t slice = wait_ns - slept < WASM__WASI_SLEEP_SLICE_NS ? wait_ns - slept : WASM__WASI_SLEEP_SLICE_NS;
+
+        if (wasm__runtime_take_interrupt(mod->rt)) return WASM_ERR_INTERRUPTED;
+        if (!wasm__platform_sleep_ns(slice)) {
+            wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTSUP);
+            return WASM_OK;
+        }
+        slept += slice;
     }
 
     for (i = 0; i < count; i++) {

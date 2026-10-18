@@ -54,6 +54,7 @@
 #include "exec/atomic.c"
 #include "exec/interpreter.c"
 #include "call.c"
+#include "link.c"
 #include "platform/wasi_state.c"
 #include "platform/wasi_io.c"
 #include "platform/wasi_fd.c"

@@ -1,5 +1,7 @@
 #include "runtime.h"
 #include "handles.h"
+#include "atomics.h"
+#include "platform/threads.h"
 #include "values.h"
 #include "module.h"
 #include "types/canonical.h"
@@ -161,6 +163,19 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     return WASM_OK;
 }
 
+void wasm_runtime_interrupt(wasm_runtime_t* rt) {
+    if (!rt) return;
+    wasm__atomic_store_size(&rt->interrupt_requested, 1u);
+    wasm__platform_atomic_wake_all();
+}
+
+WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt) {
+    if (!rt || wasm__atomic_load_size(&rt->interrupt_requested) == 0u) return 0;
+    wasm__atomic_store_size(&rt->interrupt_requested, 0u);
+    WASM__SET_ERR(rt, WASM_ERR_INTERRUPTED, "%s", "execution interrupted by the host");
+    return 1;
+}
+
 #define WASM__HANDLE_GC_MIN_THRESHOLD 1024u
 
 WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
@@ -239,43 +254,83 @@ WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
     return object;
 }
 
+/* Block storage starts this far into a block, and allocations are aligned to it. */
+#define WASM__ARENA_ALIGN ((size_t)16u)
+#define WASM__ARENA_HEADER \
+    ((sizeof(wasm__arena_chunk_t) + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN)
+
 WASM_PRIVATE void wasm__arena_destroy(wasm_runtime_t* rt) {
-    WASM_FREE(rt->frame_arena);
-    rt->frame_arena = NULL;
+    while (rt->frame_arena) {
+        wasm__arena_chunk_t* prev = rt->frame_arena->prev;
+
+        WASM_FREE(rt->frame_arena);
+        rt->frame_arena = prev;
+    }
+    WASM_FREE(rt->frame_arena_spare);
+    rt->frame_arena_spare = NULL;
     rt->frame_arena_size = 0;
-    rt->frame_arena_offset = 0;
+}
+
+static wasm__arena_chunk_t* wasm__arena_new_chunk(wasm_runtime_t* rt, size_t min_size) {
+    wasm__arena_chunk_t* chunk = rt->frame_arena_spare;
+    size_t size = min_size > rt->frame_arena_size ? min_size : rt->frame_arena_size;
+
+    if (chunk && chunk->size >= size) {
+        rt->frame_arena_spare = NULL;
+    } else {
+        if (size > SIZE_MAX - WASM__ARENA_HEADER) return NULL;
+        chunk = (wasm__arena_chunk_t*)WASM_MALLOC(WASM__ARENA_HEADER + size);
+        if (!chunk) return NULL;
+        chunk->size = size;
+    }
+    chunk->prev = rt->frame_arena;
+    chunk->used = 0;
+    rt->frame_arena = chunk;
+    return chunk;
 }
 
 WASM_PRIVATE wasm_error_t wasm__arena_init(wasm_runtime_t* rt, size_t size) {
     wasm__arena_destroy(rt);
-    if (size == 0) return WASM_OK;
-
-    rt->frame_arena = (uint8_t*)WASM_MALLOC(size);
-    if (!rt->frame_arena) return WASM_ERR_OOM;
-
     rt->frame_arena_size = size;
-    rt->frame_arena_offset = 0;
-    return WASM_OK;
+    if (size == 0) return WASM_OK;
+    return wasm__arena_new_chunk(rt, size) ? WASM_OK : WASM_ERR_OOM;
 }
 
 WASM_PRIVATE void* wasm__arena_alloc(wasm_runtime_t* rt, size_t size) {
-    size_t alignment = sizeof(void*);
-    size_t aligned_offset = rt->frame_arena_offset;
+    wasm__arena_chunk_t* chunk = rt->frame_arena;
+    size_t aligned;
 
-    if (!rt->frame_arena) return NULL;
-    if (alignment > 1) {
-        size_t remainder = aligned_offset % alignment;
-        if (remainder != 0) aligned_offset += alignment - remainder;
+    if (size > SIZE_MAX - WASM__ARENA_ALIGN) return NULL;
+    aligned = (size + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN;
+    if (!chunk || aligned > chunk->size - chunk->used) {
+        chunk = wasm__arena_new_chunk(rt, aligned);
+        if (!chunk) return NULL;
     }
-    if (aligned_offset > rt->frame_arena_size || size > rt->frame_arena_size - aligned_offset)
-        return NULL;
-
-    rt->frame_arena_offset = aligned_offset + size;
-    return rt->frame_arena + aligned_offset;
+    chunk->used += aligned;
+    return (uint8_t*)chunk + WASM__ARENA_HEADER + (chunk->used - aligned);
 }
 
-WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, size_t saved_offset) {
-    if (saved_offset <= rt->frame_arena_size) rt->frame_arena_offset = saved_offset;
+WASM_PRIVATE wasm__arena_mark_t wasm__arena_mark(const wasm_runtime_t* rt) {
+    wasm__arena_mark_t mark;
+
+    mark.chunk = rt->frame_arena;
+    mark.used = rt->frame_arena ? rt->frame_arena->used : 0u;
+    return mark;
+}
+
+WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
+    while (rt->frame_arena && rt->frame_arena != mark.chunk) {
+        wasm__arena_chunk_t* chunk = rt->frame_arena;
+
+        rt->frame_arena = chunk->prev;
+        if (rt->frame_arena_spare && rt->frame_arena_spare->size >= chunk->size) {
+            WASM_FREE(chunk);
+        } else {
+            WASM_FREE(rt->frame_arena_spare);
+            rt->frame_arena_spare = chunk;
+        }
+    }
+    if (rt->frame_arena) rt->frame_arena->used = mark.used;
 }
 
 void wasm_config_default(wasm_config_t* config) {
@@ -289,6 +344,7 @@ void wasm_config_default(wasm_config_t* config) {
     config->lazy_validation = 0;
     config->max_function_locals = WASM_MAX_FUNCTION_LOCALS;
     config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
+    config->max_total_memory_bytes = 0;
     config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
 }
 
@@ -317,9 +373,14 @@ static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth)
     if (!rt->backtrace_func_indices) return WASM_ERR_OOM;
 
     rt->backtrace_offsets = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_offsets));
-    if (!rt->backtrace_offsets) {
+    rt->backtrace_modules = (wasm_module_t**)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_modules));
+    if (!rt->backtrace_offsets || !rt->backtrace_modules) {
         WASM_FREE(rt->backtrace_func_indices);
+        WASM_FREE(rt->backtrace_offsets);
+        WASM_FREE(rt->backtrace_modules);
         rt->backtrace_func_indices = NULL;
+        rt->backtrace_offsets = NULL;
+        rt->backtrace_modules = NULL;
         return WASM_ERR_OOM;
     }
 
@@ -330,8 +391,10 @@ static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth)
 static void wasm__backtrace_destroy(wasm_runtime_t* rt) {
     WASM_FREE(rt->backtrace_func_indices);
     WASM_FREE(rt->backtrace_offsets);
+    WASM_FREE(rt->backtrace_modules);
     rt->backtrace_func_indices = NULL;
     rt->backtrace_offsets = NULL;
+    rt->backtrace_modules = NULL;
     rt->backtrace_depth = 0;
 }
 
@@ -374,6 +437,7 @@ wasm_error_t wasm_init(wasm_runtime_t* rt, const wasm_config_t* config) {
     rt->lazy_validation = cfg.lazy_validation != 0;
     rt->max_function_locals = cfg.max_function_locals;
     rt->max_memory_bytes = cfg.max_memory_bytes;
+    rt->max_total_memory_bytes = cfg.max_total_memory_bytes;
     rt->max_table_elements = cfg.max_table_elements;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
@@ -500,6 +564,18 @@ void wasm_destroy(wasm_runtime_t* rt) {
         if (!exception_object) continue;
         WASM_FREE(exception_object->values);
         WASM_FREE(exception_object);
+    }
+    while (rt->linked_funcs) {
+        wasm__linked_func_t* next = rt->linked_funcs->next;
+
+        WASM_FREE(rt->linked_funcs);
+        rt->linked_funcs = next;
+    }
+    while (rt->held_values) {
+        wasm__held_block_t* next = rt->held_values->next;
+
+        WASM_FREE(rt->held_values);
+        rt->held_values = next;
     }
     wasm__handle_set_free(&rt->exception_objects);
     wasm__handle_set_free(&rt->externref_boxes);

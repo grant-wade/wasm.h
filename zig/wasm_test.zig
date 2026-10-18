@@ -89,6 +89,8 @@ test "traps and fuel" {
     const div = try mod.func("div", fn (i32, i32) i32);
     try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
     try expectError(error.DivByZero, div.call(.{ 1, 0 }));
+    const frame = rt.callFrame(0).?;
+    try expectEqual(@as(?*wasm.Module, mod), frame.module);
     try expectError(error.IntOverflow, div.call(.{ std.math.minInt(i32), -1 }));
     try expect(rt.errorMessage().len > 0);
 
@@ -420,6 +422,12 @@ test "gc structs and arrays" {
     try mod.arraySet(ints, 1, .from(@as(i32, 20)));
     try expectEqual(@as(i32, 20), try (try mod.arrayGet(ints, 1)).to(i32));
     try expectError(error.OutOfBounds, mod.arrayGet(ints, 2));
+
+    // Collection moves objects; only held references stay usable.
+    const held = try rt.hold(point);
+    defer rt.release(held);
+    rt.collectGarbage();
+    try expectEqual(@as(i64, 4), try (try mod.structGet(held.*, 1)).to(i64));
 }
 
 test "value conversions" {

@@ -6,6 +6,8 @@
 #include "types/references.h"
 #include "types/canonical.h"
 #include "module.h"
+#include "reader.h"
+#include "internal/alloc.h"
 #include "internal/gc_types.h"
 #include <stdio.h>
 
@@ -205,6 +207,67 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
     return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
 }
 
+/* Reads the module and function names from the "name" custom section. Names that are malformed,
+ * repeated, or for missing functions are skipped, and parsing stops at the first malformed part. */
+static void wasm__load_names(wasm_module_t* mod) {
+    const uint8_t* data;
+    size_t len = 0;
+    wasm__reader_t r;
+
+    if (mod->names_loaded) return;
+    mod->names_loaded = 1;
+    data = wasm_custom_section_find(mod, "name", &len);
+    if (!data) return;
+    r.ptr = data;
+    r.end = data + len;
+    r.malformed = 0;
+    while (r.ptr < r.end && !r.malformed) {
+        uint8_t id = wasm__read_u8(&r);
+        uint32_t size = wasm__read_leb128_u32(&r);
+        wasm__reader_t sub;
+
+        if (r.malformed || !wasm__has(&r, size)) return;
+        sub.ptr = r.ptr;
+        sub.end = r.ptr + size;
+        sub.malformed = 0;
+        r.ptr += size;
+        if (id == 0u && !mod->module_name) {
+            if (wasm__read_name_owned(&sub, &mod->module_name) != WASM_OK) return;
+        } else if (id == 1u) {
+            uint32_t count = wasm__read_count(&sub);
+            uint32_t i;
+
+            if (sub.malformed || mod->num_funcs == 0) continue;
+            if (!mod->func_names) {
+                mod->func_names = (char**)WASM_CALLOC(mod->num_funcs, sizeof(char*));
+                if (!mod->func_names) return;
+            }
+            for (i = 0; i < count; i++) {
+                uint32_t func_idx = wasm__read_leb128_u32(&sub);
+                char* name = NULL;
+
+                if (sub.malformed || wasm__read_name_owned(&sub, &name) != WASM_OK) return;
+                if (func_idx < mod->num_funcs && !mod->func_names[func_idx])
+                    mod->func_names[func_idx] = name;
+                else
+                    WASM_FREE(name);
+            }
+        }
+    }
+}
+
+const char* wasm_func_name(wasm_module_t* mod, uint32_t func_idx) {
+    if (!mod || func_idx >= mod->num_funcs) return NULL;
+    wasm__load_names(mod);
+    return mod->func_names ? mod->func_names[func_idx] : NULL;
+}
+
+const char* wasm_module_name(wasm_module_t* mod) {
+    if (!mod) return NULL;
+    wasm__load_names(mod);
+    return mod->module_name;
+}
+
 void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
     uint32_t depth;
     size_t used = 0;
@@ -217,15 +280,25 @@ void wasm_dump_backtrace(wasm_runtime_t* rt, char* buffer, size_t buffer_size) {
 
     depth = wasm__visible_call_stack_depth(rt);
     for (i = 0; i < depth; i++) {
+        wasm_module_t* mod = NULL;
         uint32_t func_idx;
         uint32_t offset;
+        const char* module_name;
+        const char* func_name;
         int written;
 
-        if (!wasm__visible_call_frame_info(rt, i, &func_idx, &offset)) break;
+        if (!wasm__visible_call_frame_info(rt, i, &mod, &func_idx, &offset)) break;
+        module_name = wasm_module_name(mod);
+        func_name = wasm_func_name(mod, func_idx);
         written = wasm__snprintf(buffer + used, buffer_size - used,
-                                 "#%u func[%u] at offset 0x%04X%s",
+                                 "#%u %s%s%s%sfunc[%u]%s at offset 0x%04X%s",
                                  (unsigned)i,
+                                 module_name ? module_name : "",
+                                 module_name ? "!" : "",
+                                 func_name ? func_name : "",
+                                 func_name ? " (" : "",
                                  (unsigned)func_idx,
+                                 func_name ? ")" : "",
                                  (unsigned)offset,
                                  (i + 1u < depth) ? "\n" : "");
         if (written < 0) break;
@@ -243,18 +316,13 @@ uint32_t wasm_get_call_stack_depth(wasm_runtime_t* rt) {
     return wasm__visible_call_stack_depth(rt);
 }
 
-wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth,
+wasm_error_t wasm_get_call_frame_info(wasm_runtime_t* rt, uint32_t depth, wasm_module_t** out_module,
                                       uint32_t* out_func_idx, uint32_t* out_offset) {
     uint32_t stack_depth;
 
-    if (!rt || !out_func_idx || !out_offset) {
-        if (rt)
-            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "invalid call frame query arguments");
-        return WASM_ERR_MALFORMED;
-    }
-
+    if (!rt) return WASM_ERR_MALFORMED;
     stack_depth = wasm__visible_call_stack_depth(rt);
-    if (!wasm__visible_call_frame_info(rt, depth, out_func_idx, out_offset)) {
+    if (!wasm__visible_call_frame_info(rt, depth, out_module, out_func_idx, out_offset)) {
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED,
                       "call frame depth %u out of range (depth=%u)",
                       (unsigned)depth, (unsigned)stack_depth);
@@ -409,6 +477,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "out of fuel";
         case WASM_ERR_TRAP:
             return "trap";
+        case WASM_ERR_INTERRUPTED:
+            return "interrupted";
         case WASM_ERR_EXIT:
             return "exit";
     }

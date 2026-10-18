@@ -99,6 +99,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__range_in_bounds_u64(src_offset, len, segment->size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_BYTES(rt, len);
             if (len > 0)
                 memcpy(memory->data + dst_offset, segment->bytes + src_offset, (size_t)len);
             break;
@@ -151,6 +152,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__range_in_bounds_u64(src_offset, len, src_mem_size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_mem_size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_BYTES(rt, len);
             if (len > 0)
                 memmove(dst_memory->data + dst_offset, src_memory->data + src_offset, (size_t)len);
             break;
@@ -174,6 +176,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             len = memory->is_64 ? (uint64_t)count.of.i64 : (uint64_t)(uint32_t)count.of.i32;
             dst_offset = memory->is_64 ? (uint64_t)dst.of.i64 : (uint64_t)(uint32_t)dst.of.i32;
             if (!wasm__range_in_bounds_u64(dst_offset, len, mem_size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_BYTES(rt, len);
             if (len > 0)
                 memset(memory->data + dst_offset, (unsigned char)(value.of.i32 & 0xFF), (size_t)len);
             break;
@@ -216,6 +219,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, table->size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_ELEMS(rt, len);
             if (len > 0) {
                 if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 for (j = 0; j < len; j++) table->elems[dst_offset + j] = segment->elems[src_offset + j];
@@ -267,6 +271,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))
                 WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_ELEMS(rt, len);
             if (len > 0) {
                 if (!dst_table->elems || !src_table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 memmove(dst_table->elems + dst_offset,
@@ -282,10 +287,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             wasm_table_t* table;
             uint64_t old_size;
             uint64_t delta;
-            uint64_t new_size;
-            wasm_value_t* new_elems;
-            uint64_t j;
-            size_t alloc_count;
 
             if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
             table = wasm__table_at(mod, table_idx);
@@ -295,32 +296,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                                                   table->reftype,
                                                   &table->reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-            old_size = table->size;
             delta = wasm__table_index_value(table, &delta_value);
-            if (delta == 0) {
-                WASM__PUSH(rt, wasm__table_index_result(table, old_size));
-                break;
-            }
-            if ((table->max_size != UINT64_MAX && delta > table->max_size - old_size) ||
-                delta > UINT32_MAX - old_size) {
-                WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
-                break;
-            }
-            new_size = old_size + delta;
-            if ((rt->max_table_elements != 0 && new_size > rt->max_table_elements) ||
-                new_size > (uint64_t)(SIZE_MAX / sizeof(wasm_value_t))) {
-                WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
-                break;
-            }
-            alloc_count = (size_t)new_size;
-            new_elems = (wasm_value_t*)wasm__realloc_array(table->elems, alloc_count, sizeof(wasm_value_t));
-            if (!new_elems) {
-                WASM__PUSH(rt, wasm__table_index_result(table, UINT64_MAX));
-                break;
-            }
-            table->elems = new_elems;
-            table->size = (uint32_t)new_size;
-            for (j = old_size; j < new_size; j++) table->elems[j] = init_value;
+            old_size = wasm__table_grow(rt, table, delta, init_value);
+            if (old_size != UINT64_MAX) WASM__CHARGE_ELEMS(rt, delta);
             WASM__PUSH(rt, wasm__table_index_result(table, old_size));
             break;
         }
@@ -355,6 +333,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                                                   &table->reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(dst_offset, len, table->size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+            WASM__CHARGE_ELEMS(rt, len);
             if (len > 0) {
                 if (!table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 for (j = 0; j < len; j++) table->elems[dst_offset + j] = value;

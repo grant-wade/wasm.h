@@ -18,6 +18,7 @@
 /* One node per blocked thread, linked in arrival order so notify wakes the oldest waiters first. */
 typedef struct wasm__waiter_t {
     const uint8_t* address;
+    const size_t* interrupt;
     int notified;
 #if defined(WASM__THREADS_POSIX)
     pthread_cond_t cond;
@@ -58,7 +59,8 @@ static void wasm__waiters_remove(wasm__waiter_t* waiter) {
 /* Timeouts beyond about 146 years are treated as infinite so deadline arithmetic cannot overflow. */
 #define WASM__WAIT_FOREVER_NS (INT64_C(1) << 62)
 
-WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns) {
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns,
+                                            const size_t* interrupt) {
     wasm__waiter_t waiter;
     int forever = timeout_ns < 0 || timeout_ns >= WASM__WAIT_FOREVER_NS;
     int result = 0;
@@ -84,11 +86,14 @@ WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t 
 
     if (wasm__atomic_load(p, size) != expected) {
         result = 1;
+    } else if (interrupt && wasm__atomic_load_size(interrupt) != 0u) {
+        result = 3;
     } else if (!forever && timeout_ns == 0) {
         result = 2;
     } else {
         memset(&waiter, 0, sizeof(waiter));
         waiter.address = p;
+        waiter.interrupt = interrupt;
 #if defined(WASM__THREADS_POSIX)
         pthread_cond_init(&waiter.cond, NULL);
 #else
@@ -101,6 +106,10 @@ WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t 
         wasm__waiters_tail = &waiter;
 
         while (!waiter.notified) {
+            if (interrupt && wasm__atomic_load_size(interrupt) != 0u) {
+                result = 3;
+                break;
+            }
 #if defined(WASM__THREADS_POSIX)
             if (forever) {
                 pthread_cond_wait(&waiter.cond, &wasm__waiters_lock);
@@ -168,6 +177,28 @@ WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count) {
     return woken;
 }
 
+WASM_PRIVATE void wasm__platform_atomic_wake_all(void) {
+    wasm__waiter_t* node;
+
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_lock(&wasm__waiters_lock);
+#else
+    AcquireSRWLockExclusive(&wasm__waiters_lock);
+#endif
+    for (node = wasm__waiters_head; node; node = node->next) {
+#if defined(WASM__THREADS_POSIX)
+        pthread_cond_signal(&node->cond);
+#else
+        WakeConditionVariable(&node->cond);
+#endif
+    }
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__waiters_lock);
+#else
+    ReleaseSRWLockExclusive(&wasm__waiters_lock);
+#endif
+}
+
 WASM_PRIVATE void wasm__platform_shared_grow_lock(void) {
 #if defined(WASM__THREADS_POSIX)
     pthread_mutex_lock(&wasm__grow_lock);
@@ -186,9 +217,14 @@ WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
 
 #else
 
-WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns) {
+WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns,
+                                            const size_t* interrupt) {
     if (wasm__atomic_load(p, size) != expected) return 1;
+    if (interrupt && wasm__atomic_load_size(interrupt) != 0u) return 3;
     return timeout_ns == 0 ? 2 : -1;
+}
+
+WASM_PRIVATE void wasm__platform_atomic_wake_all(void) {
 }
 
 WASM_PRIVATE uint32_t wasm__platform_atomic_notify(uint8_t* p, uint32_t count) {

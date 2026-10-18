@@ -250,6 +250,8 @@ WASM_PRIVATE wasm_error_t wasm__do_branch(wasm_runtime_t* rt,
     uint32_t pop_count = (target->opcode == 0x03) ? depth_l : depth_l + 1;
     uint32_t i;
 
+    if (target->opcode == 0x03 && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
+
     if (rt->sp - branch_arity != target->sp_base && branch_arity > 0)
         memmove(&rt->stack[target->sp_base], &rt->stack[rt->sp - branch_arity], branch_arity * sizeof(wasm_value_t));
     rt->sp = target->sp_base + branch_arity;

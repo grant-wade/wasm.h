@@ -76,21 +76,23 @@ config.max_stack_values = 65536;
 config.max_call_depth = 1024;
 config.max_labels = 4096;
 config.initial_gc_heap_size = 2u * 1024u * 1024u;
-config.frame_arena_size = 4u * 1024u * 1024u;
+config.frame_arena_size = 256u * 1024u;
 config.lazy_validation = 0;
 config.max_function_locals = 50000;
 config.max_memory_bytes = 256u * 1024u * 1024u;
+config.max_total_memory_bytes = 1024u * 1024u * 1024u;
 config.max_table_elements = 1000000;
 
 rt = wasm_runtime_new(&config);
 ```
 
-With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution.
+With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return.
 
 The remaining fields bound what a module can make the host allocate; 0 removes a limit:
 
 - `max_function_locals` (default 50,000) rejects functions that declare more locals, parameters included.
-- `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow_at` past the cap return -1.
+- `max_memory_bytes` (default 0, unlimited) caps each linear memory. A module whose memory starts larger fails to load with `WASM_ERR_OOM`; `memory.grow` and `wasm_memory_grow_at` past the cap return -1. A shared memory reserves address space only up to this cap.
+- `max_total_memory_bytes` (default 0, unlimited) caps the linear memories that all of the runtime's instances define, together, in the same way. Memories the host creates and registers do not count.
 - `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
 
 Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
@@ -166,7 +168,19 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
 
-Lower-level registration supports functions, globals, tables, memories, and tags. Use `wasm_module_set_userdata` and `wasm_module_get_userdata` for per-module host state.
+Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_get_userdata` for per-module host state.
+
+### Linking modules
+
+`wasm_register_module` makes every export of an instance importable by modules loaded later in the same runtime:
+
+```c
+wasm_module_t* lib = wasm_load(rt, lib_bytes, lib_len);
+wasm_register_module(rt, "lib", lib);
+wasm_module_t* app = wasm_load(rt, app_bytes, app_len); /* may import "lib" "..." */
+```
+
+Importers share the exporting instance's globals, tables, memories, and tags, and call its functions, so free `lib` only after the modules that import from it. A call into a freed module's function traps.
 
 Enable platform compatibility helpers in the implementation translation unit:
 
@@ -210,11 +224,20 @@ wasm_error_t err = wasm_memory_read(mod, 0, guest_offset,
 
 Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, null-terminated string extraction. The `*_at` accessors expose direct memory data, size, and growth for a selected memory. Reacquire direct data pointers after `wasm_memory_grow_at`, because growth may relocate storage.
 
-Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
+Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`, and any global by index with `wasm_global_get_at` and `wasm_global_set_at`; setters check mutability and type. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
+
+Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`. `wasm_call_ref` calls the function a funcref refers to, such as one read from a table.
 
 ## GC references
 
-The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A GC reference, converted `externref`, or `exnref` held only by the host is valid until the next collection: store values the host keeps in a global or table.
+The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A GC reference, converted `externref`, or `exnref` held only by the host is valid until the next collection. Keep one longer with `wasm_ref_hold`, which returns a slot the collector keeps current, and read the reference from that slot when using it:
+
+```c
+wasm_value_t* held = wasm_ref_hold(rt, point);
+/* ... calls that may collect ... */
+wasm_struct_get_field(mod, *held, 0, &x);
+wasm_ref_release(rt, held);
+```
 
 ## Threads
 
@@ -231,7 +254,7 @@ wasm_register_memory_import(rt, &imp);
 wasm_module_t* mod = wasm_load(rt, bytes, len);
 ```
 
-A shared memory exported by one module can be imported the same way. Free it with `wasm_shared_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid.
+A shared memory exported by one module can be imported the same way. Free it with `wasm_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid.
 
 `memory.atomic.wait32`/`wait64` block and `memory.atomic.notify` wakes threads when the platform layer is compiled in (`WASM_ENABLE_PLATFORM`), using pthreads or Win32; link with `-pthread` on toolchains that need it. Without it, a wait that would block traps, because no other thread could wake it.
 
@@ -267,9 +290,11 @@ if (err == WASM_ERR_OUT_OF_FUEL) {
 }
 ```
 
-`wasm_disable_fuel` turns metering off again.
+Every instruction costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_disable_fuel` turns metering off again.
 
-After a trap, use `wasm_dump_backtrace` or the raw call-frame accessors to inspect the captured Wasm stack.
+To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call fails with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one stops at its first such point.
+
+After a trap, use `wasm_dump_backtrace` or `wasm_get_call_frame_info` to inspect the captured Wasm stack. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
 
 ```c
 char trace[2048];

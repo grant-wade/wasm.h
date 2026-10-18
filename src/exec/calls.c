@@ -46,14 +46,10 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     wasm_value_t* locals = NULL;
     wasm__label_t* labels;
     uint32_t max_labels;
-    size_t arena_saved;
+    wasm__arena_mark_t arena_saved;
     uint32_t i;
 
-    if (rt->call_frame_sp == 0) {
-        err = wasm__ensure_module_frame_arena(mod);
-        if (err != WASM_OK) return err;
-    }
-
+    if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     if (rt->call_frame_sp >= rt->max_call_frames) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
                       "call frame depth exceeded limit %u",
@@ -67,10 +63,6 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     err = wasm__prepare_function(mod, func_idx);
     if (err != WASM_OK) return err;
 
-    if (rt->call_frame_sp == 0) {
-        err = wasm__ensure_module_frame_arena(mod);
-        if (err != WASM_OK) return err;
-    }
 
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
@@ -82,22 +74,22 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                       (unsigned)rt->max_labels);
         return WASM_ERR_CALL_STACK_EXHAUSTED;
     }
-    arena_saved = rt->frame_arena_offset;
+    arena_saved = wasm__arena_mark(rt);
 
     if (func->num_locals > 0) {
         locals = (wasm_value_t*)wasm__arena_alloc(rt, func->num_locals * sizeof(wasm_value_t));
         if (!locals) {
             wasm__arena_reset(rt, arena_saved);
-            WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED, "%s", "frame arena exhausted");
-            return WASM_ERR_CALL_STACK_EXHAUSTED;
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame locals");
+            return WASM_ERR_OOM;
         }
     }
 
     labels = (wasm__label_t*)wasm__arena_alloc(rt, max_labels * sizeof(wasm__label_t));
     if (!labels) {
         wasm__arena_reset(rt, arena_saved);
-        WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED, "%s", "frame arena exhausted");
-        return WASM_ERR_CALL_STACK_EXHAUSTED;
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame labels");
+        return WASM_ERR_OOM;
     }
 
     cf = &rt->call_frames[rt->call_frame_sp++];

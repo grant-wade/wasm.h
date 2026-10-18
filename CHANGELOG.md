@@ -4,6 +4,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Breaking
+
+- `wasm_get_call_frame_info` takes a `wasm_module_t** out_module` after `depth`, and any of its outputs may be NULL. In Zig, `CallFrame` has a `module` field.
+- `wasm_shared_memory_free` is now `wasm_memory_free`, which also frees memories from the new `wasm_memory_new`.
+- `frame_arena_size` (and `WASM_FRAME_ARENA_SIZE`, now 256 KiB) sets the size of each block of call frame storage. The runtime allocated the largest frame times the call depth limit up front, up to about 750 MB for a module with large frames, and a nested call needing more failed with `WASM_ERR_CALL_STACK_EXHAUSTED`. Blocks are now added as calls nest and released as they return, and running out of memory for a frame fails with `WASM_ERR_OOM`.
+- `wasm_error_t` has a new last member, `WASM_ERR_INTERRUPTED`.
+
 ### Security
 
 - WASI `proc_raise` returns `NOSYS`. It raised the requested signal in the host process, so a guest could stop or kill its embedder with `SIGKILL` or `SIGSEGV`.
@@ -11,13 +18,26 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `wasm_runtime_interrupt` stops a running call from any thread with `WASM_ERR_INTERRUPTED`, at the next loop iteration, function entry, `memory.atomic.wait`, or WASI sleep. In Zig, `Runtime.interrupt` and `error.Interrupted`.
+- `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold` and `release`.
+- `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.
+- `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_at` and `wasm_global_set_at`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
+- `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, instead of filling in the structs by hand.
+- `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
+- Backtraces name each frame's module and function from the `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`, and `wasm_func_name` and `wasm_module_name` return those names.
 - `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
 - WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
 - `wasm_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
 - The CLI `run` command runs a WASI command's `_start` with the remaining arguments as its argv, and `--dir HOST[::GUEST]` and `--env NAME=VALUE` configure its WASI environment. With `--wasi`, `call` passes the module path as `argv[0]`.
 
+### Changed
+
+- Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
+- A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
+
 ### Fixed
 
+- `array.new` popped its initial value before allocating the array, so a collection during that allocation missed the value, and the array was filled with a reference into the freed heap.
 - The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
 
 ## [1.2.0] - 2026-10-17
