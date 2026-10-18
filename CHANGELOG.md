@@ -52,6 +52,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Calls that trap set `wasm_runtime_last_error` and `wasm_runtime_error_message`, which reported `ok` after a trap.
 - The GC heap grows to hold live objects and allocations larger than its initial size, which failed with `WASM_ERR_OOM` once about 4 MiB was live.
 - A collection skips anyref values made by `any.convert_extern` from host `externref` values, which it dereferenced as GC objects and crashed on.
+- Collections during instantiation keep the GC objects that constant expressions are building; globals, tables, and element segments could end up referring to freed or reused objects.
+- `wasm_struct_new` and `wasm_array_new` keep the references they are given alive while allocating, which a collection during that allocation left pointing at freed objects.
 
 ## [1.2.0] - 2026-10-17
 

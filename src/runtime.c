@@ -166,6 +166,18 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     return WASM_OK;
 }
 
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count) {
+    root->prev = rt->gc_roots;
+    root->values = values;
+    root->count = count;
+    rt->gc_roots = root;
+}
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root) {
+    rt->gc_roots = root->prev;
+}
+
 void wasm_runtime_interrupt(wasm_runtime_t* rt) {
     if (!rt) return;
     wasm__atomic_store_size(&rt->interrupt_requested, 1u);

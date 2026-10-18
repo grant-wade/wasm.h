@@ -2118,6 +2118,13 @@ typedef struct wasm__held_block_t {
     wasm__held_slot_t slots[WASM__HELD_BLOCK_SLOTS];
 } wasm__held_block_t;
 
+/* Values a C caller keeps alive across GC allocations; the collector marks and updates them. */
+typedef struct wasm__gc_root_t {
+    struct wasm__gc_root_t* prev;
+    wasm_value_t* const* values; /* address of the array, which may be reallocated while pushed */
+    const uint32_t* count;
+} wasm__gc_root_t;
+
 /* A function export registered by wasm_register_module, called through a host trampoline. */
 typedef struct wasm__linked_func_t {
     struct wasm__linked_func_t* next;
@@ -2177,6 +2184,7 @@ struct wasm_runtime_t {
     wasm_module_t* failed_modules;
     wasm__handle_set_t externref_boxes;
     wasm__held_block_t* held_values;
+    wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
     uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
     wasm__arena_chunk_t* frame_arena;       /* innermost block */
@@ -2234,6 +2242,13 @@ WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* 
 WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+/* Roots the first *count values of *values until the matching wasm__gc_pop_root. Pops must
+ * happen in reverse order of pushes. */
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count);
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
 /* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
  * only where every live reference is reachable from the runtime's roots. */
@@ -10588,18 +10603,29 @@ WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
     return wasm__is_ref_type(value->type);
 }
 
+static wasm_error_t wasm__init_expr_stack_peek_expect(wasm_module_t* mod,
+                                                      const wasm__init_expr_stack_t* stack,
+                                                      wasm_valtype_t expected_type,
+                                                      const wasm_reftype_t* expected_ref,
+                                                      wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
+    value = stack->values[stack->size - 1];
+    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm__init_expr_stack_t* stack,
                                                      wasm_valtype_t expected_type,
                                                      const wasm_reftype_t* expected_ref,
                                                      wasm_value_t* out_value) {
-    wasm_value_t value;
+    wasm_error_t err = wasm__init_expr_stack_peek_expect(mod, stack, expected_type, expected_ref, out_value);
 
-    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
-    value = stack->values[--stack->size];
-    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
-    *out_value = value;
-    return WASM_OK;
+    if (err == WASM_OK) stack->size--;
+    return err;
 }
 
 static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
@@ -10664,9 +10690,11 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value) {
     wasm__init_expr_stack_t stack;
+    wasm__gc_root_t root;
     wasm_error_t err = WASM_OK;
 
     memset(&stack, 0, sizeof(stack));
+    wasm__gc_push_root(mod->rt, &root, &stack.values, &stack.size);
 
     for (;;) {
         uint8_t op;
@@ -10944,11 +10972,11 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                                 err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &length_value);
                                 if (err != WASM_OK) break;
-                                err = wasm__init_expr_stack_pop_expect(mod,
-                                                                       &stack,
-                                                                       expected_type,
-                                                                       &atype->field.storage.ref_type,
-                                                                       &init_value);
+                                err = wasm__init_expr_stack_peek_expect(mod,
+                                                                        &stack,
+                                                                        expected_type,
+                                                                        &atype->field.storage.ref_type,
+                                                                        &init_value);
                                 if (err != WASM_OK) break;
                                 if (length_value.of.i32 < 0) {
                                     err = WASM_ERR_OUT_OF_BOUNDS;
@@ -10960,6 +10988,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                     err = WASM_ERR_OOM;
                                     break;
                                 }
+                                init_value = stack.values[--stack.size];
                                 for (i = 0; i < count; i++) {
                                     err = wasm__gc_array_store_element(object, atype, i, init_value);
                                     if (err != WASM_OK) break;
@@ -11068,6 +11097,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
             *out_value = stack.values[0];
     }
 
+    wasm__gc_pop_root(mod->rt, &root);
     WASM_FREE(stack.values);
     return err;
 }
@@ -11482,6 +11512,18 @@ WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count) {
+    root->prev = rt->gc_roots;
+    root->values = values;
+    root->count = count;
+    rt->gc_roots = root;
+}
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root) {
+    rt->gc_roots = root->prev;
 }
 
 void wasm_runtime_interrupt(wasm_runtime_t* rt) {
@@ -13029,6 +13071,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 
         segment->elems = (wasm_value_t*)wasm__malloc_array(segment->num_elems, sizeof(wasm_value_t));
         if (!segment->elems) return WASM_ERR_OOM;
+        for (j = 0; j < segment->num_elems; j++)
+            segment->elems[j] = wasm__typed_ref_null(segment->elem_type, &segment->elem_ref_type);
 
         for (j = 0; j < segment->num_elems; j++) {
             wasm_value_t value;
@@ -18430,11 +18474,13 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_mark_values(stack, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_mark_values(stack, *root->values, *root->count);
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
@@ -18462,12 +18508,15 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_mark_value(stack, &table->default_value);
+            if (table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_mark_values(stack, segment->elems, segment->num_elems);
         }
     }
@@ -18534,11 +18583,13 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_forward_values(rt, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_values(rt, *root->values, *root->count);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
@@ -18576,13 +18627,15 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems)
-                wasm__gc_forward_values(rt, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_forward_value(rt, &table->default_value);
+            if (table->elems) wasm__gc_forward_values(rt, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_forward_values(rt, segment->elems, segment->num_elems);
         }
     }
@@ -29638,6 +29691,7 @@ void wasm_table_free(wasm_table_t* table) {
 
 
 #include <stdio.h>
+#include <string.h>
 
 static const char* wasm__gc_kind_name(wasm_gc_object_kind_t kind) {
     switch (kind) {
@@ -29982,11 +30036,27 @@ void* wasm_module_userdata(const wasm_module_t* mod) {
     return mod ? mod->host_userdata : NULL;
 }
 
+static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_t* values, uint32_t count,
+                                           wasm_value_t** out_copy) {
+    *out_copy = NULL;
+    if (count == 0) return WASM_OK;
+    *out_copy = (wasm_value_t*)wasm__malloc_array(count, sizeof(wasm_value_t));
+    if (!*out_copy) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "out of memory copying GC object values");
+        return WASM_ERR_OOM;
+    }
+    memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
+    return WASM_OK;
+}
+
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref) {
     const wasm_structtype_t* st;
     wasm_gc_struct_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -30005,13 +30075,17 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_TYPE_MISMATCH;
     }
 
+    err = wasm__copy_host_values(mod, field_values, num_fields, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < st->num_fields; i++) {
-        wasm_error_t err = wasm__gc_struct_store_field(object, st, i, field_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < st->num_fields; i++)
+        err = wasm__gc_struct_store_field(object, st, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;
@@ -30022,6 +30096,9 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             wasm_value_t* out_ref) {
     const wasm_arraytype_t* at;
     wasm_gc_array_t* object;
+    wasm_value_t* values;
+    wasm__gc_root_t root;
+    wasm_error_t err;
     uint32_t i;
 
     if (!mod || !out_ref) return WASM_ERR_MALFORMED;
@@ -30038,13 +30115,17 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_MALFORMED;
     }
 
+    err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
+    if (err != WASM_OK) return err;
+    wasm__gc_push_root(mod->rt, &root, &values, &num_elems);
     object = wasm__gc_alloc_array_object(mod->rt, mod, type_idx, at, num_elems);
-    if (!object) return WASM_ERR_OOM;
+    wasm__gc_pop_root(mod->rt, &root);
+    err = object ? WASM_OK : WASM_ERR_OOM;
 
-    for (i = 0; i < num_elems; i++) {
-        wasm_error_t err = wasm__gc_array_store_element(object, at, i, elem_values[i]);
-        if (err != WASM_OK) return err;
-    }
+    for (i = 0; err == WASM_OK && i < num_elems; i++)
+        err = wasm__gc_array_store_element(object, at, i, values[i]);
+    WASM_FREE(values);
+    if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
     return WASM_OK;

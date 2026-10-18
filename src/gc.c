@@ -169,11 +169,13 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_mark_values(stack, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_mark_values(stack, *root->values, *root->count);
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
@@ -201,12 +203,15 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_mark_value(stack, &table->default_value);
+            if (table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_mark_values(stack, segment->elems, segment->num_elems);
         }
     }
@@ -273,11 +278,13 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
+    wasm__gc_root_t* root;
     uint32_t i;
 
     if (!rt) return;
 
     wasm__gc_forward_values(rt, rt->stack, rt->sp);
+    for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_values(rt, *root->values, *root->count);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
@@ -315,13 +322,15 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         }
         for (i = 0; i < mod->num_tables; i++) {
             wasm_table_t* table = wasm__table_at(mod, i);
-            if (table && table->elems)
-                wasm__gc_forward_values(rt, table->elems, table->size);
+
+            if (!table) continue;
+            wasm__gc_forward_value(rt, &table->default_value);
+            if (table->elems) wasm__gc_forward_values(rt, table->elems, table->size);
         }
         for (i = 0; i < mod->num_elem_segments; i++) {
             wasm_elem_segment_t* segment = &mod->elem_segments[i];
 
-            if (!segment->is_passive || segment->is_declarative || segment->is_dropped) continue;
+            if (segment->is_declarative || segment->is_dropped) continue;
             wasm__gc_forward_values(rt, segment->elems, segment->num_elems);
         }
     }

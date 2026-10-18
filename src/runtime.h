@@ -49,6 +49,13 @@ typedef struct wasm__held_block_t {
     wasm__held_slot_t slots[WASM__HELD_BLOCK_SLOTS];
 } wasm__held_block_t;
 
+/* Values a C caller keeps alive across GC allocations; the collector marks and updates them. */
+typedef struct wasm__gc_root_t {
+    struct wasm__gc_root_t* prev;
+    wasm_value_t* const* values; /* address of the array, which may be reallocated while pushed */
+    const uint32_t* count;
+} wasm__gc_root_t;
+
 /* A function export registered by wasm_register_module, called through a host trampoline. */
 typedef struct wasm__linked_func_t {
     struct wasm__linked_func_t* next;
@@ -108,6 +115,7 @@ struct wasm_runtime_t {
     wasm_module_t* failed_modules;
     wasm__handle_set_t externref_boxes;
     wasm__held_block_t* held_values;
+    wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
     uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
     wasm__arena_chunk_t* frame_arena;       /* innermost block */
@@ -165,6 +173,13 @@ WASM_PRIVATE void wasm__gc_unregister_module(wasm_runtime_t* rt, wasm_module_t* 
 WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr);
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size);
+
+/* Roots the first *count values of *values until the matching wasm__gc_pop_root. Pops must
+ * happen in reverse order of pushes. */
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count);
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
 /* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
  * only where every live reference is reachable from the runtime's roots. */
