@@ -8499,8 +8499,8 @@ WL_TEST(test_funcrefs_from_freed_modules_trap) {
     wasm_runtime_t rt;
     wasm_module_t* provider;
     wasm_module_t* caller;
-    wasm_value_t ref;
-    wasm_value_t result;
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_FUNCREF);
+    wasm_value_t result = wasm_i32(0);
 
     wasm_init(&rt);
     provider = wasm_load(&rt, provider_bytes, sizeof(provider_bytes));
@@ -8582,7 +8582,7 @@ WL_TEST(test_exceptions_from_imports_reach_handlers_on_all_call_paths) {
     wasm_tag_import_t tag_import;
     uint32_t func_index = 0;
     uint32_t tag_index = 0;
-    wasm_export_kind_t kind;
+    wasm_export_kind_t kind = WASM_EXPORT_FUNC;
     uint32_t i;
 
     wasm_init(&rt);
@@ -8645,7 +8645,7 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
     wasm_config_t config;
     wasm_module_t* m;
     wasm_value_t arg;
-    wasm_value_t result;
+    wasm_value_t result = wasm_i32(0);
     wasm_error_t err;
 
     wasm_config_default(&config);
@@ -8729,9 +8729,9 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     wasm_memory_import_t memory_import;
     wasm_table_import_t table_import;
     wasm_global_import_t global_import;
-    wasm_value_t result;
-    wasm_export_kind_t kind;
-    uint32_t index;
+    wasm_value_t result = wasm_i32(0);
+    wasm_export_kind_t kind = WASM_EXPORT_FUNC;
+    uint32_t index = 0;
     uint8_t byte = 0;
     wasm_error_t err;
 
@@ -8809,6 +8809,27 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
                  rt.error_msg);
     wasm_free_module(m);
     wasm_free_module(compiled);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_load_rejects_repeated_sections) {
+    /* Two export sections; the second used to replace the first and leak it. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
+        0x00, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00, 0x00, 0x01, 0x62, 0x00, 0x01, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00,
+        0x00, 0x01, 0x62, 0x00, 0x01, 0x0a, 0x07, 0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_MALFORMED && strstr(rt.error_msg, "repeated"),
+                 "expected a repeated export section to be malformed, got: %s", rt.error_msg);
+    wasm_free_module(m);
+    m = wasm_compile(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK(t, m == NULL);
+    wasm_free_module(m);
     wasm_destroy(&rt);
 }
 
@@ -10106,6 +10127,7 @@ static uint32_t wasm_test_wasi_path_open(wasm_module_t* m, uint32_t dir_fd, cons
     return (uint32_t)result.of.i32;
 }
 
+#if WASM__PLATFORM_POSIX
 static uint32_t wasm_test_wasi_symlink(wasm_module_t* m, uint32_t dir_fd, const char* target, const char* link) {
     wasm_value_t args[5];
     wasm_value_t result = wasm_i32(-1);
@@ -10122,13 +10144,13 @@ static uint32_t wasm_test_wasi_symlink(wasm_module_t* m, uint32_t dir_fd, const 
     if (wasm__wasi_path_symlink(m, args, 5, &result, 1, NULL) != WASM_OK) return UINT32_MAX;
     return (uint32_t)result.of.i32;
 }
+#endif
 
 WL_TEST(test_wasi_paths_stay_beneath_preopens) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
     wasm_module_t* m;
     uint32_t errno_value;
-    uint32_t fd = 0u;
 
     emit_header(&mod);
     {
@@ -10167,6 +10189,7 @@ WL_TEST(test_wasi_paths_stay_beneath_preopens) {
         char path[128];
         int root_fd;
         uint32_t root_wasi_fd = 0u;
+        uint32_t fd = 0u;
         FILE* f;
 
         snprintf(root, sizeof(root), "/tmp/wasm_test_wasi_%ld", (long)getpid());
@@ -15755,6 +15778,7 @@ int main(void) {
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
+        { "load: repeated sections are malformed", test_load_rejects_repeated_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

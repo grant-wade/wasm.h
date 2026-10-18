@@ -100,7 +100,7 @@ static void wasm_fuzz_stub_table(wasm_runtime_t* rt, const wasm_module_t* compil
     const wasm_table_t* declared = &compiled->tables[info->index];
     wasm_table_t* table;
     wasm_table_import_t imp;
-    wasm_value_t fill;
+    wasm_value_t fill = wasm_i32(0);
     uint32_t i;
 
     if (declared->size > WASM_FUZZ_MAX_TABLE_ELEMENTS ||

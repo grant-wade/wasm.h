@@ -17203,6 +17203,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const wasm_module_t* compiled) {
     wasm__reader_t r;
     uint32_t version;
+    uint32_t seen_sections = 0;
     wasm_module_t* mod;
     wasm_error_t err = WASM_OK;
 
@@ -17290,6 +17291,15 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         sr.ptr = r.ptr;
         sr.end = se;
         sr.malformed = 0;
+        /* A repeated section would replace what the first one decoded. */
+        if (sid != 0 && sid < 32u) {
+            if (seen_sections & (1u << sid)) {
+                WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "section %u out of order: repeated", (unsigned)sid);
+                err = WASM_ERR_MALFORMED;
+                break;
+            }
+            seen_sections |= 1u << sid;
+        }
         switch (sid) {
             case 0:
                 err = wasm__decode_custom_section(mod, &sr);

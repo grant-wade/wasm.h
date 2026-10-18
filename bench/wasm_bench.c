@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
     printf("%-14s %10s %12s\n", "kernel", "best ms", "result");
     for (k = 0; k < sizeof(kernels) / sizeof(kernels[0]); k++) {
         wasm_value_t arg = wasm_i32(kernels[k].arg);
-        wasm_value_t result;
+        wasm_value_t result = wasm_i32(0);
         double best = 0.0;
         int r;
 
