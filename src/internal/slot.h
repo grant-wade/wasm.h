@@ -10,6 +10,10 @@ typedef wasm_value_t wasm__slot_t;
 /* Slots a v128 value occupies. */
 #define WASM__V128_SLOTS 1u
 
+WASM_INLINE uint32_t wasm__valtype_slots(wasm_valtype_t type) {
+    return type == WASM_TYPE_V128 ? WASM__V128_SLOTS : 1u;
+}
+
 WASM_INLINE int32_t wasm__slot_i32(const wasm__slot_t* s) {
     return s->of.i32;
 }

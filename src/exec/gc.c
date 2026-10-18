@@ -3,6 +3,7 @@
 #include "state.h"
 #include <stdio.h>
 #include "exceptions.h"
+#include "slots.h"
 #include "../internal/gc_types.h"
 #include "../memory_internal.h"
 #include "../reader.h"
@@ -10,6 +11,12 @@
 #include "../types/canonical.h"
 #include "../types/references.h"
 #include "../values.h"
+
+#define WASM__PUSH_REF(rt, value)                    \
+    do {                                             \
+        wasm_value_t wasm__pushed = (value);         \
+        wasm__push_value((rt), &wasm__pushed);       \
+    } while (0)
 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
@@ -30,7 +37,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
             if (subop == 0x00) {
                 for (i = st->num_fields; i > 0; i--) {
-                    err = wasm__gc_struct_set_field(object, st, i - 1, *WASM__POP(rt));
+                    err = wasm__gc_struct_set_field(object, st, i - 1, wasm__pop_field_value(rt, &st->fields[i - 1]));
                     if (err != WASM_OK) goto cleanup;
                 }
             } else {
@@ -41,7 +48,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 }
             }
 
-            *WASM__PUSH(rt) = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+            WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
             break;
         }
         case 0x02:
@@ -61,9 +68,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             if (err != WASM_OK) WASM__TRAP(WASM_ERR_MALFORMED);
 
             if (subop == 0x05) {
-                wasm_value_t stored = *WASM__POP(rt);
+                wasm_value_t stored = wasm__pop_field_value(rt, &st->fields[field_idx]);
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, struct_ref.type, &struct_ref))
                     WASM__TRAP(WASM_ERR_TRAP);
                 header = wasm__runtime_get_gc_object(mod, &ref_value);
@@ -74,7 +81,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 break;
             }
 
-            ref_value = *WASM__POP(rt);
+            ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
             if (!wasm__runtime_value_matches_type(mod, &ref_value, struct_ref.type, &struct_ref))
                 WASM__TRAP(WASM_ERR_TRAP);
             header = wasm__runtime_get_gc_object(mod, &ref_value);
@@ -86,7 +93,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                                             subop == 0x03,
                                             &ref_value);
             if (err != WASM_OK) goto cleanup;
-            *WASM__PUSH(rt) = ref_value;
+            wasm__push_value(rt, &ref_value);
             break;
         }
         case 0x06:
@@ -107,10 +114,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
                 for (i = count; i > 0; i--) {
-                    err = wasm__gc_array_set(object, atype, i - 1, *WASM__POP(rt));
+                    err = wasm__gc_array_set(object, atype, i - 1, wasm__pop_field_value(rt, &atype->field));
                     if (err != WASM_OK) goto cleanup;
                 }
-                *WASM__PUSH(rt) = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+                WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
             }
 
@@ -125,7 +132,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                     if (!object) WASM__TRAP(WASM_ERR_OOM);
                     rt->sp--;
-                    init_value = *WASM__POP(rt);
+                    init_value = wasm__pop_field_value(rt, &atype->field);
                     for (i = 0; i < count; i++) {
                         err = wasm__gc_array_set(object, atype, i, init_value);
                         if (err != WASM_OK) goto cleanup;
@@ -143,7 +150,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     }
                 }
 
-                *WASM__PUSH(rt) = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+                WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
             }
 
@@ -183,7 +190,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     if (err != WASM_OK) goto cleanup;
                 }
 
-                *WASM__PUSH(rt) = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+                WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
             }
 
@@ -211,7 +218,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     if (err != WASM_OK) goto cleanup;
                 }
 
-                *WASM__PUSH(rt) = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+                WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
             }
         }
@@ -243,7 +250,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             if (subop == 0x0B || subop == 0x0C || subop == 0x0D) {
                 int32_t index_value = wasm__slot_i32(WASM__POP(rt));
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (index_value < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, array_ref.type, &array_ref))
                     WASM__TRAP(WASM_ERR_TRAP);
@@ -256,15 +263,15 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                                          subop == 0x0C,
                                          &ref_value);
                 if (err != WASM_OK) goto cleanup;
-                *WASM__PUSH(rt) = ref_value;
+                wasm__push_value(rt, &ref_value);
                 break;
             }
 
             if (subop == 0x0E) {
-                wasm_value_t stored = *WASM__POP(rt);
+                wasm_value_t stored = wasm__pop_field_value(rt, &atype->field);
                 int32_t index_value = wasm__slot_i32(WASM__POP(rt));
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (index_value < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, array_ref.type, &array_ref))
                     WASM__TRAP(WASM_ERR_TRAP);
@@ -277,7 +284,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             }
 
             if (subop == 0x0F) {
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, array_ref.type, &array_ref))
                     WASM__TRAP(WASM_ERR_TRAP);
                 header = wasm__runtime_get_gc_object(mod, &ref_value);
@@ -288,12 +295,12 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
             if (subop == 0x10) {
                 int32_t count_value = wasm__slot_i32(WASM__POP(rt));
-                wasm_value_t fill_value = *WASM__POP(rt);
+                wasm_value_t fill_value = wasm__pop_field_value(rt, &atype->field);
                 int32_t dst_value = wasm__slot_i32(WASM__POP(rt));
                 uint32_t count;
                 uint32_t dst_index;
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (count_value < 0 || dst_value < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, array_ref.type, &array_ref))
                     WASM__TRAP(WASM_ERR_TRAP);
@@ -318,7 +325,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 wasm_reftype_t src_ref;
                 int32_t count_value = wasm__slot_i32(WASM__POP(rt));
                 int32_t src_offset_value = wasm__slot_i32(WASM__POP(rt));
-                wasm_value_t src_value = *WASM__POP(rt);
+                wasm_value_t src_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 int32_t dst_offset_value = wasm__slot_i32(WASM__POP(rt));
                 uint32_t count;
                 uint32_t src_index;
@@ -326,7 +333,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 const wasm_gc_header_t* src_header;
                 const wasm_gc_array_t* src_object;
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (!src_type) WASM__TRAP(WASM_ERR_MALFORMED);
                 err = wasm__runtime_make_typeidx_reftype(mod, src_type_idx, 1, &src_ref);
                 if (err != WASM_OK) WASM__TRAP(WASM_ERR_MALFORMED);
@@ -385,7 +392,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 uint32_t dst_index;
                 uint32_t count;
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (data_idx >= mod->num_data_segments) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (count_value < 0 || src_offset_value < 0 || dst_offset_value < 0)
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
@@ -432,7 +439,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 uint32_t src_index;
                 uint32_t dst_index;
 
-                ref_value = *WASM__POP(rt);
+                ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (elem_idx >= mod->num_elem_segments) WASM__TRAP(WASM_ERR_MALFORMED);
                 if (count_value < 0 || src_offset_value < 0 || dst_offset_value < 0)
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
@@ -463,7 +470,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
         case 0x16:
         case 0x17: {
             wasm_reftype_t target_ref;
-            wasm_value_t value = *WASM__POP(rt);
+            wasm_value_t value;
             int matches;
 
             err = wasm__runtime_read_heap_reftype(mod,
@@ -471,6 +478,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                                                   subop == 0x15 || subop == 0x17,
                                                   &target_ref);
             if (err != WASM_OK) goto cleanup;
+            value = wasm__pop_value(rt, wasm__ref_top_type(target_ref.type), NULL);
             matches = wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref);
             if (subop == 0x14 || subop == 0x15) {
                 wasm__slot_set_i32(WASM__PUSH(rt), matches);
@@ -481,7 +489,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 err = WASM_ERR_TRAP;
                 goto cleanup;
             }
-            *WASM__PUSH(rt) = wasm__runtime_cast_success_value(&target_ref, value);
+            WASM__PUSH_REF(rt, wasm__runtime_cast_success_value(&target_ref, value));
             break;
         }
         case 0x1A:
@@ -491,22 +499,22 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
             /* Collect while the operand is still on the stack, where the GC can see it. */
             wasm__gc_collect_handles_if_needed(rt);
-            value = *WASM__POP(rt);
+            value = wasm__pop_value(rt, subop == 0x1A ? WASM_TYPE_EXTERNREF : WASM_TYPE_ANYREF, NULL);
 
             if (subop == 0x1A)
                 err = wasm__anyref_from_externref_value(rt, value, &converted);
             else
                 err = wasm__externref_from_anyref_value(rt, mod, value, &converted);
             if (err != WASM_OK) goto cleanup;
-            *WASM__PUSH(rt) = converted;
+            wasm__push_value(rt, &converted);
             break;
         }
         case 0x1C:
-            *WASM__PEEK(rt) = wasm_i31ref(wasm__slot_i32(WASM__PEEK(rt)));
+            WASM__PUSH_REF(rt, wasm_i31ref(wasm__slot_i32(WASM__POP(rt))));
             break;
         case 0x1D:
         case 0x1E: {
-            wasm_value_t value = *WASM__POP(rt);
+            wasm_value_t value = wasm__pop_value(rt, WASM_TYPE_I31REF, NULL);
 
             if (wasm__is_null_ref(&value)) WASM__TRAP(WASM_ERR_TRAP);
             if ((value.of.gc_ref & WASM__GC_I31_TAG) == 0) WASM__TRAP(WASM_ERR_TRAP);
@@ -526,15 +534,18 @@ cleanup:
     return err;
 }
 
+#undef WASM__PUSH_REF
+
 WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
                                           uint32_t subop,
                                           const uint8_t* flags_at,
                                           const uint8_t* code_end,
-                                          wasm_value_t* value,
+                                          wasm__slot_t* slot,
                                           int* out_branch) {
     wasm__reader_t r;
     wasm_reftype_t source_ref;
     wasm_reftype_t target_ref;
+    wasm_value_t value;
     wasm_error_t err;
     uint8_t flags;
 
@@ -549,12 +560,14 @@ WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
     err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x02u) != 0, &target_ref);
     if (err != WASM_OK) return err;
 
-    if (wasm__runtime_value_matches_type(mod, value, target_ref.type, &target_ref)) {
-        *value = wasm__runtime_cast_success_value(&target_ref, *value);
+    value = wasm__value_from_slot(mod->rt, wasm__ref_top_type(source_ref.type), NULL, slot);
+    if (wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref)) {
+        value = wasm__runtime_cast_success_value(&target_ref, value);
         *out_branch = subop == 0x18;
     } else {
-        *value = wasm__runtime_cast_difference_value(&source_ref, &target_ref, *value);
+        value = wasm__runtime_cast_difference_value(&source_ref, &target_ref, value);
         *out_branch = subop == 0x19;
     }
+    wasm__slot_from_value(slot, &value);
     return WASM_OK;
 }

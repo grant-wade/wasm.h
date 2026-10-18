@@ -7,6 +7,7 @@
 #include "frames.h"
 #include "gc.h"
 #include "simd.h"
+#include "slots.h"
 #include "atomic.h"
 #include "../atomics.h"
 #include "../instructions.h"
@@ -177,11 +178,11 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm__slot_t* sp) {
     }
 }
 
-/* args holds ft->num_params values just above rt->sp. */
+/* args holds the slots of ft's parameters just above rt->sp. */
 static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
                                                const wasm_functype_t* ft,
                                                const wasm_func_t* func,
-                                               const wasm_value_t* args) {
+                                               const wasm__slot_t* args) {
     wasm_runtime_t* rt = mod->rt;
     wasm_value_t args_buf[8];
     wasm_value_t results_buf[8];
@@ -192,13 +193,10 @@ static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
     if (ft->num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_params, sizeof(wasm_value_t));
     if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_value_t));
     if (call_args && call_results) {
-        if (ft->num_params > 0) memcpy(call_args, args, ft->num_params * sizeof(wasm_value_t));
+        wasm__values_from_slots(rt, ft->params, ft->param_reftypes, ft->num_params, args, call_args);
         err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
         if (err == WASM_OK && ft->num_results > rt->max_stack - rt->sp) err = WASM_ERR_STACK_OVERFLOW;
-        if (err == WASM_OK && ft->num_results > 0) {
-            memcpy(&rt->stack[rt->sp], call_results, ft->num_results * sizeof(wasm_value_t));
-            rt->sp += ft->num_results;
-        }
+        if (err == WASM_OK) rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], call_results, ft->num_results);
     }
     if (call_args != args_buf) wasm__free(&mod->rt->allocator, call_args);
     if (call_results != results_buf) wasm__free(&mod->rt->allocator, call_results);
@@ -487,7 +485,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_functype_t* tag_type;
                 wasm_value_t payload_buf[8];
                 wasm_value_t* payload = payload_buf;
-                int j;
 
                 if (tag_index >= mod->num_tags) WASM__TRAP(WASM_ERR_MALFORMED);
                 tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
@@ -496,7 +493,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                     payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
                     if (!payload) WASM__TRAP(WASM_ERR_OOM);
                 }
-                for (j = (int)tag_type->num_params - 1; j >= 0; j--) payload[j] = *--sp;
+                sp -= tag_type->num_params;
+                wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, sp, payload);
                 err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
                                                 tag_index,
                                                 mod->tags[tag_index].identity,
@@ -523,7 +521,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 goto throw_pending;
             }
             WASM__CASE(0x0A): { /* throw_ref */
-                wasm_value_t exnref_value = *--sp;
+                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, --sp);
                 wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
 
                 if (!exn) WASM__TRAP(WASM_ERR_TRAP);
@@ -653,7 +651,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (type_idx >= mod->num_types) WASM__TRAP(WASM_ERR_MALFORMED);
                 call_type = wasm__module_functype(mod, type_idx);
                 if (!call_type) WASM__TRAP(WASM_ERR_MALFORMED);
-                funcref_value = *--sp;
+                funcref_value = wasm__value_from_slot(rt, WASM_TYPE_FUNCREF, NULL, --sp);
                 if (wasm__is_null_ref(&funcref_value)) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null function reference");
                     WASM__TRAP(WASM_ERR_TRAP);
@@ -687,7 +685,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(WASM__OP_BR_ON_CAST): {
                 int taken = 0;
 
-                err = wasm__exec_br_on_cast(mod, pc[0], func->code + pc[1], func->code + func->code_len, &sp[-1],
+                err = wasm__exec_br_on_cast(mod, pc[0], func->code + pc[1], func->code + func->code_len, sp - 1,
                                             &taken);
                 if (err != WASM_OK) goto cleanup;
                 if (taken) {
@@ -720,22 +718,23 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(WASM__OP_LOCAL_GET_REF): {
                 uint32_t x = *pc++;
 
-                *sp++ = wasm__retag_value_for_declared_type(
-                    func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL, locals[x]);
+                *sp = locals[x];
+                wasm__slot_retag(sp++, func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL);
                 WASM__NEXT();
             }
             WASM__CASE(WASM__OP_LOCAL_SET_REF):
             WASM__CASE(WASM__OP_LOCAL_TEE_REF): {
                 uint32_t x = *pc++;
 
-                locals[x] = wasm__retag_value_for_declared_type(
-                    func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL, sp[-1]);
+                locals[x] = sp[-1];
+                wasm__slot_retag(&locals[x], func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL);
                 if (op == WASM__OP_LOCAL_SET_REF) sp--;
                 WASM__NEXT();
             }
             WASM__CASE(0x23): {
-                uint32_t x = *pc++;
-                *sp++ = wasm__global_get_value(&mod->globals[x]);
+                wasm_value_t value = wasm__global_get_value(&mod->globals[*pc++]);
+
+                sp += wasm__slot_from_value(sp, &value);
                 WASM__NEXT();
             }
             WASM__CASE(0x24): {
@@ -747,7 +746,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                     err = WASM_ERR_TYPE_MISMATCH;
                     goto cleanup;
                 }
-                value = *--sp;
+                sp -= wasm__valtype_slots(mod->globals[x].type);
+                value = wasm__value_from_slot(rt, mod->globals[x].type, &mod->globals[x].ref_type, sp);
                 if (!wasm__runtime_value_matches_type(mod,
                                                       &value,
                                                       mod->globals[x].type,
@@ -766,7 +766,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                 element_index = wasm__slot_index(sp - 1, table->is_64);
                 if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                sp[-1] = table->elems[element_index];
+                wasm__slot_from_value(sp - 1, &table->elems[element_index]);
                 WASM__NEXT();
             }
             WASM__CASE(0x26): {
@@ -778,7 +778,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (table_idx >= mod->num_tables) WASM__TRAP(WASM_ERR_MALFORMED);
                 table = wasm__table_at(mod, table_idx);
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
-                value = *--sp;
+                value = wasm__value_from_slot(rt, table->reftype, &table->reftype_info, --sp);
                 element_index = wasm__slot_index(--sp, table->is_64);
                 if (!wasm__runtime_value_matches_type(mod,
                                                       &value,
@@ -1018,11 +1018,11 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 err = wasm__read_heaptype(mod, &cf->r, &reftype);
                 if (err != WASM_OK) goto cleanup;
                 type = reftype.type ? reftype.type : WASM_TYPE_ANYREF;
-                *sp++ = wasm__typed_ref_null(type, &reftype);
+                wasm__slot_set_null(sp++, type, &reftype);
                 WASM__NEXT();
             }
             WASM__CASE(0xD1): {
-                wasm__slot_set_i32(sp - 1, wasm__is_null_ref(sp - 1));
+                wasm__slot_set_i32(sp - 1, wasm__slot_is_null(sp - 1));
                 WASM__NEXT();
             }
             WASM__CASE(0xD2): {
@@ -1030,57 +1030,31 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 wasm_value_t funcref;
                 if (func_index >= mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 WASM__CALL_OUT(wasm__make_funcref(mod, func_index, &funcref));
-                *sp++ = funcref;
+                sp += wasm__slot_from_value(sp, &funcref);
                 WASM__NEXT();
             }
-            WASM__CASE(0xD3): {
-                wasm_value_t rhs = *--sp;
-                wasm_value_t lhs = *--sp;
-                int equal;
-
-                if (!wasm__is_ref_type(lhs.type) || !wasm__is_ref_type(rhs.type)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                if (wasm__uses_funcref_storage(lhs.type) || wasm__uses_funcref_storage(rhs.type))
-                    equal = wasm__uses_funcref_storage(lhs.type) && wasm__uses_funcref_storage(rhs.type) &&
-                            lhs.of.funcref == rhs.of.funcref;
-                else if (wasm__uses_externref_storage(lhs.type) || wasm__uses_externref_storage(rhs.type))
-                    equal = wasm__uses_externref_storage(lhs.type) && wasm__uses_externref_storage(rhs.type) &&
-                            lhs.of.externref == rhs.of.externref;
-                else
-                    equal = lhs.of.gc_ref == rhs.of.gc_ref;
-                wasm__slot_set_i32(sp++, equal);
+            WASM__CASE(0xD3):
+                sp--;
+                wasm__slot_set_i32(sp - 1, wasm__slot_ref_eq(sp - 1, sp));
                 WASM__NEXT();
-            }
-            WASM__CASE(0xD4): {
-                wasm_reftype_t actual_ref;
-                wasm_value_t value = *--sp;
-
-                if (!wasm__runtime_value_reftype(mod, &value, &actual_ref)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                if (wasm__is_null_ref(&value)) {
+            WASM__CASE(0xD4):
+                if (wasm__slot_is_null(sp - 1)) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null reference");
                     err = WASM_ERR_TRAP;
                     goto cleanup;
                 }
-                actual_ref.nullable = 0;
-                *sp++ = wasm__runtime_cast_success_value(&actual_ref, value);
                 WASM__NEXT();
-            }
             WASM__CASE(0xD5):
-            WASM__CASE(0xD6): {
-                wasm_reftype_t target_ref;
-                wasm_value_t value = *--sp;
-
-                if (!wasm__runtime_value_reftype(mod, &value, &target_ref)) WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                target_ref.nullable = 0;
+            WASM__CASE(0xD6):
                 desc = pc;
                 pc += 4;
-                if (wasm__is_null_ref(&value)) {
+                if (wasm__slot_is_null(sp - 1)) {
+                    sp--;
                     if (op == 0xD5) goto do_branch;
                     WASM__NEXT();
                 }
-                *sp++ = wasm__runtime_cast_success_value(&target_ref, value);
                 if (op == 0xD6) goto do_branch;
                 WASM__NEXT();
-            }
 
             /* Constants */
             WASM__CASE(0x41):
@@ -1685,10 +1659,9 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             wasm__slot_t* src = sp - ft->num_results;
 
             for (i = 0; i < ft->num_results; i++) {
-                dst[i] = wasm__is_numeric_valtype(ft->results[i])
-                             ? src[i]
-                             : wasm__retag_value_for_declared_type(
-                                   ft->results[i], ft->result_reftypes ? &ft->result_reftypes[i] : NULL, src[i]);
+                dst[i] = src[i];
+                if (!wasm__is_numeric_valtype(ft->results[i]))
+                    wasm__slot_retag(&dst[i], ft->results[i], ft->result_reftypes ? &ft->result_reftypes[i] : NULL);
             }
             sp = dst + ft->num_results;
             wasm__drop_labels(labels, lsp, lsp);
@@ -1794,7 +1767,7 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     }
 
     if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
-    err = wasm__push_call_frame(mod, func_idx, args, num_args, results, num_results);
+    err = wasm__push_root_call_frame(mod, func_idx, args, num_args, results, num_results);
     if (err != WASM_OK) return err;
     return wasm__interp_run(rt, base_frame_sp, base_frame_sp == 0 && rt->nonresumable_depth == 0);
 }
@@ -1837,8 +1810,7 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
         return WASM_ERR_STACK_OVERFLOW;
     }
-    if (expected > 0) memcpy(&rt->stack[rt->sp], host_results, expected * sizeof(wasm_value_t));
-    rt->sp += expected;
+    rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], host_results, expected);
     rt->call_frames[0].results_dst = results;
     rt->suspended = WASM_OK;
     rt->yield_module = NULL;
