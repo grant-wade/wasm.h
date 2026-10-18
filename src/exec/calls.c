@@ -34,7 +34,6 @@ WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf) {
 WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           uint32_t func_idx,
                                           const wasm__slot_t* args,
-                                          uint32_t num_args,
                                           wasm_value_t* results_dst,
                                           uint32_t num_results) {
     wasm_runtime_t* rt = mod->rt;
@@ -79,8 +78,8 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     }
     arena_saved = wasm__arena_mark(rt);
 
-    if (func->num_locals > 0) {
-        locals = (wasm__slot_t*)wasm__arena_alloc(rt, func->num_locals * sizeof(wasm__slot_t));
+    if (func->num_local_slots > 0) {
+        locals = (wasm__slot_t*)wasm__arena_alloc(rt, func->num_local_slots * sizeof(wasm__slot_t));
         if (!locals) {
             wasm__arena_reset(rt, arena_saved);
             WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for call frame locals");
@@ -116,15 +115,19 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     cf->num_results = num_results;
     cf->arena_saved = arena_saved;
 
-    for (i = 0; i < ft->num_params && i < num_args; i++) {
-        locals[i] = args[i];
-        if (!wasm__is_numeric_valtype(ft->params[i]))
-            wasm__slot_retag(&locals[i], ft->params[i], ft->param_reftypes ? &ft->param_reftypes[i] : NULL);
+    i = 0;
+    if (args) {
+        for (i = 0; i < func->param_slots; i++) locals[i] = args[i];
+        for (i = 0; i < ft->num_params; i++) {
+            if (!wasm__is_numeric_valtype(ft->params[i]))
+                wasm__slot_retag(&locals[func->local_slots[i]], ft->params[i],
+                                 ft->param_reftypes ? &ft->param_reftypes[i] : NULL);
+        }
     }
     for (; i < func->num_locals; i++) {
         wasm_value_t value = wasm__default_value(func->locals[i]);
 
-        wasm__slot_from_value(&locals[i], &value);
+        wasm__slot_from_value(&locals[func->local_slots[i]], &value);
     }
 
     return WASM_OK;
@@ -138,7 +141,7 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                                uint32_t num_results) {
     wasm_runtime_t* rt = mod->rt;
     wasm__call_frame_t* cf;
-    wasm_error_t err = wasm__push_call_frame(mod, func_idx, NULL, 0, results_dst, num_results);
+    wasm_error_t err = wasm__push_call_frame(mod, func_idx, NULL, results_dst, num_results);
     uint32_t i;
 
     if (err != WASM_OK) return err;
@@ -149,7 +152,7 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                  ? args[i]
                                  : wasm__retag_value_for_declared_type(cf->ft->params[i], reftype, args[i]);
 
-        wasm__slot_from_value(&cf->locals[i], &value);
+        wasm__slot_from_value(&cf->locals[cf->func->local_slots[i]], &value);
     }
     return WASM_OK;
 }
@@ -176,7 +179,7 @@ WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t b
     }
 
     wasm__values_from_slots(rt, cf->ft->results, cf->ft->result_reftypes, result_count,
-                            &rt->stack[rt->sp - result_count], result_values);
+                            &rt->stack[rt->sp - cf->func->result_slots], result_values);
 
     rt->sp = cf->sp_base;
     wasm__arena_reset(rt, cf->arena_saved);

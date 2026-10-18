@@ -136,8 +136,15 @@ struct wasm_runtime_t {
     uint64_t* validator_local_init_bits;
     uint64_t* validator_local_init_entry_bits;
     size_t validator_local_init_capacity;
-    uint32_t* validator_heights; /* stack height before each byte offset of the body being validated */
+    uint32_t* validator_stack_slots; /* slot height below each validator stack entry */
+    uint32_t* validator_stack_refs;  /* reference entries below each validator stack entry */
+    uint32_t* validator_heights; /* slot height before each byte offset of the body being validated */
+    uint8_t* validator_operand_types; /* type drop and select operate on, at their byte offsets */
     uint32_t validator_heights_capacity;
+    uint32_t* validator_maps;     /* stack maps of the body being validated, as in wasm_func_t */
+    uint32_t validator_maps_capacity;
+    uint32_t* validator_map_bits;
+    uint32_t validator_map_bits_capacity;
     uint32_t backtrace_depth;
     uint32_t max_labels;
     uint32_t* backtrace_func_indices;

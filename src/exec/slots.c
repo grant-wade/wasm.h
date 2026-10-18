@@ -79,6 +79,14 @@ WASM_PRIVATE uint32_t wasm__slots_from_values(wasm__slot_t* dst, const wasm_valu
     return slots;
 }
 
+WASM_PRIVATE uint32_t wasm__values_slots(const wasm_value_t* values, uint32_t count) {
+    uint32_t slots = 0;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) slots += wasm__valtype_slots(values[i].type);
+    return slots;
+}
+
 WASM_PRIVATE uint32_t wasm__values_from_slots(const wasm_runtime_t* rt,
                                               const wasm_valtype_t* types,
                                               const wasm_reftype_t* reftypes,

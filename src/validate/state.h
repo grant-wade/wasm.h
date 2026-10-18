@@ -32,7 +32,13 @@ typedef struct wasm__validator_t {
     wasm_reftype_t* stack_reftypes;
     uint32_t stack_capacity;
     uint32_t sp;
-    uint32_t max_sp;
+    uint32_t* stack_slots; /* stack_slots[i] is the slot height below stack entry i */
+    uint32_t* stack_refs;  /* stack_refs[i] counts the reference entries below stack entry i */
+    uint32_t max_slots;
+    uint32_t num_maps;       /* entries in rt->validator_maps */
+    uint32_t num_map_bits;   /* words in rt->validator_map_bits */
+    uint32_t last_map_bits;  /* where the latest map's kinds start */
+    uint32_t last_map_slots; /* slots the latest map covers */
     wasm__val_frame_t* frames;
     uint32_t frame_capacity;
     uint32_t fp;

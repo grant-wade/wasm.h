@@ -15,7 +15,15 @@ struct wasm_func_t {
     uint32_t* op_offsets; /* for each translated instruction, its index in ops and bytecode offset */
     uint32_t num_op_offsets;
     uint32_t max_handlers; /* deepest nesting of try and try_table blocks */
-    uint32_t max_stack;    /* operand stack values the body needs at most */
+    uint32_t max_stack;    /* operand stack slots the body needs at most */
+    uint32_t* local_slots; /* slot offset of each local in the frame's locals */
+    uint32_t num_local_slots;
+    uint32_t param_slots;
+    uint32_t result_slots;
+    uint32_t* stack_maps;     /* bytecode offset, bits index, and slot count of each map, by offset */
+    uint32_t num_stack_maps;
+    uint32_t* stack_map_bits; /* WASM__SLOT_KIND_BITS-bit slot kinds the maps index */
+    uint32_t num_stack_map_bits;
     uint32_t max_label_depth;
     uint32_t funcref_id;
     int is_declared_ref;

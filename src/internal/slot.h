@@ -14,6 +14,46 @@ WASM_INLINE uint32_t wasm__valtype_slots(wasm_valtype_t type) {
     return type == WASM_TYPE_V128 ? WASM__V128_SLOTS : 1u;
 }
 
+WASM_INLINE uint32_t wasm__valtypes_slots(const wasm_valtype_t* types, uint32_t count) {
+    uint32_t slots = 0;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) slots += wasm__valtype_slots(types[i]);
+    return slots;
+}
+
+/* What a slot holds for the collector, by the reference hierarchy of its static type. */
+#define WASM__SLOT_KIND_NONE 0u
+#define WASM__SLOT_KIND_ANY 1u
+#define WASM__SLOT_KIND_EXTERN 2u
+#define WASM__SLOT_KIND_EXN 3u
+#define WASM__SLOT_KIND_BITS 2u
+
+WASM_INLINE uint32_t wasm__slot_kind(wasm_valtype_t type) {
+    switch (type) {
+        case WASM_TYPE_NONE:
+        case WASM_TYPE_ANYREF:
+        case WASM_TYPE_EQREF:
+        case WASM_TYPE_I31REF:
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ARRAYREF:
+            return WASM__SLOT_KIND_ANY;
+        case WASM_TYPE_EXTERNREF:
+        case WASM_TYPE_NOEXTERN:
+            return WASM__SLOT_KIND_EXTERN;
+        case WASM_TYPE_EXNREF:
+        case WASM_TYPE_NOEXN:
+            return WASM__SLOT_KIND_EXN;
+        default:
+            return WASM__SLOT_KIND_NONE;
+    }
+}
+
+/* Returns the kind of slot index in a stack map of WASM__SLOT_KIND_BITS-bit kinds. */
+WASM_INLINE uint32_t wasm__stack_map_kind(const uint32_t* bits, uint32_t index) {
+    return (bits[index / 16u] >> ((index % 16u) * WASM__SLOT_KIND_BITS)) & 3u;
+}
+
 WASM_INLINE int32_t wasm__slot_i32(const wasm__slot_t* s) {
     return s->of.i32;
 }

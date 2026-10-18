@@ -101,7 +101,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
         *out_err = wasm__copy_exception_to_label(&rt->allocator, label, &rt->pending_exception);
         if (*out_err != WASM_OK) return 1;
         if (clause[0] == WASM__CLAUSE_CATCH) {
-            if (rt->sp + label->caught_count > rt->max_stack) {
+            if (rt->sp + wasm__values_slots(label->caught_values, label->caught_count) > rt->max_stack) {
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
@@ -139,17 +139,17 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
             return 1;
         }
 
+        if (clause[0] == 0x01 || clause[0] == 0x03) wasm__gc_collect_handles_if_needed(rt);
         wasm__unwind_labels(cf, idx - 1);
         rt->sp = label->sp_base;
         if (tag_type) {
-            if (rt->sp + tag_type->num_params + 1u > rt->max_stack) {
+            if (rt->sp + wasm__valtypes_slots(tag_type->params, tag_type->num_params) + 1u > rt->max_stack) {
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
             rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], rt->pending_exception.values, tag_type->num_params);
         }
         if (clause[0] == 0x01 || clause[0] == 0x03) {
-            wasm__gc_collect_handles_if_needed(rt);
             *out_err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
             if (*out_err != WASM_OK) return 1;
             if (rt->sp >= rt->max_stack) {

@@ -14,9 +14,14 @@ enum {
     WASM__OP_BR_IF_LOOP,          /* target */
     WASM__OP_BR_IF_X,             /* branch descriptor */
     WASM__OP_BR_TABLE,            /* count, then count + 1 branch descriptors */
-    WASM__OP_LOCAL_GET_REF,       /* local index; a local of reference type */
-    WASM__OP_LOCAL_SET_REF,       /* local index */
-    WASM__OP_LOCAL_TEE_REF,       /* local index */
+    WASM__OP_LOCAL_GET_REF,       /* slot offset, local index; a local of reference type */
+    WASM__OP_LOCAL_SET_REF,       /* slot offset, local index */
+    WASM__OP_LOCAL_TEE_REF,       /* slot offset, local index */
+    WASM__OP_LOCAL_GET_N,         /* slot offset, slot count; a local of vector type */
+    WASM__OP_LOCAL_SET_N,         /* slot offset, slot count */
+    WASM__OP_LOCAL_TEE_N,         /* slot offset, slot count */
+    WASM__OP_DROP_N,              /* slot count */
+    WASM__OP_SELECT_N,            /* slot count of each operand */
     WASM__OP_MEMORY_X,            /* Wasm opcode, memory index, offset low and high words */
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
@@ -35,10 +40,18 @@ enum {
 #define WASM__CLAUSE_CATCH_ALL 1u
 #define WASM__CLAUSE_DELEGATE 2u
 
-/* heights[i] is the operand stack height before the instruction at byte offset i, and max_height the
- * greatest height the body reaches. */
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
-                                                   uint32_t max_height);
+/* What validating a function body tells its translation. */
+typedef struct wasm__body_info_t {
+    const uint32_t* heights;      /* operand stack slots before the instruction at each byte offset */
+    const uint8_t* operand_types; /* type each drop and select operates on, at its byte offset */
+    uint32_t max_height;          /* greatest slot height the body reaches */
+    const uint32_t* maps;         /* stack maps as in wasm_func_t */
+    uint32_t num_maps;
+    const uint32_t* map_bits;
+    uint32_t num_map_bits;
+} wasm__body_info_t;
+
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const wasm__body_info_t* info);
 
 WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm_func_t* dst, const wasm_func_t* src);
 

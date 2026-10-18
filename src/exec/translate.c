@@ -12,9 +12,9 @@
 typedef struct wasm__xframe_t {
     uint8_t opcode;    /* 0x02, 0x03, 0x04, 0x06, or 0x1F; 0 for the function body */
     uint8_t in_catch;  /* a try past its first catch clause */
-    uint32_t height;   /* operand stack height below the block's parameters */
-    uint32_t params;
-    uint32_t results;
+    uint32_t height;   /* operand stack slots below the block's parameters */
+    uint32_t params;   /* slots of the block's parameters */
+    uint32_t results;  /* slots of the block's results */
     uint32_t start;    /* loop: index of the body */
     uint32_t fixups;
     uint32_t if_fixup; /* if: index + 1 of the word that takes the else body or continuation */
@@ -46,6 +46,8 @@ typedef struct wasm__translator_t {
     uint32_t* try_operands;
     uint32_t num_tries;
     uint32_t tries_cap;
+    uint32_t* local_slots;
+    uint32_t num_local_slots;
     uint32_t handlers;
     uint32_t max_handlers;
     int failed;
@@ -149,9 +151,9 @@ static wasm__xframe_t* wasm__x_push_frame(wasm__translator_t* t, uint8_t opcode,
     frame = &t->frames[t->fp++];
     memset(frame, 0, sizeof(*frame));
     frame->opcode = opcode;
-    frame->params = blocktype->param_arity;
-    frame->results = blocktype->result_arity;
-    frame->height = height - blocktype->param_arity;
+    frame->params = wasm__valtypes_slots(blocktype->params, blocktype->param_arity);
+    frame->results = wasm__valtypes_slots(blocktype->results, blocktype->result_arity);
+    frame->height = height - frame->params;
     frame->handlers = t->handlers;
     frame->start = t->len;
     return frame;
@@ -188,9 +190,47 @@ static void wasm__x_free(wasm__translator_t* t) {
     wasm__free(t->allocator, t->frames);
     wasm__free(t->allocator, t->clauses);
     wasm__free(t->allocator, t->try_operands);
+    wasm__free(t->allocator, t->local_slots);
 }
 
-static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func, const uint32_t* heights) {
+static void wasm__x_local_slots(wasm__translator_t* t, const wasm_func_t* func) {
+    uint32_t i;
+
+    if (func->num_locals == 0) return;
+    t->local_slots = (uint32_t*)wasm__malloc_array(t->allocator, func->num_locals, sizeof(uint32_t));
+    if (!t->local_slots) {
+        t->failed = 1;
+        return;
+    }
+    for (i = 0; i < func->num_locals; i++) {
+        t->local_slots[i] = t->num_local_slots;
+        t->num_local_slots += wasm__valtype_slots(func->locals[i]);
+    }
+}
+
+/* Returns a copy of count words of src, or NULL with *failed set when out of memory. */
+static uint32_t* wasm__x_copy_words(const wasm_allocator_t* a, const uint32_t* src, uint32_t count, int* failed) {
+    uint32_t* copy;
+
+    if (count == 0) return NULL;
+    copy = (uint32_t*)wasm__malloc_array(a, count, sizeof(uint32_t));
+    if (!copy) {
+        *failed = 1;
+        return NULL;
+    }
+    memcpy(copy, src, (size_t)count * sizeof(uint32_t));
+    return copy;
+}
+
+static void wasm__x_param_slots(wasm__translator_t* t, wasm_module_t* mod, uint32_t type_idx) {
+    const wasm_functype_t* type = wasm__module_functype(mod, type_idx);
+
+    wasm__x_emit(t, type ? wasm__valtypes_slots(type->params, type->num_params) : 0u);
+}
+
+static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
+                                 const wasm__body_info_t* info) {
+    const uint32_t* heights = info->heights;
     int mem0_is_32 = mod->num_memories > 0 && !mod->memories[0].is_64;
     wasm__blocktype_t no_block;
     wasm__reader_t r;
@@ -199,6 +239,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     if (!ft) return WASM_ERR_MALFORMED;
     memset(&no_block, 0, sizeof(no_block));
     no_block.result_arity = ft->num_results;
+    no_block.results = ft->results;
     if (!wasm__x_push_frame(t, 0, 0, &no_block)) return WASM_ERR_OOM;
 
     r.ptr = func->code;
@@ -216,8 +257,6 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0x01:
             case 0x0A:
             case 0x0F:
-            case 0x1A:
-            case 0x1B:
             case 0xD1:
             case 0xD3:
             case 0xD4:
@@ -282,11 +321,40 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                                    0);
                 break;
             }
-            case 0x08:
             case 0x10:
-            case 0x12:
+            case 0x12: {
+                uint32_t callee = wasm__read_leb128_u32(&r);
+
+                if (callee >= mod->num_funcs) return WASM_ERR_MALFORMED;
+                wasm__x_emit(t, op);
+                wasm__x_emit(t, callee);
+                wasm__x_param_slots(t, mod, mod->funcs[callee].type_idx);
+                break;
+            }
             case 0x14:
-            case 0x15:
+            case 0x15: {
+                uint32_t type_idx = wasm__read_leb128_u32(&r);
+
+                wasm__x_emit(t, op);
+                wasm__x_emit(t, type_idx);
+                wasm__x_param_slots(t, mod, type_idx);
+                break;
+            }
+            case 0x1A:
+            case 0x1B:
+            case 0x1C: {
+                uint32_t width = wasm__valtype_slots((wasm_valtype_t)info->operand_types[at - func->code]);
+
+                if (op == 0x1C) wasm__skip_immediates(op, &r);
+                if (info->operand_types[at - func->code] == WASM_TYPE_V128) {
+                    wasm__x_emit(t, op == 0x1A ? WASM__OP_DROP_N : WASM__OP_SELECT_N);
+                    wasm__x_emit(t, width);
+                } else {
+                    wasm__x_emit(t, op == 0x1A ? 0x1A : 0x1B);
+                }
+                break;
+            }
+            case 0x08:
             case 0x23:
             case 0x24:
             case 0x25:
@@ -363,12 +431,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 wasm__x_emit(t, op);
                 wasm__x_emit(t, type_idx);
                 wasm__x_emit(t, wasm__read_leb128_u32(&r));
+                wasm__x_param_slots(t, mod, type_idx);
                 break;
             }
-            case 0x1C:
-                wasm__skip_immediates(op, &r);
-                wasm__x_emit(t, 0x1B);
-                break;
             case 0x1F: {
                 wasm__blocktype_t blocktype;
                 wasm__xframe_t* frame;
@@ -378,7 +443,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 if (wasm__read_blocktype(mod, &r, &blocktype) != WASM_OK) return WASM_ERR_MALFORMED;
                 count = wasm__read_leb128_u32(&r);
                 wasm__x_emit(t, WASM__OP_TRY_TABLE);
-                wasm__x_emit(t, height - blocktype.param_arity);
+                wasm__x_emit(t, height - wasm__valtypes_slots(blocktype.params, blocktype.param_arity));
                 wasm__x_emit(t, count);
                 for (i = 0; i < count && !t->failed; i++) {
                     wasm__try_table_clause_t clause;
@@ -400,11 +465,18 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 uint32_t index = wasm__read_leb128_u32(&r);
 
                 if (index >= func->num_locals) return WASM_ERR_MALFORMED;
-                if (wasm__is_numeric_valtype(func->locals[index]))
+                if (func->locals[index] == WASM_TYPE_V128) {
+                    wasm__x_emit(t, WASM__OP_LOCAL_GET_N + (uint32_t)(op - 0x20));
+                    wasm__x_emit(t, t->local_slots[index]);
+                    wasm__x_emit(t, wasm__valtype_slots(WASM_TYPE_V128));
+                } else if (wasm__is_numeric_valtype(func->locals[index])) {
                     wasm__x_emit(t, op);
-                else
+                    wasm__x_emit(t, t->local_slots[index]);
+                } else {
                     wasm__x_emit(t, WASM__OP_LOCAL_GET_REF + (uint32_t)(op - 0x20));
-                wasm__x_emit(t, index);
+                    wasm__x_emit(t, t->local_slots[index]);
+                    wasm__x_emit(t, index);
+                }
                 break;
             }
             case 0x41:
@@ -526,20 +598,29 @@ static void wasm__x_try_tables(wasm__translator_t* t) {
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights,
-                                                   uint32_t max_height) {
+WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const wasm__body_info_t* info) {
     wasm__translator_t t;
     wasm_func_t* func = &mod->funcs[func_idx];
-    wasm_error_t err;
+    const wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
+    uint32_t* maps;
+    uint32_t* map_bits;
+    wasm_error_t err = WASM_OK;
 
+    if (!ft) return WASM_ERR_MALFORMED;
     memset(&t, 0, sizeof(t));
     t.allocator = &mod->rt->allocator;
-    err = wasm__x_body(&t, mod, func, heights);
+    wasm__x_local_slots(&t, func);
+    maps = wasm__x_copy_words(t.allocator, info->maps, info->num_maps * 3u, &t.failed);
+    map_bits = wasm__x_copy_words(t.allocator, info->map_bits, info->num_map_bits, &t.failed);
+    if (t.failed) err = WASM_ERR_OOM;
+    if (err == WASM_OK) err = wasm__x_body(&t, mod, func, info);
     if (err == WASM_OK) {
         wasm__x_try_tables(&t);
         if (t.failed) err = WASM_ERR_OOM;
     }
     if (err != WASM_OK) {
+        wasm__free(t.allocator, maps);
+        wasm__free(t.allocator, map_bits);
         wasm__x_free(&t);
         return err;
     }
@@ -549,9 +630,18 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
     func->op_offsets = t.offsets;
     func->num_op_offsets = t.num_offsets;
     func->max_handlers = t.max_handlers;
-    func->max_stack = max_height;
+    func->max_stack = info->max_height;
+    func->local_slots = t.local_slots;
+    func->num_local_slots = t.num_local_slots;
+    func->param_slots = wasm__valtypes_slots(ft->params, ft->num_params);
+    func->result_slots = wasm__valtypes_slots(ft->results, ft->num_results);
+    func->stack_maps = maps;
+    func->num_stack_maps = info->num_maps;
+    func->stack_map_bits = map_bits;
+    func->num_stack_map_bits = info->num_map_bits;
     t.ops = NULL;
     t.offsets = NULL;
+    t.local_slots = NULL;
     wasm__x_free(&t);
     return WASM_OK;
 }
@@ -559,17 +649,25 @@ WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t 
 WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm_func_t* dst, const wasm_func_t* src) {
     uint32_t* ops = NULL;
     uint32_t* offsets = NULL;
+    uint32_t* local_slots = NULL;
+    uint32_t* maps = NULL;
+    uint32_t* map_bits = NULL;
+    int failed = 0;
 
     if (src->ops) {
-        ops = (uint32_t*)wasm__malloc_array(a, src->num_ops, sizeof(uint32_t));
-        offsets = (uint32_t*)wasm__malloc_array(a, (size_t)src->num_op_offsets * 2u, sizeof(uint32_t));
-        if (!ops || !offsets) {
+        ops = wasm__x_copy_words(a, src->ops, src->num_ops, &failed);
+        offsets = wasm__x_copy_words(a, src->op_offsets, src->num_op_offsets * 2u, &failed);
+        local_slots = src->local_slots ? wasm__x_copy_words(a, src->local_slots, src->num_locals, &failed) : NULL;
+        maps = wasm__x_copy_words(a, src->stack_maps, src->num_stack_maps * 3u, &failed);
+        map_bits = wasm__x_copy_words(a, src->stack_map_bits, src->num_stack_map_bits, &failed);
+        if (failed) {
             wasm__free(a, ops);
             wasm__free(a, offsets);
+            wasm__free(a, local_slots);
+            wasm__free(a, maps);
+            wasm__free(a, map_bits);
             return WASM_ERR_OOM;
         }
-        memcpy(ops, src->ops, src->num_ops * sizeof(uint32_t));
-        memcpy(offsets, src->op_offsets, (size_t)src->num_op_offsets * 2u * sizeof(uint32_t));
     }
     wasm__free_translation(a, dst);
     dst->ops = ops;
@@ -578,18 +676,35 @@ WASM_PRIVATE wasm_error_t wasm__copy_translation(const wasm_allocator_t* a, wasm
     dst->num_op_offsets = src->num_op_offsets;
     dst->max_handlers = src->max_handlers;
     dst->max_stack = src->max_stack;
+    dst->local_slots = local_slots;
+    dst->num_local_slots = src->num_local_slots;
+    dst->param_slots = src->param_slots;
+    dst->result_slots = src->result_slots;
+    dst->stack_maps = maps;
+    dst->num_stack_maps = src->num_stack_maps;
+    dst->stack_map_bits = map_bits;
+    dst->num_stack_map_bits = src->num_stack_map_bits;
     return WASM_OK;
 }
 
 WASM_PRIVATE void wasm__free_translation(const wasm_allocator_t* a, wasm_func_t* func) {
     wasm__free(a, func->ops);
     wasm__free(a, func->op_offsets);
+    wasm__free(a, func->local_slots);
+    wasm__free(a, func->stack_maps);
+    wasm__free(a, func->stack_map_bits);
     func->ops = NULL;
     func->op_offsets = NULL;
+    func->local_slots = NULL;
+    func->stack_maps = NULL;
+    func->stack_map_bits = NULL;
     func->num_ops = 0;
     func->num_op_offsets = 0;
     func->max_handlers = 0;
     func->max_stack = 0;
+    func->num_local_slots = 0;
+    func->num_stack_maps = 0;
+    func->num_stack_map_bits = 0;
 }
 
 WASM_PRIVATE uint32_t wasm__translated_offset(const wasm_func_t* func, const uint32_t* op) {

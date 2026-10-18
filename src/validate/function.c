@@ -17,10 +17,75 @@
 #include "stack.h"
 #include "../values.h"
 #include "atomic.h"
+#include <string.h>
+
+/* Grows *buf to hold need words; returns 0 when out of memory. */
+static int wasm__validator_reserve(const wasm_allocator_t* a, uint32_t** buf, uint32_t* capacity, uint32_t need) {
+    uint32_t cap = *capacity ? *capacity : 64u;
+    uint32_t* grown;
+
+    if (need <= *capacity) return 1;
+    while (cap < need) {
+        if (cap > UINT32_MAX / 2u) return 0;
+        cap *= 2u;
+    }
+    grown = (uint32_t*)wasm__realloc_array(a, *buf, cap, sizeof(uint32_t));
+    if (!grown) return 0;
+    *buf = grown;
+    *capacity = cap;
+    return 1;
+}
+
+/* Records the slot kinds below the instruction at offset if any slot holds a traced reference;
+ * returns 0 when out of memory. */
+static int wasm__validator_record_stack_map(wasm__validator_t* v, uint32_t offset) {
+    wasm_runtime_t* rt = v->mod->rt;
+    uint32_t slots = 0;
+    uint32_t words;
+    uint32_t* bits;
+    uint32_t i;
+
+    if (v->stack_refs[v->sp] == 0) return 1;
+    for (i = v->sp; i > 0 && slots == 0; i--) {
+        if (wasm__slot_kind(v->stack[i - 1]) != WASM__SLOT_KIND_NONE) slots = v->stack_slots[i - 1] + 1u;
+    }
+    words = (slots + 15u) / 16u;
+    if (!wasm__validator_reserve(&rt->allocator, &rt->validator_map_bits, &rt->validator_map_bits_capacity,
+                                 v->num_map_bits + words) ||
+        !wasm__validator_reserve(&rt->allocator, &rt->validator_maps, &rt->validator_maps_capacity,
+                                 v->num_maps * 3u + 3u))
+        return 0;
+    bits = rt->validator_map_bits + v->num_map_bits;
+    memset(bits, 0, words * sizeof(uint32_t));
+    for (i = 0; i < v->sp && v->stack_slots[i] < slots; i++) {
+        uint32_t slot = v->stack_slots[i];
+
+        bits[slot / 16u] |= wasm__slot_kind(v->stack[i]) << ((slot % 16u) * WASM__SLOT_KIND_BITS);
+    }
+    if (v->num_maps > 0 && slots <= v->last_map_slots) {
+        const uint32_t* last = rt->validator_map_bits + v->last_map_bits;
+
+        for (i = 0; i < slots && wasm__stack_map_kind(last, i) == wasm__stack_map_kind(bits, i); i++) {
+        }
+        if (i == slots) bits = NULL;
+    }
+    if (bits) {
+        v->last_map_bits = v->num_map_bits;
+        v->last_map_slots = slots;
+        v->num_map_bits += words;
+    }
+    rt->validator_maps[v->num_maps * 3u] = offset;
+    rt->validator_maps[v->num_maps * 3u + 1u] = v->last_map_bits;
+    rt->validator_maps[v->num_maps * 3u + 2u] = slots;
+    v->num_maps++;
+    return 1;
+}
 
 static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_idx) {
     wasm__validator_t v;
+    wasm__body_info_t info;
     uint32_t* heights;
+    uint8_t* operand_types;
     wasm_func_t* func = &mod->funcs[func_idx];
     wasm_functype_t* ft = wasm__module_functype(mod, func->type_idx);
     wasm_error_t err;
@@ -59,21 +124,28 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
 
     if (mod->rt->validator_heights_capacity < func->code_len) {
         heights = (uint32_t*)wasm__realloc_array(&mod->rt->allocator, mod->rt->validator_heights, func->code_len, sizeof(uint32_t));
-        if (!heights) {
+        if (heights) mod->rt->validator_heights = heights;
+        operand_types = (uint8_t*)wasm__realloc(&mod->rt->allocator, mod->rt->validator_operand_types, func->code_len);
+        if (operand_types) mod->rt->validator_operand_types = operand_types;
+        if (!heights || !operand_types) {
             wasm__validator_destroy(&v);
             return wasm__set_validation_error(mod->rt, func_idx, 0, "failed to allocate validator state");
         }
-        mod->rt->validator_heights = heights;
         mod->rt->validator_heights_capacity = func->code_len;
     }
     heights = mod->rt->validator_heights;
+    operand_types = mod->rt->validator_operand_types;
 
     while (v.r.ptr < v.r.end) {
         const uint8_t* at = v.r.ptr;
         uint8_t op = wasm__read_u8(&v.r);
 
         err = WASM_OK;
-        heights[at - v.body_start] = v.sp;
+        heights[at - v.body_start] = v.stack_slots[v.sp];
+        if (!wasm__validator_record_stack_map(&v, (uint32_t)(at - v.body_start))) {
+            wasm__validator_destroy(&v);
+            return wasm__set_validation_error(mod->rt, func_idx, 0, "failed to allocate validator state");
+        }
 
         switch (op) {
             case 0x00:
@@ -676,7 +748,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                                      &branch_types,
                                                      &branch_reftypes,
                                                      &branch_count);
-                    if (entry_height + branch_count > v.max_sp) v.max_sp = entry_height + branch_count;
+                    if (v.stack_slots[entry_height] + wasm__valtypes_slots(branch_types, branch_count) > v.max_slots)
+                        v.max_slots = v.stack_slots[entry_height] + wasm__valtypes_slots(branch_types, branch_count);
 
                     switch (clause.kind) {
                         case 0x00: {
@@ -790,9 +863,10 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 break;
             }
             case 0x1A: {
-                wasm_valtype_t ignored;
-                err = wasm__validator_pop_any(&v, at, &ignored);
+                wasm_valtype_t dropped;
+                err = wasm__validator_pop_any(&v, at, &dropped);
                 if (err != WASM_OK) return err;
+                operand_types[at - v.body_start] = (uint8_t)dropped;
                 break;
             }
             case 0x19: {
@@ -826,6 +900,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 }
                 err = wasm__validator_push(&v, at, lhs == WASM__TYPE_BOT ? rhs : lhs);
                 if (err != WASM_OK) return err;
+                operand_types[at - v.body_start] = (uint8_t)(lhs == WASM__TYPE_BOT ? rhs : lhs);
                 break;
             }
             case 0x1C: {
@@ -842,6 +917,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push_typed(&v, at, select_type, &select_ref_type);
                 if (err != WASM_OK) return err;
+                operand_types[at - v.body_start] = (uint8_t)select_type;
                 break;
             }
             case 0x20: {
@@ -1432,7 +1508,14 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                     (unsigned)ft->num_results);
         goto done;
     }
-    err = wasm__translate_function(mod, func_idx, heights, v.max_sp);
+    info.heights = heights;
+    info.operand_types = operand_types;
+    info.max_height = v.max_slots;
+    info.maps = mod->rt->validator_maps;
+    info.num_maps = v.num_maps;
+    info.map_bits = mod->rt->validator_map_bits;
+    info.num_map_bits = v.num_map_bits;
+    err = wasm__translate_function(mod, func_idx, &info);
     if (err != WASM_OK) {
         if (err == WASM_ERR_OOM)
             WASM__SET_ERR(mod->rt, err, "%s", "failed to allocate translated code");

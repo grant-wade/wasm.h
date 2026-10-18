@@ -631,7 +631,12 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     wasm__free(&rt->allocator, rt->validator_frames);
     wasm__free(&rt->allocator, rt->validator_local_init_bits);
     wasm__free(&rt->allocator, rt->validator_local_init_entry_bits);
+    wasm__free(&rt->allocator, rt->validator_stack_slots);
+    wasm__free(&rt->allocator, rt->validator_stack_refs);
     wasm__free(&rt->allocator, rt->validator_heights);
+    wasm__free(&rt->allocator, rt->validator_operand_types);
+    wasm__free(&rt->allocator, rt->validator_maps);
+    wasm__free(&rt->allocator, rt->validator_map_bits);
     wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
     wasm__backtrace_destroy(rt);
     wasm__call_frame_stack_destroy(rt);

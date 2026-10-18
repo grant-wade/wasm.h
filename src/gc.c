@@ -1,6 +1,7 @@
 #include "gc.h"
 #include "wasm.h"
 #include "handles.h"
+#include "exec/frames.h"
 #include "exec/state.h"
 #include "values.h"
 #include "support.h"
@@ -200,7 +201,7 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
         wasm__call_frame_t* cf = &rt->call_frames[i];
         uint32_t j;
 
-        if (cf->func && cf->locals) wasm__gc_mark_values(stack, cf->locals, cf->func->num_locals);
+        if (cf->func && cf->locals) wasm__gc_mark_values(stack, cf->locals, cf->func->num_local_slots);
         for (j = 0; j < cf->lsp; j++) {
             wasm__gc_mark_values(stack, cf->labels[j].caught_values, cf->labels[j].caught_count);
         }
@@ -319,7 +320,7 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
         uint32_t j;
 
-        if (cf->func && cf->locals) wasm__gc_forward_values(rt, cf->locals, cf->func->num_locals);
+        if (cf->func && cf->locals) wasm__gc_forward_values(rt, cf->locals, cf->func->num_local_slots);
         for (j = 0; j < cf->lsp; j++) {
             wasm__gc_forward_values(rt, cf->labels[j].caught_values, cf->labels[j].caught_count);
         }
@@ -407,6 +408,9 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     wasm__gc_mark_stack_t stack;
 
     if (!rt) return WASM_ERR_MALFORMED;
+#ifndef NDEBUG
+    wasm__check_stack_maps(rt);
+#endif
 
     for (object = rt->gc_allocations; object; object = object->next_alloc) object->marked = 0;
     wasm__gc_clear_handle_marks(rt);

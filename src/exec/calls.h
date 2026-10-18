@@ -8,11 +8,10 @@ WASM_PRIVATE void wasm__clear_label(wasm__label_t* label);
 
 WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf);
 
-/* args holds the slots of the first num_args parameters; later locals start at their defaults. */
+/* args holds the slots of the parameters, or is NULL to start them at their defaults. */
 WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           uint32_t func_idx,
                                           const wasm__slot_t* args,
-                                          uint32_t num_args,
                                           wasm_value_t* results_dst,
                                           uint32_t num_results);
 

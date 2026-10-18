@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "../internal/alloc.h"
 #include "../runtime.h"
+#include <stdlib.h>
 
 WASM_PRIVATE wasm_error_t wasm__call_frame_stack_init(wasm_runtime_t* rt) {
     rt->call_frames = (wasm__call_frame_t*)wasm__calloc(&rt->allocator, rt->max_call_frames, sizeof(*rt->call_frames));
@@ -51,6 +52,70 @@ WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_fram
         rt->backtrace_offsets[i] = wasm__call_frame_offset(cf);
     }
 }
+
+#ifndef NDEBUG
+WASM_PRIVATE const uint32_t* wasm__frame_stack_map(const wasm_runtime_t* rt, uint32_t frame_index, uint32_t* out_slots) {
+    const wasm__call_frame_t* cf = &rt->call_frames[frame_index];
+    const wasm_func_t* func = cf->func;
+    const uint32_t* at = cf->op_at;
+    uint32_t offset;
+    uint32_t lo = 0;
+    uint32_t hi;
+
+    *out_slots = 0;
+    if (!func || !func->ops || func->num_stack_maps == 0) return NULL;
+    if (rt->suspended != WASM_OK && frame_index + 1u == rt->call_frame_sp && cf->pc) at = cf->pc;
+    offset = wasm__translated_offset(func, at);
+    hi = func->num_stack_maps;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+
+        if (func->stack_maps[mid * 3u] < offset)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo == func->num_stack_maps || func->stack_maps[lo * 3u] != offset) return NULL;
+    *out_slots = func->stack_maps[lo * 3u + 2u];
+    return func->stack_map_bits + func->stack_maps[lo * 3u + 1u];
+}
+
+static void wasm__stack_map_mismatch(const wasm__call_frame_t* cf, const char* where, uint32_t slot, uint32_t tag_kind,
+                                     uint32_t map_kind) {
+    fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u holds kind %u, map says %u\n",
+            (unsigned)cf->func_idx, (unsigned)wasm__translated_offset(cf->func, cf->op_at), where, (unsigned)slot,
+            (unsigned)tag_kind, (unsigned)map_kind);
+    abort();
+}
+
+WASM_PRIVATE void wasm__check_stack_maps(const wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->call_frame_sp; i++) {
+        const wasm__call_frame_t* cf = &rt->call_frames[i];
+        uint32_t end = i + 1u < rt->call_frame_sp ? rt->call_frames[i + 1u].sp_base : rt->sp;
+        uint32_t map_slots;
+        const uint32_t* map;
+        uint32_t j;
+
+        if (!cf->func || !cf->func->ops) continue;
+        map = wasm__frame_stack_map(rt, i, &map_slots);
+        for (j = cf->sp_base; j < end; j++) {
+            uint32_t slot = j - cf->sp_base;
+            uint32_t map_kind = map && slot < map_slots ? wasm__stack_map_kind(map, slot) : WASM__SLOT_KIND_NONE;
+            uint32_t tag_kind = wasm__slot_kind(rt->stack[j].type);
+
+            if (tag_kind != map_kind) wasm__stack_map_mismatch(cf, "operand", slot, tag_kind, map_kind);
+        }
+        for (j = 0; j < cf->func->num_locals && cf->locals; j++) {
+            uint32_t declared = wasm__slot_kind(cf->func->locals[j]);
+            uint32_t tag_kind = wasm__slot_kind(cf->locals[cf->func->local_slots[j]].type);
+
+            if (tag_kind != declared) wasm__stack_map_mismatch(cf, "local", j, tag_kind, declared);
+        }
+    }
+}
+#endif
 
 WASM_PRIVATE uint32_t wasm__visible_call_stack_depth(const wasm_runtime_t* rt) {
     if (!rt) return 0;
