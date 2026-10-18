@@ -48,6 +48,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - An exception thrown inside a legacy `catch` or `catch_all` body was caught by a later clause of the same `try`.
 - `array.new` popped its initial value before allocating the array, so a collection during that allocation missed the value, and the array was filled with a reference into the freed heap.
 - The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
+- Calls that trap set `wasm_runtime_last_error` and `wasm_runtime_error_message`, which reported `ok` after a trap.
 
 ## [1.2.0] - 2026-10-17
 

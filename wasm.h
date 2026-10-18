@@ -23809,6 +23809,14 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
 #include <stdarg.h>
 #include <stdio.h>
 
+static wasm_error_t wasm__record_call_result(wasm_runtime_t* rt, wasm_error_t err) {
+    if (err == WASM_OK)
+        wasm_runtime_clear_error(rt);
+    else if (rt->last_error != err || rt->error_msg[0] == '\0')
+        WASM__SET_ERR(rt, err, "%s", wasm_error_string(err));
+    return err;
+}
+
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results) {
@@ -23816,6 +23824,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
     wasm_export_kind_t kind;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
     if (!func_name || !wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
         WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name ? func_name : "");
         return WASM_ERR_UNDEFINED_EXPORT;
@@ -23829,6 +23838,7 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
     wasm__clear_backtrace(mod->rt);
     if (mod->is_compiled) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
@@ -23867,8 +23877,8 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 
     {
         wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
-        if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
-        return err;
+        if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(mod->rt);
+        return wasm__record_call_result(mod->rt, err);
     }
 }
 
@@ -23879,6 +23889,7 @@ wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
     uint32_t func_idx = 0;
 
     if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
     if (!wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) {
         WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "%s", "expected a non-null funcref");
         return WASM_ERR_TYPE_MISMATCH;
@@ -24112,6 +24123,7 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     wasm_error_t err;
 
     memset(&parsed_type, 0, sizeof(parsed_type));
+    if (mod && mod->rt) wasm_runtime_clear_error(mod->rt);
     if (!mod || !func_name || !fmt)
         return wasm__set_fmt_error(mod ? mod->rt : NULL, WASM_ERR_MALFORMED,
                                    "invalid format call arguments", NULL);

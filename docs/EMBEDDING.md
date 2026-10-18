@@ -269,7 +269,7 @@ Names may contain arbitrary bytes. Use `wasm_export_name_bytes` and `wasm_find_e
 
 ## Errors, traps, and limits
 
-Most operations return `wasm_error_t`; loading returns `NULL` on failure. Read `wasm_runtime_error_message` immediately for details, or `wasm_error_string` for the generic error name.
+Most operations return `wasm_error_t`; loading returns `NULL` on failure. Loads and calls clear the previous error, and after a failure `wasm_runtime_last_error` returns its code and `wasm_runtime_error_message` describes it, such as `integer divide by zero` for a trap. `wasm_error_string` gives the generic error name.
 
 A guest that calls WASI `proc_exit` stops at once: the call (or `wasm_load`, from a start function) fails with `WASM_ERR_EXIT`, and `wasm_runtime_exit_code` returns the status it passed.
 

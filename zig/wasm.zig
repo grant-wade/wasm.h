@@ -496,7 +496,7 @@ pub const Runtime = opaque {
         return @ptrCast(rt);
     }
 
-    /// Describes the most recent error; empty when there is none.
+    /// Describes the most recent error; "ok" when there is none.
     pub fn errorMessage(rt: *Runtime) [:0]const u8 {
         return span(c.wasm_runtime_error_message(rt.raw()));
     }

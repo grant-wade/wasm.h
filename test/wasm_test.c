@@ -8825,8 +8825,8 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
     WL_CHECK_MSG(t, compiled != NULL, "expected compile not to run the start function: %s", rt.error_msg);
     m = compiled ? wasm_instantiate(compiled) : NULL;
-    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE, "expected the start function to trap: %s",
-                 rt.error_msg);
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE && strstr(rt.error_msg, "unreachable"),
+                 "expected the start function to trap: %s", rt.error_msg);
     wasm_module_free(m);
     wasm_module_free(compiled);
     wasm_destroy(&rt);
@@ -8947,6 +8947,106 @@ WL_TEST(test_div_by_zero) {
 
     err = wasm_call(m, "f", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_DIV_BY_ZERO, "%s", "expected div by zero trap");
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static wasm_error_t wasm_test_host_trap(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    return WASM_ERR_TRAP;
+}
+
+static wasm_error_t wasm_test_host_refuse(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_set_error(mod->rt, WASM_ERR_TRAP, "host refused");
+    return WASM_ERR_TRAP;
+}
+
+static void wasm_test_expect_call_error(wl_test_ctx* t, const wasm_runtime_t* rt, const char* what, wasm_error_t err,
+                                        wasm_error_t expected, const char* message) {
+    WL_CHECK_MSG(t, err == expected, "%s: expected %s, got %s", what, wasm_error_string(expected),
+                 wasm_error_string(err));
+    WL_CHECK_MSG(t, wasm_runtime_last_error(rt) == err, "%s: last error %s does not match the returned code", what,
+                 wasm_error_string(wasm_runtime_last_error(rt)));
+    WL_CHECK_MSG(t, strcmp(wasm_runtime_error_message(rt), message) == 0, "%s: expected message '%s', got '%s'", what,
+                 message, wasm_runtime_error_message(rt));
+}
+
+WL_TEST(test_failed_calls_record_trap_codes_and_messages) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x19, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00,
+        0x00, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x72, 0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x00, 0x03, 0x07, 0x06, 0x00,
+        0x01, 0x02, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0d, 0x03,
+        0x01, 0x00, 0x00, 0x07, 0x3f, 0x08, 0x01, 0x74, 0x01, 0x00, 0x07, 0x75, 0x6e, 0x72, 0x65, 0x61, 0x63, 0x68,
+        0x00, 0x02, 0x03, 0x6f, 0x6f, 0x62, 0x00, 0x03, 0x03, 0x64, 0x69, 0x76, 0x00, 0x04, 0x04, 0x73, 0x70, 0x69,
+        0x6e, 0x00, 0x05, 0x05, 0x74, 0x68, 0x72, 0x6f, 0x77, 0x00, 0x06, 0x0b, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x72,
+        0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x07, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00, 0x00, 0x09, 0x07, 0x01, 0x00,
+        0x41, 0x00, 0x0b, 0x01, 0x02, 0x0a, 0x29, 0x06, 0x03, 0x00, 0x00, 0x0b, 0x09, 0x00, 0x41, 0xf0, 0xa2, 0x04,
+        0x28, 0x02, 0x00, 0x0b, 0x07, 0x00, 0x41, 0x01, 0x20, 0x00, 0x6d, 0x0b, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00,
+        0x0b, 0x0b, 0x04, 0x00, 0x08, 0x00, 0x0b, 0x04, 0x00, 0x10, 0x01, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_value_t ref;
+    int32_t out = 0;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "fail", "()", wasm_test_host_trap, NULL));
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "refuse", "()", wasm_test_host_refuse, NULL));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_test_expect_call_error(t, &rt, "unreachable", wasm_call(m, "unreach", NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "out-of-bounds load", wasm_call(m, "oob", NULL, 0, &result, 1),
+                                WASM_ERR_OUT_OF_BOUNDS, "out of bounds memory access");
+    arg = wasm_i32(0);
+    wasm_test_expect_call_error(t, &rt, "divide by zero", wasm_call(m, "div", &arg, 1, &result, 1),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+    arg = wasm_i32(1);
+    WASM_CHECK_OK(t, wasm_call(m, "div", &arg, 1, &result, 1));
+    WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_OK);
+    WL_CHECK(t, strcmp(wasm_runtime_error_message(&rt), "ok") == 0);
+
+    wasm_runtime_set_fuel(&rt, 5);
+    wasm_test_expect_call_error(t, &rt, "fuel", wasm_call(m, "spin", NULL, 0, NULL, 0), WASM_ERR_OUT_OF_FUEL,
+                                "out of fuel");
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_test_expect_call_error(t, &rt, "uncaught exception", wasm_call(m, "throw", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "uncaught exception tag 0");
+
+    WASM_CHECK_OK(t, wasm_table_get(m, 0, 0, &ref));
+    wasm_test_expect_call_error(t, &rt, "wasm_call_ref", wasm_call_ref(&rt, ref, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_index", wasm_call_index(m, 2, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_fmt", wasm_call_fmt(m, "div", "i(i)", 0, &out),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+
+    wasm_test_expect_call_error(t, &rt, "host message", wasm_call(m, "call_refuse", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "host refused");
+    wasm_test_expect_call_error(t, &rt, "imported host function", wasm_call(m, "fail", NULL, 0, NULL, 0),
+                                WASM_ERR_TRAP, "trap");
 
     wasm_module_free(m);
     wasm_destroy(&rt);
@@ -16452,6 +16552,7 @@ int main(void) {
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
+        { "public api: failed calls record the trap code and message", test_failed_calls_record_trap_codes_and_messages },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
         { "public api: fuel helpers meter finite execution", test_public_fuel_helpers_account_for_finite_calls },
         { "public api: fuel helpers stop infinite loops", test_public_fuel_helpers_trap_in_infinite_loop },
