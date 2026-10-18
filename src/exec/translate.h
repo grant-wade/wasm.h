@@ -14,9 +14,6 @@ enum {
     WASM__OP_BR_IF_LOOP,          /* target */
     WASM__OP_BR_IF_X,             /* branch descriptor */
     WASM__OP_BR_TABLE,            /* count, then count + 1 branch descriptors */
-    WASM__OP_LOCAL_GET_REF,       /* slot offset, local index; a local of reference type */
-    WASM__OP_LOCAL_SET_REF,       /* slot offset, local index */
-    WASM__OP_LOCAL_TEE_REF,       /* slot offset, local index */
     WASM__OP_LOCAL_GET_N,         /* slot offset, slot count; a local of vector type */
     WASM__OP_LOCAL_SET_N,         /* slot offset, slot count */
     WASM__OP_LOCAL_TEE_N,         /* slot offset, slot count */

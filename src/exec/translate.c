@@ -251,6 +251,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
         uint8_t op = wasm__read_u8(&r);
         wasm__xframe_t* top = &t->frames[t->fp - 1u];
 
+        if (op >= 0xBC && op <= 0xBF) continue;
         wasm__x_record_offset(t, (uint32_t)(at - func->code));
         switch (op) {
             case 0x00:
@@ -469,13 +470,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                     wasm__x_emit(t, WASM__OP_LOCAL_GET_N + (uint32_t)(op - 0x20));
                     wasm__x_emit(t, t->local_slots[index]);
                     wasm__x_emit(t, wasm__valtype_slots(WASM_TYPE_V128));
-                } else if (wasm__is_numeric_valtype(func->locals[index])) {
+                } else {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, t->local_slots[index]);
-                } else {
-                    wasm__x_emit(t, WASM__OP_LOCAL_GET_REF + (uint32_t)(op - 0x20));
-                    wasm__x_emit(t, t->local_slots[index]);
-                    wasm__x_emit(t, index);
                 }
                 break;
             }
@@ -508,9 +505,10 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 wasm__x_emit(t, (uint32_t)(bits >> 32));
                 break;
             }
-            case 0xD0:
-                wasm__x_emit(t, op);
-                wasm__x_emit(t, (uint32_t)(r.ptr - func->code));
+            case 0xD0: /* every null reference is a zero slot */
+                wasm__x_emit(t, 0x42);
+                wasm__x_emit(t, 0);
+                wasm__x_emit(t, 0);
                 wasm__skip_immediates(op, &r);
                 break;
             case 0xD5:

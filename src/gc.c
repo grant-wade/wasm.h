@@ -178,6 +178,47 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
     }
 }
 
+static void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value);
+
+/* Marks the reference of kind in s if stack is not NULL, else forwards it. */
+static void wasm__gc_frame_slot(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt, wasm__slot_t* s, uint32_t kind) {
+    wasm_value_t value;
+
+    if (kind == WASM__SLOT_KIND_NONE || wasm__slot_u64(s) == 0) return;
+    memset(&value, 0, sizeof(value));
+    value.type = kind == WASM__SLOT_KIND_EXTERN ? WASM_TYPE_EXTERNREF
+                 : kind == WASM__SLOT_KIND_EXN  ? WASM_TYPE_EXNREF
+                                                : WASM_TYPE_ANYREF;
+    value.of.gc_ref = wasm__slot_ref(s);
+    if (stack) {
+        wasm__gc_mark_value(stack, &value);
+    } else {
+        wasm__gc_forward_value(rt, &value);
+        wasm__slot_set_ref(s, value.of.gc_ref);
+    }
+}
+
+/* Marks the references in the operand stacks and locals of rt's frames if stack is not NULL, else
+ * forwards them. */
+static void wasm__gc_frame_slots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->call_frame_sp; i++) {
+        wasm__call_frame_t* cf = &rt->call_frames[i];
+        uint32_t end = i + 1u < rt->call_frame_sp ? rt->call_frames[i + 1u].sp_base : rt->sp;
+        uint32_t map_slots;
+        const uint32_t* map;
+        uint32_t j;
+
+        if (!cf->func || !cf->func->ops) continue;
+        map = wasm__frame_stack_map(rt, i, &map_slots);
+        for (j = 0; map && j < map_slots && cf->sp_base + j < end; j++)
+            wasm__gc_frame_slot(stack, rt, &rt->stack[cf->sp_base + j], wasm__stack_map_kind(map, j));
+        for (j = 0; cf->locals && j < cf->func->num_locals; j++)
+            wasm__gc_frame_slot(stack, rt, &cf->locals[cf->func->local_slots[j]], wasm__slot_kind(cf->func->locals[j]));
+    }
+}
+
 static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
     wasm_module_t* mod;
     wasm__held_block_t* held;
@@ -186,7 +227,7 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
 
     if (!rt) return;
 
-    wasm__gc_mark_values(stack, rt->stack, rt->sp);
+    wasm__gc_frame_slots(stack, rt);
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_mark_values(stack, *root->values, *root->count);
     wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
@@ -201,7 +242,6 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
         wasm__call_frame_t* cf = &rt->call_frames[i];
         uint32_t j;
 
-        if (cf->func && cf->locals) wasm__gc_mark_values(stack, cf->locals, cf->func->num_local_slots);
         for (j = 0; j < cf->lsp; j++) {
             wasm__gc_mark_values(stack, cf->labels[j].caught_values, cf->labels[j].caught_count);
         }
@@ -295,7 +335,7 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
 
     if (!rt) return;
 
-    wasm__gc_forward_values(rt, rt->stack, rt->sp);
+    wasm__gc_frame_slots(NULL, rt);
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_values(rt, *root->values, *root->count);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
@@ -320,7 +360,6 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         wasm__call_frame_t* cf = &rt->call_frames[i];
         uint32_t j;
 
-        if (cf->func && cf->locals) wasm__gc_forward_values(rt, cf->locals, cf->func->num_local_slots);
         for (j = 0; j < cf->lsp; j++) {
             wasm__gc_forward_values(rt, cf->labels[j].caught_values, cf->labels[j].caught_count);
         }

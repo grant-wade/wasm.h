@@ -500,7 +500,7 @@ typedef struct wasm_tag_import_t {
 #endif
 
 typedef struct wasm_config_t {
-    uint32_t max_stack_values;
+    uint32_t max_stack_values; /* operand stack size in 8-byte slots; a v128 takes two */
     uint32_t max_call_depth;
     uint32_t max_labels;
     size_t initial_gc_heap_size;

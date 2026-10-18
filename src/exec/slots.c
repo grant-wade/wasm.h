@@ -2,6 +2,7 @@
 #include "../runtime.h"
 #include "../support.h"
 #include "../values.h"
+#include "../internal/gc_types.h"
 #include <string.h>
 
 WASM_PRIVATE uint32_t wasm__slot_from_value(wasm__slot_t* s, const wasm_value_t* value) {
@@ -29,9 +30,42 @@ WASM_PRIVATE uint32_t wasm__slot_from_value(wasm__slot_t* s, const wasm_value_t*
         case WASM_TYPE_V128:
             wasm__slot_set_v128(s, value->of.v128);
             return WASM__V128_SLOTS;
-        default:
-            *s = *value;
+        case WASM_TYPE_FUNCREF:
+        case WASM_TYPE_NOFUNC:
+            wasm__slot_set_funcref(s, value->of.funcref);
             return 1;
+        default:
+            wasm__slot_set_ref(s, value->of.gc_ref);
+            return 1;
+    }
+}
+
+static wasm_value_t wasm__ref_from_slot(const wasm_runtime_t* rt,
+                                        wasm_valtype_t type,
+                                        const wasm_reftype_t* reftype,
+                                        const wasm__slot_t* s) {
+    wasm_value_t value;
+
+    if (wasm__slot_u64(s) == 0) return wasm__typed_ref_null(type, reftype);
+    memset(&value, 0, sizeof(value));
+    switch (wasm__ref_top_type(type)) {
+        case WASM_TYPE_FUNCREF:
+            value.type = WASM_TYPE_FUNCREF;
+            value.of.funcref = wasm__slot_funcref(s);
+            return value;
+        case WASM_TYPE_EXTERNREF:
+        case WASM_TYPE_EXNREF:
+            value.type = wasm__ref_top_type(type);
+            value.of.externref = wasm__slot_ref(s);
+            return value;
+        default:
+            value.type = WASM_TYPE_ANYREF;
+            value.of.gc_ref = wasm__slot_ref(s);
+            if ((value.of.gc_ref & WASM__GC_I31_TAG) != 0)
+                value.type = WASM_TYPE_I31REF;
+            else if (wasm__gc_ptr_in_heap(rt, value.of.gc_obj))
+                value.type = value.of.gc_obj->kind == WASM_GC_OBJ_ARRAY ? WASM_TYPE_ARRAYREF : WASM_TYPE_STRUCTREF;
+            return value;
     }
 }
 
@@ -41,7 +75,6 @@ WASM_PRIVATE wasm_value_t wasm__value_from_slot(const wasm_runtime_t* rt,
                                                 const wasm__slot_t* s) {
     wasm_value_t value;
 
-    (void)rt;
     memset(&value, 0, sizeof(value));
     value.type = type;
     switch (type) {
@@ -67,7 +100,7 @@ WASM_PRIVATE wasm_value_t wasm__value_from_slot(const wasm_runtime_t* rt,
             wasm__slot_v128(s, value.of.v128);
             return value;
         default:
-            return wasm__retag_value_for_declared_type(type, reftype, *s);
+            return wasm__ref_from_slot(rt, type, reftype, s);
     }
 }
 
@@ -115,22 +148,6 @@ WASM_PRIVATE wasm_value_t wasm__pop_field_value(wasm_runtime_t* rt, const wasm_f
 
 WASM_PRIVATE void wasm__push_value(wasm_runtime_t* rt, const wasm_value_t* value) {
     rt->sp += wasm__slot_from_value(&rt->stack[rt->sp], value);
-}
-
-WASM_PRIVATE void wasm__slot_retag(wasm__slot_t* s, wasm_valtype_t type, const wasm_reftype_t* reftype) {
-    *s = wasm__retag_value_for_declared_type(type, reftype, *s);
-}
-
-WASM_PRIVATE int wasm__slot_is_null(const wasm__slot_t* s) {
-    return wasm__is_null_ref(s);
-}
-
-WASM_PRIVATE int wasm__slot_ref_eq(const wasm__slot_t* a, const wasm__slot_t* b) {
-    return a->of.gc_ref == b->of.gc_ref;
-}
-
-WASM_PRIVATE void wasm__slot_set_null(wasm__slot_t* s, wasm_valtype_t type, const wasm_reftype_t* reftype) {
-    *s = wasm__typed_ref_null(type, reftype);
 }
 
 WASM_PRIVATE wasm_valtype_t wasm__ref_top_type(wasm_valtype_t type) {

@@ -7689,7 +7689,7 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
 
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 1);
-        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 4);
         emit(&body, 0x7E);
         emit(&body, 0x41);
         emit_leb128_i32(&body, 7);
@@ -13418,7 +13418,7 @@ WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
     err = wasm_call(m, "pick", args, 1, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
-        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected subtype operand to survive typed select");
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF, "%s", "expected the declared anyref result type");
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected null eqref result");
     }
 
@@ -13509,7 +13509,7 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
-        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected table.get to return the stored eqref value");
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF, "%s", "expected the declared anyref result type");
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected table entry 0 to hold a null eqref");
     }
 
@@ -14500,7 +14500,13 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     wasm_table_t tables[1];
     wasm_value_t table_elems[1];
     wasm_func_t fake_func;
-    wasm_value_t frame_locals[1];
+    wasm_valtype_t fake_local_types[1];
+    uint32_t fake_local_slots[1] = { 0 };
+    uint32_t fake_ops[1] = { 0x01 };
+    uint32_t fake_op_offsets[2] = { 0, 0 };
+    uint32_t fake_maps[3] = { 0, 0, 1 };
+    uint32_t fake_map_bits[1] = { WASM__SLOT_KIND_ANY };
+    wasm__slot_t frame_locals[1];
     wasm_gc_struct_t* child;
     wasm_gc_struct_t* parent;
     wasm_gc_struct_t* table_root;
@@ -14551,11 +14557,23 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     tables[0].reftype = WASM_TYPE_STRUCTREF;
     wasm__gc_register_module(&rt, &mod);
 
+    fake_local_types[0] = WASM_TYPE_STRUCTREF;
     fake_func.num_locals = 1;
+    fake_func.locals = fake_local_types;
+    fake_func.local_slots = fake_local_slots;
     fake_func.num_local_slots = 1;
+    fake_func.ops = fake_ops;
+    fake_func.num_ops = 1;
+    fake_func.op_offsets = fake_op_offsets;
+    fake_func.num_op_offsets = 1;
+    fake_func.stack_maps = fake_maps;
+    fake_func.num_stack_maps = 1;
+    fake_func.stack_map_bits = fake_map_bits;
+    fake_func.num_stack_map_bits = 1;
     rt.call_frame_sp = 1;
     rt.call_frames[0].func = &fake_func;
     rt.call_frames[0].locals = frame_locals;
+    rt.call_frames[0].op_at = fake_ops;
 
     child = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
     parent = wasm__gc_alloc_struct_object(&rt, &mod, 1, &types[1].of.struct_);
@@ -14595,8 +14613,8 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     globals[0].type = WASM_TYPE_STRUCTREF;
     globals[0].value = wasm__gc_type_ref_value(&mod, 1, &parent->header);
     table_elems[0] = wasm__gc_type_ref_value(&mod, 0, &table_root->header);
-    frame_locals[0] = wasm__gc_type_ref_value(&mod, 0, &local_root->header);
-    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &stack_root->header);
+    wasm__slot_set_ref(&frame_locals[0], (uintptr_t)&local_root->header);
+    wasm__slot_set_ref(&rt.stack[rt.sp++], (uintptr_t)&stack_root->header);
 
     wasm_gc_collect(&rt);
 
@@ -14611,10 +14629,10 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     table_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)table_elems[0].of.gc_obj,
                                                   &types[0].of.struct_,
                                                   0);
-    local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)frame_locals[0].of.gc_obj,
+    local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&frame_locals[0]),
                                                   &types[0].of.struct_,
                                                   0);
-    stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)rt.stack[0].of.gc_obj,
+    stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&rt.stack[0]),
                                                   &types[0].of.struct_,
                                                   0);
 
@@ -14717,6 +14735,7 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     wasm_gc_struct_t* root;
     wasm_gc_struct_t* garbage;
     wasm_gc_struct_t* fresh;
+    wasm_value_t* held;
     size_t object_size = 0;
     size_t heap_size;
 
@@ -14756,7 +14775,7 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
         return;
     }
 
-    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &root->header);
+    held = wasm_ref_hold(&rt, wasm__gc_type_ref_value(&mod, 0, &root->header));
     fresh = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
 
     WL_CHECK_MSG(t, fresh != NULL,
@@ -14765,10 +14784,11 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     WL_CHECK_MSG(t, wasm_test_gc_allocation_count(&rt) == 2,
                  "expected only the rooted object and the fresh allocation to remain, got %u",
                  (unsigned)wasm_test_gc_allocation_count(&rt));
-    WL_CHECK_MSG(t, rt.stack[0].of.gc_obj != NULL && rt.stack[0].of.gc_obj != &root->header,
+    WL_CHECK_MSG(t, held && held->of.gc_obj != NULL && held->of.gc_obj != &root->header,
                  "%s",
                  "expected collection to rewrite the rooted reference during retry");
 
+    wasm_ref_release(&rt, held);
     wasm__gc_unregister_module(&rt, &mod);
     wasm_destroy(&rt);
 }

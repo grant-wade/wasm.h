@@ -35,18 +35,6 @@ WASM_PRIVATE wasm_value_t wasm__pop_field_value(wasm_runtime_t* rt, const wasm_f
 
 WASM_PRIVATE void wasm__push_value(wasm_runtime_t* rt, const wasm_value_t* value);
 
-/* Rewrites the reference in s to carry its static type type. */
-WASM_PRIVATE void wasm__slot_retag(wasm__slot_t* s, wasm_valtype_t type, const wasm_reftype_t* reftype);
-
-/* s holds a reference. */
-WASM_PRIVATE int wasm__slot_is_null(const wasm__slot_t* s);
-
-/* a and b hold eqref values. */
-WASM_PRIVATE int wasm__slot_ref_eq(const wasm__slot_t* a, const wasm__slot_t* b);
-
-/* Stores the null reference of type type, refined by reftype if not NULL. */
-WASM_PRIVATE void wasm__slot_set_null(wasm__slot_t* s, wasm_valtype_t type, const wasm_reftype_t* reftype);
-
 WASM_PRIVATE wasm_valtype_t wasm__ref_top_type(wasm_valtype_t type);
 
 #endif /* WASM_SRC_EXEC_SLOTS_H */

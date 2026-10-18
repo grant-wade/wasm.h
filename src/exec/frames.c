@@ -3,7 +3,9 @@
 #include "state.h"
 #include "translate.h"
 #include <stdio.h>
+#include "../handles.h"
 #include "../internal/alloc.h"
+#include "../internal/gc_types.h"
 #include "../runtime.h"
 #include <stdlib.h>
 
@@ -53,7 +55,6 @@ WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_fram
     }
 }
 
-#ifndef NDEBUG
 WASM_PRIVATE const uint32_t* wasm__frame_stack_map(const wasm_runtime_t* rt, uint32_t frame_index, uint32_t* out_slots) {
     const wasm__call_frame_t* cf = &rt->call_frames[frame_index];
     const wasm_func_t* func = cf->func;
@@ -80,11 +81,22 @@ WASM_PRIVATE const uint32_t* wasm__frame_stack_map(const wasm_runtime_t* rt, uin
     return func->stack_map_bits + func->stack_maps[lo * 3u + 1u];
 }
 
-static void wasm__stack_map_mismatch(const wasm__call_frame_t* cf, const char* where, uint32_t slot, uint32_t tag_kind,
-                                     uint32_t map_kind) {
-    fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u holds kind %u, map says %u\n",
+#ifndef NDEBUG
+static void wasm__check_ref_slot(const wasm_runtime_t* rt, const wasm__call_frame_t* cf, const char* where,
+                                 uint32_t slot, uint32_t kind, const wasm__slot_t* s) {
+    uintptr_t bits = wasm__slot_ref(s);
+    int valid = 1;
+
+    if (bits == 0) return;
+    if (kind == WASM__SLOT_KIND_ANY)
+        valid = (bits & WASM__GC_I31_TAG) != 0 || wasm__gc_ptr_in_heap(rt, (const void*)bits) ||
+                wasm__handle_set_contains(&rt->externref_boxes, (const void*)bits);
+    else if (kind == WASM__SLOT_KIND_EXN)
+        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits);
+    if (valid) return;
+    fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u of kind %u holds %p\n",
             (unsigned)cf->func_idx, (unsigned)wasm__translated_offset(cf->func, cf->op_at), where, (unsigned)slot,
-            (unsigned)tag_kind, (unsigned)map_kind);
+            (unsigned)kind, (void*)bits);
     abort();
 }
 
@@ -100,19 +112,11 @@ WASM_PRIVATE void wasm__check_stack_maps(const wasm_runtime_t* rt) {
 
         if (!cf->func || !cf->func->ops) continue;
         map = wasm__frame_stack_map(rt, i, &map_slots);
-        for (j = cf->sp_base; j < end; j++) {
-            uint32_t slot = j - cf->sp_base;
-            uint32_t map_kind = map && slot < map_slots ? wasm__stack_map_kind(map, slot) : WASM__SLOT_KIND_NONE;
-            uint32_t tag_kind = wasm__slot_kind(rt->stack[j].type);
-
-            if (tag_kind != map_kind) wasm__stack_map_mismatch(cf, "operand", slot, tag_kind, map_kind);
-        }
-        for (j = 0; j < cf->func->num_locals && cf->locals; j++) {
-            uint32_t declared = wasm__slot_kind(cf->func->locals[j]);
-            uint32_t tag_kind = wasm__slot_kind(cf->locals[cf->func->local_slots[j]].type);
-
-            if (tag_kind != declared) wasm__stack_map_mismatch(cf, "local", j, tag_kind, declared);
-        }
+        for (j = 0; map && j < map_slots && cf->sp_base + j < end; j++)
+            wasm__check_ref_slot(rt, cf, "operand", j, wasm__stack_map_kind(map, j), &rt->stack[cf->sp_base + j]);
+        for (j = 0; j < cf->func->num_locals && cf->locals; j++)
+            wasm__check_ref_slot(rt, cf, "local", j, wasm__slot_kind(cf->func->locals[j]),
+                                 &cf->locals[cf->func->local_slots[j]]);
     }
 }
 #endif

@@ -1888,7 +1888,8 @@ static int spec_values_match(const spec_value_t* expected,
     }
 
     if (wasm__is_null_ref(&expected->value) && wasm__is_null_ref(actual) &&
-        wasm__is_valtype_subtype(NULL, actual->type, expected->value.type)) {
+        (wasm__is_valtype_subtype(NULL, actual->type, expected->value.type) ||
+         wasm__is_valtype_subtype(NULL, expected->value.type, actual->type))) {
         return 1;
     }
 

@@ -4,11 +4,14 @@
 #include "../wasm.h"
 #include <string.h>
 
-/* One operand stack or local slot. */
-typedef wasm_value_t wasm__slot_t;
+/* An 8-byte operand stack or local slot; a v128 spans two. */
+typedef union wasm__slot_t {
+    uint64_t u64; /* numbers zero-extended; references as bits, null 0, a funcref its id + 1 */
+    double f64;
+} wasm__slot_t;
 
 /* Slots a v128 value occupies. */
-#define WASM__V128_SLOTS 1u
+#define WASM__V128_SLOTS 2u
 
 WASM_INLINE uint32_t wasm__valtype_slots(wasm_valtype_t type) {
     return type == WASM_TYPE_V128 ? WASM__V128_SLOTS : 1u;
@@ -55,105 +58,112 @@ WASM_INLINE uint32_t wasm__stack_map_kind(const uint32_t* bits, uint32_t index) 
 }
 
 WASM_INLINE int32_t wasm__slot_i32(const wasm__slot_t* s) {
-    return s->of.i32;
+    return (int32_t)(uint32_t)s->u64;
 }
 
 WASM_INLINE uint32_t wasm__slot_u32(const wasm__slot_t* s) {
-    return (uint32_t)s->of.i32;
+    return (uint32_t)s->u64;
 }
 
 WASM_INLINE int64_t wasm__slot_i64(const wasm__slot_t* s) {
-    return s->of.i64;
+    return (int64_t)s->u64;
 }
 
 WASM_INLINE uint64_t wasm__slot_u64(const wasm__slot_t* s) {
-    return (uint64_t)s->of.i64;
+    return s->u64;
 }
 
 WASM_INLINE float wasm__slot_f32(const wasm__slot_t* s) {
-    return s->of.f32;
+    uint32_t bits = (uint32_t)s->u64;
+    float value;
+
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 WASM_INLINE double wasm__slot_f64(const wasm__slot_t* s) {
-    return s->of.f64;
+    return s->f64;
 }
 
 WASM_INLINE uint32_t wasm__slot_f32_bits(const wasm__slot_t* s) {
-    uint32_t bits;
-
-    memcpy(&bits, &s->of.f32, sizeof(bits));
-    return bits;
+    return (uint32_t)s->u64;
 }
 
 WASM_INLINE uint64_t wasm__slot_f64_bits(const wasm__slot_t* s) {
-    uint64_t bits;
-
-    memcpy(&bits, &s->of.f64, sizeof(bits));
-    return bits;
+    return s->u64;
 }
 
 /* Reads a memory or table index of an i64 slot if is_64, else of an i32 slot. */
 WASM_INLINE uint64_t wasm__slot_index(const wasm__slot_t* s, int is_64) {
-    return is_64 ? wasm__slot_u64(s) : (uint64_t)wasm__slot_u32(s);
+    return is_64 ? s->u64 : (uint64_t)(uint32_t)s->u64;
 }
 
 /* s spans WASM__V128_SLOTS slots. */
 WASM_INLINE void wasm__slot_v128(const wasm__slot_t* s, uint8_t out[16]) {
-    memcpy(out, s->of.v128, 16);
+    memcpy(out, s, 16);
+}
+
+/* Returns the function reference id in s, UINT32_MAX for null. */
+WASM_INLINE uint32_t wasm__slot_funcref(const wasm__slot_t* s) {
+    return (uint32_t)s->u64 - 1u;
+}
+
+WASM_INLINE uintptr_t wasm__slot_ref(const wasm__slot_t* s) {
+    return (uintptr_t)s->u64;
 }
 
 WASM_INLINE void wasm__slot_set_i32(wasm__slot_t* s, int32_t value) {
-    s->type = WASM_TYPE_I32;
-    s->of.i32 = value;
+    s->u64 = (uint32_t)value;
 }
 
 WASM_INLINE void wasm__slot_set_u32(wasm__slot_t* s, uint32_t value) {
-    s->type = WASM_TYPE_I32;
-    s->of.i32 = (int32_t)value;
+    s->u64 = value;
 }
 
 WASM_INLINE void wasm__slot_set_i64(wasm__slot_t* s, int64_t value) {
-    s->type = WASM_TYPE_I64;
-    s->of.i64 = value;
+    s->u64 = (uint64_t)value;
 }
 
 WASM_INLINE void wasm__slot_set_u64(wasm__slot_t* s, uint64_t value) {
-    s->type = WASM_TYPE_I64;
-    s->of.i64 = (int64_t)value;
+    s->u64 = value;
 }
 
 WASM_INLINE void wasm__slot_set_f32(wasm__slot_t* s, float value) {
-    s->type = WASM_TYPE_F32;
-    s->of.f32 = value;
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    s->u64 = bits;
 }
 
 WASM_INLINE void wasm__slot_set_f64(wasm__slot_t* s, double value) {
-    s->type = WASM_TYPE_F64;
-    s->of.f64 = value;
+    s->f64 = value;
 }
 
 WASM_INLINE void wasm__slot_set_f32_bits(wasm__slot_t* s, uint32_t bits) {
-    s->type = WASM_TYPE_F32;
-    memcpy(&s->of.f32, &bits, sizeof(bits));
+    s->u64 = bits;
 }
 
 WASM_INLINE void wasm__slot_set_f64_bits(wasm__slot_t* s, uint64_t bits) {
-    s->type = WASM_TYPE_F64;
-    memcpy(&s->of.f64, &bits, sizeof(bits));
+    s->u64 = bits;
 }
 
 /* Sets an i64 slot if is_64, else an i32 slot. */
 WASM_INLINE void wasm__slot_set_index(wasm__slot_t* s, uint64_t value, int is_64) {
-    if (is_64)
-        wasm__slot_set_u64(s, value);
-    else
-        wasm__slot_set_u32(s, (uint32_t)value);
+    s->u64 = is_64 ? value : (uint64_t)(uint32_t)value;
 }
 
 /* s spans WASM__V128_SLOTS slots. */
 WASM_INLINE void wasm__slot_set_v128(wasm__slot_t* s, const uint8_t bytes[16]) {
-    s->type = WASM_TYPE_V128;
-    memcpy(s->of.v128, bytes, 16);
+    memcpy(s, bytes, 16);
+}
+
+/* id is a function reference id, UINT32_MAX for null. */
+WASM_INLINE void wasm__slot_set_funcref(wasm__slot_t* s, uint32_t id) {
+    s->u64 = (uint32_t)(id + 1u);
+}
+
+WASM_INLINE void wasm__slot_set_ref(wasm__slot_t* s, uintptr_t bits) {
+    s->u64 = (uint64_t)bits;
 }
 
 #endif /* WASM_INTERNAL_SLOT_H */

@@ -80,7 +80,7 @@ config.max_gc_heap_bytes = 512u * 1024u * 1024u;
 rt = wasm_runtime_new(wasm_libc_allocator(), &config);
 ```
 
-With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return.
+`max_stack_values` sizes the operand stack in 8-byte slots, and a `v128` takes two. With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return.
 
 The remaining fields bound what a module can make the host allocate; 0 removes a limit:
 

@@ -118,19 +118,9 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
 
     i = 0;
     if (args) {
-        for (i = 0; i < func->param_slots; i++) locals[i] = args[i];
-        for (i = 0; i < ft->num_params; i++) {
-            if (!wasm__is_numeric_valtype(ft->params[i]))
-                wasm__slot_retag(&locals[func->local_slots[i]], ft->params[i],
-                                 ft->param_reftypes ? &ft->param_reftypes[i] : NULL);
-        }
+        for (; i < func->param_slots; i++) locals[i] = args[i];
     }
-    for (; i < func->num_locals; i++) {
-        wasm_value_t value = wasm__default_value(func->locals[i]);
-
-        wasm__slot_from_value(&locals[func->local_slots[i]], &value);
-    }
-
+    if (i < func->num_local_slots) memset(locals + i, 0, (func->num_local_slots - i) * sizeof(*locals));
     return WASM_OK;
 }
 
@@ -148,10 +138,7 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
     if (err != WASM_OK) return err;
     cf = &rt->call_frames[rt->call_frame_sp - 1u];
     for (i = 0; i < cf->ft->num_params && i < num_args; i++) {
-        const wasm_reftype_t* reftype = cf->ft->param_reftypes ? &cf->ft->param_reftypes[i] : NULL;
-        wasm_value_t value = wasm__is_numeric_valtype(cf->ft->params[i])
-                                 ? args[i]
-                                 : wasm__retag_value_for_declared_type(cf->ft->params[i], reftype, args[i]);
+        wasm_value_t value = args[i];
 
         err = wasm__anyref_from_host(rt, &value);
         if (err != WASM_OK) return err;

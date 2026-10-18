@@ -400,13 +400,13 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [0xB0] = &&wasm__op_0xB0, [0xB1] = &&wasm__op_0xB1, [0xB2] = &&wasm__op_0xB2, [0xB3] = &&wasm__op_0xB3,
         [0xB4] = &&wasm__op_0xB4, [0xB5] = &&wasm__op_0xB5, [0xB6] = &&wasm__op_0xB6, [0xB7] = &&wasm__op_0xB7,
         [0xB8] = &&wasm__op_0xB8, [0xB9] = &&wasm__op_0xB9, [0xBA] = &&wasm__op_0xBA, [0xBB] = &&wasm__op_0xBB,
-        [0xBC] = &&wasm__op_0xBC, [0xBD] = &&wasm__op_0xBD, [0xBE] = &&wasm__op_0xBE, [0xBF] = &&wasm__op_0xBF,
+        [0xBC] = &&wasm__op_default, [0xBD] = &&wasm__op_default, [0xBE] = &&wasm__op_default, [0xBF] = &&wasm__op_default,
         [0xC0] = &&wasm__op_0xC0, [0xC1] = &&wasm__op_0xC1, [0xC2] = &&wasm__op_0xC2, [0xC3] = &&wasm__op_0xC3,
         [0xC4] = &&wasm__op_0xC4, [0xC5] = &&wasm__op_default, [0xC6] = &&wasm__op_default,
         [0xC7] = &&wasm__op_default, [0xC8] = &&wasm__op_default, [0xC9] = &&wasm__op_default,
         [0xCA] = &&wasm__op_default, [0xCB] = &&wasm__op_default, [0xCC] = &&wasm__op_default,
         [0xCD] = &&wasm__op_default, [0xCE] = &&wasm__op_default, [0xCF] = &&wasm__op_default,
-        [0xD0] = &&wasm__op_0xD0, [0xD1] = &&wasm__op_0xD1, [0xD2] = &&wasm__op_0xD2, [0xD3] = &&wasm__op_0xD3,
+        [0xD0] = &&wasm__op_default, [0xD1] = &&wasm__op_0xD1, [0xD2] = &&wasm__op_0xD2, [0xD3] = &&wasm__op_0xD3,
         [0xD4] = &&wasm__op_0xD4, [0xD5] = &&wasm__op_0xD5, [0xD6] = &&wasm__op_0xD6, [0xD7] = &&wasm__op_default,
         [0xD8] = &&wasm__op_default, [0xD9] = &&wasm__op_default, [0xDA] = &&wasm__op_default,
         [0xDB] = &&wasm__op_default, [0xDC] = &&wasm__op_default, [0xDD] = &&wasm__op_default,
@@ -425,9 +425,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [WASM__OP_BR_X] = &&wasm__op_WASM__OP_BR_X, [WASM__OP_BR_IF] = &&wasm__op_WASM__OP_BR_IF,
         [WASM__OP_BR_IF_LOOP] = &&wasm__op_WASM__OP_BR_IF_LOOP, [WASM__OP_BR_IF_X] = &&wasm__op_WASM__OP_BR_IF_X,
         [WASM__OP_BR_TABLE] = &&wasm__op_WASM__OP_BR_TABLE,
-        [WASM__OP_LOCAL_GET_REF] = &&wasm__op_WASM__OP_LOCAL_GET_REF,
-        [WASM__OP_LOCAL_SET_REF] = &&wasm__op_WASM__OP_LOCAL_SET_REF,
-        [WASM__OP_LOCAL_TEE_REF] = &&wasm__op_WASM__OP_LOCAL_TEE_REF,
         [WASM__OP_LOCAL_GET_N] = &&wasm__op_WASM__OP_LOCAL_GET_N,
         [WASM__OP_LOCAL_SET_N] = &&wasm__op_WASM__OP_LOCAL_SET_N,
         [WASM__OP_LOCAL_TEE_N] = &&wasm__op_WASM__OP_LOCAL_TEE_N,
@@ -656,18 +653,16 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(0x14):   /* call_ref */
             WASM__CASE(0x15): { /* return_call_ref */
                 uint32_t type_idx = *pc++;
-                wasm_value_t funcref_value;
 
                 call_slots = *pc++;
                 if (type_idx >= mod->num_types) WASM__TRAP(WASM_ERR_MALFORMED);
                 call_type = wasm__module_functype(mod, type_idx);
                 if (!call_type) WASM__TRAP(WASM_ERR_MALFORMED);
-                funcref_value = wasm__value_from_slot(rt, WASM_TYPE_FUNCREF, NULL, --sp);
-                if (wasm__is_null_ref(&funcref_value)) {
+                if (wasm__slot_u64(--sp) == 0) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null function reference");
                     WASM__TRAP(WASM_ERR_TRAP);
                 }
-                if (!wasm__resolve_func_ref(rt, funcref_value.of.funcref, &call_mod, &call_idx))
+                if (!wasm__resolve_func_ref(rt, wasm__slot_funcref(sp), &call_mod, &call_idx))
                     WASM__TRAP(WASM_ERR_MALFORMED);
                 if (!call_mod || call_idx >= call_mod->num_funcs) WASM__TRAP(WASM_ERR_MALFORMED);
                 if ((call_mod != mod || call_mod->funcs[call_idx].type_idx != type_idx) &&
@@ -736,24 +731,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(0x22):
                 locals[*pc++] = sp[-1];
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_LOCAL_GET_REF): {
-                uint32_t x = pc[1];
-
-                *sp = locals[pc[0]];
-                wasm__slot_retag(sp++, func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL);
-                pc += 2;
-                WASM__NEXT();
-            }
-            WASM__CASE(WASM__OP_LOCAL_SET_REF):
-            WASM__CASE(WASM__OP_LOCAL_TEE_REF): {
-                uint32_t x = pc[1];
-
-                locals[pc[0]] = sp[-1];
-                wasm__slot_retag(&locals[pc[0]], func->locals[x], func->local_reftypes ? &func->local_reftypes[x] : NULL);
-                if (op == WASM__OP_LOCAL_SET_REF) sp--;
-                pc += 2;
-                WASM__NEXT();
-            }
             WASM__CASE(WASM__OP_LOCAL_GET_N):
                 memcpy(sp, locals + pc[0], pc[1] * sizeof(wasm__slot_t));
                 sp += pc[1];
@@ -1045,20 +1022,9 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             }
 
             /* Reference instructions */
-            WASM__CASE(0xD0): {
-                wasm_valtype_t type;
-                wasm_reftype_t reftype = { 0 };
-                cf->r.ptr = func->code + *pc++;
-                err = wasm__read_heaptype(mod, &cf->r, &reftype);
-                if (err != WASM_OK) goto cleanup;
-                type = reftype.type ? reftype.type : WASM_TYPE_ANYREF;
-                wasm__slot_set_null(sp++, type, &reftype);
+            WASM__CASE(0xD1):
+                wasm__slot_set_i32(sp - 1, wasm__slot_u64(sp - 1) == 0);
                 WASM__NEXT();
-            }
-            WASM__CASE(0xD1): {
-                wasm__slot_set_i32(sp - 1, wasm__slot_is_null(sp - 1));
-                WASM__NEXT();
-            }
             WASM__CASE(0xD2): {
                 uint32_t func_index = *pc++;
                 wasm_value_t funcref;
@@ -1068,11 +1034,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__NEXT();
             }
             WASM__CASE(0xD3):
-                sp--;
-                wasm__slot_set_i32(sp - 1, wasm__slot_ref_eq(sp - 1, sp));
+                WASM__BINARY(uint64_t, u64, i32, a == b);
                 WASM__NEXT();
             WASM__CASE(0xD4):
-                if (wasm__slot_is_null(sp - 1)) {
+                if (wasm__slot_u64(sp - 1) == 0) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null reference");
                     err = WASM_ERR_TRAP;
                     goto cleanup;
@@ -1082,7 +1047,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(0xD6):
                 desc = pc;
                 pc += 4;
-                if (wasm__slot_is_null(sp - 1)) {
+                if (wasm__slot_u64(sp - 1) == 0) {
                     sp--;
                     if (op == 0xD5) goto do_branch;
                     WASM__NEXT();
@@ -1552,20 +1517,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__UNARY(float, f32, f64, (double)a);
                 WASM__NEXT();
 
-            /* Reinterpretations */
-            WASM__CASE(0xBC):
-                WASM__UNARY(uint32_t, f32_bits, u32, a);
-                WASM__NEXT();
-            WASM__CASE(0xBD):
-                WASM__UNARY(uint64_t, f64_bits, u64, a);
-                WASM__NEXT();
-            WASM__CASE(0xBE):
-                WASM__UNARY(uint32_t, u32, f32_bits, a);
-                WASM__NEXT();
-            WASM__CASE(0xBF):
-                WASM__UNARY(uint64_t, u64, f64_bits, a);
-                WASM__NEXT();
-
             /* Sign extension */
             WASM__CASE(0xC0):
                 WASM__UNARY(uint32_t, u32, u32, (a & 0x80u) ? (a | 0xFFFFFF00u) : (a & 0xFFu));
@@ -1685,16 +1636,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             goto cleanup;
         }
         {
-            const wasm_functype_t* ft = cf->ft;
             wasm__slot_t* dst = stack + sp_base;
             wasm__slot_t* src = sp - func->result_slots;
-            uint32_t slot = 0;
 
             for (i = 0; i < func->result_slots; i++) dst[i] = src[i];
-            for (i = 0; i < ft->num_results; slot += wasm__valtype_slots(ft->results[i]), i++) {
-                if (!wasm__is_numeric_valtype(ft->results[i]))
-                    wasm__slot_retag(&dst[slot], ft->results[i], ft->result_reftypes ? &ft->result_reftypes[i] : NULL);
-            }
             sp = dst + func->result_slots;
             wasm__drop_labels(labels, lsp, lsp);
             cf->lsp = 0;
