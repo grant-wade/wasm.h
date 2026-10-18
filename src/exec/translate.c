@@ -249,6 +249,14 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
     int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
     int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
 
+    if (o[0] == 0x01) {
+        uint32_t i;
+
+        for (i = 1; i < len; i++) {
+            if (o[i] != 0x01) return 0;
+        }
+        return len == 2 ? WASM__OP_NOP2 : len == 3 ? WASM__OP_NOP3 : WASM__OP_NOP4;
+    }
     if (len == 2) {
         if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
         if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;

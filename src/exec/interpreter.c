@@ -1912,6 +1912,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 *sp++ = locals[pc[0]];
                 pc += 3;
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP2):
+                pc++;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP3):
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP4):
+                pc += 3;
+                WASM__NEXT();
 
             WASM__DEFAULT:
                 WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);

@@ -16805,8 +16805,8 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
  * opcode word: name, first instruction's opcode, instructions run, and word offset of the last.
  * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
  * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
- * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, and LOAD64 an
- * 8-byte load. */
+ * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
+ * load, and NOPn n nops. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_BIN, 0x20, 3, 4)           \
@@ -16843,7 +16843,10 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     X(J_I64BIN, 0x42, 2, 3)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
-    X(L_T, 0x20, 2, 2)
+    X(L_T, 0x20, 2, 2)              \
+    X(NOP2, 0x01, 2, 1)             \
+    X(NOP3, 0x01, 3, 2)             \
+    X(NOP4, 0x01, 4, 3)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
@@ -20300,6 +20303,14 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
     int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
     int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
 
+    if (o[0] == 0x01) {
+        uint32_t i;
+
+        for (i = 1; i < len; i++) {
+            if (o[i] != 0x01) return 0;
+        }
+        return len == 2 ? WASM__OP_NOP2 : len == 3 ? WASM__OP_NOP3 : WASM__OP_NOP4;
+    }
     if (len == 2) {
         if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
         if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
@@ -24989,6 +25000,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(WASM__OP_L_T):
                 locals[pc[2]] = locals[pc[0]];
                 *sp++ = locals[pc[0]];
+                pc += 3;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP2):
+                pc++;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP3):
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_NOP4):
                 pc += 3;
                 WASM__NEXT();
 
