@@ -8820,6 +8820,7 @@ WL_TEST(test_public_wasi_stub_helpers) {
         emit_leb128_i32(&quit_body, 5);
         emit(&quit_body, 0x10);
         emit_leb128_u32(&quit_body, 2);
+        emit(&quit_body, 0x00);
         emit(&quit_body, 0x0B);
         emit_leb128_u32(&sec, quit_body.len);
         emit_bytes(&sec, quit_body.buf, quit_body.len);
@@ -8907,7 +8908,8 @@ WL_TEST(test_public_wasi_stub_helpers) {
     }
 
     err = wasm_call(m, "quit", NULL, 0, NULL, 0);
-    WASM_CHECK_OK(t, err);
+    WASM_CHECK_I32(t, (int32_t)err, (int32_t)WASM_ERR_EXIT);
+    WASM_CHECK_I32(t, wasm_runtime_exit_code(&rt), 5);
 
     wasm_free_module(m);
     wasm_destroy(&rt);

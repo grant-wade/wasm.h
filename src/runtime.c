@@ -407,6 +407,10 @@ void wasm_runtime_clear_error(wasm_runtime_t* rt) {
     rt->error_msg[0] = '\0';
 }
 
+int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt) {
+    return rt ? rt->exit_code : 0;
+}
+
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message) {
     if (!rt) return;
     rt->last_error = err;

@@ -402,6 +402,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "out of fuel";
         case WASM_ERR_TRAP:
             return "trap";
+        case WASM_ERR_EXIT:
+            return "exit";
     }
     return "unknown error";
 }

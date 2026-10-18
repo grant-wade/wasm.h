@@ -35,6 +35,7 @@ pub const Error = error{
     OutOfMemory,
     OutOfFuel,
     Trap,
+    Exit,
 };
 
 const error_codes = .{
@@ -59,6 +60,7 @@ const error_codes = .{
     .{ c.WASM_ERR_OOM, error.OutOfMemory },
     .{ c.WASM_ERR_OUT_OF_FUEL, error.OutOfFuel },
     .{ c.WASM_ERR_TRAP, error.Trap },
+    .{ c.WASM_ERR_EXIT, error.Exit },
 };
 
 fn check(code: c.wasm_error_t) Error!void {
@@ -600,6 +602,11 @@ pub const Runtime = opaque {
 
     pub fn fuel(rt: *Runtime) u64 {
         return c.wasm_get_fuel(rt.raw());
+    }
+
+    /// The status the guest passed to WASI `proc_exit` when a call failed with `error.Exit`.
+    pub fn exitCode(rt: *Runtime) i32 {
+        return c.wasm_runtime_exit_code(rt.raw());
     }
 
     /// Writes the current Wasm call stack into `buffer`, typically from a host function.

@@ -8,8 +8,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - WASI path operations accept only directories reached from a preopen. Standard I/O descriptors were treated as directory capabilities, so a guest could open, create, rename, or delete any host file through `path_open(0, "/abs/path")` and the other `path_*` calls. Guest paths, and symlink targets, must now be relative and must not climb above their directory with `..`; violations return `NOTCAPABLE`.
 
+### Added
+
+- `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. Zig maps it to `error.Exit` with `Runtime.exitCode`.
+
 ### Fixed
 
+- WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.
 - WASI `path_open` derives the host access mode from the requested rights, so directories and read-only files can be opened on POSIX hosts.
 
 ## [1.1.0] - 2026-10-17

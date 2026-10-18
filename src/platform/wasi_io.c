@@ -483,13 +483,13 @@ WASM_PRIVATE wasm_error_t wasm__wasi_proc_exit(wasm_module_t* mod,
                                          const wasm_value_t* args, uint32_t num_args,
                                          wasm_value_t* results, uint32_t num_results,
                                          void* userdata) {
-    (void)mod;
-    (void)args;
     (void)results;
     (void)userdata;
 
-    if (num_args != 1 || num_results != 0) return WASM_ERR_TYPE_MISMATCH;
-    return WASM_OK;
+    if (!mod || !args || num_args != 1 || num_results != 0) return WASM_ERR_TYPE_MISMATCH;
+    mod->rt->exit_code = args[0].of.i32;
+    WASM__SET_ERR(mod->rt, WASM_ERR_EXIT, "proc_exit(%d)", (int)args[0].of.i32);
+    return WASM_ERR_EXIT;
 }
 
 WASM_PRIVATE wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,

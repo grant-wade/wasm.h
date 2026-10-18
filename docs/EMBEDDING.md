@@ -206,6 +206,8 @@ Names may contain arbitrary bytes. Use `wasm_export_name_bytes` and `wasm_find_e
 
 Most operations return `wasm_error_t`; loading returns `NULL` on failure. Read `wasm_runtime_error_message` immediately for details, or `wasm_error_string` for the generic error name.
 
+A guest that calls WASI `proc_exit` stops at once: the call (or `wasm_load`, from a start function) fails with `WASM_ERR_EXIT`, and `wasm_runtime_exit_code` returns the status it passed.
+
 Fuel metering is disabled until a budget is set:
 
 ```c

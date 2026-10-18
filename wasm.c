@@ -780,6 +780,10 @@ static int wasm_cli_call_export(wasm_module_t* mod, const char* export_name,
     }
 
     err = wasm_call_index(mod, func_idx, args, ft->num_params, results, ft->num_results);
+    if (err == WASM_ERR_EXIT) {
+        exit_code = wasm_runtime_exit_code(mod->rt);
+        goto cleanup;
+    }
     if (err != WASM_OK) {
         fprintf(stderr, "call failed: %s\n", wasm_cli_error_text(mod->rt));
         wasm_cli_print_backtrace(mod->rt);
@@ -858,6 +862,10 @@ static int wasm_cli_call_index(wasm_module_t* mod, const char* func_index_text,
         }
 
         err = wasm_call_index(mod, func_idx, args, ft->num_params, results, ft->num_results);
+        if (err == WASM_ERR_EXIT) {
+            exit_code = wasm_runtime_exit_code(mod->rt);
+            goto cleanup;
+        }
         if (err != WASM_OK) {
             fprintf(stderr, "call failed: %s\n", wasm_cli_error_text(mod->rt));
             wasm_cli_print_backtrace(mod->rt);
@@ -1147,6 +1155,10 @@ int main(int argc, char** argv) {
     free(bytes);
     bytes = NULL;
     if (!module) {
+        if (wasm_runtime_last_error(&runtime) == WASM_ERR_EXIT) {
+            exit_code = wasm_runtime_exit_code(&runtime);
+            goto cleanup;
+        }
         fprintf(stderr, "load failed: %s\n", wasm_cli_error_text(&runtime));
         goto cleanup;
     }

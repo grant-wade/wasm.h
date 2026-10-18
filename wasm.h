@@ -204,7 +204,9 @@ typedef enum wasm_error_t {
     WASM_ERR_CALL_STACK_EXHAUSTED,
     WASM_ERR_OOM,
     WASM_ERR_OUT_OF_FUEL,
-    WASM_ERR_TRAP
+    WASM_ERR_TRAP,
+    /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
+    WASM_ERR_EXIT
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -635,6 +637,7 @@ void wasm_destroy(wasm_runtime_t* rt);
 wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
 const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
+int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
@@ -1860,6 +1863,7 @@ struct wasm_runtime_t {
     int lazy_validation;
     wasm_error_t last_error;
     char error_msg[256];
+    int32_t exit_code;
     wasm__exception_state_t pending_exception;
     wasm__exception_object_t* exception_objects;
     uint8_t* gc_heap;
@@ -11120,6 +11124,10 @@ void wasm_runtime_clear_error(wasm_runtime_t* rt) {
     if (!rt) return;
     rt->last_error = WASM_OK;
     rt->error_msg[0] = '\0';
+}
+
+int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt) {
+    return rt ? rt->exit_code : 0;
 }
 
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message) {
@@ -24457,13 +24465,13 @@ WASM_PRIVATE wasm_error_t wasm__wasi_proc_exit(wasm_module_t* mod,
                                          const wasm_value_t* args, uint32_t num_args,
                                          wasm_value_t* results, uint32_t num_results,
                                          void* userdata) {
-    (void)mod;
-    (void)args;
     (void)results;
     (void)userdata;
 
-    if (num_args != 1 || num_results != 0) return WASM_ERR_TYPE_MISMATCH;
-    return WASM_OK;
+    if (!mod || !args || num_args != 1 || num_results != 0) return WASM_ERR_TYPE_MISMATCH;
+    mod->rt->exit_code = args[0].of.i32;
+    WASM__SET_ERR(mod->rt, WASM_ERR_EXIT, "proc_exit(%d)", (int)args[0].of.i32);
+    return WASM_ERR_EXIT;
 }
 
 WASM_PRIVATE wasm_error_t wasm__wasi_fd_close(wasm_module_t* mod,
@@ -28394,6 +28402,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "out of fuel";
         case WASM_ERR_TRAP:
             return "trap";
+        case WASM_ERR_EXIT:
+            return "exit";
     }
     return "unknown error";
 }

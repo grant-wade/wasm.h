@@ -53,6 +53,7 @@ struct wasm_runtime_t {
     int lazy_validation;
     wasm_error_t last_error;
     char error_msg[256];
+    int32_t exit_code;
     wasm__exception_state_t pending_exception;
     wasm__exception_object_t* exception_objects;
     uint8_t* gc_heap;

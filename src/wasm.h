@@ -195,7 +195,9 @@ typedef enum wasm_error_t {
     WASM_ERR_CALL_STACK_EXHAUSTED,
     WASM_ERR_OOM,
     WASM_ERR_OUT_OF_FUEL,
-    WASM_ERR_TRAP
+    WASM_ERR_TRAP,
+    /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
+    WASM_ERR_EXIT
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -626,6 +628,7 @@ void wasm_destroy(wasm_runtime_t* rt);
 wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
 const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
+int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
