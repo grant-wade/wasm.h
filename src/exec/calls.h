@@ -26,6 +26,10 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                                uint32_t num_args,
                                                wasm_value_t* results_dst);
 
+/* Returns nonzero if callee, of call_mod, may be called through type type_idx of mod. */
+WASM_PRIVATE int wasm__indirect_callee_matches(const wasm_module_t* mod, uint32_t type_idx,
+                                              const wasm_module_t* call_mod, wasm_func_t* callee);
+
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp);
 
 WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);

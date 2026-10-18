@@ -2036,6 +2036,8 @@ struct wasm_func_t {
     uint32_t num_stack_map_bits;
     uint32_t max_label_depth;
     uint32_t funcref_id;
+    uint64_t matched_module; /* identity of the last module whose type matched_type an indirect call matched */
+    uint32_t matched_type;
     int is_declared_ref;
     int is_import;
     wasm_host_func_t host_func;
@@ -2044,6 +2046,7 @@ struct wasm_func_t {
 
 struct wasm_module_t {
     wasm_runtime_t* rt;
+    uint64_t identity; /* unique among the modules of rt, never reused */
     void* host_userdata;
     uint8_t* module_bytes;
     size_t module_size;
@@ -18552,6 +18555,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         return NULL;
     }
     mod->rt = rt;
+    mod->identity = wasm__alloc_tag_identity(rt);
     mod->start_func = UINT32_MAX;
     mod->is_compiled = compile_only;
     mod->loaded_features = rt->enabled_features;
@@ -19834,6 +19838,10 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
                                                uint32_t num_args,
                                                wasm_value_t* results_dst);
 
+/* Returns nonzero if callee, of call_mod, may be called through type type_idx of mod. */
+WASM_PRIVATE int wasm__indirect_callee_matches(const wasm_module_t* mod, uint32_t type_idx,
+                                              const wasm_module_t* call_mod, wasm_func_t* callee);
+
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp);
 
 WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
@@ -19855,6 +19863,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
 
 #endif /* WASM_SRC_EXEC_EXCEPTIONS_H */
 /* END src/exec/exceptions.h */
+
 
 
 
@@ -19977,6 +19986,15 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
         wasm__slot_from_value(&cf->locals[cf->func->local_slots[i]], &value);
     }
     return WASM_OK;
+}
+
+WASM_PRIVATE int wasm__indirect_callee_matches(const wasm_module_t* mod, uint32_t type_idx,
+                                              const wasm_module_t* call_mod, wasm_func_t* callee) {
+    if (callee->matched_module == mod->identity && callee->matched_type == type_idx) return 1;
+    if (!wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx)) return 0;
+    callee->matched_module = mod->identity;
+    callee->matched_type = type_idx;
+    return 1;
 }
 
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp) {
@@ -23108,7 +23126,6 @@ cleanup:
 
 
 
-
 #include <string.h>
 
 WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t count) {
@@ -23920,7 +23937,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 call_idx = rt->func_refs[ref_id].func_idx;
                 callee = &call_mod->funcs[call_idx];
                 if ((call_mod != mod || callee->type_idx != type_idx) &&
-                    !wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx))
+                    !wasm__indirect_callee_matches(mod, type_idx, call_mod, callee))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (callee->is_import) goto do_host_call;
                 if (op == 0x13) goto do_tail_call;
@@ -23943,7 +23960,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 call_idx = rt->func_refs[ref_id].func_idx;
                 callee = &call_mod->funcs[call_idx];
                 if ((call_mod != mod || callee->type_idx != type_idx) &&
-                    !wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx))
+                    !wasm__indirect_callee_matches(mod, type_idx, call_mod, callee))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (callee->is_import) goto do_host_call;
                 if (op == 0x15) goto do_tail_call;

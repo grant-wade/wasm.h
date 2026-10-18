@@ -7,6 +7,7 @@
 #include "../internal/alloc.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
+#include "../types/cross_module.h"
 #include "../types/references.h"
 #include "../validate/function.h"
 #include "../values.h"
@@ -124,6 +125,15 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
         wasm__slot_from_value(&cf->locals[cf->func->local_slots[i]], &value);
     }
     return WASM_OK;
+}
+
+WASM_PRIVATE int wasm__indirect_callee_matches(const wasm_module_t* mod, uint32_t type_idx,
+                                              const wasm_module_t* call_mod, wasm_func_t* callee) {
+    if (callee->matched_module == mod->identity && callee->matched_type == type_idx) return 1;
+    if (!wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx)) return 0;
+    callee->matched_module = mod->identity;
+    callee->matched_type = type_idx;
+    return 1;
 }
 
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp) {

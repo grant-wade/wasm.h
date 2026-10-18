@@ -19,7 +19,6 @@
 #include "../runtime.h"
 #include "../support.h"
 #include "../types/canonical.h"
-#include "../types/cross_module.h"
 #include "../types/references.h"
 #include "../values.h"
 #include <string.h>
@@ -833,7 +832,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 call_idx = rt->func_refs[ref_id].func_idx;
                 callee = &call_mod->funcs[call_idx];
                 if ((call_mod != mod || callee->type_idx != type_idx) &&
-                    !wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx))
+                    !wasm__indirect_callee_matches(mod, type_idx, call_mod, callee))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (callee->is_import) goto do_host_call;
                 if (op == 0x13) goto do_tail_call;
@@ -856,7 +855,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 call_idx = rt->func_refs[ref_id].func_idx;
                 callee = &call_mod->funcs[call_idx];
                 if ((call_mod != mod || callee->type_idx != type_idx) &&
-                    !wasm__functype_is_subtype_across_modules(call_mod, callee->type_idx, mod, type_idx))
+                    !wasm__indirect_callee_matches(mod, type_idx, call_mod, callee))
                     WASM__TRAP(WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
                 if (callee->is_import) goto do_host_call;
                 if (op == 0x15) goto do_tail_call;
