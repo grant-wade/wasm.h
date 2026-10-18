@@ -16806,7 +16806,7 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
  * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
  * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
  * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
- * load, and NOPn n nops. */
+ * load. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_BIN, 0x20, 3, 4)           \
@@ -16843,10 +16843,7 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     X(J_I64BIN, 0x42, 2, 3)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
-    X(L_T, 0x20, 2, 2)              \
-    X(NOP2, 0x01, 2, 1)             \
-    X(NOP3, 0x01, 3, 2)             \
-    X(NOP4, 0x01, 4, 3)
+    X(L_T, 0x20, 2, 2)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
@@ -16867,13 +16864,16 @@ enum {
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
-    WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+    WASM__OP_TRY_END,             /* ends a try or try_table */
+    WASM__OP_END,                 /* ends the function body */
 #define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
     WASM__FUSED_OPS(WASM__FUSED_ENUM)
 #undef WASM__FUSED_ENUM
     WASM__OP_COUNT
 };
+/* Ops from WASM__OP_FREE up to WASM__OP_FUSED cost no fuel. */
+#define WASM__OP_FREE WASM__OP_TRY_END
 #define WASM__OP_FUSED WASM__OP_LC_ADD
 
 #define WASM__BRANCH_LOOP 0x1u
@@ -20303,14 +20303,6 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
     int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
     int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
 
-    if (o[0] == 0x01) {
-        uint32_t i;
-
-        for (i = 1; i < len; i++) {
-            if (o[i] != 0x01) return 0;
-        }
-        return len == 2 ? WASM__OP_NOP2 : len == 3 ? WASM__OP_NOP3 : WASM__OP_NOP4;
-    }
     if (len == 2) {
         if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
         if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
@@ -20417,6 +20409,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     r.malformed = 0;
     while (r.ptr < r.end && !t->failed) {
         const uint8_t* at = r.ptr;
+        uint32_t start = t->len;
         uint32_t height = heights[at - func->code];
         uint8_t op = wasm__read_u8(&r);
         wasm__xframe_t* top = &t->frames[t->fp - 1u];
@@ -20442,7 +20435,6 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
 
                 if (wasm__read_blocktype(mod, &r, &blocktype) != WASM_OK) return WASM_ERR_MALFORMED;
                 if (op == 0x04) height--;
-                if (op == 0x02 || op == 0x03) wasm__x_emit(t, 0x01);
                 frame = wasm__x_push_frame(t, op, height, &blocktype);
                 if (!frame) break;
                 if (op == 0x04) {
@@ -20553,12 +20545,10 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             }
             case 0x0B:
                 if (top->opcode == 0) {
-                    wasm__x_emit(t, 0x0F);
+                    wasm__x_emit(t, WASM__OP_END);
                 } else if (top->opcode == 0x06 || top->opcode == 0x1F) {
                     wasm__x_emit(t, WASM__OP_TRY_END);
                     t->handlers--;
-                } else {
-                    wasm__x_emit(t, 0x01);
                 }
                 if (top->if_fixup) t->ops[top->if_fixup - 1u] = t->len;
                 wasm__x_patch(t, top->fixups, t->len);
@@ -20740,6 +20730,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 return WASM_ERR_MALFORMED;
         }
         if (r.malformed) return WASM_ERR_MALFORMED;
+        if (t->len == start && !t->failed) t->num_offsets--;
     }
     if (t->failed) return WASM_ERR_OOM;
     if (t->fp != 0) return WASM_ERR_MALFORMED;
@@ -23664,13 +23655,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
-        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST,
+        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END,
+        [WASM__OP_END] = &&wasm__op_WASM__OP_END,
 #define WASM__FUSED_LABEL(name, first, units, last) [WASM__OP_##name] = &&wasm__op_WASM__OP_##name,
         WASM__FUSED_OPS(WASM__FUSED_LABEL)
 #undef WASM__FUSED_LABEL
     };
     static const void* const wasm__fuel_dispatch[WASM__OP_COUNT] = {
-        [0 ... WASM__OP_FUSED - 1] = &&wasm__op_fuel,
+        [0 ... WASM__OP_FREE - 1] = &&wasm__op_fuel,
+        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_END] = &&wasm__op_WASM__OP_END,
         [WASM__OP_FUSED ... WASM__OP_COUNT - 1] = &&wasm__op_fuel_fused
     };
 #else
@@ -23712,7 +23705,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 #else
         op_at = pc;
         op = *pc++;
-        if (fuel_on) {
+        if (fuel_on && (op < WASM__OP_FREE || op >= WASM__OP_FUSED)) {
             if (rt->fuel == 0) {
                 pc = op_at;
                 op_at = fuel_prev;
@@ -23735,7 +23728,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 #endif
             WASM__CASE(0x00):
                 WASM__TRAP(WASM_ERR_UNREACHABLE);
-            WASM__CASE(0x01): /* nop, and the block, loop, and end instructions that need no work */
+            WASM__CASE(0x01): /* nop */
                 WASM__NEXT();
             WASM__CASE(0x04): /* if */
                 if (wasm__slot_u32(--sp))
@@ -23869,6 +23862,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 goto do_branch;
             }
             WASM__CASE(0x0F): /* return */
+            WASM__CASE(WASM__OP_END):
                 goto return_frame;
 
             WASM__CASE(0x10): /* call */
@@ -25000,15 +24994,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(WASM__OP_L_T):
                 locals[pc[2]] = locals[pc[0]];
                 *sp++ = locals[pc[0]];
-                pc += 3;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP2):
-                pc++;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP3):
-                pc += 2;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP4):
                 pc += 3;
                 WASM__NEXT();
 

@@ -9,7 +9,7 @@
  * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
  * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
  * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
- * load, and NOPn n nops. */
+ * load. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_BIN, 0x20, 3, 4)           \
@@ -46,10 +46,7 @@
     X(J_I64BIN, 0x42, 2, 3)         \
     X(LJ_I64BIN, 0x20, 3, 5)        \
     X(L_S, 0x20, 2, 2)              \
-    X(L_T, 0x20, 2, 2)              \
-    X(NOP2, 0x01, 2, 1)             \
-    X(NOP3, 0x01, 3, 2)             \
-    X(NOP4, 0x01, 4, 3)
+    X(L_T, 0x20, 2, 2)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
@@ -70,13 +67,16 @@ enum {
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
-    WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+    WASM__OP_TRY_END,             /* ends a try or try_table */
+    WASM__OP_END,                 /* ends the function body */
 #define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
     WASM__FUSED_OPS(WASM__FUSED_ENUM)
 #undef WASM__FUSED_ENUM
     WASM__OP_COUNT
 };
+/* Ops from WASM__OP_FREE up to WASM__OP_FUSED cost no fuel. */
+#define WASM__OP_FREE WASM__OP_TRY_END
 #define WASM__OP_FUSED WASM__OP_LC_ADD
 
 #define WASM__BRANCH_LOOP 0x1u

@@ -286,7 +286,7 @@ if (err == WASM_ERR_OUT_OF_FUEL) {
 }
 ```
 
-Every instruction costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_runtime_disable_fuel` turns metering off again.
+Every instruction except `block`, `loop`, and `end` costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_runtime_disable_fuel` turns metering off again.
 
 To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call stops with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one fails before it starts.
 

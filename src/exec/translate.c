@@ -249,14 +249,6 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
     int brif = o[len - 1u] == WASM__OP_BR_IF || o[len - 1u] == WASM__OP_BR_IF_LOOP;
     int loop = o[len - 1u] == WASM__OP_BR_IF_LOOP;
 
-    if (o[0] == 0x01) {
-        uint32_t i;
-
-        for (i = 1; i < len; i++) {
-            if (o[i] != 0x01) return 0;
-        }
-        return len == 2 ? WASM__OP_NOP2 : len == 3 ? WASM__OP_NOP3 : WASM__OP_NOP4;
-    }
     if (len == 2) {
         if (o[0] == 0x41 && o[1] == 0x6A) return WASM__OP_C_ADD;
         if (o[0] == 0x41 && wasm__x_is_i32_bin(o[1])) return WASM__OP_C_BIN;
@@ -363,6 +355,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     r.malformed = 0;
     while (r.ptr < r.end && !t->failed) {
         const uint8_t* at = r.ptr;
+        uint32_t start = t->len;
         uint32_t height = heights[at - func->code];
         uint8_t op = wasm__read_u8(&r);
         wasm__xframe_t* top = &t->frames[t->fp - 1u];
@@ -388,7 +381,6 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
 
                 if (wasm__read_blocktype(mod, &r, &blocktype) != WASM_OK) return WASM_ERR_MALFORMED;
                 if (op == 0x04) height--;
-                if (op == 0x02 || op == 0x03) wasm__x_emit(t, 0x01);
                 frame = wasm__x_push_frame(t, op, height, &blocktype);
                 if (!frame) break;
                 if (op == 0x04) {
@@ -499,12 +491,10 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             }
             case 0x0B:
                 if (top->opcode == 0) {
-                    wasm__x_emit(t, 0x0F);
+                    wasm__x_emit(t, WASM__OP_END);
                 } else if (top->opcode == 0x06 || top->opcode == 0x1F) {
                     wasm__x_emit(t, WASM__OP_TRY_END);
                     t->handlers--;
-                } else {
-                    wasm__x_emit(t, 0x01);
                 }
                 if (top->if_fixup) t->ops[top->if_fixup - 1u] = t->len;
                 wasm__x_patch(t, top->fixups, t->len);
@@ -686,6 +676,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 return WASM_ERR_MALFORMED;
         }
         if (r.malformed) return WASM_ERR_MALFORMED;
+        if (t->len == start && !t->failed) t->num_offsets--;
     }
     if (t->failed) return WASM_ERR_OOM;
     if (t->fp != 0) return WASM_ERR_MALFORMED;

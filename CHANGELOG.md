@@ -50,6 +50,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
 - `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
+- `block`, `loop`, and `end` cost no fuel.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
 - The interpreter runs `wasm_bench` about 10x faster than 1.2.0.
 - A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.

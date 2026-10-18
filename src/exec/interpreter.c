@@ -574,13 +574,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
-        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST,
+        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END,
+        [WASM__OP_END] = &&wasm__op_WASM__OP_END,
 #define WASM__FUSED_LABEL(name, first, units, last) [WASM__OP_##name] = &&wasm__op_WASM__OP_##name,
         WASM__FUSED_OPS(WASM__FUSED_LABEL)
 #undef WASM__FUSED_LABEL
     };
     static const void* const wasm__fuel_dispatch[WASM__OP_COUNT] = {
-        [0 ... WASM__OP_FUSED - 1] = &&wasm__op_fuel,
+        [0 ... WASM__OP_FREE - 1] = &&wasm__op_fuel,
+        [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END, [WASM__OP_END] = &&wasm__op_WASM__OP_END,
         [WASM__OP_FUSED ... WASM__OP_COUNT - 1] = &&wasm__op_fuel_fused
     };
 #else
@@ -622,7 +624,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 #else
         op_at = pc;
         op = *pc++;
-        if (fuel_on) {
+        if (fuel_on && (op < WASM__OP_FREE || op >= WASM__OP_FUSED)) {
             if (rt->fuel == 0) {
                 pc = op_at;
                 op_at = fuel_prev;
@@ -645,7 +647,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 #endif
             WASM__CASE(0x00):
                 WASM__TRAP(WASM_ERR_UNREACHABLE);
-            WASM__CASE(0x01): /* nop, and the block, loop, and end instructions that need no work */
+            WASM__CASE(0x01): /* nop */
                 WASM__NEXT();
             WASM__CASE(0x04): /* if */
                 if (wasm__slot_u32(--sp))
@@ -779,6 +781,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 goto do_branch;
             }
             WASM__CASE(0x0F): /* return */
+            WASM__CASE(WASM__OP_END):
                 goto return_frame;
 
             WASM__CASE(0x10): /* call */
@@ -1910,15 +1913,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__CASE(WASM__OP_L_T):
                 locals[pc[2]] = locals[pc[0]];
                 *sp++ = locals[pc[0]];
-                pc += 3;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP2):
-                pc++;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP3):
-                pc += 2;
-                WASM__NEXT();
-            WASM__CASE(WASM__OP_NOP4):
                 pc += 3;
                 WASM__NEXT();
 

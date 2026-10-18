@@ -9512,8 +9512,17 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
         emit_leb128_u32(&sec, 1);
 
         emit_leb128_u32(&body, 0);
+        emit(&body, 0x02);
+        emit(&body, 0x7F);
+        emit(&body, 0x03);
+        emit(&body, 0x7F);
+        emit(&body, 0x02);
+        emit(&body, 0x40);
+        emit(&body, 0x0B);
         emit(&body, 0x41);
         emit_leb128_i32(&body, 42);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
         emit(&body, 0x0B);
 
         emit_leb128_u32(&sec, body.len);
@@ -9536,7 +9545,7 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
     WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
 
-    wasm_runtime_set_fuel(&rt, 2);
+    wasm_runtime_set_fuel(&rt, 1);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
