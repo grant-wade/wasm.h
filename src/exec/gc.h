@@ -5,8 +5,7 @@
 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf);
 
-/* Runs br_on_cast (subop 0x18) or br_on_cast_fail (0x19), whose flags byte is at flags_at, on the
- * operand value, which it replaces with the cast result; out_branch says whether to branch. */
+/* subop is 0x18 (br_on_cast) or 0x19 (br_on_cast_fail); value is replaced by the cast result. */
 WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
                                           uint32_t subop,
                                           const uint8_t* flags_at,

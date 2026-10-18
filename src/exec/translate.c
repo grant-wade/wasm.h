@@ -7,8 +7,7 @@
 #include "../values.h"
 #include <string.h>
 
-/* A block being translated. Branches to a block, if, or try are not resolved until its end, so
- * their target words form a chain through fixups: each holds the index + 1 of the next, 0 ends it. */
+/* A block being translated; fixups chains unresolved target words as index + 1, 0 ending it. */
 typedef struct wasm__xframe_t {
     uint8_t opcode;    /* 0x02, 0x03, 0x04, 0x06, or 0x1F; 0 for the function body */
     uint8_t in_catch;  /* a try past its first catch clause */
@@ -121,8 +120,6 @@ static void wasm__x_descriptor(wasm__translator_t* t, uint32_t depth) {
                         ((t->handlers - frame->handlers) << WASM__BRANCH_POPS_SHIFT));
 }
 
-/* Branches whose values already sit where the target expects them, with no handler labels to
- * pop, take the short forms that only carry the target. */
 static void wasm__x_branch(wasm__translator_t* t,
                            uint32_t short_op,
                            uint32_t loop_op,

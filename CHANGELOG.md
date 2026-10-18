@@ -34,7 +34,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
-- The interpreter runs `wasm_bench` (release build) in 0.9 s instead of 2.4 s. Validation translates each function body into fixed-width instructions whose branches carry their target and the values to keep, so blocks and branches no longer push labels or decode immediates; only `try` and `try_table` keep a label at run time. The translation replaces a control-flow table of 8 bytes per byte of code. The dispatch loop keeps its position and stack pointer in locals, calls between Wasm functions stay in the loop and move their arguments straight into the callee's locals, and loads and stores keep memory 0's base and size in locals and bound a 32-bit address with one comparison. GCC and Clang builds dispatch through a table of label addresses, with a second table that charges fuel only while fuel is on.
+- Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
 
 ### Fixed
 

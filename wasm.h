@@ -16155,10 +16155,8 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 
 
 
-/* Validated bodies run as arrays of 32-bit words: an opcode followed by fixed-width immediates.
- * Core instructions keep their Wasm opcode; the rest use the values below. A branch descriptor is
- * four words: target index, arity, the target label's stack height above the frame's base, and
- * WASM__BRANCH_* flags with the number of handler labels to pop in the upper bits. */
+/* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
+ * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
 enum {
     WASM__OP_BR = 0x100,          /* target */
     WASM__OP_BR_LOOP,             /* target; polls for interrupts */
@@ -16183,14 +16181,12 @@ enum {
 #define WASM__BRANCH_RETURN 0x2u
 #define WASM__BRANCH_POPS_SHIFT 8u
 
-/* Legacy try clause kinds in a WASM__OP_TRY table: count, then kind, tag or skip count, and body
- * index per clause. A delegate skips that many handler labels before the search continues. */
+/* WASM__OP_TRY table: count, then kind, tag or delegate skip count, and body index per clause. */
 #define WASM__CLAUSE_CATCH 0u
 #define WASM__CLAUSE_CATCH_ALL 1u
 #define WASM__CLAUSE_DELEGATE 2u
 
-/* Translates a function that has just passed validation. heights holds the operand stack height
- * the validator saw before the instruction starting at each byte offset of the body. */
+/* heights[i] is the operand stack height before the instruction at byte offset i. */
 WASM_PRIVATE wasm_error_t wasm__translate_function(wasm_module_t* mod, uint32_t func_idx, const uint32_t* heights);
 
 WASM_PRIVATE wasm_error_t wasm__copy_translation(wasm_func_t* dst, const wasm_func_t* src);
@@ -18742,9 +18738,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint
 
 WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
 
-/* Looks for a handler for rt->pending_exception among the frame's labels. On a match the frame
- * resumes at cf->pc with the stack and labels the handler expects; otherwise the labels are
- * cleared and WASM__ERR_EXCEPTION is returned. */
+/* Returns WASM_OK with cf at the handler, or clears its labels and returns WASM__ERR_EXCEPTION. */
 WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf);
 
 #endif /* WASM_SRC_EXEC_EXCEPTIONS_H */
@@ -18950,8 +18944,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint
 
 #include <string.h>
 
-/* A block being translated. Branches to a block, if, or try are not resolved until its end, so
- * their target words form a chain through fixups: each holds the index + 1 of the next, 0 ends it. */
+/* A block being translated; fixups chains unresolved target words as index + 1, 0 ending it. */
 typedef struct wasm__xframe_t {
     uint8_t opcode;    /* 0x02, 0x03, 0x04, 0x06, or 0x1F; 0 for the function body */
     uint8_t in_catch;  /* a try past its first catch clause */
@@ -19064,8 +19057,6 @@ static void wasm__x_descriptor(wasm__translator_t* t, uint32_t depth) {
                         ((t->handlers - frame->handlers) << WASM__BRANCH_POPS_SHIFT));
 }
 
-/* Branches whose values already sit where the target expects them, with no handler labels to
- * pop, take the short forms that only carry the target. */
 static void wasm__x_branch(wasm__translator_t* t,
                            uint32_t short_op,
                            uint32_t loop_op,
@@ -19586,7 +19577,6 @@ WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     return WASM_ERR_TRAP;
 }
 
-/* Takes a try_table's branch descriptor from a frame outside the interpreter loop. */
 static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc) {
     wasm_runtime_t* rt = cf->module->rt;
     uint32_t arity = desc[1];
@@ -19620,7 +19610,7 @@ static int wasm__tag_matches(const wasm_module_t* mod, uint32_t tag_index, const
     return tag_index < mod->num_tags && mod->tags[tag_index].identity == ex->tag_identity;
 }
 
-/* A legacy try that is already running one of its catch clauses no longer handles exceptions. */
+/* A legacy try running one of its catch clauses does not handle exceptions. */
 static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegated, uint32_t* next_idx,
                               wasm_error_t* out_err) {
     wasm_module_t* mod = cf->module;
@@ -19759,8 +19749,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf);
 
-/* Runs br_on_cast (subop 0x18) or br_on_cast_fail (0x19), whose flags byte is at flags_at, on the
- * operand value, which it replaces with the cast result; out_branch says whether to branch. */
+/* subop is 0x18 (br_on_cast) or 0x19 (br_on_cast_fail); value is replaced by the cast result. */
 WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
                                           uint32_t subop,
                                           const uint8_t* flags_at,
@@ -21790,7 +21779,6 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
 
 #include <string.h>
 
-/* Frees what an exception handler left on popped labels; other labels hold nothing to release. */
 WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t count) {
     while (count-- > 0) {
         if (labels[lsp - 1].caught_values || labels[lsp - 1].active_catch) wasm__clear_label(&labels[lsp - 1]);
@@ -21798,7 +21786,6 @@ WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t
     }
 }
 
-/* Polls the interrupt flag with a plain read and confirms it with an atomic one before acting. */
 WASM_INLINE int wasm__interrupt_pending(wasm_runtime_t* rt) {
 #if defined(__GNUC__) || defined(__clang__)
     if (__atomic_load_n(&rt->interrupt_requested, __ATOMIC_RELAXED) == 0u) return 0;
@@ -21840,9 +21827,7 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
-/* Returns where an access of width bytes at base + offset lands, or NULL if it is out of bounds.
-   Refreshes the loop's copy of memory 0's base and size, which it keeps only for 32-bit memories.
-   A shared memory can grow on another thread at any time, so a stale size only sends accesses here. */
+/* Returns the address of width bytes at base + offset, or NULL if out of bounds. */
 static uint8_t* wasm__memory_access_slow(wasm_module_t* mod,
                                          uint32_t memory_index,
                                          const wasm_value_t* base,
@@ -21883,7 +21868,7 @@ static uint64_t wasm__f64_to_bits(double value) {
     return bits;
 }
 
-/* Runs load or store op (0x28 to 0x3E) at p: a load replaces sp[-1], a store writes sp[-1]. */
+/* op is a load or store opcode (0x28 to 0x3E) and p the address it accesses. */
 static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm_value_t* sp) {
     switch (op) {
         case 0x28:
@@ -21960,8 +21945,7 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm_value_t* sp) {
     }
 }
 
-/* Calls host import func with the ft->num_params arguments at args, which sit just above rt->sp
-   where a reentrant call could overwrite them, and pushes its results. */
+/* args holds ft->num_params values just above rt->sp. */
 static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
                                                const wasm_functype_t* ft,
                                                const wasm_func_t* func,
@@ -22008,9 +21992,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
     return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
 }
 
-/* The loop keeps pc, sp, and the label count in locals. Before anything outside the loop can see
-   the frame (calls, traps, allocation, backtraces) it stores them back with WASM__SAVE_STATE,
-   with the instruction it is running, and reloads them with WASM__LOAD_STATE. */
+/* Must run before anything outside the loop reads the frame or rt->sp. */
 #define WASM__SAVE_STATE()                   \
     do {                                     \
         cf->pc = pc;                         \
@@ -22038,8 +22020,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         mem0_size = 0;                                \
         WASM__LOAD_STATE();                           \
     } while (0)
-/* Runs an out-of-line handler that uses rt->sp. Prefixed instructions set cf->r to their
-   immediates in the bytecode first, since their handlers decode them. */
+/* Prefixed instructions must set cf->r to their immediates first. */
 #define WASM__CALL_OUT(expr)                      \
     do {                                          \
         WASM__SAVE_STATE();                       \
@@ -22048,9 +22029,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         mem0_size = 0;                            \
         if (err != WASM_OK) goto cleanup;         \
     } while (0)
-/* Sets p to the bytes a load or store reaches. Memory 0's base and size live in locals; anything
-   that can grow it or switch modules zeroes mem0_size, so the next access refreshes them. Only
-   32-bit memory 0 accesses with offsets below 2^32 take this path, so their sum cannot overflow. */
+/* Only for 32-bit memory 0 with an offset below 2^32; a zero mem0_size forces a refresh. */
 #define WASM__MEMORY_PTR(p, base, width)                                                         \
     do {                                                                                         \
         uint64_t addr_ = (uint64_t)(uint32_t)(base).of.i32 + *pc++;                              \
@@ -22069,20 +22048,16 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         }                                  \
         *sp++ = (val);                     \
     } while (0)
-/* Pushes into a slot the same instruction has just popped, so it cannot overflow. */
+/* Only after the same instruction has popped a slot. */
 #define WASM__SP_PUT(val) (*sp++ = (val))
 #define WASM__SP_POP() (*--sp)
 #define WASM__SP_TOP() (sp[-1])
 
-/* GCC and Clang jump straight to each handler through a table of label addresses; other
-   compilers use the switch. */
 #if defined(__GNUC__) || defined(__clang__)
 #define WASM__THREADED_DISPATCH 1
 #define WASM__CASE(op) wasm__op_##op
 #define WASM__DEFAULT wasm__op_default
-/* With fuel on, dispatch goes through a table whose every entry charges fuel first. An out-of-fuel
-   trap reports the instruction before the one it stops, as the switch does, so the fuel entry
-   keeps that instruction in fuel_prev. */
+/* fuel_prev holds the instruction an out-of-fuel trap reports. */
 #define WASM__NEXT()        \
     do {                    \
         op_at = pc;         \
@@ -22104,8 +22079,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
 #define WASM__LOAD_FUEL() (fuel_on = rt->fuel_enabled)
 #endif
 
-/* Runs the frames above base_frame_sp until the lowest of them returns, which leaves its results
-   on top of the stack and returns WASM__ERR_RETURN_FRAME. */
+/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns. */
 static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     wasm_value_t* const stack = rt->stack;
     wasm_value_t* const stack_end = rt->stack + rt->max_stack;

@@ -22,7 +22,6 @@
 #include "../values.h"
 #include <string.h>
 
-/* Frees what an exception handler left on popped labels; other labels hold nothing to release. */
 WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t count) {
     while (count-- > 0) {
         if (labels[lsp - 1].caught_values || labels[lsp - 1].active_catch) wasm__clear_label(&labels[lsp - 1]);
@@ -30,7 +29,6 @@ WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t
     }
 }
 
-/* Polls the interrupt flag with a plain read and confirms it with an atomic one before acting. */
 WASM_INLINE int wasm__interrupt_pending(wasm_runtime_t* rt) {
 #if defined(__GNUC__) || defined(__clang__)
     if (__atomic_load_n(&rt->interrupt_requested, __ATOMIC_RELAXED) == 0u) return 0;
@@ -72,9 +70,7 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
-/* Returns where an access of width bytes at base + offset lands, or NULL if it is out of bounds.
-   Refreshes the loop's copy of memory 0's base and size, which it keeps only for 32-bit memories.
-   A shared memory can grow on another thread at any time, so a stale size only sends accesses here. */
+/* Returns the address of width bytes at base + offset, or NULL if out of bounds. */
 static uint8_t* wasm__memory_access_slow(wasm_module_t* mod,
                                          uint32_t memory_index,
                                          const wasm_value_t* base,
@@ -115,7 +111,7 @@ static uint64_t wasm__f64_to_bits(double value) {
     return bits;
 }
 
-/* Runs load or store op (0x28 to 0x3E) at p: a load replaces sp[-1], a store writes sp[-1]. */
+/* op is a load or store opcode (0x28 to 0x3E) and p the address it accesses. */
 static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm_value_t* sp) {
     switch (op) {
         case 0x28:
@@ -192,8 +188,7 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm_value_t* sp) {
     }
 }
 
-/* Calls host import func with the ft->num_params arguments at args, which sit just above rt->sp
-   where a reentrant call could overwrite them, and pushes its results. */
+/* args holds ft->num_params values just above rt->sp. */
 static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
                                                const wasm_functype_t* ft,
                                                const wasm_func_t* func,
@@ -240,9 +235,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
     return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
 }
 
-/* The loop keeps pc, sp, and the label count in locals. Before anything outside the loop can see
-   the frame (calls, traps, allocation, backtraces) it stores them back with WASM__SAVE_STATE,
-   with the instruction it is running, and reloads them with WASM__LOAD_STATE. */
+/* Must run before anything outside the loop reads the frame or rt->sp. */
 #define WASM__SAVE_STATE()                   \
     do {                                     \
         cf->pc = pc;                         \
@@ -270,8 +263,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         mem0_size = 0;                                \
         WASM__LOAD_STATE();                           \
     } while (0)
-/* Runs an out-of-line handler that uses rt->sp. Prefixed instructions set cf->r to their
-   immediates in the bytecode first, since their handlers decode them. */
+/* Prefixed instructions must set cf->r to their immediates first. */
 #define WASM__CALL_OUT(expr)                      \
     do {                                          \
         WASM__SAVE_STATE();                       \
@@ -280,9 +272,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         mem0_size = 0;                            \
         if (err != WASM_OK) goto cleanup;         \
     } while (0)
-/* Sets p to the bytes a load or store reaches. Memory 0's base and size live in locals; anything
-   that can grow it or switch modules zeroes mem0_size, so the next access refreshes them. Only
-   32-bit memory 0 accesses with offsets below 2^32 take this path, so their sum cannot overflow. */
+/* Only for 32-bit memory 0 with an offset below 2^32; a zero mem0_size forces a refresh. */
 #define WASM__MEMORY_PTR(p, base, width)                                                         \
     do {                                                                                         \
         uint64_t addr_ = (uint64_t)(uint32_t)(base).of.i32 + *pc++;                              \
@@ -301,20 +291,16 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         }                                  \
         *sp++ = (val);                     \
     } while (0)
-/* Pushes into a slot the same instruction has just popped, so it cannot overflow. */
+/* Only after the same instruction has popped a slot. */
 #define WASM__SP_PUT(val) (*sp++ = (val))
 #define WASM__SP_POP() (*--sp)
 #define WASM__SP_TOP() (sp[-1])
 
-/* GCC and Clang jump straight to each handler through a table of label addresses; other
-   compilers use the switch. */
 #if defined(__GNUC__) || defined(__clang__)
 #define WASM__THREADED_DISPATCH 1
 #define WASM__CASE(op) wasm__op_##op
 #define WASM__DEFAULT wasm__op_default
-/* With fuel on, dispatch goes through a table whose every entry charges fuel first. An out-of-fuel
-   trap reports the instruction before the one it stops, as the switch does, so the fuel entry
-   keeps that instruction in fuel_prev. */
+/* fuel_prev holds the instruction an out-of-fuel trap reports. */
 #define WASM__NEXT()        \
     do {                    \
         op_at = pc;         \
@@ -336,8 +322,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
 #define WASM__LOAD_FUEL() (fuel_on = rt->fuel_enabled)
 #endif
 
-/* Runs the frames above base_frame_sp until the lowest of them returns, which leaves its results
-   on top of the stack and returns WASM__ERR_RETURN_FRAME. */
+/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns. */
 static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     wasm_value_t* const stack = rt->stack;
     wasm_value_t* const stack_end = rt->stack + rt->max_stack;

@@ -33,7 +33,6 @@ WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     return WASM_ERR_TRAP;
 }
 
-/* Takes a try_table's branch descriptor from a frame outside the interpreter loop. */
 static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc) {
     wasm_runtime_t* rt = cf->module->rt;
     uint32_t arity = desc[1];
@@ -67,7 +66,7 @@ static int wasm__tag_matches(const wasm_module_t* mod, uint32_t tag_index, const
     return tag_index < mod->num_tags && mod->tags[tag_index].identity == ex->tag_identity;
 }
 
-/* A legacy try that is already running one of its catch clauses no longer handles exceptions. */
+/* A legacy try running one of its catch clauses does not handle exceptions. */
 static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegated, uint32_t* next_idx,
                               wasm_error_t* out_err) {
     wasm_module_t* mod = cf->module;
