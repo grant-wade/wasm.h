@@ -11,6 +11,11 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Compiled modules have declared memories but no storage. */
+static wasm_memory_t* wasm__instance_memory_at(wasm_module_t* mod, uint32_t memory_index) {
+    return mod && !mod->is_compiled ? wasm__memory_at(mod, memory_index) : NULL;
+}
+
 uint32_t wasm_memory_count(wasm_module_t* mod) {
     return mod ? mod->num_memories : 0;
 }
@@ -26,7 +31,7 @@ wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -59,7 +64,7 @@ wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -96,7 +101,7 @@ wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -129,7 +134,7 @@ wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
 }
 
 uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index) {
-    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     return memory ? memory->data : NULL;
 }
 
@@ -159,7 +164,7 @@ static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pa
 }
 
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
-    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     uint64_t old, np;
     size_t old_size;
     size_t new_size;
@@ -245,7 +250,7 @@ int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx) {
 wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx) {
     wasm_global_t* global;
 
-    if (!mod || global_idx >= mod->num_globals) return NULL;
+    if (!mod || mod->is_compiled || global_idx >= mod->num_globals) return NULL;
     global = &mod->globals[global_idx];
     return global->is_import ? global->import_value : &global->value;
 }
@@ -260,6 +265,10 @@ wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t*
         return WASM_ERR_MALFORMED;
     }
 
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 
@@ -277,6 +286,10 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
         return WASM_ERR_MALFORMED;
     }
 
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 

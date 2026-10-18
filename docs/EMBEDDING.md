@@ -40,6 +40,27 @@ wasm_runtime_free(rt);
 
 `wasm_load` copies the input binary, so the caller may release its input buffer after the call returns. Free every module before freeing its runtime.
 
+### Compiling and instantiating separately
+
+`wasm_load` decodes, validates, and instantiates in one step: it resolves imports, allocates memories and tables, applies data and element segments, and runs the start function. `wasm_compile` does only the first part. Its result needs no imports and runs no code, so it can inspect a module of unknown origin, and it can be instantiated any number of times:
+
+```c
+wasm_module_t* compiled = wasm_compile(rt, bytes, byte_count);
+wasm_module_t* instance;
+
+if (!compiled) { /* malformed or invalid: wasm_runtime_error_message(rt) */ }
+for (uint32_t i = 0; i < wasm_import_count(compiled); i++) {
+    const wasm_import_info_t* info = wasm_import_info(compiled, i);
+    /* register a binding for info->module / info->name */
+}
+instance = wasm_instantiate(compiled);
+/* ... */
+wasm_free_module(instance);
+wasm_free_module(compiled);
+```
+
+A compiled module supports the introspection functions, but calls, memory access, and global reads fail. `wasm_instantiate` resolves imports registered on the runtime at that point and does not validate function bodies again. Each instance has its own globals, memories, and tables, and is freed independently of the compiled module.
+
 `wasm_init` and `wasm_destroy` support custom storage when the concrete runtime definition is available.
 
 ## Configuration

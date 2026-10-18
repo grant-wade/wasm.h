@@ -318,6 +318,25 @@ test "missing imports fail to load" {
     try expectError(error.InvalidMagic, rt.load("not wasm"));
 }
 
+test "compiled modules are inspected without imports and instantiated repeatedly" {
+    const rt = try wasm.Runtime.init(.{});
+    defer rt.deinit();
+
+    const unbound = try rt.compile(&host_wasm);
+    defer unbound.deinit();
+    try expectError(error.UnknownImport, unbound.instantiate());
+
+    const compiled = try rt.compile(&basic_wasm);
+    defer compiled.deinit();
+    try expectError(error.Malformed, (try compiled.func("add", fn (i32, i32) i32)).call(.{ 1, 2 }));
+    const first = try compiled.instantiate();
+    defer first.deinit();
+    const second = try compiled.instantiate();
+    defer second.deinit();
+    try expectEqual(@as(i32, 3), try (try first.func("add", fn (i32, i32) i32)).call(.{ 1, 2 }));
+    try expectEqual(@as(i32, 7), try (try second.func("add", fn (i32, i32) i32)).call(.{ 3, 4 }));
+}
+
 test "features" {
     const rt = try wasm.Runtime.init(.{ .lazy_validation = false });
     defer rt.deinit();

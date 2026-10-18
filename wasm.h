@@ -664,6 +664,13 @@ void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
+/* Decodes and validates a module without resolving imports, allocating memories or tables, or
+   running code. The result supports the introspection functions but cannot be called; pass it
+   to wasm_instantiate, as often as needed, and free it with wasm_free_module. */
+wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
+/* Instantiates a compiled module in its runtime, resolving imports registered there and
+   running the start function, without validating function bodies again. */
+wasm_module_t* wasm_instantiate(const wasm_module_t* compiled);
 void wasm_free_module(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
@@ -1696,6 +1703,9 @@ struct wasm_module_t {
     int has_data_count_section;
     int uses_data_count_section;
     int preserve_on_failure;
+    int is_compiled; /* from wasm_compile: validated against placeholder imports, never instantiated */
+    int init_expr_read_placeholder; /* an init expression read a compiled module's placeholder global */
+    uint32_t loaded_features;       /* runtime features enabled when the module was decoded */
     uint32_t start_func;
     int startup_ran;
     wasm_module_t* gc_prev;
@@ -10127,6 +10137,14 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value);
 
+/* Checks an init expression's value against its declared type. A compiled module's imported
+   globals hold placeholders known only by type, so a value derived from one is checked by
+   value type alone: a placeholder reference may be null where a non-nullable type is declared. */
+WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
+                                    const wasm_value_t* value,
+                                    wasm_valtype_t type,
+                                    const wasm_reftype_t* ref_type);
+
 #endif /* WASM_INIT_EXPR_H */
 /* END src/init_expr.h */
 
@@ -10162,6 +10180,16 @@ static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, w
     return WASM_OK;
 }
 
+WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
+                                    const wasm_value_t* value,
+                                    wasm_valtype_t type,
+                                    const wasm_reftype_t* ref_type) {
+    if (wasm__runtime_value_matches_type(mod, value, type, ref_type)) return 1;
+    if (!mod || !mod->init_expr_read_placeholder) return 0;
+    if (!wasm__is_ref_type(type)) return value->type == type;
+    return wasm__is_ref_type(value->type);
+}
+
 static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm__init_expr_stack_t* stack,
                                                      wasm_valtype_t expected_type,
@@ -10171,8 +10199,7 @@ static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
 
     if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
     value = stack->values[--stack->size];
-    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
-        return WASM_ERR_TYPE_MISMATCH;
+    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
     *out_value = value;
     return WASM_OK;
 }
@@ -10315,6 +10342,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                     break;
                 }
 
+                if (global->is_import && mod->is_compiled) mod->init_expr_read_placeholder = 1;
                 err = wasm__init_expr_stack_push(&stack, wasm__global_get_value(global));
                 break;
             }
@@ -11870,6 +11898,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         mod->num_func_imports++;
         info->index = fi;
         info->type_index = ti;
+        if (mod->is_compiled) return WASM_OK;
         for (j = mod->rt->num_imports; j > 0u; j--) {
             uint32_t binding_index = j - 1u;
 
@@ -11918,9 +11947,9 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         table = &mod->tables[table_index];
         err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
-        timp = wasm__find_table_import(mod->rt, info->module, info->name);
+        timp = mod->is_compiled ? NULL : wasm__find_table_import(mod->rt, info->module, info->name);
         if (!timp) {
-            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
+            if (!mod->is_compiled && wasm__has_import_named(mod->rt, info->module, info->name)) {
                 WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
                               "table import type mismatch: %.64s.%.64s",
                               info->module, info->name);
@@ -11973,6 +12002,11 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (err != WASM_OK) return err;
         err = wasm__validate_memory_limits(mod, memory_index, memory);
         if (err != WASM_OK) return err;
+        if (mod->is_compiled) {
+            memory->is_import = 1;
+            info->index = memory_index;
+            return WASM_OK;
+        }
         mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
 #if WASM_ENABLE_PLATFORM
         if (!mimp && mod->rt && mod->rt->emscripten_stubs_enabled &&
@@ -12032,6 +12066,27 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             if (feature_err != WASM_OK) return feature_err;
         }
 
+        if (mod->is_compiled) {
+            wasm_value_t* placeholder = (wasm_value_t*)WASM_MALLOC(sizeof(*placeholder));
+
+            if (!placeholder) return WASM_ERR_OOM;
+            if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) {
+                WASM_FREE(placeholder);
+                return WASM_ERR_OOM;
+            }
+            *placeholder = wasm__default_value(type);
+            mod->globals[gi].type = type;
+            mod->globals[gi].ref_type = ref_type;
+            mod->globals[gi].is_mutable = is_mutable;
+            mod->globals[gi].is_import = 1;
+            mod->globals[gi].import_value = placeholder;
+            mod->num_global_imports++;
+            info->index = gi;
+            info->type = type;
+            info->ref_type = ref_type;
+            info->is_mutable = (int)is_mutable;
+            return WASM_OK;
+        }
         gimp = wasm__find_global_import(mod->rt, info->module, info->name);
         if (!gimp) {
             if (wasm__has_import_named(mod->rt, info->module, info->name)) {
@@ -12089,6 +12144,14 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (import_type->num_results != 0) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "non-empty tag result type");
             return WASM_ERR_TYPE_MISMATCH;
+        }
+        if (mod->is_compiled) {
+            if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
+            mod->tags[tag_index].type_idx = type_index;
+            mod->tags[tag_index].identity = wasm__alloc_tag_identity(mod->rt);
+            info->index = tag_index;
+            info->type_index = type_index;
+            return WASM_OK;
         }
         timp = wasm__find_tag_import(mod->rt, info->module, info->name);
         if (!timp) {
@@ -12330,12 +12393,13 @@ WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__
             err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
             if (err != WASM_OK) return err;
         }
+        mod->init_expr_read_placeholder = 0;
         err = wasm__eval_init_expr(mod, r, global_index, &value);
         if (err != WASM_OK) return err;
-        if (!wasm__runtime_value_matches_type(mod,
-                                              &value,
-                                              mod->globals[global_index].type,
-                                              &mod->globals[global_index].ref_type))
+        if (!wasm__init_value_matches(mod,
+                                      &value,
+                                      mod->globals[global_index].type,
+                                      &mod->globals[global_index].ref_type))
             return WASM_ERR_TYPE_MISMATCH;
         wasm__global_set_value(&mod->globals[global_index], value);
     }
@@ -12450,12 +12514,10 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
             wasm_value_t value;
 
             if (uses_expr) {
+                mod->init_expr_read_placeholder = 0;
                 err = wasm__eval_init_expr(mod, r, mod->num_globals, &value);
                 if (err != WASM_OK) return err;
-                if (!wasm__runtime_value_matches_type(mod,
-                                                      &value,
-                                                      segment->elem_type,
-                                                      &segment->elem_ref_type))
+                if (!wasm__init_value_matches(mod, &value, segment->elem_type, &segment->elem_ref_type))
                     return WASM_ERR_TYPE_MISMATCH;
             } else {
                 uint32_t func_index = wasm__read_leb128_u32(r);
@@ -17059,7 +17121,10 @@ WASM_PRIVATE wasm_error_t wasm__validate_code(wasm_module_t* mod) {
     if (mod->rt && mod->rt->lazy_validation) return WASM_OK;
 
     for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
-        wasm_error_t err = wasm__validate_function(mod, i);
+        wasm_error_t err;
+
+        if (mod->funcs[i].max_label_depth != 0) continue;
+        err = wasm__validate_function(mod, i);
         if (err != WASM_OK) return err;
     }
     if (mod->uses_data_count_section && !mod->has_data_count_section) {
@@ -17122,13 +17187,20 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 #include <string.h>
 #include <stdio.h>
 
-wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
+   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
+static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
+                                        const uint8_t* bytes,
+                                        size_t len,
+                                        int compile_only,
+                                        const wasm_module_t* compiled) {
     wasm__reader_t r;
     uint32_t version;
     wasm_module_t* mod;
     wasm_error_t err = WASM_OK;
 
     if (!rt) return NULL;
+    wasm_runtime_clear_error(rt);
     if (!bytes) {
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "null module bytes");
         return NULL;
@@ -17160,6 +17232,8 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     }
     mod->rt = rt;
     mod->start_func = UINT32_MAX;
+    mod->is_compiled = compile_only;
+    mod->loaded_features = rt->enabled_features;
     if (len > 0) {
         mod->module_bytes = (uint8_t*)WASM_MALLOC(len);
         if (!mod->module_bytes) {
@@ -17296,10 +17370,19 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         WASM__LOAD_FAIL("validate_structural");
     }
 
+    if (compiled && compiled->num_funcs == mod->num_funcs && compiled->loaded_features == mod->loaded_features) {
+        uint32_t fi;
+
+        for (fi = mod->num_func_imports; fi < mod->num_funcs; fi++)
+            mod->funcs[fi].max_label_depth = compiled->funcs[fi].max_label_depth;
+    }
+
     err = wasm__validate_code(mod);
     if (err != WASM_OK) {
         WASM__LOAD_FAIL("validate_code");
     }
+
+    if (compile_only) return mod;
 
     if (!rt->lazy_validation) {
         err = wasm__build_module_control_targets(mod);
@@ -17370,6 +17453,23 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     return mod;
 }
 
+wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+    return wasm__load_module(rt, bytes, len, 0, NULL);
+}
+
+wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+    return wasm__load_module(rt, bytes, len, 1, NULL);
+}
+
+wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
+    if (!compiled || !compiled->rt) return NULL;
+    if (!compiled->is_compiled) {
+        WASM__SET_ERR(compiled->rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
+        return NULL;
+    }
+    return wasm__load_module(compiled->rt, compiled->module_bytes, compiled->module_size, 0, compiled);
+}
+
 void wasm_free_module(wasm_module_t* mod) {
     wasm_gc_header_t* object;
     uint32_t i;
@@ -17382,6 +17482,11 @@ void wasm_free_module(wasm_module_t* mod) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
+    }
+    if (mod->is_compiled) {
+        for (i = 0; i < mod->num_globals; i++) {
+            if (mod->globals[i].is_import) WASM_FREE(mod->globals[i].import_value);
+        }
     }
     for (i = 0; i < mod->num_types; i++) wasm__free_comptype(&mod->types[i]);
     WASM_FREE(mod->types);
@@ -23001,6 +23106,10 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
     wasm__clear_backtrace(mod->rt);
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
 
     if (func_idx >= mod->num_funcs) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);
@@ -27753,6 +27862,11 @@ wasm_error_t wasm_bind_emscripten_stubs(wasm_runtime_t* rt) {
 #include <string.h>
 #include <stdio.h>
 
+/* Compiled modules have declared memories but no storage. */
+static wasm_memory_t* wasm__instance_memory_at(wasm_module_t* mod, uint32_t memory_index) {
+    return mod && !mod->is_compiled ? wasm__memory_at(mod, memory_index) : NULL;
+}
+
 uint32_t wasm_memory_count(wasm_module_t* mod) {
     return mod ? mod->num_memories : 0;
 }
@@ -27768,7 +27882,7 @@ wasm_error_t wasm_memory_read(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -27801,7 +27915,7 @@ wasm_error_t wasm_memory_write(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -27838,7 +27952,7 @@ wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
         return WASM_ERR_MALFORMED;
     }
 
-    memory = wasm__memory_at(mod, memory_index);
+    memory = wasm__instance_memory_at(mod, memory_index);
     if (!memory) {
         if (mod->rt)
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
@@ -27871,7 +27985,7 @@ wasm_error_t wasm_memory_get_string(wasm_module_t* mod, uint32_t memory_index,
 }
 
 uint8_t* wasm_memory_data_at(wasm_module_t* mod, uint32_t memory_index) {
-    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     return memory ? memory->data : NULL;
 }
 
@@ -27901,7 +28015,7 @@ static int64_t wasm__shared_memory_grow(wasm_memory_t* memory, uint64_t delta_pa
 }
 
 int64_t wasm_memory_grow_at(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages) {
-    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    wasm_memory_t* memory = wasm__instance_memory_at(mod, memory_index);
     uint64_t old, np;
     size_t old_size;
     size_t new_size;
@@ -27987,7 +28101,7 @@ int wasm_global_is_mutable(wasm_module_t* mod, uint32_t global_idx) {
 wasm_value_t* wasm_global_value_ref_at(wasm_module_t* mod, uint32_t global_idx) {
     wasm_global_t* global;
 
-    if (!mod || global_idx >= mod->num_globals) return NULL;
+    if (!mod || mod->is_compiled || global_idx >= mod->num_globals) return NULL;
     global = &mod->globals[global_idx];
     return global->is_import ? global->import_value : &global->value;
 }
@@ -28002,6 +28116,10 @@ wasm_error_t wasm_global_get(wasm_module_t* mod, const char* name, wasm_value_t*
         return WASM_ERR_MALFORMED;
     }
 
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 
@@ -28019,6 +28137,10 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
         return WASM_ERR_MALFORMED;
     }
 
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 

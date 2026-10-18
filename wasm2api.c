@@ -80,12 +80,6 @@ typedef struct wasm2api_export_filter_set_t {
     int include_default_rules;
 } wasm2api_export_filter_set_t;
 
-typedef struct wasm2api_prescan_t {
-    wasm_value_t** globals;
-    uint32_t num_globals;
-    uint32_t cap_globals;
-} wasm2api_prescan_t;
-
 static void wasm2api_usage(FILE* stream, const char* argv0) {
     fprintf(stream,
             "usage: %s [--embed] [--singleton] [--no-prefix] [--init-func <export>] [--all-exports]\n"
@@ -746,225 +740,6 @@ static char* wasm2api_default_output_prefix(const char* input_path) {
     ident = wasm2api_make_identifier(stem);
     free(stem);
     return ident;
-}
-
-static void wasm2api_prescan_free(wasm2api_prescan_t* prescan) {
-    uint32_t i;
-
-    if (!prescan) return;
-    for (i = 0; i < prescan->num_globals; i++) free(prescan->globals[i]);
-    free(prescan->globals);
-    memset(prescan, 0, sizeof(*prescan));
-}
-
-static wasm_value_t* wasm2api_prescan_add_global(wasm2api_prescan_t* prescan) {
-    wasm_value_t** next;
-    wasm_value_t* value;
-    uint32_t new_cap;
-
-    if (prescan->num_globals >= prescan->cap_globals) {
-        new_cap = prescan->cap_globals ? prescan->cap_globals * 2u : 8u;
-        next = (wasm_value_t**)realloc(prescan->globals, new_cap * sizeof(*next));
-        if (!next) return NULL;
-        prescan->globals = next;
-        prescan->cap_globals = new_cap;
-    }
-
-    value = (wasm_value_t*)calloc(1u, sizeof(*value));
-    if (!value) return NULL;
-    prescan->globals[prescan->num_globals++] = value;
-    return value;
-}
-
-static int wasm2api_prescan_read_valtype(wasm__reader_t* reader,
-                                         wasm_valtype_t* out_type,
-                                         wasm_reftype_t* out_ref_type) {
-    wasm_valtype_t type;
-
-    if (!reader || reader->ptr >= reader->end) return 0;
-    if (wasm__is_reftype_lead_byte(*reader->ptr)) {
-        if (wasm__read_reftype(NULL, reader, out_type, out_ref_type) != WASM_OK) return 0;
-        return !reader->malformed;
-    }
-
-    type = (wasm_valtype_t)wasm__read_u8(reader);
-    if (!wasm__is_value_type(type)) {
-        reader->ptr = reader->end;
-        reader->malformed = 1;
-        return 0;
-    }
-    if (out_type) *out_type = type;
-    if (out_ref_type) wasm__clear_reftype(out_ref_type);
-    return 1;
-}
-
-static int wasm2api_prescan_init_global_value(wasm_valtype_t type,
-                                              const wasm_reftype_t* ref_type,
-                                              wasm_value_t* out_value) {
-    memset(out_value, 0, sizeof(*out_value));
-    out_value->type = type ? type : WASM_TYPE_ANYREF;
-    if (wasm__is_ref_type(type) && ref_type && !ref_type->nullable) return 0;
-    return 1;
-}
-
-static wasm_error_t wasm2api_placeholder_import(wasm_module_t* mod,
-                                                const wasm_value_t* args,
-                                                uint32_t num_args,
-                                                wasm_value_t* results,
-                                                uint32_t num_results,
-                                                void* userdata) {
-    (void)mod;
-    (void)args;
-    (void)num_args;
-    (void)userdata;
-    if (results && num_results > 0u) memset(results, 0, sizeof(*results) * num_results);
-    return WASM_OK;
-}
-
-static int wasm2api_prescan_bind_imports(wasm_runtime_t* rt,
-                                         const uint8_t* wasm_bytes,
-                                         size_t wasm_len,
-                                         wasm2api_prescan_t* prescan) {
-    wasm__reader_t reader;
-
-    if (!rt || !wasm_bytes || wasm_len < 8u) return 0;
-    if (memcmp(wasm_bytes, "\0asm", 4u) != 0 ||
-        memcmp(wasm_bytes + 4u, "\x01\0\0\0", 4u) != 0) {
-        fprintf(stderr, "wasm2api: invalid wasm header\n");
-        return 0;
-    }
-
-    reader.ptr = wasm_bytes + 8u;
-    reader.end = wasm_bytes + wasm_len;
-    reader.malformed = 0;
-
-    while (reader.ptr < reader.end) {
-        uint8_t section_id = wasm__read_u8(&reader);
-        uint32_t section_len = wasm__read_leb128_u32(&reader);
-        wasm__reader_t section_reader;
-
-        if (reader.malformed || !wasm__has(&reader, section_len)) break;
-
-        section_reader.ptr = reader.ptr;
-        section_reader.end = reader.ptr + section_len;
-        section_reader.malformed = 0;
-
-        if (section_id == 2u) {
-            uint32_t count = wasm__read_leb128_u32(&section_reader);
-            uint32_t i;
-
-            for (i = 0; i < count; i++) {
-                char* module_name = NULL;
-                char* import_name = NULL;
-                uint8_t kind;
-                wasm_error_t err;
-
-                err = wasm__read_name_owned(&section_reader, &module_name);
-                if (err != WASM_OK) goto fail;
-                err = wasm__read_name_owned(&section_reader, &import_name);
-                if (err != WASM_OK) {
-                    free(module_name);
-                    goto fail;
-                }
-
-                kind = wasm__read_u8(&section_reader);
-                if (kind == 0x00u) {
-                    wasm_import_t import_binding;
-
-                    (void)wasm__read_leb128_u32(&section_reader);
-                    memset(&import_binding, 0, sizeof(import_binding));
-                    import_binding.module = module_name;
-                    import_binding.name = import_name;
-                    import_binding.func = wasm2api_placeholder_import;
-                    err = wasm_register_import(rt, &import_binding);
-                    free(module_name);
-                    free(import_name);
-                    if (err != WASM_OK) goto fail;
-                } else if (kind == 0x01u) {
-                    uint8_t limits_flags;
-
-                    wasm__skip_reftype(&section_reader);
-                    limits_flags = wasm__read_u8(&section_reader);
-                    (void)wasm__read_leb128_u32(&section_reader);
-                    if ((limits_flags & 1u) != 0u) (void)wasm__read_leb128_u32(&section_reader);
-                    free(module_name);
-                    free(import_name);
-                } else if (kind == 0x02u) {
-                    uint8_t limits_flags = wasm__read_u8(&section_reader);
-
-                    (void)wasm__read_leb128_u32(&section_reader);
-                    if ((limits_flags & 1u) != 0u) (void)wasm__read_leb128_u32(&section_reader);
-                    free(module_name);
-                    free(import_name);
-                } else if (kind == 0x03u) {
-                    wasm_global_import_t global_binding;
-                    wasm_valtype_t type;
-                    wasm_reftype_t ref_type;
-                    uint8_t is_mutable;
-                    wasm_value_t* value;
-
-                    if (!wasm2api_prescan_read_valtype(&section_reader, &type, &ref_type)) {
-                        free(module_name);
-                        free(import_name);
-                        goto fail;
-                    }
-                    is_mutable = wasm__read_u8(&section_reader);
-                    value = wasm2api_prescan_add_global(prescan);
-                    if (!value) {
-                        free(module_name);
-                        free(import_name);
-                        goto fail;
-                    }
-                    if (!wasm2api_prescan_init_global_value(type, &ref_type, value)) {
-                        fprintf(stderr,
-                                "wasm2api: cannot inspect non-nullable global import %s.%s\n",
-                                module_name, import_name);
-                        free(module_name);
-                        free(import_name);
-                        goto fail;
-                    }
-                    memset(&global_binding, 0, sizeof(global_binding));
-                    global_binding.module = module_name;
-                    global_binding.name = import_name;
-                    global_binding.type = type;
-                    global_binding.ref_type = ref_type;
-                    global_binding.is_mutable = (int)is_mutable;
-                    global_binding.value = value;
-                    err = wasm_register_global_import(rt, &global_binding);
-                    free(module_name);
-                    free(import_name);
-                    if (err != WASM_OK) goto fail;
-                } else if (kind == 0x04u) {
-                    if (wasm__read_u8(&section_reader) != 0x00u) {
-                        free(module_name);
-                        free(import_name);
-                        goto fail;
-                    }
-                    (void)wasm__read_leb128_u32(&section_reader);
-                    free(module_name);
-                    free(import_name);
-                } else {
-                    free(module_name);
-                    free(import_name);
-                    goto fail;
-                }
-
-                if (section_reader.malformed) goto fail;
-            }
-        } else {
-            section_reader.ptr = section_reader.end;
-        }
-
-        if (section_reader.malformed || section_reader.ptr != section_reader.end) goto fail;
-        reader.ptr = section_reader.end;
-    }
-
-    if (reader.malformed) goto fail;
-    return 1;
-
-fail:
-    fprintf(stderr, "wasm2api: failed to pre-scan module imports\n");
-    return 0;
 }
 
 static void wasm2api_free_model(wasm2api_model_t* model) {
@@ -2499,7 +2274,6 @@ int main(int argc, char** argv) {
     wasm_runtime_t rt;
     wasm_module_t* mod = NULL;
     wasm2api_model_t model;
-    wasm2api_prescan_t prescan;
     wasm2api_export_filter_set_t export_filters;
     wasm_error_t err;
     int embed_wasm = 0;
@@ -2509,7 +2283,6 @@ int main(int argc, char** argv) {
     int ok = 0;
 
     memset(&model, 0, sizeof(model));
-    memset(&prescan, 0, sizeof(prescan));
     wasm2api_export_filter_set_init(&export_filters);
 
     for (i = 1; i < argc; i++) {
@@ -2617,19 +2390,8 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    if (!wasm2api_prescan_bind_imports(&rt, wasm_bytes, wasm_len, &prescan)) goto cleanup_runtime;
-    err = wasm_bind_wasi_stubs(&rt);
-    if (err != WASM_OK) {
-        fprintf(stderr, "wasm2api: failed to bind builtin WASI stubs: %s\n", wasm_error_string(err));
-        goto cleanup_runtime;
-    }
-    err = wasm_bind_emscripten_stubs(&rt);
-    if (err != WASM_OK) {
-        fprintf(stderr, "wasm2api: failed to bind builtin Emscripten stubs: %s\n", wasm_error_string(err));
-        goto cleanup_runtime;
-    }
-
-    mod = wasm_load(&rt, wasm_bytes, wasm_len);
+    /* Generating wrappers only inspects the module: it binds no imports and runs no guest code. */
+    mod = wasm_compile(&rt, wasm_bytes, wasm_len);
     if (!mod) {
         fprintf(stderr, "wasm2api: failed to load %s: %s", input_path,
                 wasm_error_string(rt.last_error));
@@ -2668,7 +2430,6 @@ int main(int argc, char** argv) {
 cleanup_runtime:
     if (mod) wasm_free_module(mod);
     wasm_destroy(&rt);
-    wasm2api_prescan_free(&prescan);
 
 cleanup:
     wasm2api_export_filter_set_free(&export_filters);

@@ -14,13 +14,20 @@
 #include <string.h>
 #include <stdio.h>
 
-wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
+   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
+static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
+                                        const uint8_t* bytes,
+                                        size_t len,
+                                        int compile_only,
+                                        const wasm_module_t* compiled) {
     wasm__reader_t r;
     uint32_t version;
     wasm_module_t* mod;
     wasm_error_t err = WASM_OK;
 
     if (!rt) return NULL;
+    wasm_runtime_clear_error(rt);
     if (!bytes) {
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "null module bytes");
         return NULL;
@@ -52,6 +59,8 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     }
     mod->rt = rt;
     mod->start_func = UINT32_MAX;
+    mod->is_compiled = compile_only;
+    mod->loaded_features = rt->enabled_features;
     if (len > 0) {
         mod->module_bytes = (uint8_t*)WASM_MALLOC(len);
         if (!mod->module_bytes) {
@@ -188,10 +197,19 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
         WASM__LOAD_FAIL("validate_structural");
     }
 
+    if (compiled && compiled->num_funcs == mod->num_funcs && compiled->loaded_features == mod->loaded_features) {
+        uint32_t fi;
+
+        for (fi = mod->num_func_imports; fi < mod->num_funcs; fi++)
+            mod->funcs[fi].max_label_depth = compiled->funcs[fi].max_label_depth;
+    }
+
     err = wasm__validate_code(mod);
     if (err != WASM_OK) {
         WASM__LOAD_FAIL("validate_code");
     }
+
+    if (compile_only) return mod;
 
     if (!rt->lazy_validation) {
         err = wasm__build_module_control_targets(mod);
@@ -262,6 +280,23 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
     return mod;
 }
 
+wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+    return wasm__load_module(rt, bytes, len, 0, NULL);
+}
+
+wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+    return wasm__load_module(rt, bytes, len, 1, NULL);
+}
+
+wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
+    if (!compiled || !compiled->rt) return NULL;
+    if (!compiled->is_compiled) {
+        WASM__SET_ERR(compiled->rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
+        return NULL;
+    }
+    return wasm__load_module(compiled->rt, compiled->module_bytes, compiled->module_size, 0, compiled);
+}
+
 void wasm_free_module(wasm_module_t* mod) {
     wasm_gc_header_t* object;
     uint32_t i;
@@ -274,6 +309,11 @@ void wasm_free_module(wasm_module_t* mod) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
+    }
+    if (mod->is_compiled) {
+        for (i = 0; i < mod->num_globals; i++) {
+            if (mod->globals[i].is_import) WASM_FREE(mod->globals[i].import_value);
+        }
     }
     for (i = 0; i < mod->num_types; i++) wasm__free_comptype(&mod->types[i]);
     WASM_FREE(mod->types);

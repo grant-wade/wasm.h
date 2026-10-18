@@ -8691,6 +8691,127 @@ WL_TEST(test_runtime_limits_memory_and_tables) {
     wasm_destroy(&rt);
 }
 
+static wasm_error_t wasm_test_host_add(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                       wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)num_args;
+    (void)num_results;
+    (void)userdata;
+    results[0] = wasm_i32(args[0].of.i32 + args[1].of.i32);
+    return WASM_OK;
+}
+
+WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x03, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
+        0x00, 0x01, 0x7f, 0x60, 0x00, 0x00, 0x02, 0x2e, 0x04, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x64, 0x64, 0x00,
+        0x00, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x6d, 0x65, 0x6d, 0x02, 0x00, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x62,
+        0x61, 0x73, 0x65, 0x03, 0x7f, 0x00, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x74, 0x61, 0x62, 0x01, 0x70, 0x00, 0x01,
+        0x03, 0x03, 0x02, 0x01, 0x02, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x23, 0x00, 0x0b, 0x07, 0x08, 0x01, 0x04, 0x62,
+        0x75, 0x6d, 0x70, 0x00, 0x01, 0x08, 0x01, 0x02, 0x0a, 0x1e, 0x02, 0x0c, 0x00, 0x23, 0x01, 0x41, 0x01, 0x10,
+        0x00, 0x24, 0x01, 0x23, 0x01, 0x0b, 0x0f, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x41, 0xe8, 0x00, 0x47, 0x04,
+        0x40, 0x00, 0x0b, 0x0b, 0x0b, 0x08, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x68, 0x69,
+    };
+    static const uint8_t trapping_start_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f,
+        0x03, 0x03, 0x02, 0x00, 0x01, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x01, 0x08, 0x01, 0x00, 0x0a, 0x0a, 0x02,
+        0x03, 0x00, 0x00, 0x0b, 0x04, 0x00, 0x41, 0x01, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* compiled;
+    wasm_module_t* first = NULL;
+    wasm_module_t* second = NULL;
+    wasm_module_t* m;
+    wasm_memory_t memory;
+    wasm_table_t table;
+    wasm_value_t table_elems[1];
+    wasm_value_t base = wasm_i32(10);
+    wasm_memory_import_t memory_import;
+    wasm_table_import_t table_import;
+    wasm_global_import_t global_import;
+    wasm_value_t result;
+    wasm_export_kind_t kind;
+    uint32_t index;
+    uint8_t byte = 0;
+    wasm_error_t err;
+
+    wasm_init(&rt);
+    compiled = wasm_compile(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, compiled != NULL, "expected compile to need no imports: %s", rt.error_msg);
+    if (!compiled) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm_import_count(compiled) == 4u);
+    WL_CHECK(t, wasm_find_export(compiled, "bump", &kind, &index) && kind == WASM_EXPORT_FUNC);
+    WL_CHECK(t, wasm_func_result_count(compiled, index) == 1u);
+    err = wasm_call(compiled, "bump", NULL, 0, &result, 1);
+    WL_CHECK_MSG(t, err == WASM_ERR_MALFORMED && strstr(rt.error_msg, "not instantiated"), "%s", rt.error_msg);
+    WL_CHECK(t, wasm_memory_read(compiled, 0, 0, &byte, 1) != WASM_OK);
+    WL_CHECK(t, wasm_memory_data_at(compiled, 0) == NULL);
+    WL_CHECK(t, wasm_global_value_ref_at(compiled, 0) == NULL);
+
+    m = wasm_instantiate(compiled);
+    WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "env"), "expected unresolved imports to fail: %s", rt.error_msg);
+
+    memset(&memory, 0, sizeof(memory));
+    memory.data = (uint8_t*)calloc(1, WASM_PAGE_SIZE);
+    memory.pages = 1;
+    memory.max_pages = WASM_MEMORY32_MAX_PAGES;
+    memset(&table, 0, sizeof(table));
+    table_elems[0] = wasm_ref_null(WASM_TYPE_FUNCREF);
+    table.reftype = WASM_TYPE_FUNCREF;
+    table.reftype_info.type = WASM_TYPE_FUNCREF;
+    table.reftype_info.nullable = 1;
+    table.elems = table_elems;
+    table.size = 1;
+    table.max_size = UINT32_MAX;
+    memory_import.module = "env";
+    memory_import.name = "mem";
+    memory_import.memory = &memory;
+    table_import.module = "env";
+    table_import.name = "tab";
+    table_import.table = &table;
+    memset(&global_import, 0, sizeof(global_import));
+    global_import.module = "env";
+    global_import.name = "base";
+    global_import.type = WASM_TYPE_I32;
+    global_import.value = &base;
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "add", "ii(i)", wasm_test_host_add, NULL));
+    WASM_CHECK_OK(t, wasm_register_memory_import(&rt, &memory_import));
+    WASM_CHECK_OK(t, wasm_register_table_import(&rt, &table_import));
+    WASM_CHECK_OK(t, wasm_register_global_import(&rt, &global_import));
+
+    first = wasm_instantiate(compiled);
+    WL_CHECK_MSG(t, first != NULL, "%s", rt.error_msg);
+    second = wasm_instantiate(compiled);
+    WL_CHECK_MSG(t, second != NULL, "%s", rt.error_msg);
+    if (first && second) {
+        WL_CHECK(t, memory.data[0] == 'h' && memory.data[1] == 'i');
+        err = wasm_call(first, "bump", NULL, 0, &result, 1);
+        WASM_CHECK_OK(t, err);
+        err = wasm_call(first, "bump", NULL, 0, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, 12);
+        err = wasm_call(second, "bump", NULL, 0, &result, 1);
+        WASM_CHECK_OK(t, err);
+        WASM_CHECK_I32(t, result.of.i32, 11);
+    }
+    wasm_free_module(second);
+    wasm_free_module(first);
+    wasm_free_module(compiled);
+    free(memory.data);
+
+    compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
+    WL_CHECK_MSG(t, compiled != NULL, "expected compile not to run the start function: %s", rt.error_msg);
+    m = compiled ? wasm_instantiate(compiled) : NULL;
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE, "expected the start function to trap: %s",
+                 rt.error_msg);
+    wasm_free_module(m);
+    wasm_free_module(compiled);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bad_magic) {
     uint8_t bad[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x00, 0x00, 0x00 };
     wasm_runtime_t rt;
@@ -15633,6 +15754,7 @@ int main(void) {
         { "funcref: references into freed modules trap", test_funcrefs_from_freed_modules_trap },
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
+        { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
         { "reject bad magic number", test_bad_magic },
         { "trap on i32.div_s by zero", test_div_by_zero },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },

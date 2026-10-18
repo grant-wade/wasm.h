@@ -49,6 +49,8 @@ pub fn main() !void {
 
 `Runtime.init` takes a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
 
+`Runtime.compile` decodes and validates without resolving imports or running code; the result supports introspection, and `Module.instantiate` creates independent instances of it.
+
 Errors are the `wasm.Error` set, one per `wasm_error_t` code; `Runtime.errorMessage` describes the most recent one.
 
 ## Typed functions

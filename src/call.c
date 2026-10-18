@@ -32,6 +32,10 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
     wasm__clear_backtrace(mod->rt);
+    if (mod->is_compiled) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
+        return WASM_ERR_MALFORMED;
+    }
 
     if (func_idx >= mod->num_funcs) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "function index %u out of range", (unsigned)func_idx);

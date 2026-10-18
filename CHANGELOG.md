@@ -12,10 +12,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - `wasm_config_t.max_function_locals` (default 50,000, `WASM_MAX_FUNCTION_LOCALS`) limits the locals a function may declare; 0 removes the limit. A 30-byte module could declare hundreds of millions of locals and make loading allocate gigabytes.
 - `wasm_config_t.max_memory_bytes` (default unlimited) and `max_table_elements` (default 10,000,000) cap each memory and table at instantiation and on growth. A module could declare a table of 2³² elements and make loading write every one.
+- `wasm_compile` decodes and validates a module without resolving imports or running code, and `wasm_instantiate` creates instances of it without validating function bodies again. Zig exposes them as `Runtime.compile` and `Module.instantiate`.
+- The CLI `imports` command, and the inspection commands compile instead of instantiating: they no longer fail on modules with unbound imports or run start functions.
 - `WASM_ERR_EXIT` and `wasm_runtime_exit_code`, which report a guest's requested termination and its status. Zig maps it to `error.Exit` with `Runtime.exitCode`.
 
 ### Fixed
 
+- wasm2api inspects modules with `wasm_compile`. It bound the Emscripten stubs, which reach the host filesystem, and ran the module's start function while generating code, and it failed on modules that import memories or tables.
+- `wasm_load` clears the previous error first, so a failure no longer reports a stale message from an earlier one.
 - WASI `proc_exit` stops the guest. It used to return to the caller, so programs kept running past `exit()` and the status was lost. The CLI exits with the guest's status.
 - Exceptions thrown through an imported function reach Wasm handlers after `call_indirect`, `call_ref`, and the tail calls, not only after `call`. A tail call no longer leaves its own function's handlers in place.
 - Freeing a module invalidates the funcrefs that point into it. A funcref kept by the host or stored in a table that outlives the module was resolved through freed memory; using it now traps or fails the type check.

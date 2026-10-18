@@ -655,6 +655,13 @@ void wasm_disable_feature(wasm_runtime_t* rt, uint32_t flag);
 void wasm_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
+/* Decodes and validates a module without resolving imports, allocating memories or tables, or
+   running code. The result supports the introspection functions but cannot be called; pass it
+   to wasm_instantiate, as often as needed, and free it with wasm_free_module. */
+wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
+/* Instantiates a compiled module in its runtime, resolving imports registered there and
+   running the start function, without validating function bodies again. */
+wasm_module_t* wasm_instantiate(const wasm_module_t* compiled);
 void wasm_free_module(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,

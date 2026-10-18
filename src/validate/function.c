@@ -1432,7 +1432,10 @@ WASM_PRIVATE wasm_error_t wasm__validate_code(wasm_module_t* mod) {
     if (mod->rt && mod->rt->lazy_validation) return WASM_OK;
 
     for (i = mod->num_func_imports; i < mod->num_funcs; i++) {
-        wasm_error_t err = wasm__validate_function(mod, i);
+        wasm_error_t err;
+
+        if (mod->funcs[i].max_label_depth != 0) continue;
+        err = wasm__validate_function(mod, i);
         if (err != WASM_OK) return err;
     }
     if (mod->uses_data_count_section && !mod->has_data_count_section) {

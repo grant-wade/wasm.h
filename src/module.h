@@ -61,6 +61,9 @@ struct wasm_module_t {
     int has_data_count_section;
     int uses_data_count_section;
     int preserve_on_failure;
+    int is_compiled; /* from wasm_compile: validated against placeholder imports, never instantiated */
+    int init_expr_read_placeholder; /* an init expression read a compiled module's placeholder global */
+    uint32_t loaded_features;       /* runtime features enabled when the module was decoded */
     uint32_t start_func;
     int startup_ran;
     wasm_module_t* gc_prev;

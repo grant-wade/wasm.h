@@ -134,6 +134,7 @@ wasm [--help] [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args..
 | Command | Description |
 | --- | --- |
 | `info` | Module summary. |
+| `imports` | List imports with their types. |
 | `exports` | List exports. |
 | `funcs` | List functions with signatures. |
 | `types` | List type section entries. |
@@ -146,6 +147,8 @@ wasm [--help] [--wasi] [--emscripten] [--fuel N] <module.wasm> <command> [args..
 | `global-set <name> <value>` | Write an exported mutable global. |
 | `memory-read <idx> <offset> <len>` | Hex-dump memory. |
 | `memory-string <idx> <offset> [max]` | Print a null-terminated string from memory. |
+
+`info`, `imports`, `exports`, `funcs`, `types`, `memories`, and `custom-sections` compile the module without instantiating it, so they need no imports and run no guest code.
 
 ```sh
 ./build/wasm hello.wasm info

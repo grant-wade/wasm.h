@@ -23,6 +23,7 @@ static void wasm_cli_print_usage(FILE* stream, const char* argv0) {
             "\n"
             "commands:\n"
             "  info\n"
+            "  imports\n"
             "  exports\n"
             "  funcs\n"
             "  types\n"
@@ -558,6 +559,26 @@ static void wasm_cli_print_summary(wasm_module_t* mod, const char* module_path) 
            (unsigned)wasm_cli_count_exports_of_kind(mod, WASM_EXPORT_MEM));
     printf("custom sections: %u\n", (unsigned)wasm_custom_section_count(mod));
     printf("required features: 0x%08x\n", (unsigned)mod->required_features);
+}
+
+static void wasm_cli_print_imports(wasm_module_t* mod) {
+    uint32_t i;
+
+    for (i = 0; i < wasm_import_count(mod); i++) {
+        const wasm_import_info_t* info = wasm_import_info(mod, i);
+
+        if (!info) continue;
+        printf("[%u] %s.%s kind=%s index=%u", (unsigned)i, info->module, info->name,
+               wasm_cli_export_kind_name((wasm_export_kind_t)info->kind), (unsigned)info->index);
+        if (info->kind == WASM_IMPORT_FUNC) {
+            fputc(' ', stdout);
+            wasm_cli_print_func_signature(stdout, mod, info->index);
+        } else if (info->kind == WASM_IMPORT_GLOBAL) {
+            printf(" %s ", info->is_mutable ? "var" : "const");
+            wasm_cli_print_value_type(stdout, info->type, &info->ref_type);
+        }
+        fputc('\n', stdout);
+    }
 }
 
 static void wasm_cli_print_exports(wasm_module_t* mod) {
@@ -1151,7 +1172,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    module = wasm_load(&runtime, bytes, bytes_len);
+    {
+        static const char* const inspect_commands[] = {
+            "info", "imports", "exports", "funcs", "types", "memories", "custom-sections"
+        };
+        size_t ci;
+        int inspect_only = 0;
+
+        for (ci = 0; ci < sizeof(inspect_commands) / sizeof(inspect_commands[0]); ci++) {
+            if (strcmp(command, inspect_commands[ci]) == 0) inspect_only = 1;
+        }
+        /* Inspection never instantiates, so it needs no imports and runs no guest code. */
+        module = inspect_only ? wasm_compile(&runtime, bytes, bytes_len) : wasm_load(&runtime, bytes, bytes_len);
+    }
     free(bytes);
     bytes = NULL;
     if (!module) {
@@ -1165,6 +1198,9 @@ int main(int argc, char** argv) {
 
     if (strcmp(command, "info") == 0) {
         wasm_cli_print_summary(module, module_path);
+        exit_code = 0;
+    } else if (strcmp(command, "imports") == 0) {
+        wasm_cli_print_imports(module);
         exit_code = 0;
     } else if (strcmp(command, "exports") == 0) {
         wasm_cli_print_exports(module);

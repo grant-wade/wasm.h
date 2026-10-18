@@ -525,6 +525,16 @@ pub const Runtime = opaque {
         return @ptrCast(mod);
     }
 
+    /// Decodes and validates `bytes` without resolving imports or running code. The result supports
+    /// introspection but not calls; create instances with `Module.instantiate`.
+    pub fn compile(rt: *Runtime, bytes: []const u8) Error!*Module {
+        const mod = c.wasm_compile(rt.raw(), bytes.ptr, bytes.len) orelse {
+            check(c.wasm_runtime_last_error(rt.raw())) catch |err| return err;
+            return error.Malformed;
+        };
+        return @ptrCast(mod);
+    }
+
     /// Binds a Zig function as the import `module_name.name` for modules loaded afterwards.
     ///
     /// `func` may take a leading `*Module` (the caller) followed by Wasm-typed parameters, and may return
@@ -711,6 +721,16 @@ pub const Module = opaque {
 
     pub fn raw(mod: *Module) *c.wasm_module_t {
         return @ptrCast(mod);
+    }
+
+    /// Creates an instance of a module from `Runtime.compile`, resolving the imports bound on its
+    /// runtime. Free each instance and the compiled module separately.
+    pub fn instantiate(mod: *Module) Error!*Module {
+        const instance = c.wasm_instantiate(mod.raw()) orelse {
+            check(c.wasm_runtime_last_error(c.wasm_module_runtime(mod.raw()))) catch |err| return err;
+            return error.Malformed;
+        };
+        return @ptrCast(instance);
     }
 
     pub fn runtime(mod: *Module) *Runtime {

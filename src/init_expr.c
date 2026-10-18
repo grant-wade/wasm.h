@@ -32,6 +32,16 @@ static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, w
     return WASM_OK;
 }
 
+WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
+                                    const wasm_value_t* value,
+                                    wasm_valtype_t type,
+                                    const wasm_reftype_t* ref_type) {
+    if (wasm__runtime_value_matches_type(mod, value, type, ref_type)) return 1;
+    if (!mod || !mod->init_expr_read_placeholder) return 0;
+    if (!wasm__is_ref_type(type)) return value->type == type;
+    return wasm__is_ref_type(value->type);
+}
+
 static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm__init_expr_stack_t* stack,
                                                      wasm_valtype_t expected_type,
@@ -41,8 +51,7 @@ static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
 
     if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
     value = stack->values[--stack->size];
-    if (!wasm__runtime_value_matches_type(mod, &value, expected_type, expected_ref))
-        return WASM_ERR_TYPE_MISMATCH;
+    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
     *out_value = value;
     return WASM_OK;
 }
@@ -185,6 +194,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                     break;
                 }
 
+                if (global->is_import && mod->is_compiled) mod->init_expr_read_placeholder = 1;
                 err = wasm__init_expr_stack_push(&stack, wasm__global_get_value(global));
                 break;
             }
