@@ -7773,8 +7773,13 @@ WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
 static void wasm__skip_simd_immediates(wasm__reader_t* r);
 
 WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r) {
-    uint8_t lead = *r->ptr;
+    uint8_t lead;
 
+    if (!wasm__has(r, 1)) {
+        r->malformed = 1;
+        return;
+    }
+    lead = *r->ptr;
     if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
         if (lead == 0x40)
             r->ptr++;
@@ -7915,7 +7920,7 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
-    uint8_t lead = *r->ptr;
+    uint8_t lead;
     wasm_error_t err;
 
     blocktype->param_arity = 0;
@@ -7927,6 +7932,11 @@ WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_
     blocktype->inline_result = WASM_TYPE_VOID;
     wasm__clear_reftype(&blocktype->inline_result_reftype);
 
+    if (!wasm__has(r, 1)) {
+        r->malformed = 1;
+        return WASM_ERR_MALFORMED;
+    }
+    lead = *r->ptr;
     if (lead == 0x40) {
         r->ptr++;
         return WASM_OK;
@@ -15569,6 +15579,9 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, cons
                     uint32_t i;
 
                     for (i = count; i > 0; i--) {
+                        const wasm__val_frame_t* frame = wasm__validator_frame(v);
+
+                        if (frame->unreachable && v->sp == frame->height) break;
                         err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                         if (err != WASM_OK) return err;
                     }
@@ -17272,7 +17285,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 break;
             }
             case 0x0E: {
-                uint32_t count = wasm__read_leb128_u32(&v.r);
+                uint32_t count = wasm__read_count(&v.r);
                 const wasm_valtype_t* branch_types = NULL;
                 const wasm_reftype_t* branch_reftypes = NULL;
                 uint32_t branch_count = 0;

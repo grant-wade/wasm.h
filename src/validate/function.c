@@ -433,7 +433,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 break;
             }
             case 0x0E: {
-                uint32_t count = wasm__read_leb128_u32(&v.r);
+                uint32_t count = wasm__read_count(&v.r);
                 const wasm_valtype_t* branch_types = NULL;
                 const wasm_reftype_t* branch_reftypes = NULL;
                 uint32_t branch_count = 0;

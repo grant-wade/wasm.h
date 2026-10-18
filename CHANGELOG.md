@@ -68,6 +68,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_struct_new` and `wasm_array_new` keep the references they are given alive while allocating, which a collection during that allocation left pointing at freed objects.
 - `extern.convert_any` returns exactly the host `externref` that `any.convert_extern` received; odd values such as 1 came back as a different pointer and tested as `i31ref` in between.
 - A host value passed to Wasm as an `externref` or `anyref` could be read as a GC object, and changed by a collection, once a later GC heap covered its address.
+- Loading a module whose function body ends where a block type should start read a byte past the module.
+- Validating a `br_table` or an unreachable `array.new_fixed` with a count near 2^32 took minutes.
 
 ## [1.2.0] - 2026-10-17
 

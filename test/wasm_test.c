@@ -8108,6 +8108,55 @@ WL_TEST(test_validation_requires_data_count_for_memory_init) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_validation_rejects_a_body_ending_before_its_blocktype) {
+    static const uint8_t header[] = { 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04,
+                                      0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x0a };
+    static const uint8_t bodies[][5] = { { 2, 0x00, 0x02 }, { 2, 0x00, 0x03 }, { 4, 0x00, 0x41, 0x00, 0x04 } };
+    size_t i;
+
+    for (i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        uint8_t bytes[32];
+        size_t len = sizeof(header);
+        wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
+        wasm_module_t* m;
+
+        WL_CHECK(t, rt != NULL);
+        if (!rt) return;
+        memcpy(bytes, header, sizeof(header));
+        bytes[len++] = (uint8_t)(bodies[i][0] + 2u);
+        bytes[len++] = 1;
+        memcpy(bytes + len, bodies[i], bodies[i][0] + 1u);
+        len += bodies[i][0] + 1u;
+        m = wasm_load(rt, bytes, len);
+        WL_CHECK_MSG(t, m == NULL, "body %u loaded", (unsigned)i);
+        wasm_module_free(m);
+        wasm_runtime_free(rt);
+    }
+}
+
+WL_TEST(test_validation_of_huge_immediate_counts_stays_bounded) {
+    static const uint8_t array_new_fixed_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x02, 0x5e, 0x7f, 0x00, 0x60,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a, 0x0e,
+        0x01, 0x0c, 0x00, 0x00, 0xfb, 0x08, 0x00, 0x80, 0xd0, 0xac, 0xf3, 0x0e, 0x1a, 0x0b,
+    };
+    static const uint8_t br_table_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x0a, 0x0d, 0x01, 0x0b, 0x00, 0x41, 0x00, 0x0e, 0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, array_new_fixed_bytes, sizeof(array_new_fixed_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    wasm_module_free(m);
+    m = wasm_load(&rt, br_table_bytes, sizeof(br_table_bytes));
+    WL_CHECK(t, m == NULL);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_validation_rejects_code_body_count_mismatch) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -17730,6 +17779,8 @@ int main(void) {
         { "validation: stack type errors are rejected at load", test_validation_rejects_stack_type_errors },
         { "validation: memory.init requires a data count section", test_validation_requires_data_count_for_memory_init },
         { "validation: code body count must match declared functions", test_validation_rejects_code_body_count_mismatch },
+        { "validation: a body that ends before a blocktype is rejected", test_validation_rejects_a_body_ending_before_its_blocktype },
+        { "validation: huge array.new_fixed and br_table counts validate in bounded time", test_validation_of_huge_immediate_counts_stays_bounded },
         { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
         { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
         { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
