@@ -43,6 +43,7 @@ struct wasm__exception_object_t {
     int marked;
 };
 
+/* An externref wrapping an anyref, or an anyref wrapping a host externref; value is what it wraps. */
 struct wasm__externref_box_t {
     wasm_value_t value;
     int marked;
