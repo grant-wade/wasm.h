@@ -9155,6 +9155,7 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
     WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
     WL_CHECK(t, wasm_call(m, "run", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    wasm_runtime_cancel(&rt);
 
     wasm_runtime_disable_fuel(&rt);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
@@ -16003,6 +16004,7 @@ WL_TEST(test_bulk_fuel_and_array_new_rooting) {
     wasm_runtime_set_fuel(&rt, 100);
     arg = wasm_i32(65536);
     WL_CHECK(t, wasm_call(m, "fill", &arg, 1, NULL, 0) == WASM_ERR_OUT_OF_FUEL);
+    wasm_runtime_cancel(&rt);
     wasm_runtime_disable_fuel(&rt);
 
     /* A held struct survives the collections below and follows the object as it moves. */
@@ -16093,9 +16095,389 @@ WL_TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
             WL_CHECK_MSG(t, wasm_call(m, exports[i], NULL, 0, &result, i) == WASM_ERR_INTERRUPTED,
                          "expected %s to be interrupted: %s", exports[i], rt.error_msg);
             wasm_test_thread_join(thread);
+            wasm_runtime_cancel(&rt);
         }
     }
 #endif
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* State shared by the host imports of the resume test module. */
+typedef struct wasm_test_resume_host_t {
+    wasm_module_t* mod;
+    const char* reenter_export; /* export "reenter" calls with its argument */
+    uint64_t reenter_fuel;      /* fuel set before the inner call; 0 leaves fuel unchanged */
+    uint32_t yields;
+    int32_t last_arg;
+} wasm_test_resume_host_t;
+
+static wasm_error_t wasm_test_resume_yield(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_resume_host_t* host = (wasm_test_resume_host_t*)userdata;
+
+    (void)mod;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    host->yields++;
+    host->last_arg = args[0].of.i32;
+    return WASM_YIELD;
+}
+
+static wasm_error_t wasm_test_resume_reenter(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_resume_host_t* host = (wasm_test_resume_host_t*)userdata;
+    wasm_value_t inner = wasm_i64(0);
+    wasm_error_t err;
+
+    (void)num_args;
+    (void)num_results;
+    if (host->reenter_fuel) wasm_runtime_set_fuel(wasm_module_runtime(mod), host->reenter_fuel);
+    err = wasm_call(host->mod, host->reenter_export, args, 1, &inner, 1);
+    if (err != WASM_OK) return err;
+    results[0] = wasm_i32(inner.type == WASM_TYPE_I64 ? (int32_t)inner.of.i64 : inner.of.i32);
+    return WASM_OK;
+}
+
+static wasm_error_t wasm_test_resume_interrupt(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                               wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_interrupt(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+static wasm_module_t* wasm_test_load_resume_module(wl_test_ctx* t, wasm_runtime_t* rt, wasm_test_resume_host_t* host) {
+    /* Function indices: 0 yield, 1 reenter, 2 interrupt (imports), 3 sum, 4 count, 5 rec,
+     * 6 catch_after_yield, 7 tail_target, 8 tail, 9 tail_import, 10 outer, 11 gc_keep,
+     * 12 self_interrupt, 13 spin_until_flag, 14 fill, 15 grow, 16 catch_loop, 17 leaf,
+     * 18 call_after_interrupt, 19 nested_tail_import. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x20, 0x07, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f,
+        0x01, 0x7f, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x60, 0x02, 0x7f, 0x7f,
+        0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x2e, 0x03, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x05, 0x79, 0x69, 0x65,
+        0x6c, 0x64, 0x00, 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x07, 0x72, 0x65, 0x65, 0x6e, 0x74, 0x65, 0x72, 0x00,
+        0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x09, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x00, 0x02,
+        0x03, 0x12, 0x11, 0x04, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x06, 0x01, 0x06, 0x01, 0x06,
+        0x06, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0d, 0x03, 0x01, 0x00, 0x03, 0x07, 0xc0, 0x01, 0x10, 0x03, 0x6d,
+        0x65, 0x6d, 0x02, 0x00, 0x03, 0x73, 0x75, 0x6d, 0x00, 0x03, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x00, 0x04,
+        0x03, 0x72, 0x65, 0x63, 0x00, 0x05, 0x11, 0x63, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x61, 0x66, 0x74, 0x65, 0x72,
+        0x5f, 0x79, 0x69, 0x65, 0x6c, 0x64, 0x00, 0x06, 0x04, 0x74, 0x61, 0x69, 0x6c, 0x00, 0x08, 0x0b, 0x74, 0x61,
+        0x69, 0x6c, 0x5f, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x00, 0x09, 0x05, 0x6f, 0x75, 0x74, 0x65, 0x72, 0x00,
+        0x0a, 0x07, 0x67, 0x63, 0x5f, 0x6b, 0x65, 0x65, 0x70, 0x00, 0x0b, 0x0e, 0x73, 0x65, 0x6c, 0x66, 0x5f, 0x69,
+        0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x00, 0x0c, 0x0f, 0x73, 0x70, 0x69, 0x6e, 0x5f, 0x75, 0x6e,
+        0x74, 0x69, 0x6c, 0x5f, 0x66, 0x6c, 0x61, 0x67, 0x00, 0x0d, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x0e, 0x04,
+        0x67, 0x72, 0x6f, 0x77, 0x00, 0x0f, 0x0a, 0x63, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x6c, 0x6f, 0x6f, 0x70, 0x00,
+        0x10, 0x14, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x61, 0x66, 0x74, 0x65, 0x72, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72,
+        0x72, 0x75, 0x70, 0x74, 0x00, 0x12, 0x12, 0x6e, 0x65, 0x73, 0x74, 0x65, 0x64, 0x5f, 0x74, 0x61, 0x69, 0x6c,
+        0x5f, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x00, 0x13, 0x0a, 0xd4, 0x02, 0x11, 0x26, 0x02, 0x01, 0x7f, 0x01,
+        0x7e, 0x02, 0x40, 0x03, 0x40, 0x20, 0x01, 0x20, 0x00, 0x4f, 0x0d, 0x01, 0x20, 0x02, 0x20, 0x01, 0xad, 0x7c,
+        0x21, 0x02, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x02, 0x0b, 0x17, 0x00,
+        0x20, 0x00, 0x45, 0x04, 0x7f, 0x20, 0x01, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x20, 0x01, 0x20, 0x00, 0x6a,
+        0x12, 0x04, 0x0b, 0x0b, 0x18, 0x00, 0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 0xe4, 0x00, 0x10, 0x00, 0x05, 0x20,
+        0x00, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x05, 0x6a, 0x0b, 0x0b, 0x14, 0x00, 0x02, 0x7f, 0x1f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x20, 0x00, 0x10, 0x00, 0x08, 0x00, 0x0b, 0x41, 0x7f, 0x0b, 0x0b, 0x09, 0x00, 0x20, 0x00,
+        0x10, 0x00, 0x41, 0x02, 0x6c, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x12, 0x07, 0x0b, 0x06, 0x00,
+        0x20, 0x00, 0x12, 0x00, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x10, 0x01, 0x41, 0x01, 0x6a, 0x0b, 0x27, 0x01, 0x01,
+        0x63, 0x00, 0x41, 0x01, 0xfb, 0x00, 0x00, 0x1a, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x01, 0x41, 0x05, 0xfb,
+        0x00, 0x00, 0x41, 0x00, 0x10, 0x00, 0x1a, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x01, 0xfb, 0x02, 0x00, 0x00, 0x6a,
+        0x0b, 0x21, 0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x01, 0x41, 0x03, 0x46, 0x04, 0x40, 0x10, 0x02, 0x0b, 0x20,
+        0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x20, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x0b, 0x18,
+        0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x45,
+        0x0d, 0x00, 0x0b, 0x20, 0x00, 0x0b, 0x13, 0x00, 0x41, 0x10, 0x41, 0x07, 0x20, 0x00, 0xfc, 0x0b, 0x00, 0x41,
+        0x0f, 0x20, 0x00, 0x6a, 0x2d, 0x00, 0x00, 0x0b, 0x06, 0x00, 0x41, 0x01, 0x40, 0x00, 0x0b, 0x2c, 0x00, 0x20,
+        0x00, 0x03, 0x01, 0x21, 0x00, 0x20, 0x00, 0x45, 0x04, 0x40, 0x41, 0xcd, 0x00, 0x0f, 0x0b, 0x1f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x20, 0x00, 0x41, 0x02, 0x46, 0x04, 0x40, 0x10, 0x02, 0x0b, 0x20, 0x00, 0x41, 0x01, 0x6b,
+        0x08, 0x00, 0x0b, 0x00, 0x0b, 0x0b, 0x04, 0x00, 0x41, 0x05, 0x0b, 0x06, 0x00, 0x10, 0x02, 0x10, 0x11, 0x0b,
+        0x09, 0x00, 0x20, 0x00, 0x10, 0x09, 0x41, 0x01, 0x6a, 0x0b,
+    };
+    wasm_module_t* m;
+
+    memset(host, 0, sizeof(*host));
+    host->reenter_export = "sum";
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "yield", "i(i)", wasm_test_resume_yield, host));
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "reenter", "i(i)", wasm_test_resume_reenter, host));
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "interrupt", "()", wasm_test_resume_interrupt, host));
+    m = wasm_load(rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt->error_msg);
+    host->mod = m;
+    return m;
+}
+
+/* Runs export name with fuel units per step, resuming until it finishes; returns the step count. */
+static uint32_t wasm_test_run_in_fuel_steps(wl_test_ctx* t, wasm_module_t* m, const char* name,
+                                            const wasm_value_t* args, uint32_t num_args,
+                                            uint64_t fuel, int grow_fuel, wasm_value_t* result) {
+    wasm_runtime_t* rt = wasm_module_runtime(m);
+    uint32_t steps = 0;
+    wasm_error_t err;
+
+    wasm_runtime_set_fuel(rt, fuel);
+    err = wasm_call(m, name, args, num_args, result, 1);
+    while (err == WASM_ERR_OUT_OF_FUEL && steps < 1000000u) {
+        WL_CHECK(t, wasm_runtime_suspended(rt) == WASM_ERR_OUT_OF_FUEL);
+        if (grow_fuel) fuel *= 2u;
+        wasm_runtime_set_fuel(rt, fuel);
+        err = wasm_runtime_resume(rt, NULL, 0, result, 1);
+        steps++;
+    }
+    WL_CHECK_MSG(t, err == WASM_OK, "%s stopped with %s: %s", name, wasm_error_string(err), rt->error_msg);
+    WL_CHECK(t, wasm_runtime_suspended(rt) == WASM_OK);
+    wasm_runtime_disable_fuel(rt);
+    return steps;
+}
+
+WL_TEST(test_resume_fuel_steps_match_unmetered_runs) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t expected = wasm_i64(0);
+    wasm_value_t result = wasm_i64(0);
+    uint32_t steps;
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(1000);
+    WASM_CHECK_OK(t, wasm_call(m, "sum", args, 1, &expected, 1));
+    steps = wasm_test_run_in_fuel_steps(t, m, "sum", args, 1, 5, 0, &result);
+    WL_CHECK_MSG(t, steps > 100u, "expected many fuel stops, got %u", (unsigned)steps);
+    WASM_CHECK_I64(t, result.of.i64, expected.of.i64);
+    WASM_CHECK_I64(t, result.of.i64, 499500);
+
+    args[0] = wasm_i32(500);
+    args[1] = wasm_i32(0);
+    WASM_CHECK_OK(t, wasm_call(m, "count", args, 2, &expected, 1));
+    steps = wasm_test_run_in_fuel_steps(t, m, "count", args, 2, 3, 0, &result);
+    WL_CHECK(t, steps > 100u);
+    WASM_CHECK_I32(t, result.of.i32, expected.of.i32);
+    WASM_CHECK_I32(t, result.of.i32, 125250);
+
+    args[0] = wasm_i32(4096);
+    steps = wasm_test_run_in_fuel_steps(t, m, "fill", args, 1, 1, 1, &result);
+    WL_CHECK(t, steps > 0u);
+    WASM_CHECK_I32(t, result.of.i32, 7);
+
+    wasm_runtime_set_fuel(&rt, 10);
+    WL_CHECK(t, wasm_call(m, "grow", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_OUT_OF_FUEL);
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 65536);
+    wasm_runtime_set_fuel(&rt, 5000);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 1);
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 2 * 65536);
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_yielding_host_imports) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t host_result;
+    wasm_value_t result = wasm_i32(0);
+    uint32_t func_idx = 0;
+    char backtrace[256];
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 100);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 6);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, NULL));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 5);
+    wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
+    WL_CHECK_MSG(t, backtrace[0] != '\0', "%s", "expected a backtrace while suspended");
+
+    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_MALFORMED);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "suspended") != NULL, "%s", rt.error_msg);
+    WL_CHECK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    host_result = wasm_i64(7);
+    WL_CHECK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    host_result = wasm_i32(7);
+    WL_CHECK(t, wasm_runtime_resume(&rt, &host_result, 1, NULL, 0) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_YIELD);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 5 + 4 + 3 + 2 + 1 + 7);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    WL_CHECK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1) == WASM_ERR_MALFORMED);
+
+    arg = wasm_i32(3);
+    WL_CHECK(t, wasm_call(m, "catch_after_yield", &arg, 1, &result, 1) == WASM_YIELD);
+    host_result = wasm_i32(42);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "tail", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 6);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 1);
+    host_result = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 20);
+
+    arg = wasm_i32(7);
+    WL_CHECK(t, wasm_call(m, "tail_import", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 7);
+    host_result = wasm_i32(9);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 9);
+    WL_CHECK(t, wasm_call(m, "nested_tail_import", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 2);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 10);
+
+    arg = wasm_i32(3);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_runtime_cancel(&rt);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 0);
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "sum", &arg, 1, &result, 1));
+    WASM_CHECK_I64(t, result.of.i64, 45);
+
+    arg = wasm_i32(1);
+    WL_CHECK(t, wasm_call_index(m, 0, &arg, 1, &result, 1) == WASM_ERR_TRAP);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "yielded outside") != NULL, "%s", rt.error_msg);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+    host.reenter_export = "rec";
+    WL_CHECK(t, wasm_call(m, "outer", &arg, 1, &result, 1) == WASM_ERR_TRAP);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+    arg = wasm_i32(2);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_module_free(m);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_keeps_gc_objects_alive_across_collections) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(9);
+    wasm_value_t host_result = wasm_i32(0);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK(t, wasm_call(m, "gc_keep", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_gc_collect(&rt);
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 9 + 5);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_after_interrupts) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(10);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK(t, wasm_call(m, "self_interrupt", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    wasm_runtime_interrupt(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 10);
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "catch_loop", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 77);
+
+    WL_CHECK(t, wasm_call(m, "call_after_interrupt", NULL, 0, &result, 1) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 2);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 5);
+
+    wasm_runtime_interrupt(&rt);
+    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+#if defined(WASM_TEST_THREADS)
+    {
+        wasm_test_thread_start_t start;
+        wasm_test_thread_t thread;
+        uint8_t* data = wasm_memory_data(m, 0);
+
+        memset(data, 0, 4);
+        start.fn = wasm_test_interrupt_later;
+        start.arg = &rt;
+        WL_CHECK(t, wasm_test_thread_spawn(&thread, &start));
+        WL_CHECK_MSG(t, wasm_call(m, "spin_until_flag", NULL, 0, &result, 1) == WASM_ERR_INTERRUPTED, "%s",
+                     rt.error_msg);
+        wasm_test_thread_join(thread);
+        WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+        data[0] = 1;
+        WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+        WL_CHECK(t, result.of.i32 > 0);
+    }
+#endif
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_reentered_calls_unwind_on_fuel) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(1000);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    host.reenter_fuel = 5;
+    WL_CHECK(t, wasm_call(m, "outer", &arg, 1, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    host.reenter_fuel = 0;
+    wasm_runtime_disable_fuel(&rt);
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "outer", &arg, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 46);
 
     wasm_module_free(m);
     wasm_destroy(&rt);
@@ -16445,6 +16827,11 @@ int main(void) {
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
         { "memory: growth by a callee or host is visible to the caller", test_memory_grown_by_callee_or_host_is_visible_to_caller },
         { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
+        { "resume: fuel stops resumed step by step match unmetered runs", test_resume_fuel_steps_match_unmetered_runs },
+        { "resume: yielding host imports suspend nested frames until resumed or cancelled", test_resume_yielding_host_imports },
+        { "resume: GC objects in suspended frames survive collections", test_resume_keeps_gc_objects_alive_across_collections },
+        { "resume: interrupted calls continue where they stopped", test_resume_after_interrupts },
+        { "resume: a call re-entered from a host function unwinds when it runs out of fuel", test_resume_reentered_calls_unwind_on_fuel },
         { "public api: register_module links instances; table, global, funcref, and host object APIs", test_register_module_links_instances_and_host_objects },
         { "backtrace: frames name their module and function from the name section", test_backtraces_name_modules_and_functions },
         { "gc: unreachable externref boxes and exnrefs are freed", test_gc_collects_unreachable_externref_boxes_and_exnrefs },

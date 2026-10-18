@@ -297,6 +297,11 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                                                   &table->reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             delta = wasm__table_index_value(table, &delta_value);
+            if (rt->fuel_enabled && rt->fuel < delta / WASM__FUEL_ELEMS_PER_UNIT &&
+                (table->max_size == UINT64_MAX || delta <= table->max_size - table->size)) {
+                rt->fuel = 0;
+                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
+            }
             old_size = wasm__table_grow(rt, table, delta, init_value);
             if (old_size != UINT64_MAX) WASM__CHARGE_ELEMS(rt, delta);
             WASM__PUSH(rt, wasm__table_index_result(table, old_size));

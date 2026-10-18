@@ -199,7 +199,9 @@ typedef enum wasm_error_t {
     /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
     WASM_ERR_EXIT,
     /* The host stopped execution with wasm_runtime_interrupt. */
-    WASM_ERR_INTERRUPTED
+    WASM_ERR_INTERRUPTED,
+    /* Returned by a host function to suspend the calling Wasm code; see wasm_runtime_resume. */
+    WASM_YIELD
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -522,8 +524,17 @@ int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
 /* Asks the call running in rt to stop with WASM_ERR_INTERRUPTED; safe to call from any thread.
    Execution stops at the next loop iteration, function entry, atomic wait, or WASI sleep. If no
-   call is running, the next one stops at its first such point. */
+   call is running, the next one fails before it starts. */
 void wasm_runtime_interrupt(wasm_runtime_t* rt);
+/* Returns the code a suspended call stopped with (WASM_ERR_OUT_OF_FUEL, WASM_ERR_INTERRUPTED, or
+   WASM_YIELD), or WASM_OK if no call is suspended. */
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt);
+/* Continues the suspended call. host_results are the yielding host function's results and must be
+   empty after a fuel or interrupt stop; results receives the call's results once it finishes. */
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results);
+/* Discards the suspended call, if any. */
+void wasm_runtime_cancel(wasm_runtime_t* rt);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
@@ -559,6 +570,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results);
+/* A suspended call's results arrive through wasm_runtime_resume, not fmt's result pointers. */
 wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char* fmt, ...);
 /* Calls the function a funcref refers to, such as one read from a table or returned by a call. */
 wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,

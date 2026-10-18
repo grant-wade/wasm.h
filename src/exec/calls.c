@@ -47,7 +47,6 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     wasm__arena_mark_t arena_saved;
     uint32_t i;
 
-    if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     if (rt->call_frame_sp >= rt->max_call_frames) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
                       "call frame depth exceeded limit %u",

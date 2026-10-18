@@ -8,6 +8,7 @@
 #include "memory_internal.h"
 #include "reader.h"
 #include "exec/frames.h"
+#include "exec/interpreter.h"
 #include "platform/wasi_state.h"
 #include "platform/emscripten.h"
 #include "internal/gc_types.h"
@@ -525,6 +526,7 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
 
     if (!rt) return;
 
+    wasm__interp_cancel(rt);
     while (rt->failed_modules) {
         wasm_module_t* failed = rt->failed_modules;
         rt->failed_modules = failed->failed_next;

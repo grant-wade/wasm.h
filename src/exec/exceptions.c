@@ -43,7 +43,6 @@ static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* d
         cf->pc = NULL;
         return WASM_OK;
     }
-    if ((desc[3] & WASM__BRANCH_LOOP) && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     if (arity > 0 && rt->sp - arity != dst)
         memmove(&rt->stack[dst], &rt->stack[rt->sp - arity], arity * sizeof(wasm_value_t));
     rt->sp = dst + arity;
@@ -52,6 +51,7 @@ static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* d
         cf->lsp--;
     }
     cf->pc = cf->func->ops + desc[0];
+    if ((desc[3] & WASM__BRANCH_LOOP) && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     return WASM_OK;
 }
 

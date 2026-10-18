@@ -16,7 +16,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Module and runtime query functions take `const` pointers, `wasm_module_runtime` returns a non-`const` runtime, and `wasm_import_info_t` names are `const char*`.
 - `wasm_shared_memory_free` is now `wasm_memory_free`, which also frees memories from the new `wasm_memory_new`.
 - `frame_arena_size` (and `WASM_FRAME_ARENA_SIZE`, now 256 KiB) sets the size of each block of call frame storage. The runtime allocated the largest frame times the call depth limit up front, up to about 750 MB for a module with large frames, and a nested call needing more failed with `WASM_ERR_CALL_STACK_EXHAUSTED`. Blocks are now added as calls nest and released as they return, and running out of memory for a frame fails with `WASM_ERR_OOM`.
-- `wasm_error_t` has a new last member, `WASM_ERR_INTERRUPTED`.
+- `wasm_error_t` has new last members, `WASM_ERR_INTERRUPTED` and `WASM_YIELD`.
+- A call stopped by fuel or `wasm_runtime_interrupt` stays suspended, and other calls on its runtime fail until `wasm_runtime_resume` or `wasm_runtime_cancel`.
 
 ### Security
 
@@ -35,11 +36,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
 - WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
 - `wasm_runtime_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
+- `wasm_runtime_resume` continues a call suspended by running out of fuel, an interrupt, or a host function returning `WASM_YIELD`, and `wasm_runtime_suspended` and `wasm_runtime_cancel` report and discard it. In Zig, `Runtime.resumeCall`, `TypedFunc.resumeCall`, `Runtime.suspended`, `Runtime.cancel`, and `error.Yield`.
 - The CLI `run` command runs a WASI command's `_start` with the remaining arguments as its argv, and `--dir HOST[::GUEST]` and `--env NAME=VALUE` configure its WASI environment. With `--wasi`, `call` passes the module path as `argv[0]`.
 
 ### Changed
 
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
+- `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
 - Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
 

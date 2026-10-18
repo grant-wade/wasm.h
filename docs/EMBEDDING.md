@@ -280,12 +280,13 @@ wasm_runtime_set_fuel(rt, 1000000);
 err = wasm_call(mod, "run", NULL, 0, NULL, 0);
 if (err == WASM_ERR_OUT_OF_FUEL) {
     fprintf(stderr, "instruction budget exhausted\n");
+    wasm_runtime_cancel(rt);
 }
 ```
 
 Every instruction costs one unit. Bulk instructions also cost a unit per 64 bytes (`memory.fill`, `memory.copy`, `memory.init`, `memory.grow`) or per 8 elements (table and array bulk instructions, `table.grow`, and `array.new` and its variants) they touch. `wasm_runtime_disable_fuel` turns metering off again.
 
-To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call fails with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one stops at its first such point.
+To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call stops with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one fails before it starts.
 
 After a trap, use `wasm_runtime_backtrace` or `wasm_runtime_call_frame` to inspect the captured Wasm stack. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
 
@@ -294,6 +295,30 @@ char trace[2048];
 wasm_runtime_backtrace(rt, trace, sizeof(trace));
 fputs(trace, stderr);
 ```
+
+### Resuming calls
+
+A call that runs out of fuel, is interrupted, or reaches a host function that returns `WASM_YIELD` stays suspended with its frames intact. `wasm_runtime_suspended` returns the code it stopped with, `wasm_runtime_resume` continues it, and `wasm_runtime_cancel` discards it:
+
+```c
+wasm_runtime_set_fuel(rt, 10000);
+err = wasm_call(mod, "run", NULL, 0, &result, 1);
+while (err == WASM_ERR_OUT_OF_FUEL && wasm_runtime_suspended(rt)) {
+    wasm_runtime_set_fuel(rt, 10000);
+    err = wasm_runtime_resume(rt, NULL, 0, &result, 1);
+}
+```
+
+A yielding host function's results are passed to `wasm_runtime_resume`, which checks them against the import's result types; after a fuel or interrupt stop it takes none. Its `results` buffer receives the call's results, also for a call started with `wasm_call_fmt`, whose result pointers are left unwritten. A resumed call may stop again.
+
+- Fuel and interrupt stops fall between instructions; the call continues with the instruction it stopped before, and `memory.atomic.wait` waits again.
+- `wasm_runtime_resume` clears a pending interrupt.
+- Only the outermost call suspends. Calls made by host functions and start functions run by `wasm_load` or `wasm_instantiate` fail with the stop's code.
+- An interrupt observed inside a host function, such as WASI sleep, fails the call.
+- A host function that yields outside a suspendable call, including one called directly with `wasm_call_index`, fails it with `WASM_ERR_TRAP`.
+- A runtime holds one suspended call; until it is resumed or cancelled, other calls on the runtime, including start functions, fail with `WASM_ERR_MALFORMED`.
+- `wasm_module_free` on a module the suspended call runs, and `wasm_runtime_free`, cancel it.
+- References in suspended frames stay alive across collections, and `wasm_runtime_backtrace` and `wasm_runtime_call_frame` describe the suspended frames.
 
 ## Custom allocators
 

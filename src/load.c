@@ -5,6 +5,7 @@
 #include "decode.h"
 #include "module.h"
 #include "exec/translate.h"
+#include "exec/interpreter.h"
 #include "runtime.h"
 #include "init_expr.h"
 #include "types/canonical.h"
@@ -323,6 +324,7 @@ void wasm_module_free(wasm_module_t* mod) {
     uint32_t i;
     if (!mod) return;
     if (mod->rt) {
+        wasm__interp_cancel_using(mod->rt, mod);
         for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
             if (object->module == mod) object->module = NULL;
         }

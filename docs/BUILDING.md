@@ -125,7 +125,7 @@ To fuzz the module loader with Clang and ASan/UBSan:
 ./build/debug/wasm_load_fuzzer -runs=10000 -max_len=65536
 ```
 
-`wasm_exec_fuzzer` goes further: it compiles each input with every implemented proposal except threads enabled, stubs all its imports, instantiates it, and calls each exported function with zero arguments under a fuel budget and memory and table limits. Seed it with the modules `./cbuild --test` builds from `test/fuzz/corpus` into `build/debug/fuzz-corpus`:
+`wasm_exec_fuzzer` goes further: it compiles each input with every implemented proposal except threads enabled, stubs all its imports, instantiates it, and calls each exported function with zero arguments under a fuel budget and memory and table limits. A second instance repeats each call in small fuel steps, resuming after every stop and yielding from every stubbed import, and the fuzzer aborts if its results or memory differ. Seed it with the modules `./cbuild --test` builds from `test/fuzz/corpus` into `build/debug/fuzz-corpus`:
 
 ```sh
 ./cbuild --fuzzer --cc=clang -t wasm_exec_fuzzer

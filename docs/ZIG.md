@@ -66,6 +66,17 @@ start.call(.{}) catch |err| switch (err) {
 };
 ```
 
+A call that stops with `error.OutOfFuel`, `error.Interrupted`, or `error.Yield` stays suspended, following the C rules in [Resuming calls](EMBEDDING.md#resuming-calls). `Runtime.suspended` returns why, or null; `TypedFunc.resumeCall` and `Runtime.resumeCall` continue the call with the yielding host function's results, and `Runtime.cancel` discards it:
+
+```zig
+rt.setFuel(10_000);
+var result = run.call(.{});
+while (rt.suspended() == .out_of_fuel) {
+    rt.setFuel(10_000);
+    result = run.resumeCall(&.{});
+}
+```
+
 ## Typed functions
 
 `Module.func` looks up an export and checks its signature against a Zig function type. Calls validate argument values against the Wasm parameters, including values passed as `wasm.Value`. Parameters and results map to Wasm types as follows:
@@ -115,7 +126,7 @@ try rt.bindFuncContext("env", "accumulate", &counter, accumulate);
 - **Parameters:** a function may take a leading `*wasm.Module`, which is the calling module, followed by Wasm-typed parameters.
 - **Context:** `bindFuncContext` passes its context pointer as the first parameter. The context must outlive every module that imports the function.
 - **Results:** a function may return `void`, a Wasm-typed value, or a tuple of them, optionally as an error union.
-- **Errors:** a returned error traps the calling Wasm code, with the error's name as the runtime's error message. Members of `wasm.Error` keep their meaning, such as `error.OutOfBounds`. Any other error becomes `error.Trap`.
+- **Errors:** a returned error traps the calling Wasm code, with the error's name as the runtime's error message. Members of `wasm.Error` keep their meaning, such as `error.OutOfBounds`, and `error.Yield` suspends the call until `resumeCall` supplies the results. Any other error becomes `error.Trap`.
 
 `bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
 

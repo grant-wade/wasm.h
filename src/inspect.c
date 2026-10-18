@@ -472,6 +472,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "interrupted";
         case WASM_ERR_EXIT:
             return "exit";
+        case WASM_YIELD:
+            return "yielded";
     }
     return "unknown error";
 }

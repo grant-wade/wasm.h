@@ -33,6 +33,11 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    if (mod->rt->suspended != WASM_OK) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s",
+                      "runtime has a suspended call; resume or cancel it first");
+        return WASM_ERR_MALFORMED;
+    }
     wasm__clear_backtrace(mod->rt);
     if (mod->is_compiled) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
@@ -474,4 +479,23 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
     err = wasm__register_import_internal(rt, &imp, 0);
     wasm__free_functype(&type);
     return err;
+}
+
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt) {
+    return rt ? rt->suspended : WASM_OK;
+}
+
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results) {
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    wasm__clear_backtrace(rt);
+    err = wasm__interp_resume(rt, host_results, num_host_results, results, num_results);
+    if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(rt);
+    return err;
+}
+
+void wasm_runtime_cancel(wasm_runtime_t* rt) {
+    wasm__interp_cancel(rt);
 }

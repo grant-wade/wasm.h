@@ -37,6 +37,8 @@ pub const Error = error{
     Trap,
     Exit,
     Interrupted,
+    /// A host function returns it to suspend the calling Wasm code until `Runtime.resumeCall`.
+    Yield,
 };
 
 const error_codes = .{
@@ -63,6 +65,7 @@ const error_codes = .{
     .{ c.WASM_ERR_TRAP, error.Trap },
     .{ c.WASM_ERR_EXIT, error.Exit },
     .{ c.WASM_ERR_INTERRUPTED, error.Interrupted },
+    .{ c.WASM_YIELD, error.Yield },
 };
 
 fn check(code: c.wasm_error_t) Error!void {
@@ -653,13 +656,14 @@ pub const Runtime = opaque {
         c.wasm_ref_release(rt.raw(), @ptrCast(held));
     }
 
-    /// Limits execution to `fuel` units; calls fail with `error.OutOfFuel` once it runs out.
+    /// Limits execution to `fuel` units; a call that runs out stops with `error.OutOfFuel`.
     pub fn setFuel(rt: *Runtime, fuel_units: u64) void {
         c.wasm_runtime_set_fuel(rt.raw(), fuel_units);
     }
 
-    /// Makes the running call, or the next one, fail with `error.Interrupted` at its next loop
-    /// iteration, function entry, atomic wait, or WASI sleep. Safe to call from any thread.
+    /// Makes the running call stop with `error.Interrupted` at its next loop iteration, function
+    /// entry, atomic wait, or WASI sleep, or the next call fail before it starts. Safe to call from
+    /// any thread.
     pub fn interrupt(rt: *Runtime) void {
         c.wasm_runtime_interrupt(rt.raw());
     }
@@ -671,6 +675,30 @@ pub const Runtime = opaque {
 
     pub fn fuel(rt: *Runtime) u64 {
         return c.wasm_runtime_fuel(rt.raw());
+    }
+
+    /// Why a call is suspended.
+    pub const Suspension = enum { out_of_fuel, interrupted, yield };
+
+    /// Why the last call is suspended, or null if none is.
+    pub fn suspended(rt: *Runtime) ?Suspension {
+        return switch (c.wasm_runtime_suspended(rt.raw())) {
+            c.WASM_ERR_OUT_OF_FUEL => .out_of_fuel,
+            c.WASM_ERR_INTERRUPTED => .interrupted,
+            c.WASM_YIELD => .yield,
+            else => null,
+        };
+    }
+
+    /// Continues the suspended call. `host_results` are the yielding host function's results and
+    /// must be empty after a fuel or interrupt stop; `results` receives the call's results.
+    pub fn resumeCall(rt: *Runtime, host_results: []const Value, results: []Value) Error!void {
+        try check(c.wasm_runtime_resume(rt.raw(), Value.cPtr(host_results), @intCast(host_results.len), Value.cPtrMut(results), @intCast(results.len)));
+    }
+
+    /// Discards the suspended call, if any.
+    pub fn cancel(rt: *Runtime) void {
+        c.wasm_runtime_cancel(rt.raw());
     }
 
     /// The status the guest passed to WASI `proc_exit` when a call failed with `error.Exit`.
@@ -760,6 +788,13 @@ pub fn TypedFunc(comptime Fn: type) type {
             inline for (0..sig.params.len) |i| params[i] = .from(args[i]);
             var results: [sig.results.len]Value = undefined;
             try self.module.callIndex(self.index, &params, &results);
+            return sig.unpackResults(&results);
+        }
+
+        /// Continues this function's suspended call; see `Runtime.resumeCall`.
+        pub fn resumeCall(self: Self, host_results: []const Value) Error!sig.Result {
+            var results: [sig.results.len]Value = undefined;
+            try self.module.runtime().resumeCall(host_results, &results);
             return sig.unpackResults(&results);
         }
     };

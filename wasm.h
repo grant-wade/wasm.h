@@ -208,7 +208,9 @@ typedef enum wasm_error_t {
     /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
     WASM_ERR_EXIT,
     /* The host stopped execution with wasm_runtime_interrupt. */
-    WASM_ERR_INTERRUPTED
+    WASM_ERR_INTERRUPTED,
+    /* Returned by a host function to suspend the calling Wasm code; see wasm_runtime_resume. */
+    WASM_YIELD
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -531,8 +533,17 @@ int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
 /* Asks the call running in rt to stop with WASM_ERR_INTERRUPTED; safe to call from any thread.
    Execution stops at the next loop iteration, function entry, atomic wait, or WASI sleep. If no
-   call is running, the next one stops at its first such point. */
+   call is running, the next one fails before it starts. */
 void wasm_runtime_interrupt(wasm_runtime_t* rt);
+/* Returns the code a suspended call stopped with (WASM_ERR_OUT_OF_FUEL, WASM_ERR_INTERRUPTED, or
+   WASM_YIELD), or WASM_OK if no call is suspended. */
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt);
+/* Continues the suspended call. host_results are the yielding host function's results and must be
+   empty after a fuel or interrupt stop; results receives the call's results once it finishes. */
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results);
+/* Discards the suspended call, if any. */
+void wasm_runtime_cancel(wasm_runtime_t* rt);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
@@ -568,6 +579,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results);
+/* A suspended call's results arrive through wasm_runtime_resume, not fmt's result pointers. */
 wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char* fmt, ...);
 /* Calls the function a funcref refers to, such as one read from a table or returned by a call. */
 wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
@@ -2179,6 +2191,10 @@ struct wasm_runtime_t {
     wasm__call_frame_t* call_frames;
     uint32_t max_call_frames;
     uint32_t call_frame_sp;
+    wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
+    wasm_module_t* yield_module;          /* owner of yield_type's type indices */
+    const wasm_functype_t* yield_type;    /* type of the host import a suspended call yielded in */
+    uint32_t nonresumable_depth;          /* host functions and start functions running */
     wasm_valtype_t* validator_stack;
     wasm_reftype_t* validator_stack_reftypes;
     wasm__val_frame_t* validator_frames;
@@ -11102,6 +11118,104 @@ WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
 #endif /* WASM_SRC_EXEC_FRAMES_H */
 /* END src/exec/frames.h */
 
+/* BEGIN src/exec/interpreter.h */
+#ifndef WASM_SRC_EXEC_INTERPRETER_H
+#define WASM_SRC_EXEC_INTERPRETER_H
+
+
+/* BEGIN src/exec/state.h */
+#ifndef WASM_EXEC_STATE_H
+#define WASM_EXEC_STATE_H
+
+
+
+/* A try or try_table block that is running: the only blocks that keep a label at run time. */
+typedef struct wasm__label_t {
+    const uint32_t* handler; /* its clause table in the translated body */
+    uint32_t sp_base;
+    uint32_t caught_tag;
+    uint64_t caught_tag_identity;
+    uint32_t caught_count;
+    wasm_value_t* caught_values;
+    uint8_t opcode;
+    uint8_t active_catch;
+} wasm__label_t;
+struct wasm__call_frame_t {
+    wasm_module_t* module;
+    uint32_t func_idx;
+    uint32_t sp_base;
+    wasm_value_t* locals;
+    wasm__label_t* labels;
+    uint32_t lsp;
+    uint32_t max_labels;
+    const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
+    const uint32_t* op_at; /* the instruction it is running, for backtraces */
+    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates */
+    wasm_func_t* func;
+    wasm_functype_t* ft;
+    wasm_value_t* results_dst;
+    uint32_t num_results;
+    wasm__arena_mark_t arena_saved;
+};
+#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
+#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
+#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
+#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
+#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
+#define WASM__PUSH(rt, val)                \
+    do {                                   \
+        if ((rt)->sp >= (rt)->max_stack) { \
+            err = WASM_ERR_STACK_OVERFLOW; \
+            goto cleanup;                  \
+        }                                  \
+        (rt)->stack[(rt)->sp++] = (val);   \
+    } while (0)
+#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
+#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
+#define WASM__TRAP(code) \
+    do {                 \
+        err = (code);    \
+        goto cleanup;    \
+    } while (0)
+
+/* Bulk instructions pay for their size on top of the unit every instruction costs: one more
+ * unit per WASM__FUEL_BYTES_PER_UNIT bytes or WASM__FUEL_ELEMS_PER_UNIT elements they touch. */
+#define WASM__FUEL_BYTES_PER_UNIT 64u
+#define WASM__FUEL_ELEMS_PER_UNIT 8u
+#define WASM__CHARGE_FUEL(rt, units)                    \
+    do {                                                \
+        if ((rt)->fuel_enabled) {                       \
+            uint64_t wasm__units = (uint64_t)(units);   \
+            if ((rt)->fuel < wasm__units) {             \
+                (rt)->fuel = 0;                         \
+                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);       \
+            }                                           \
+            (rt)->fuel -= wasm__units;                  \
+        }                                               \
+    } while (0)
+#define WASM__CHARGE_BYTES(rt, bytes) WASM__CHARGE_FUEL(rt, (uint64_t)(bytes) / WASM__FUEL_BYTES_PER_UNIT)
+#define WASM__CHARGE_ELEMS(rt, count) WASM__CHARGE_FUEL(rt, (uint64_t)(count) / WASM__FUEL_ELEMS_PER_UNIT)
+
+#endif /* WASM_EXEC_STATE_H */
+/* END src/exec/state.h */
+
+WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
+                                 wasm_value_t* args, uint32_t num_args,
+                                 wasm_value_t* results, uint32_t num_results);
+
+/* Continues rt's suspended call; host_results must match the yielding import's result types. */
+WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
+                                        const wasm_value_t* host_results, uint32_t num_host_results,
+                                        wasm_value_t* results, uint32_t num_results);
+
+WASM_PRIVATE void wasm__interp_cancel(wasm_runtime_t* rt);
+
+/* Cancels rt's suspended call if any of its frames belongs to mod. */
+WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_module_t* mod);
+
+#endif /* WASM_SRC_EXEC_INTERPRETER_H */
+/* END src/exec/interpreter.h */
+
 /* BEGIN src/platform/wasi_state.h */
 #ifndef WASM_PLATFORM_WASI_STATE_H
 #define WASM_PLATFORM_WASI_STATE_H
@@ -11827,6 +11941,7 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
 
     if (!rt) return;
 
+    wasm__interp_cancel(rt);
     while (rt->failed_modules) {
         wasm_module_t* failed = rt->failed_modules;
         rt->failed_modules = failed->failed_next;
@@ -13238,7 +13353,9 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod) {
     mod->startup_ran = 1;
 
     if (mod->start_func != UINT32_MAX) {
+        mod->rt->nonresumable_depth++;
         err = wasm_call_index(mod, mod->start_func, NULL, 0, NULL, 0);
+        mod->rt->nonresumable_depth--;
         if (err != WASM_OK) {
             mod->startup_ran = 0;
             return err;
@@ -13249,7 +13366,9 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod) {
     {
         uint32_t ctor_idx = wasm__find_exported_func(mod, "__wasm_call_ctors");
         if (ctor_idx != UINT32_MAX) {
+            mod->rt->nonresumable_depth++;
             err = wasm_call_index(mod, ctor_idx, NULL, 0, NULL, 0);
+            mod->rt->nonresumable_depth--;
             if (err != WASM_OK) {
                 mod->startup_ran = 0;
                 return err;
@@ -17710,6 +17829,7 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 
 
 
+
 #include <string.h>
 #include <stdio.h>
 
@@ -18022,6 +18142,7 @@ void wasm_module_free(wasm_module_t* mod) {
     uint32_t i;
     if (!mod) return;
     if (mod->rt) {
+        wasm__interp_cancel_using(mod->rt, mod);
         for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
             if (object->module == mod) object->module = NULL;
         }
@@ -18077,81 +18198,6 @@ void wasm_module_free(wasm_module_t* mod) {
 
 
 
-/* BEGIN src/exec/state.h */
-#ifndef WASM_EXEC_STATE_H
-#define WASM_EXEC_STATE_H
-
-
-
-/* A try or try_table block that is running: the only blocks that keep a label at run time. */
-typedef struct wasm__label_t {
-    const uint32_t* handler; /* its clause table in the translated body */
-    uint32_t sp_base;
-    uint32_t caught_tag;
-    uint64_t caught_tag_identity;
-    uint32_t caught_count;
-    wasm_value_t* caught_values;
-    uint8_t opcode;
-    uint8_t active_catch;
-} wasm__label_t;
-struct wasm__call_frame_t {
-    wasm_module_t* module;
-    uint32_t func_idx;
-    uint32_t sp_base;
-    wasm_value_t* locals;
-    wasm__label_t* labels;
-    uint32_t lsp;
-    uint32_t max_labels;
-    const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
-    const uint32_t* op_at; /* the instruction it is running, for backtraces */
-    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates */
-    wasm_func_t* func;
-    wasm_functype_t* ft;
-    wasm_value_t* results_dst;
-    uint32_t num_results;
-    wasm__arena_mark_t arena_saved;
-};
-#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
-#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
-#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
-#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
-#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt, val)                \
-    do {                                   \
-        if ((rt)->sp >= (rt)->max_stack) { \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        (rt)->stack[(rt)->sp++] = (val);   \
-    } while (0)
-#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
-#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
-#define WASM__TRAP(code) \
-    do {                 \
-        err = (code);    \
-        goto cleanup;    \
-    } while (0)
-
-/* Bulk instructions pay for their size on top of the unit every instruction costs: one more
- * unit per WASM__FUEL_BYTES_PER_UNIT bytes or WASM__FUEL_ELEMS_PER_UNIT elements they touch. */
-#define WASM__FUEL_BYTES_PER_UNIT 64u
-#define WASM__FUEL_ELEMS_PER_UNIT 8u
-#define WASM__CHARGE_FUEL(rt, units)                    \
-    do {                                                \
-        if ((rt)->fuel_enabled) {                       \
-            uint64_t wasm__units = (uint64_t)(units);   \
-            if ((rt)->fuel < wasm__units) {             \
-                (rt)->fuel = 0;                         \
-                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);       \
-            }                                           \
-            (rt)->fuel -= wasm__units;                  \
-        }                                               \
-    } while (0)
-#define WASM__CHARGE_BYTES(rt, bytes) WASM__CHARGE_FUEL(rt, (uint64_t)(bytes) / WASM__FUEL_BYTES_PER_UNIT)
-#define WASM__CHARGE_ELEMS(rt, count) WASM__CHARGE_FUEL(rt, (uint64_t)(count) / WASM__FUEL_ELEMS_PER_UNIT)
-
-#endif /* WASM_EXEC_STATE_H */
-/* END src/exec/state.h */
 
 #include <stdio.h>
 
@@ -18802,7 +18848,6 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     wasm__arena_mark_t arena_saved;
     uint32_t i;
 
-    if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     if (rt->call_frame_sp >= rt->max_call_frames) {
         WASM__SET_ERR(rt, WASM_ERR_CALL_STACK_EXHAUSTED,
                       "call frame depth exceeded limit %u",
@@ -19601,7 +19646,6 @@ static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* d
         cf->pc = NULL;
         return WASM_OK;
     }
-    if ((desc[3] & WASM__BRANCH_LOOP) && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     if (arity > 0 && rt->sp - arity != dst)
         memmove(&rt->stack[dst], &rt->stack[rt->sp - arity], arity * sizeof(wasm_value_t));
     rt->sp = dst + arity;
@@ -19610,6 +19654,7 @@ static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* d
         cf->lsp--;
     }
     cf->pc = cf->func->ops + desc[0];
+    if ((desc[3] & WASM__BRANCH_LOOP) && wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     return WASM_OK;
 }
 
@@ -20648,6 +20693,11 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
                                                   &table->reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             delta = wasm__table_index_value(table, &delta_value);
+            if (rt->fuel_enabled && rt->fuel < delta / WASM__FUEL_ELEMS_PER_UNIT &&
+                (table->max_size == UINT64_MAX || delta <= table->max_size - table->size)) {
+                rt->fuel = 0;
+                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
+            }
             old_size = wasm__table_grow(rt, table, delta, init_value);
             if (old_size != UINT64_MAX) WASM__CHARGE_ELEMS(rt, delta);
             WASM__PUSH(rt, wasm__table_index_result(table, old_size));
@@ -21759,19 +21809,8 @@ cleanup:
 
 /* BEGIN src/exec/interpreter.c */
 
-/* BEGIN src/exec/interpreter.h */
-#ifndef WASM_SRC_EXEC_INTERPRETER_H
-#define WASM_SRC_EXEC_INTERPRETER_H
-
-
-
-WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
-                                 wasm_value_t* args, uint32_t num_args,
-                                 wasm_value_t* results, uint32_t num_results);
-
-#endif /* WASM_SRC_EXEC_INTERPRETER_H */
-/* END src/exec/interpreter.h */
 #include <stdio.h>
+
 
 
 
@@ -21827,7 +21866,9 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
         results[i] = wasm__is_ref_type(ft->results[i]) ? wasm__typed_ref_null(ft->results[i], reftype)
                                                        : wasm__default_value(ft->results[i]);
     }
+    mod->rt->nonresumable_depth++;
     err = host_func(mod, args, ft->num_params, results, ft->num_results, userdata);
+    mod->rt->nonresumable_depth--;
     if (err != WASM_OK) return err;
     for (i = 0; i < ft->num_results; i++) {
         const wasm_reftype_t* reftype = ft->result_reftypes ? &ft->result_reftypes[i] : NULL;
@@ -22034,14 +22075,22 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         mem0_size = 0;                                \
         WASM__LOAD_STATE();                           \
     } while (0)
-/* Prefixed instructions must set cf->r to their immediates first. */
-#define WASM__CALL_OUT(expr)                      \
-    do {                                          \
-        WASM__SAVE_STATE();                       \
-        err = (expr);                             \
-        WASM__LOAD_STATE();                       \
-        mem0_size = 0;                            \
-        if (err != WASM_OK) goto cleanup;         \
+/* Prefixed instructions must set cf->r to their immediates first. A fuel or interrupt stop from expr
+ * must leave the instruction's operands below their original stack height untouched. */
+#define WASM__CALL_OUT(expr)                                                    \
+    do {                                                                        \
+        wasm_value_t* call_sp_ = sp;                                            \
+        WASM__SAVE_STATE();                                                     \
+        err = (expr);                                                           \
+        WASM__LOAD_STATE();                                                     \
+        mem0_size = 0;                                                          \
+        if (err != WASM_OK) {                                                   \
+            if (err != WASM_ERR_OUT_OF_FUEL && err != WASM_ERR_INTERRUPTED)     \
+                goto cleanup;                                                   \
+            sp = call_sp_;                                                      \
+            pc = op_at;                                                         \
+            goto suspend;                                                       \
+        }                                                                       \
     } while (0)
 /* Only for 32-bit memory 0 with an offset below 2^32; a zero mem0_size forces a refresh. */
 #define WASM__MEMORY_PTR(p, base, width)                                                         \
@@ -22093,8 +22142,9 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
 #define WASM__LOAD_FUEL() (fuel_on = rt->fuel_enabled)
 #endif
 
-/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns. */
-static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp) {
+/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns.
+ * If resumable, fuel, interrupt, and yield stops leave the frames in place with rt->suspended set. */
+static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp, int resumable) {
     wasm_value_t* const stack = rt->stack;
     wasm_value_t* const stack_end = rt->stack + rt->max_stack;
     wasm__call_frame_t* cf;
@@ -22223,8 +22273,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         WASM__NEXT();
     wasm__op_fuel:
         if (rt->fuel == 0) {
+            pc = op_at;
             op_at = fuel_prev;
-            WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
+            err = WASM_ERR_OUT_OF_FUEL;
+            goto suspend;
         }
         rt->fuel--;
         fuel_prev = op_at;
@@ -22232,7 +22284,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         do {
 #else
         if (fuel_on) {
-            if (rt->fuel == 0) WASM__TRAP(WASM_ERR_OUT_OF_FUEL);
+            if (rt->fuel == 0) {
+                err = WASM_ERR_OUT_OF_FUEL;
+                goto suspend;
+            }
             rt->fuel--;
         }
         op_at = pc;
@@ -22340,8 +22395,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 pc = ops + *pc;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_BR_LOOP):
-                if (wasm__interrupt_pending(rt)) WASM__TRAP(WASM_ERR_INTERRUPTED);
                 pc = ops + *pc;
+                if (wasm__interrupt_pending(rt)) goto interrupted;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_BR_X):
                 desc = pc;
@@ -22354,8 +22409,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 WASM__NEXT();
             WASM__CASE(WASM__OP_BR_IF_LOOP):
                 if (WASM__SP_POP().of.i32) {
-                    if (wasm__interrupt_pending(rt)) WASM__TRAP(WASM_ERR_INTERRUPTED);
                     pc = ops + *pc;
+                    if (wasm__interrupt_pending(rt)) goto interrupted;
                 } else {
                     pc++;
                 }
@@ -22772,19 +22827,27 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 int64_t res;
                 uint32_t mem_idx = *pc++;
                 wasm_memory_t* memory;
-                d = WASM__SP_POP();
+                uint64_t pages;
+                uint64_t units = 0;
+
+                d = WASM__SP_TOP();
                 memory = wasm__memory_at(mod, mem_idx);
                 if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                res = wasm_memory_grow(mod,
-                                          mem_idx,
-                                          memory->is_64 ? (uint64_t)d.of.i64
-                                                        : (uint64_t)(uint32_t)d.of.i32);
-                if (res >= 0) {
+                pages = memory->is_64 ? (uint64_t)d.of.i64 : (uint64_t)(uint32_t)d.of.i32;
+                if (rt->fuel_enabled && pages <= memory->max_pages - wasm__memory_pages(memory)) {
                     uint64_t page_size = memory->page_size ? memory->page_size : WASM_PAGE_SIZE;
-                    uint64_t pages = memory->is_64 ? (uint64_t)d.of.i64 : (uint64_t)(uint32_t)d.of.i32;
 
-                    WASM__CHARGE_BYTES(rt, pages * page_size);
+                    units = pages > UINT64_MAX / page_size ? UINT64_MAX : pages * page_size / WASM__FUEL_BYTES_PER_UNIT;
+                    if (rt->fuel < units) {
+                        rt->fuel = 0;
+                        pc = op_at;
+                        err = WASM_ERR_OUT_OF_FUEL;
+                        goto suspend;
+                    }
                 }
+                sp--;
+                res = wasm_memory_grow(mod, mem_idx, pages);
+                if (res >= 0) rt->fuel -= units;
                 mem0_size = 0;
                 WASM__SP_PUSH(memory->is_64 ? wasm_i64(res) : wasm_i32((int32_t)res));
                 WASM__NEXT();
@@ -23633,7 +23696,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         wasm_value_t* dst = stack + sp_base + desc[2];
 
         if (desc[3] & WASM__BRANCH_RETURN) goto return_frame;
-        if ((desc[3] & WASM__BRANCH_LOOP) && wasm__interrupt_pending(rt)) WASM__TRAP(WASM_ERR_INTERRUPTED);
         if (arity > 0 && sp - arity != dst) memmove(dst, sp - arity, arity * sizeof(wasm_value_t));
         sp = dst + arity;
         if (pops > 0) {
@@ -23641,6 +23703,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             lsp -= pops;
         }
         pc = ops + desc[0];
+        if ((desc[3] & WASM__BRANCH_LOOP) && wasm__interrupt_pending(rt)) goto interrupted;
         WASM__NEXT();
     }
 
@@ -23653,8 +23716,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             mem0_size = 0;
             WASM__LOAD_FUEL();
             if (err == WASM_OK) WASM__NEXT();
+            if (err == WASM_YIELD) goto yielded;
             if (err != WASM__ERR_EXCEPTION) goto cleanup;
             err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
+            if (err == WASM_ERR_INTERRUPTED) goto interrupted_in_handler;
             if (err != WASM__ERR_RESUME_FRAME) return err;
             goto resume_frame;
         }
@@ -23663,6 +23728,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         err = wasm__push_call_frame(call_mod, call_idx, sp, call_type->num_params, NULL, 0);
         if (err != WASM_OK) goto cleanup;
         WASM__ENTER_FRAME();
+        if (wasm__interrupt_pending(rt)) goto interrupted;
         WASM__NEXT();
 
     do_tail_call: {
@@ -23678,8 +23744,13 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             mem0_size = 0;
             WASM__LOAD_FUEL();
             if (err == WASM_OK) goto return_frame;
+            if (err == WASM_YIELD) {
+                pc = NULL;
+                goto yielded;
+            }
             if (err != WASM__ERR_EXCEPTION) goto cleanup;
             err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
+            if (err == WASM_ERR_INTERRUPTED) goto interrupted_in_handler;
             if (err != WASM__ERR_RESUME_FRAME) return err;
             goto resume_frame;
         }
@@ -23694,12 +23765,14 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         err = wasm__push_call_frame(call_mod, call_idx, sp, num_params, results_dst, num_results);
         if (err != WASM_OK) return err;
         WASM__ENTER_FRAME();
+        if (wasm__interrupt_pending(rt)) goto interrupted;
         WASM__NEXT();
     }
 
     throw_pending:
         WASM__SAVE_STATE();
         err = wasm__handle_exception_frames(mod, base_frame_sp);
+        if (err == WASM_ERR_INTERRUPTED) goto interrupted_in_handler;
         if (err != WASM_OK) return err;
     resume_frame:
         WASM__ENTER_FRAME();
@@ -23733,6 +23806,28 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         }
     }
 
+    interrupted_in_handler:
+        WASM__ENTER_FRAME();
+    interrupted:
+        err = WASM_ERR_INTERRUPTED;
+        goto suspend;
+
+    yielded:
+        if (!resumable) {
+            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "host function yielded outside a resumable call");
+            err = WASM_ERR_TRAP;
+            goto cleanup;
+        }
+        rt->yield_module = call_mod;
+        rt->yield_type = call_type;
+        WASM__SET_ERR(rt, WASM_YIELD, "%s", "host function yielded");
+
+    suspend:
+        if (!resumable) goto cleanup;
+        WASM__SAVE_STATE();
+        rt->suspended = err;
+        return err;
+
 cleanup:
     WASM__SAVE_STATE();
     while (cf->lsp > 0) {
@@ -23761,6 +23856,29 @@ cleanup:
 #undef WASM__LOAD_STATE
 #undef WASM__SAVE_STATE
 
+static void wasm__drop_call_frames(wasm_runtime_t* rt, uint32_t base_frame_sp) {
+    while (rt->call_frame_sp > base_frame_sp) {
+        wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
+
+        wasm__clear_call_frame(cf);
+        wasm__arena_reset(rt, cf->arena_saved);
+        rt->sp = cf->sp_base;
+        memset(cf, 0, sizeof(*cf));
+        rt->call_frame_sp--;
+    }
+}
+
+static wasm_error_t wasm__interp_run(wasm_runtime_t* rt, uint32_t base_frame_sp, int resumable) {
+    wasm_error_t err = wasm__interp_loop(rt, base_frame_sp, resumable);
+
+    if (rt->suspended != WASM_OK) return err;
+    if (err == WASM__ERR_RETURN_FRAME) err = wasm__finish_call_frame(rt, base_frame_sp);
+    if (err != WASM_OK && rt->call_frame_sp > base_frame_sp)
+        wasm__capture_backtrace(rt, base_frame_sp);
+    wasm__drop_call_frames(rt, base_frame_sp);
+    return err;
+}
+
 WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
                                  wasm_value_t* args, uint32_t num_args,
                                  wasm_value_t* results, uint32_t num_results) {
@@ -23772,24 +23890,103 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
 
     func = &mod->funcs[func_idx];
-    if (func->is_import)
-        return wasm__invoke_host_func(mod, wasm__module_functype(mod, func->type_idx), func->host_func,
-                                      args, results, func->host_userdata);
+    if (func->is_import) {
+        err = wasm__invoke_host_func(mod, wasm__module_functype(mod, func->type_idx), func->host_func,
+                                     args, results, func->host_userdata);
+        if (err == WASM_YIELD) {
+            WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "host function yielded outside a resumable call");
+            err = WASM_ERR_TRAP;
+        }
+        return err;
+    }
 
+    if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     err = wasm__push_call_frame(mod, func_idx, args, num_args, results, num_results);
     if (err != WASM_OK) return err;
-    err = wasm__interp_loop(rt, base_frame_sp);
-    if (err == WASM__ERR_RETURN_FRAME) err = wasm__finish_call_frame(rt, base_frame_sp);
-    if (err != WASM_OK && rt->call_frame_sp > base_frame_sp)
-        wasm__capture_backtrace(rt, base_frame_sp);
-    while (rt->call_frame_sp > base_frame_sp) {
-        wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
-        wasm__clear_call_frame(cf);
-        wasm__arena_reset(rt, cf->arena_saved);
-        memset(cf, 0, sizeof(*cf));
-        rt->call_frame_sp--;
+    return wasm__interp_run(rt, base_frame_sp, base_frame_sp == 0 && rt->nonresumable_depth == 0);
+}
+
+WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
+                                        const wasm_value_t* host_results, uint32_t num_host_results,
+                                        wasm_value_t* results, uint32_t num_results) {
+    const wasm_functype_t* root_type;
+    uint32_t expected = 0;
+    uint32_t i;
+
+    if (rt->suspended == WASM_OK || rt->call_frame_sp == 0) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "no call is suspended");
+        return WASM_ERR_MALFORMED;
     }
-    return err;
+    root_type = rt->call_frames[0].ft;
+    if (num_results < root_type->num_results || (root_type->num_results > 0 && !results)) {
+        WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "resume expects %u results, got %u",
+                      (unsigned)root_type->num_results, (unsigned)num_results);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    if (rt->suspended == WASM_YIELD) expected = rt->yield_type->num_results;
+    if (num_host_results != expected || (expected > 0 && !host_results)) {
+        WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "resume expects %u host results, got %u",
+                      (unsigned)expected, (unsigned)num_host_results);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    for (i = 0; i < expected; i++) {
+        const wasm_functype_t* ft = rt->yield_type;
+
+        if (!wasm__runtime_value_matches_type(rt->yield_module, &host_results[i], ft->results[i],
+                                              ft->result_reftypes ? &ft->result_reftypes[i] : NULL)) {
+            WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH,
+                          "host function result %u does not match its declared type", (unsigned)i);
+            return WASM_ERR_TYPE_MISMATCH;
+        }
+    }
+    if (expected > rt->max_stack - rt->sp) {
+        wasm__interp_cancel(rt);
+        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
+        return WASM_ERR_STACK_OVERFLOW;
+    }
+    if (expected > 0) memcpy(&rt->stack[rt->sp], host_results, expected * sizeof(wasm_value_t));
+    rt->sp += expected;
+    rt->call_frames[0].results_dst = results;
+    rt->suspended = WASM_OK;
+    rt->yield_module = NULL;
+    rt->yield_type = NULL;
+    wasm__atomic_store_size(&rt->interrupt_requested, 0u);
+    if (!rt->call_frames[rt->call_frame_sp - 1u].pc) {
+        wasm_error_t err;
+
+        wasm__clear_call_frame(&rt->call_frames[rt->call_frame_sp - 1u]);
+        err = wasm__finish_call_frame(rt, 0);
+        if (err != WASM_OK) {
+            wasm__drop_call_frames(rt, 0);
+            return err;
+        }
+        if (rt->call_frame_sp == 0) return WASM_OK;
+    }
+    return wasm__interp_run(rt, 0, 1);
+}
+
+WASM_PRIVATE void wasm__interp_cancel(wasm_runtime_t* rt) {
+    if (!rt || rt->suspended == WASM_OK) return;
+    wasm__drop_call_frames(rt, 0);
+    rt->suspended = WASM_OK;
+    rt->yield_module = NULL;
+    rt->yield_type = NULL;
+}
+
+WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_module_t* mod) {
+    uint32_t i;
+
+    if (!rt || rt->suspended == WASM_OK) return;
+    if (rt->yield_module == mod) {
+        wasm__interp_cancel(rt);
+        return;
+    }
+    for (i = 0; i < rt->call_frame_sp; i++) {
+        if (rt->call_frames[i].module == mod) {
+            wasm__interp_cancel(rt);
+            return;
+        }
+    }
 }
 /* END src/exec/interpreter.c */
 
@@ -23829,6 +24026,11 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    if (mod->rt->suspended != WASM_OK) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s",
+                      "runtime has a suspended call; resume or cancel it first");
+        return WASM_ERR_MALFORMED;
+    }
     wasm__clear_backtrace(mod->rt);
     if (mod->is_compiled) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
@@ -24270,6 +24472,25 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
     err = wasm__register_import_internal(rt, &imp, 0);
     wasm__free_functype(&type);
     return err;
+}
+
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt) {
+    return rt ? rt->suspended : WASM_OK;
+}
+
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results) {
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    wasm__clear_backtrace(rt);
+    err = wasm__interp_resume(rt, host_results, num_host_results, results, num_results);
+    if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(rt);
+    return err;
+}
+
+void wasm_runtime_cancel(wasm_runtime_t* rt) {
+    wasm__interp_cancel(rt);
 }
 /* END src/call.c */
 
@@ -30027,6 +30248,8 @@ const char* wasm_error_string(wasm_error_t err) {
             return "interrupted";
         case WASM_ERR_EXIT:
             return "exit";
+        case WASM_YIELD:
+            return "yielded";
     }
     return "unknown error";
 }

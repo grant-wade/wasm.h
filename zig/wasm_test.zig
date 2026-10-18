@@ -98,9 +98,58 @@ test "traps and fuel" {
     const spin = try mod.func("spin", fn () void);
     try expectError(error.OutOfFuel, spin.call(.{}));
     try expectEqual(@as(u64, 0), rt.fuel());
+    try expectEqual(wasm.Runtime.Suspension.out_of_fuel, rt.suspended().?);
+    try expectError(error.Malformed, div.call(.{ 9, 3 }));
+    rt.cancel();
+    try expectEqual(@as(?wasm.Runtime.Suspension, null), rt.suspended());
     try expectError(error.OutOfFuel, div.call(.{ 9, 3 }));
     rt.disableFuel();
-    try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
+    try expectEqual(@as(i32, 3), try div.resumeCall(&.{}));
+}
+
+fn hostAsk(x: i32) error{Yield}!i32 {
+    _ = x;
+    return error.Yield;
+}
+
+fn countInFuelSteps(rt: *wasm.Runtime, count: anytype, n: i32, steps: *u32) !i32 {
+    rt.setFuel(10);
+    var result = count.call(.{n});
+    while (true) {
+        return result catch |err| {
+            if (err != error.OutOfFuel) return err;
+            steps.* += 1;
+            rt.setFuel(10);
+            result = count.resumeCall(&.{});
+            continue;
+        };
+    }
+}
+
+test "resumable calls" {
+    const rt = try wasm.Runtime.init(.{});
+    defer rt.deinit();
+    try rt.bindFunc("env", "ask", hostAsk);
+    const mod = try rt.load(&resume_wasm);
+    defer mod.deinit();
+
+    const twice = try mod.func("twice", fn (i32) i32);
+    try expectError(error.Yield, twice.call(.{4}));
+    try expectEqual(wasm.Runtime.Suspension.yield, rt.suspended().?);
+    try expectEqual(@as(u32, 1), rt.callDepth());
+    try expectError(error.TypeMismatch, twice.resumeCall(&.{.from(@as(i64, 21))}));
+    try expectEqual(@as(i32, 42), try twice.resumeCall(&.{.from(@as(i32, 21))}));
+    try expectEqual(@as(?wasm.Runtime.Suspension, null), rt.suspended());
+
+    const count = try mod.func("count", fn (i32) i32);
+    var steps: u32 = 0;
+    try expectEqual(@as(i32, 1000), try countInFuelSteps(rt, count, 1000, &steps));
+    rt.disableFuel();
+    try expect(steps > 100);
+
+    try expectError(error.Yield, twice.call(.{1}));
+    rt.cancel();
+    try expectEqual(@as(i32, 3), try count.call(.{3}));
 }
 
 test "wasi configuration" {
@@ -524,6 +573,24 @@ const host_wasm = [_]u8{
 //   (import "env" "memory" (memory 1 4 shared))
 //   (func (export "store") (param i32 i32) (i32.atomic.store (local.get 0) (local.get 1)))
 //   (func (export "load") (param i32) (result i32) (i32.atomic.load (local.get 0))))
+// (module
+//   (import "env" "ask" (func $ask (param i32) (result i32)))
+//   (func (export "twice") (param i32) (result i32) (i32.mul (call $ask (local.get 0)) (i32.const 2)))
+//   (func (export "count") (param $n i32) (result i32)
+//     (local $i i32)
+//     (loop $l
+//       (local.set $i (i32.add (local.get $i) (i32.const 1)))
+//       (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+//     (local.get $i)))
+const resume_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x73, 0x6b, 0x00, 0x00, 0x03, 0x03, 0x02,
+    0x00, 0x00, 0x07, 0x11, 0x02, 0x05, 0x74, 0x77, 0x69, 0x63, 0x65, 0x00, 0x01, 0x05, 0x63, 0x6f,
+    0x75, 0x6e, 0x74, 0x00, 0x02, 0x0a, 0x23, 0x02, 0x09, 0x00, 0x20, 0x00, 0x10, 0x00, 0x41, 0x02,
+    0x6c, 0x0b, 0x17, 0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x20,
+    0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x0b,
+};
+
 const shared_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x02, 0x60, 0x02, 0x7f, 0x7f, 0x00,
     0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x10, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x6d, 0x65, 0x6d,

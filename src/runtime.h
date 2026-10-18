@@ -114,6 +114,10 @@ struct wasm_runtime_t {
     wasm__call_frame_t* call_frames;
     uint32_t max_call_frames;
     uint32_t call_frame_sp;
+    wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
+    wasm_module_t* yield_module;          /* owner of yield_type's type indices */
+    const wasm_functype_t* yield_type;    /* type of the host import a suspended call yielded in */
+    uint32_t nonresumable_depth;          /* host functions and start functions running */
     wasm_valtype_t* validator_stack;
     wasm_reftype_t* validator_stack_reftypes;
     wasm__val_frame_t* validator_frames;

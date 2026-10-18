@@ -1076,7 +1076,9 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod) {
     mod->startup_ran = 1;
 
     if (mod->start_func != UINT32_MAX) {
+        mod->rt->nonresumable_depth++;
         err = wasm_call_index(mod, mod->start_func, NULL, 0, NULL, 0);
+        mod->rt->nonresumable_depth--;
         if (err != WASM_OK) {
             mod->startup_ran = 0;
             return err;
@@ -1087,7 +1089,9 @@ WASM_PRIVATE wasm_error_t wasm__run_startup(wasm_module_t* mod) {
     {
         uint32_t ctor_idx = wasm__find_exported_func(mod, "__wasm_call_ctors");
         if (ctor_idx != UINT32_MAX) {
+            mod->rt->nonresumable_depth++;
             err = wasm_call_index(mod, ctor_idx, NULL, 0, NULL, 0);
+            mod->rt->nonresumable_depth--;
             if (err != WASM_OK) {
                 mod->startup_ran = 0;
                 return err;
