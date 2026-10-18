@@ -21597,6 +21597,29 @@ static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
     return WASM_OK;
 }
 
+/* Returns where an access of width bytes at base + offset lands, or NULL if it is out of bounds.
+   Refreshes the loop's copy of memory 0's base and size, which it keeps only for 32-bit memories.
+   A shared memory can grow on another thread at any time, so a stale size only sends accesses here. */
+static uint8_t* wasm__memory_access_slow(wasm_module_t* mod,
+                                         uint32_t memory_index,
+                                         const wasm_value_t* base,
+                                         uint64_t offset,
+                                         uint32_t width,
+                                         uint8_t** mem0_data,
+                                         uint64_t* mem0_size) {
+    wasm_memory_t* memory = wasm__memory_at(mod, memory_index);
+    uint64_t addr;
+
+    if (!memory) return NULL;
+    if (memory_index == 0 && !memory->is_64) {
+        *mem0_data = memory->data;
+        *mem0_size = wasm__memory_byte_size(memory);
+    }
+    if (!wasm__memory_effective_addr(memory, base, offset, &addr)) return NULL;
+    if (!wasm__memory_access_in_bounds(addr, width, wasm__memory_byte_size(memory))) return NULL;
+    return memory->data + addr;
+}
+
 /* Calls host import func with the ft->num_params arguments at args, which sit just above rt->sp
    where a reentrant call could overwrite them, and pushes its results. */
 static wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
@@ -21671,6 +21694,7 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         max_labels = cf->max_labels;                           \
         sp_base = cf->sp_base;                                 \
         op_at = func->code + cf->current_offset;               \
+        mem0_size = 0;                                         \
         WASM__LOAD_STATE();                                    \
     } while (0)
 /* Runs an out-of-line handler that reads immediates through cf->r and uses rt->sp. */
@@ -21679,7 +21703,24 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
         WASM__SAVE_STATE();               \
         err = (expr);                     \
         WASM__LOAD_STATE();               \
+        mem0_size = 0;                    \
         if (err != WASM_OK) goto cleanup; \
+    } while (0)
+/* Sets p to the bytes a load or store reaches. Memory 0's base and size live in locals; anything
+   that can grow it or switch modules zeroes mem0_size, so the next access refreshes them. A 32-bit
+   memory's address plus an offset below 2^32 cannot overflow, so one comparison bounds it. */
+#define WASM__MEMORY_PTR(p, base, width)                                                              \
+    do {                                                                                              \
+        uint32_t memory_index_;                                                                       \
+        uint64_t offset_ = wasm__fetch_memarg(&pc, &memory_index_);                                   \
+        uint64_t addr_ = (uint64_t)(uint32_t)(base).of.i32 + offset_;                                 \
+        if (((offset_ >> 32) | memory_index_) == 0 && addr_ + (width) <= mem0_size) {                 \
+            (p) = mem0_data + addr_;                                                                  \
+        } else {                                                                                      \
+            (p) = wasm__memory_access_slow(mod, memory_index_, &(base), offset_, (width), &mem0_data, \
+                                           &mem0_size);                                               \
+            if (!(p)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);                                             \
+        }                                                                                             \
     } while (0)
 #define WASM__SP_PUSH(val)                 \
     do {                                   \
@@ -21724,6 +21765,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
     wasm_module_t* call_mod;
     wasm_functype_t* call_type;
     uint32_t call_idx;
+    uint8_t* mem0_data = NULL;
+    uint64_t mem0_size = 0;
     uint32_t lsp;
     uint32_t max_labels;
     uint32_t branch_depth;
@@ -22118,193 +22161,185 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 break;
             }
 
-            /* Memory load */
-            case 0x28:
-            case 0x29:
-            case 0x2A:
-            case 0x2B:
-            case 0x2C:
-            case 0x2D:
-            case 0x2E:
-            case 0x2F:
-            case 0x30:
-            case 0x31:
-            case 0x32:
-            case 0x33:
-            case 0x34:
-            case 0x35: {
-                wasm__memarg_t memarg;
-                wasm_value_t base;
-                uint64_t addr, msz;
-                wasm_memory_t* memory;
+            /* Memory access */
+            case 0x28: {
+                uint8_t* p;
 
-                memarg.offset = wasm__fetch_memarg(&pc, &memarg.memory_index);
-                base = WASM__SP_POP();
-                memory = wasm__memory_at(mod, memarg.memory_index);
-                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__memory_effective_addr(memory, &base, memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                msz = wasm__memory_byte_size(memory);
-                switch (op) {
-                    case 0x28: {
-                        int32_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(memory->data + addr);
-                        WASM__SP_PUT(wasm_i32(v));
-                        break;
-                    }
-                    case 0x29: {
-                        int64_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int64_t)wasm__load_le64(memory->data + addr);
-                        WASM__SP_PUT(wasm_i64(v));
-                        break;
-                    }
-                    case 0x2A: {
-                        uint32_t b;
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le32(memory->data + addr);
-                        WASM__SP_PUT(wasm__f32_bits(b));
-                        break;
-                    }
-                    case 0x2B: {
-                        uint64_t b;
-                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        b = wasm__load_le64(memory->data + addr);
-                        WASM__SP_PUT(wasm__f64_bits(b));
-                        break;
-                    }
-                    case 0x2C:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__SP_PUT(wasm_i32((int32_t)(int8_t)memory->data[addr]));
-                        break;
-                    case 0x2D:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__SP_PUT(wasm_i32((int32_t)memory->data[addr]));
-                        break;
-                    case 0x2E: {
-                        int16_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(memory->data + addr);
-                        WASM__SP_PUT(wasm_i32((int32_t)v));
-                        break;
-                    }
-                    case 0x2F: {
-                        uint16_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(memory->data + addr);
-                        WASM__SP_PUT(wasm_i32((int32_t)v));
-                        break;
-                    }
-                    case 0x30:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__SP_PUT(wasm_i64((int64_t)(int8_t)memory->data[addr]));
-                        break;
-                    case 0x31:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        WASM__SP_PUT(wasm_i64((int64_t)memory->data[addr]));
-                        break;
-                    case 0x32: {
-                        int16_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int16_t)wasm__load_le16(memory->data + addr);
-                        WASM__SP_PUT(wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x33: {
-                        uint16_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le16(memory->data + addr);
-                        WASM__SP_PUT(wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x34: {
-                        int32_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = (int32_t)wasm__load_le32(memory->data + addr);
-                        WASM__SP_PUT(wasm_i64((int64_t)v));
-                        break;
-                    }
-                    case 0x35: {
-                        uint32_t v;
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        v = wasm__load_le32(memory->data + addr);
-                        WASM__SP_PUT(wasm_i64((int64_t)v));
-                        break;
-                    }
-                    default:
-                        break;
-                }
+                WASM__MEMORY_PTR(p, sp[-1], 4u);
+                sp[-1] = wasm_i32((int32_t)wasm__load_le32(p));
                 break;
             }
+            case 0x29: {
+                uint8_t* p;
 
-            /* Memory store */
-            case 0x36:
-            case 0x37:
-            case 0x38:
-            case 0x39:
-            case 0x3A:
-            case 0x3B:
-            case 0x3C:
-            case 0x3D:
-            case 0x3E: {
-                wasm__memarg_t memarg;
-                wasm_value_t val, base;
-                uint64_t addr, msz;
-                wasm_memory_t* memory;
+                WASM__MEMORY_PTR(p, sp[-1], 8u);
+                sp[-1] = wasm_i64((int64_t)wasm__load_le64(p));
+                break;
+            }
+            case 0x2A: {
+                uint8_t* p;
 
-                memarg.offset = wasm__fetch_memarg(&pc, &memarg.memory_index);
-                val = WASM__SP_POP();
-                base = WASM__SP_POP();
-                memory = wasm__memory_at(mod, memarg.memory_index);
-                if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (!wasm__memory_effective_addr(memory, &base, memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                msz = wasm__memory_byte_size(memory);
-                switch (op) {
-                    case 0x36:
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i32);
-                        break;
-                    case 0x37:
-                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le64(memory->data + addr, (uint64_t)val.of.i64);
-                        break;
-                    case 0x38: {
-                        uint32_t b;
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memcpy(&b, &val.of.f32, 4);
-                        wasm__store_le32(memory->data + addr, b);
-                        break;
-                    }
-                    case 0x39: {
-                        uint64_t b;
-                        if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memcpy(&b, &val.of.f64, 8);
-                        wasm__store_le64(memory->data + addr, b);
-                        break;
-                    }
-                    case 0x3A:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memory->data[addr] = (uint8_t)val.of.i32;
-                        break;
-                    case 0x3B:
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i32);
-                        break;
-                    case 0x3C:
-                        if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        memory->data[addr] = (uint8_t)val.of.i64;
-                        break;
-                    case 0x3D:
-                        if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le16(memory->data + addr, (uint16_t)val.of.i64);
-                        break;
-                    case 0x3E:
-                        if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                        wasm__store_le32(memory->data + addr, (uint32_t)val.of.i64);
-                        break;
-                    default:
-                        break;
+                WASM__MEMORY_PTR(p, sp[-1], 4u);
+                sp[-1] = wasm__f32_bits(wasm__load_le32(p));
+                break;
+            }
+            case 0x2B: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 8u);
+                sp[-1] = wasm__f64_bits(wasm__load_le64(p));
+                break;
+            }
+            case 0x2C: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 1u);
+                sp[-1] = wasm_i32((int32_t)(int8_t)*p);
+                break;
+            }
+            case 0x2D: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 1u);
+                sp[-1] = wasm_i32((int32_t)*p);
+                break;
+            }
+            case 0x2E: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 2u);
+                sp[-1] = wasm_i32((int32_t)(int16_t)wasm__load_le16(p));
+                break;
+            }
+            case 0x2F: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 2u);
+                sp[-1] = wasm_i32((int32_t)wasm__load_le16(p));
+                break;
+            }
+            case 0x30: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 1u);
+                sp[-1] = wasm_i64((int64_t)(int8_t)*p);
+                break;
+            }
+            case 0x31: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 1u);
+                sp[-1] = wasm_i64((int64_t)*p);
+                break;
+            }
+            case 0x32: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 2u);
+                sp[-1] = wasm_i64((int64_t)(int16_t)wasm__load_le16(p));
+                break;
+            }
+            case 0x33: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 2u);
+                sp[-1] = wasm_i64((int64_t)wasm__load_le16(p));
+                break;
+            }
+            case 0x34: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 4u);
+                sp[-1] = wasm_i64((int64_t)(int32_t)wasm__load_le32(p));
+                break;
+            }
+            case 0x35: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-1], 4u);
+                sp[-1] = wasm_i64((int64_t)wasm__load_le32(p));
+                break;
+            }
+            case 0x36: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 4u);
+                wasm__store_le32(p, (uint32_t)sp[-1].of.i32);
+                sp -= 2;
+                break;
+            }
+            case 0x37: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 8u);
+                wasm__store_le64(p, (uint64_t)sp[-1].of.i64);
+                sp -= 2;
+                break;
+            }
+            case 0x38: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 4u);
+                {
+                    uint32_t bits;
+
+                    memcpy(&bits, &sp[-1].of.f32, 4);
+                    wasm__store_le32(p, bits);
                 }
+                sp -= 2;
+                break;
+            }
+            case 0x39: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 8u);
+                {
+                    uint64_t bits;
+
+                    memcpy(&bits, &sp[-1].of.f64, 8);
+                    wasm__store_le64(p, bits);
+                }
+                sp -= 2;
+                break;
+            }
+            case 0x3A: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 1u);
+                *p = (uint8_t)sp[-1].of.i32;
+                sp -= 2;
+                break;
+            }
+            case 0x3B: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 2u);
+                wasm__store_le16(p, (uint16_t)sp[-1].of.i32);
+                sp -= 2;
+                break;
+            }
+            case 0x3C: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 1u);
+                *p = (uint8_t)sp[-1].of.i64;
+                sp -= 2;
+                break;
+            }
+            case 0x3D: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 2u);
+                wasm__store_le16(p, (uint16_t)sp[-1].of.i64);
+                sp -= 2;
+                break;
+            }
+            case 0x3E: {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp[-2], 4u);
+                wasm__store_le32(p, (uint32_t)sp[-1].of.i64);
+                sp -= 2;
                 break;
             }
 
@@ -22335,6 +22370,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
 
                     WASM__CHARGE_BYTES(rt, pages * page_size);
                 }
+                mem0_size = 0;
                 WASM__SP_PUSH(memory->is_64 ? wasm_i64(res) : wasm_i32((int32_t)res));
                 break;
             }
@@ -23210,6 +23246,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__SAVE_STATE();
             err = wasm__call_host_from_stack(call_mod, call_type, &call_mod->funcs[call_idx], sp);
             sp = stack + rt->sp;
+            mem0_size = 0;
             if (err == WASM_OK) continue;
             if (err != WASM__ERR_EXCEPTION) goto cleanup;
             err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 0);
@@ -23233,6 +23270,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             WASM__SAVE_STATE();
             err = wasm__call_host_from_stack(call_mod, call_type, &call_mod->funcs[call_idx], sp);
             sp = stack + rt->sp;
+            mem0_size = 0;
             if (err == WASM_OK) goto return_frame;
             if (err != WASM__ERR_EXCEPTION) goto cleanup;
             err = wasm__unwind_host_exception(mod, cf, base_frame_sp, 1);
@@ -23305,6 +23343,7 @@ cleanup:
 #undef WASM__SP_PUT
 #undef WASM__SP_PUSH
 #undef WASM__CALL_OUT
+#undef WASM__MEMORY_PTR
 #undef WASM__ENTER_FRAME
 #undef WASM__LOAD_STATE
 #undef WASM__SAVE_STATE

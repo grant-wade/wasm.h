@@ -15916,6 +15916,54 @@ WL_TEST(test_host_results_must_match_the_import_type) {
     wasm_destroy(&rt);
 }
 
+static wasm_error_t wasm_test_host_grow_memory(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                               wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    return wasm_memory_grow(mod, 1) == 2 ? WASM_OK : WASM_ERR_TRAP;
+}
+
+WL_TEST(test_memory_grown_by_callee_or_host_is_visible_to_caller) {
+    /* wasm() and host() store 1 at address 0, grow memory through a Wasm callee or env.grow, store
+       42 or 43 in the new page, and return it plus the value at 0; past_end() loads across the end
+       of the third page. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f,
+        0x02, 0x0c, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x00, 0x03, 0x05, 0x04, 0x00,
+        0x01, 0x01, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x1a, 0x03, 0x04, 0x77, 0x61, 0x73, 0x6d, 0x00, 0x02,
+        0x04, 0x68, 0x6f, 0x73, 0x74, 0x00, 0x03, 0x08, 0x70, 0x61, 0x73, 0x74, 0x5f, 0x65, 0x6e, 0x64, 0x00, 0x04,
+        0x0a, 0x57, 0x04, 0x07, 0x00, 0x41, 0x01, 0x40, 0x00, 0x1a, 0x0b, 0x21, 0x00, 0x41, 0x00, 0x41, 0x01, 0x36,
+        0x02, 0x00, 0x10, 0x01, 0x41, 0x80, 0x80, 0x04, 0x41, 0x2a, 0x36, 0x02, 0x00, 0x41, 0x80, 0x80, 0x04, 0x28,
+        0x02, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x6a, 0x0b, 0x21, 0x00, 0x41, 0x00, 0x41, 0x01, 0x36, 0x02, 0x00,
+        0x10, 0x00, 0x41, 0x80, 0x80, 0x08, 0x41, 0x2b, 0x36, 0x02, 0x00, 0x41, 0x80, 0x80, 0x08, 0x28, 0x02, 0x00,
+        0x41, 0x00, 0x28, 0x02, 0x00, 0x6a, 0x0b, 0x09, 0x00, 0x41, 0xfd, 0xff, 0x0b, 0x28, 0x02, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "grow", "()", wasm_test_host_grow_memory, NULL));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WASM_CHECK_OK(t, wasm_call(m, "wasm", NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 43);
+    WASM_CHECK_OK(t, wasm_call(m, "host", NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 44);
+    WL_CHECK(t, wasm_call(m, "past_end", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_BOUNDS);
+
+    wasm_free_module(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_bulk_fuel_and_array_new_rooting) {
     /* fill(n) runs memory.fill over n bytes; churn(n) builds n arrays of 64 copies of a new
      * struct holding the loop counter and sums each array's last element's field. A struct kept
@@ -16392,6 +16440,7 @@ int main(void) {
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
+        { "memory: growth by a callee or host is visible to the caller", test_memory_grown_by_callee_or_host_is_visible_to_caller },
         { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
         { "public api: register_module links instances; table, global, funcref, and host object APIs", test_register_module_links_instances_and_host_objects },
         { "backtrace: frames name their module and function from the name section", test_backtraces_name_modules_and_functions },
