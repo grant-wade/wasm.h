@@ -163,7 +163,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+    if ((path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -177,21 +177,21 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_create_directory(wasm_module_t* mod,
         char* full_path = NULL;
         wchar_t* wide_path = NULL;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_utf8_to_wide(full_path, &wide_path))
+        else if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, full_path, &wide_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
         else if (_wmkdir(wide_path) != 0)
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
         else
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-        WASM_FREE(full_path);
-        WASM_FREE(wide_path);
+        wasm__free(&mod->rt->allocator, full_path);
+        wasm__free(&mod->rt->allocator, wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -224,7 +224,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
     }
     out_ptr = (uint32_t)args[4].of.i32;
     if (!wasm__range_in_bounds_u64((uint64_t)out_ptr, 64u, mem_size) ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -244,20 +244,20 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_filestat_get(wasm_module_t* mod,
         char* full_path = NULL;
         wasm__wasi_host_stat_t st;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_stat_path(full_path, &st))
+        else if (!wasm__wasi_windows_stat_path(&mod->rt->allocator, full_path, &st))
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
         else {
             wasm__wasi_store_filestat(memory->data + out_ptr, &st);
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
         }
-        WASM_FREE(full_path);
+        wasm__free(&mod->rt->allocator, full_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -286,10 +286,10 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[5].of.i32, (uint32_t)args[6].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
-        WASM_FREE(old_path);
-        WASM_FREE(new_path);
+    if ((path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[5].of.i32, (uint32_t)args[6].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__free(&mod->rt->allocator, old_path);
+        wasm__free(&mod->rt->allocator, new_path);
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -306,26 +306,26 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_link(wasm_module_t* mod,
         wchar_t* old_wide_path = NULL;
         wchar_t* new_wide_path = NULL;
 
-        if (!wasm__wasi_windows_resolve_path(old_entry, old_path, &old_full_path) ||
-            !wasm__wasi_windows_resolve_path(new_entry, new_path, &new_full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, old_entry, old_path, &old_full_path) ||
+            !wasm__wasi_windows_resolve_path(&mod->rt->allocator, new_entry, new_path, &new_full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_utf8_to_wide(old_full_path, &old_wide_path) ||
-                 !wasm__wasi_windows_utf8_to_wide(new_full_path, &new_wide_path))
+        else if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, old_full_path, &old_wide_path) ||
+                 !wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, new_full_path, &new_wide_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
         else if (!CreateHardLinkW(new_wide_path, old_wide_path, NULL))
             wasm__wasi_set_errno(results, num_results, wasm__wasi_windows_error_to_wasi(GetLastError()));
         else
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-        WASM_FREE(old_full_path);
-        WASM_FREE(new_full_path);
-        WASM_FREE(old_wide_path);
-        WASM_FREE(new_wide_path);
+        wasm__free(&mod->rt->allocator, old_full_path);
+        wasm__free(&mod->rt->allocator, new_full_path);
+        wasm__free(&mod->rt->allocator, old_wide_path);
+        wasm__free(&mod->rt->allocator, new_wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(old_path);
-    WASM_FREE(new_path);
+    wasm__free(&mod->rt->allocator, old_path);
+    wasm__free(&mod->rt->allocator, new_path);
     return WASM_OK;
 }
 
@@ -354,7 +354,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
     }
     opened_fd_ptr = (uint32_t)args[8].of.i32;
     if (!wasm__range_in_bounds_u64((uint64_t)opened_fd_ptr, 4u, mem_size) ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[2].of.i32, (uint32_t)args[3].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -396,10 +396,10 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
         wasm__wasi_host_stat_t st;
         uint8_t filetype = WASM__WASI_FILETYPE_UNKNOWN;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         else if ((oflags & 0x2u) != 0u) {
-            if (!wasm__wasi_windows_stat_path(full_path, &st))
+            if (!wasm__wasi_windows_stat_path(&mod->rt->allocator, full_path, &st))
                 wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
             else if (wasm__wasi_filetype_from_mode(st.st_mode) != WASM__WASI_FILETYPE_DIRECTORY)
                 wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTDIR);
@@ -412,7 +412,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
                 wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
             }
         } else {
-            int host_fd = wasm__wasi_windows_open_path(full_path, host_flags);
+            int host_fd = wasm__wasi_windows_open_path(&mod->rt->allocator, full_path, host_flags);
 
             if (host_fd < 0)
                 wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
@@ -434,12 +434,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_open(wasm_module_t* mod,
                 }
             }
         }
-        WASM_FREE(full_path);
+        wasm__free(&mod->rt->allocator, full_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -467,7 +467,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
     }
     if (!wasm__range_in_bounds_u64((uint64_t)(uint32_t)args[3].of.i32, (uint64_t)(uint32_t)args[4].of.i32, mem_size) ||
         !wasm__range_in_bounds_u64((uint64_t)(uint32_t)args[5].of.i32, 4u, mem_size) ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -488,9 +488,9 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
         char* target_path = NULL;
         size_t target_len;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_readlink_path(full_path, &target_path)) {
+        else if (!wasm__wasi_windows_readlink_path(&mod->rt->allocator, full_path, &target_path)) {
             DWORD last_error = GetLastError();
 
             if (last_error != ERROR_SUCCESS)
@@ -504,13 +504,13 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_readlink(wasm_module_t* mod,
             wasm__store_le32(memory->data + (uint32_t)args[5].of.i32, (uint32_t)target_len);
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
         }
-        WASM_FREE(full_path);
-        WASM_FREE(target_path);
+        wasm__free(&mod->rt->allocator, full_path);
+        wasm__free(&mod->rt->allocator, target_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -536,7 +536,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+    if ((path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -557,21 +557,21 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_remove_directory(wasm_module_t* mod,
         char* full_path = NULL;
         wchar_t* wide_path = NULL;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_utf8_to_wide(full_path, &wide_path))
+        else if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, full_path, &wide_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
         else if (_wrmdir(wide_path) != 0)
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
         else
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-        WASM_FREE(full_path);
-        WASM_FREE(wide_path);
+        wasm__free(&mod->rt->allocator, full_path);
+        wasm__free(&mod->rt->allocator, wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -600,10 +600,10 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[4].of.i32, (uint32_t)args[5].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
-        WASM_FREE(old_path);
-        WASM_FREE(new_path);
+    if ((path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &old_path)) != WASM__WASI_ERRNO_SUCCESS ||
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[4].of.i32, (uint32_t)args[5].of.i32, &new_path)) != WASM__WASI_ERRNO_SUCCESS) {
+        wasm__free(&mod->rt->allocator, old_path);
+        wasm__free(&mod->rt->allocator, new_path);
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -619,30 +619,30 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_rename(wasm_module_t* mod,
         wchar_t* old_wide_path = NULL;
         wchar_t* new_wide_path = NULL;
 
-        if (!wasm__wasi_windows_resolve_path(old_entry, old_path, &old_full_path) ||
-            !wasm__wasi_windows_resolve_path(new_entry, new_path, &new_full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, old_entry, old_path, &old_full_path) ||
+            !wasm__wasi_windows_resolve_path(&mod->rt->allocator, new_entry, new_path, &new_full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_utf8_to_wide(old_full_path, &old_wide_path) ||
-                 !wasm__wasi_windows_utf8_to_wide(new_full_path, &new_wide_path))
+        else if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, old_full_path, &old_wide_path) ||
+                 !wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, new_full_path, &new_wide_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
         else if (_wrename(old_wide_path, new_wide_path) != 0)
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
         else
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-        WASM_FREE(old_full_path);
-        WASM_FREE(new_full_path);
-        WASM_FREE(old_wide_path);
-        WASM_FREE(new_wide_path);
+        wasm__free(&mod->rt->allocator, old_full_path);
+        wasm__free(&mod->rt->allocator, new_full_path);
+        wasm__free(&mod->rt->allocator, old_wide_path);
+        wasm__free(&mod->rt->allocator, new_wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(old_path);
-    WASM_FREE(new_path);
+    wasm__free(&mod->rt->allocator, old_path);
+    wasm__free(&mod->rt->allocator, new_path);
     return WASM_OK;
 }
 
-static int wasm__wasi_symlink_target_contained(const char* target, const char* link_path) {
+static int wasm__wasi_symlink_target_contained(const wasm_allocator_t* a, const char* target, const char* link_path) {
     uint32_t depth = 0u;
     const char* last = link_path;
     const char* p;
@@ -654,12 +654,12 @@ static int wasm__wasi_symlink_target_contained(const char* target, const char* l
         if (*p == '/' || *p == '\\') last = p;
     }
     parent_len = last == link_path ? 0u : (size_t)(last - link_path);
-    parent = (char*)WASM_MALLOC(parent_len + 1u);
+    parent = (char*)wasm__malloc(a, parent_len + 1u);
     if (!parent) return 0;
     memcpy(parent, link_path, parent_len);
     parent[parent_len] = 0;
     ok = wasm__wasi_path_walk(parent, 0u, &depth) && wasm__wasi_path_walk(target, depth, NULL);
-    WASM_FREE(parent);
+    wasm__free(a, parent);
     return ok;
 }
 
@@ -686,17 +686,17 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if (!wasm__wasi_read_guest_string(memory, mem_size, (uint32_t)args[0].of.i32, (uint32_t)args[1].of.i32, &old_path) ||
-        (path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[3].of.i32, (uint32_t)args[4].of.i32, &new_path)) !=
+    if (!wasm__wasi_read_guest_string(&mod->rt->allocator, memory, mem_size, (uint32_t)args[0].of.i32, (uint32_t)args[1].of.i32, &old_path) ||
+        (path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[3].of.i32, (uint32_t)args[4].of.i32, &new_path)) !=
             WASM__WASI_ERRNO_SUCCESS) {
-        WASM_FREE(old_path);
-        WASM_FREE(new_path);
+        wasm__free(&mod->rt->allocator, old_path);
+        wasm__free(&mod->rt->allocator, new_path);
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
-    if (!wasm__wasi_symlink_target_contained(old_path, new_path)) {
-        WASM_FREE(old_path);
-        WASM_FREE(new_path);
+    if (!wasm__wasi_symlink_target_contained(&mod->rt->allocator, old_path, new_path)) {
+        wasm__free(&mod->rt->allocator, old_path);
+        wasm__free(&mod->rt->allocator, new_path);
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOTCAPABLE);
         return WASM_OK;
     }
@@ -717,34 +717,34 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_symlink(wasm_module_t* mod,
 #ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
         flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 #endif
-        if (!wasm__wasi_windows_resolve_path(entry, new_path, &new_full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, new_path, &new_full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
         else {
             if (wasm__wasi_windows_path_is_absolute(old_path))
-                old_target_probe = wasm__wasi_strdup(old_path);
+                old_target_probe = wasm__wasi_strdup(&mod->rt->allocator, old_path);
             else
-                (void)wasm__wasi_windows_resolve_path(entry, old_path, &old_target_probe);
-            if (old_target_probe && wasm__wasi_windows_stat_path(old_target_probe, &st) &&
+                (void)wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, old_path, &old_target_probe);
+            if (old_target_probe && wasm__wasi_windows_stat_path(&mod->rt->allocator, old_target_probe, &st) &&
                 wasm__wasi_filetype_from_mode(st.st_mode) == WASM__WASI_FILETYPE_DIRECTORY)
                 flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
-            if (!wasm__wasi_windows_utf8_to_wide(old_path, &old_wide_path) ||
-                !wasm__wasi_windows_utf8_to_wide(new_full_path, &new_wide_path))
+            if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, old_path, &old_wide_path) ||
+                !wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, new_full_path, &new_wide_path))
                 wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
             else if (!CreateSymbolicLinkW(new_wide_path, old_wide_path, flags))
                 wasm__wasi_set_errno(results, num_results, wasm__wasi_windows_error_to_wasi(GetLastError()));
             else
                 wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
         }
-        WASM_FREE(new_full_path);
-        WASM_FREE(old_target_probe);
-        WASM_FREE(old_wide_path);
-        WASM_FREE(new_wide_path);
+        wasm__free(&mod->rt->allocator, new_full_path);
+        wasm__free(&mod->rt->allocator, old_target_probe);
+        wasm__free(&mod->rt->allocator, old_wide_path);
+        wasm__free(&mod->rt->allocator, new_wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(old_path);
-    WASM_FREE(new_path);
+    wasm__free(&mod->rt->allocator, old_path);
+    wasm__free(&mod->rt->allocator, new_path);
     return WASM_OK;
 }
 
@@ -770,7 +770,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_BADF);
         return WASM_OK;
     }
-    if ((path_errno = wasm__wasi_read_guest_path(memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
+    if ((path_errno = wasm__wasi_read_guest_path(&mod->rt->allocator, memory, mem_size, (uint32_t)args[1].of.i32, (uint32_t)args[2].of.i32, &path)) != WASM__WASI_ERRNO_SUCCESS) {
         wasm__wasi_set_errno(results, num_results, path_errno);
         return WASM_OK;
     }
@@ -784,21 +784,21 @@ WASM_PRIVATE wasm_error_t wasm__wasi_path_unlink_file(wasm_module_t* mod,
         char* full_path = NULL;
         wchar_t* wide_path = NULL;
 
-        if (!wasm__wasi_windows_resolve_path(entry, path, &full_path))
+        if (!wasm__wasi_windows_resolve_path(&mod->rt->allocator, entry, path, &full_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
-        else if (!wasm__wasi_windows_utf8_to_wide(full_path, &wide_path))
+        else if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, full_path, &wide_path))
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
         else if (_wunlink(wide_path) != 0)
             wasm__wasi_set_errno(results, num_results, wasm__wasi_errno_from_host(errno));
         else
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
-        WASM_FREE(full_path);
-        WASM_FREE(wide_path);
+        wasm__free(&mod->rt->allocator, full_path);
+        wasm__free(&mod->rt->allocator, wide_path);
     }
 #else
     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOSYS);
 #endif
-    WASM_FREE(path);
+    wasm__free(&mod->rt->allocator, path);
     return WASM_OK;
 }
 
@@ -837,7 +837,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_renumber(wasm_module_t* mod,
         return WASM_OK;
     }
     to_entry = &rt->wasi_state->fds[to_fd];
-    if (to_entry->used) wasm__wasi_fd_entry_reset(to_entry);
+    if (to_entry->used) wasm__wasi_fd_entry_reset(&mod->rt->allocator, to_entry);
     *to_entry = *from_entry;
     memset(from_entry, 0, sizeof(*from_entry));
     from_entry->host_fd = -1;
@@ -1052,12 +1052,12 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
         uint32_t used = 0u;
         int done = 0;
 
-        if (!base_path || !wasm__wasi_windows_join_path(base_path, "*", &glob_path)) {
+        if (!base_path || !wasm__wasi_windows_join_path(&mod->rt->allocator, base_path, "*", &glob_path)) {
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_INVAL);
             return WASM_OK;
         }
-        if (!wasm__wasi_windows_utf8_to_wide(glob_path, &wide_glob_path)) {
-            WASM_FREE(glob_path);
+        if (!wasm__wasi_windows_utf8_to_wide(&mod->rt->allocator, glob_path, &wide_glob_path)) {
+            wasm__free(&mod->rt->allocator, glob_path);
             wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
             return WASM_OK;
         }
@@ -1065,8 +1065,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
         if (find_handle == INVALID_HANDLE_VALUE) {
             DWORD last_error = GetLastError();
 
-            WASM_FREE(glob_path);
-            WASM_FREE(wide_glob_path);
+            wasm__free(&mod->rt->allocator, glob_path);
+            wasm__free(&mod->rt->allocator, wide_glob_path);
             if (last_error == ERROR_FILE_NOT_FOUND) {
                 wasm__store_le32(memory->data + out_ptr, 0u);
                 wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
@@ -1081,17 +1081,17 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
             uint32_t record_size;
 
             if (index++ >= cookie) {
-                if (!wasm__wasi_windows_wide_to_utf8(find_data.cFileName, &name)) {
+                if (!wasm__wasi_windows_wide_to_utf8(&mod->rt->allocator, find_data.cFileName, &name)) {
                     FindClose(find_handle);
-                    WASM_FREE(glob_path);
-                    WASM_FREE(wide_glob_path);
+                    wasm__free(&mod->rt->allocator, glob_path);
+                    wasm__free(&mod->rt->allocator, wide_glob_path);
                     wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_NOMEM);
                     return WASM_OK;
                 }
                 name_len = strlen(name);
                 record_size = 24u + (uint32_t)name_len;
                 if (used + record_size > buf_len) {
-                    WASM_FREE(name);
+                    wasm__free(&mod->rt->allocator, name);
                     break;
                 }
                 memset(memory->data + buf_ptr + used, 0, 24u);
@@ -1102,15 +1102,15 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
                     wasm__wasi_windows_filetype_from_attributes(find_data.dwFileAttributes);
                 memcpy(memory->data + buf_ptr + used + 24u, name, name_len);
                 used += record_size;
-                WASM_FREE(name);
+                wasm__free(&mod->rt->allocator, name);
             }
             if (!FindNextFileW(find_handle, &find_data)) {
                 DWORD last_error = GetLastError();
 
                 if (last_error != ERROR_NO_MORE_FILES) {
                     FindClose(find_handle);
-                    WASM_FREE(glob_path);
-                    WASM_FREE(wide_glob_path);
+                    wasm__free(&mod->rt->allocator, glob_path);
+                    wasm__free(&mod->rt->allocator, wide_glob_path);
                     wasm__wasi_set_errno(results, num_results, wasm__wasi_windows_error_to_wasi(last_error));
                     return WASM_OK;
                 }
@@ -1119,8 +1119,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_fd_readdir(wasm_module_t* mod,
         }
 
         FindClose(find_handle);
-        WASM_FREE(glob_path);
-        WASM_FREE(wide_glob_path);
+        wasm__free(&mod->rt->allocator, glob_path);
+        wasm__free(&mod->rt->allocator, wide_glob_path);
         wasm__store_le32(memory->data + out_ptr, used);
         wasm__wasi_set_errno(results, num_results, WASM__WASI_ERRNO_SUCCESS);
     }

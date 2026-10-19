@@ -10,14 +10,9 @@
  *   platform-backed WASI and Emscripten compatibility helpers.
  *
  * CUSTOM ALLOCATORS:
- *   #define WASM_MALLOC(sz)      my_malloc(sz)
- *   #define WASM_REALLOC(p, sz)  my_realloc(p, sz)
- *   #define WASM_FREE(p)         my_free(p)
- *   #define WASM_CALLOC(n, sz)   my_calloc(n, sz)
- *   #define WASM_GC_ALLOC(sz)    my_gc_alloc(sz)
- *   #define WASM_GC_FREE(p)      my_gc_free(p)
- *   #define WASM_IMPL
- *   #include "wasm.h"
+ *   Every runtime takes a wasm_allocator_t; wasm_libc_allocator() wraps malloc.
+ *   static const wasm_allocator_t my_allocator = { &my_ctx, my_alloc, my_resize, my_free };
+ *   rt = wasm_runtime_new(&my_allocator, NULL);
  *
  * QUICK START:
  *   wasm_runtime_t *rt;
@@ -25,7 +20,7 @@
  *   wasm_value_t args[1];
  *   wasm_value_t result;
  *
- *   rt = wasm_runtime_new(NULL);
+ *   rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
  *   if (!rt || wasm_runtime_last_error(rt) != WASM_OK) {
  *       wasm_runtime_free(rt);
  *       return 1;
@@ -199,7 +194,11 @@ typedef enum wasm_error_t {
     /* The guest requested termination, such as WASI proc_exit; see wasm_runtime_exit_code. */
     WASM_ERR_EXIT,
     /* The host stopped execution with wasm_runtime_interrupt. */
-    WASM_ERR_INTERRUPTED
+    WASM_ERR_INTERRUPTED,
+    /* Returned by a host function to suspend the calling Wasm code; see wasm_runtime_resume. */
+    WASM_YIELD,
+    /* The runtime holds a suspended call; see wasm_runtime_resume and wasm_runtime_cancel. */
+    WASM_ERR_SUSPENDED
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
@@ -432,7 +431,7 @@ typedef struct wasm_global_import_t {
     wasm_valtype_t type;
     wasm_reftype_t ref_type;
     int is_mutable;
-    wasm_value_t* value;
+    wasm_value_t* value; /* must not hold a host anyref; see wasm_global_set */
 } wasm_global_import_t;
 
 /* ── Export entry ──────────────────────────────────────────────────── */
@@ -490,6 +489,9 @@ typedef struct wasm_tag_import_t {
 #ifndef WASM_MAX_MEMORY_BYTES
 #define WASM_MAX_MEMORY_BYTES 0u
 #endif
+#ifndef WASM_MAX_GC_HEAP_BYTES
+#define WASM_MAX_GC_HEAP_BYTES 0u
+#endif
 #ifndef WASM_MAX_TABLE_ELEMENTS
 #define WASM_MAX_TABLE_ELEMENTS 10000000u
 #endif
@@ -498,7 +500,7 @@ typedef struct wasm_tag_import_t {
 #endif
 
 typedef struct wasm_config_t {
-    uint32_t max_stack_values;
+    uint32_t max_stack_values; /* operand stack size in 8-byte slots; a v128 takes two */
     uint32_t max_call_depth;
     uint32_t max_labels;
     size_t initial_gc_heap_size;
@@ -509,12 +511,30 @@ typedef struct wasm_config_t {
     uint64_t max_memory_bytes;    /* bytes per linear memory, at instantiation and on growth */
     uint64_t max_total_memory_bytes; /* bytes across the linear memories the runtime's modules define */
     uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
+    uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
 } wasm_config_t;
 
+/* Memory source for a runtime and for standalone memories and tables. size and new_size are never
+   0, p is never NULL, and align is a power of two. free and resize receive the size and alignment
+   the block was allocated with. resize returns the block, possibly moved, or NULL leaving the old
+   block intact. An allocator used by runtimes on several threads must be thread-safe. */
+typedef struct wasm_allocator_t {
+    void* ctx;
+    void* (*alloc)(void* ctx, size_t size, size_t align);
+    void* (*resize)(void* ctx, void* p, size_t old_size, size_t new_size, size_t align);
+    void (*free)(void* ctx, void* p, size_t size, size_t align);
+} wasm_allocator_t;
+
 /* ── Public API ───────────────────────────────────────────────────── */
+/* A static allocator over malloc, realloc, and free that honors alignments beyond malloc's. */
+const wasm_allocator_t* wasm_libc_allocator(void);
 void wasm_config_default(wasm_config_t* config);
-wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config);
+/* Returns NULL when allocator is NULL or lacks a function. The runtime copies *allocator; its ctx
+   must outlive the runtime. config may be NULL for the defaults. */
+wasm_runtime_t* wasm_runtime_new(const wasm_allocator_t* allocator, const wasm_config_t* config);
 void wasm_runtime_free(wasm_runtime_t* rt);
+/* The runtime's copy of the allocator passed to wasm_runtime_new. */
+const wasm_allocator_t* wasm_runtime_allocator(const wasm_runtime_t* rt);
 wasm_error_t wasm_runtime_last_error(const wasm_runtime_t* rt);
 const char* wasm_runtime_error_message(const wasm_runtime_t* rt);
 void wasm_runtime_clear_error(wasm_runtime_t* rt);
@@ -522,8 +542,17 @@ int32_t wasm_runtime_exit_code(const wasm_runtime_t* rt);
 void wasm_runtime_set_error(wasm_runtime_t* rt, wasm_error_t err, const char* message);
 /* Asks the call running in rt to stop with WASM_ERR_INTERRUPTED; safe to call from any thread.
    Execution stops at the next loop iteration, function entry, atomic wait, or WASI sleep. If no
-   call is running, the next one stops at its first such point. */
+   call is running, the next one fails before it starts. */
 void wasm_runtime_interrupt(wasm_runtime_t* rt);
+/* Returns the code a suspended call stopped with (WASM_ERR_OUT_OF_FUEL, WASM_ERR_INTERRUPTED, or
+   WASM_YIELD), or WASM_OK if no call is suspended. */
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt);
+/* Continues the suspended call. host_results are the yielding host function's results and must be
+   empty after a fuel or interrupt stop; results receives the call's results once it finishes. */
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results);
+/* Discards the suspended call, if any. */
+void wasm_runtime_cancel(wasm_runtime_t* rt);
 void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
 uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
@@ -541,7 +570,7 @@ void wasm_runtime_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 /* Keeps a reference alive across collections until wasm_ref_release. Returns a slot holding the
    value, which collections update when they move the object; read the reference from the slot
-   each time it is used. Returns NULL when out of memory. */
+   each time it is used. Returns NULL when out of memory. Do not store a host anyref in the slot. */
 wasm_value_t* wasm_ref_hold(wasm_runtime_t* rt, wasm_value_t value);
 void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held);
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
@@ -559,6 +588,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
 wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
                              const wasm_value_t* args, uint32_t num_args,
                              wasm_value_t* results, uint32_t num_results);
+/* A suspended call's results arrive through wasm_runtime_resume, not fmt's result pointers. */
 wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char* fmt, ...);
 /* Calls the function a funcref refers to, such as one read from a table or returned by a call. */
 wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
@@ -588,11 +618,14 @@ uint8_t* wasm_memory_data(wasm_module_t* mod, uint32_t memory_index);
 uint64_t wasm_memory_size(const wasm_module_t* mod, uint32_t memory_index);
 int64_t wasm_memory_grow(wasm_module_t* mod, uint32_t memory_index, uint64_t delta_pages);
 /* Creates a zeroed memory for hosts to register with wasm_register_memory_import. It must outlive
-   every module that imports it. Growth reallocates its data with WASM_REALLOC. */
-wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+   every module that imports it. Its data comes from allocator, which is copied and also grows and
+   frees it; allocator's ctx must outlive the memory. Returns NULL for an invalid allocator. */
+wasm_memory_t* wasm_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages, int is_64);
 /* Creates a shared memory (threads proposal) for hosts to register as an import in several runtimes,
-   each used by its own thread. It must outlive every module that imports it. */
-wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64);
+   each used by its own thread. It must outlive every module that imports it. Its data is reserved
+   from the operating system; allocator, as for wasm_memory_new, holds its bookkeeping. */
+wasm_memory_t* wasm_shared_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages,
+                                      int is_64);
 /* Frees a memory from wasm_memory_new or wasm_shared_memory_new. */
 void wasm_memory_free(wasm_memory_t* memory);
 /* The data and byte size of a memory handle; another thread may grow a shared one at any time. */
@@ -610,12 +643,16 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
 int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
 /* Creates a table of size null references for hosts to register with wasm_register_table_import;
    max_size UINT32_MAX means no maximum. It must outlive every module that imports it. */
-wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size);
+/* Creates a table for hosts to register with wasm_register_table_import, allocated from allocator as
+   for wasm_memory_new. */
+wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
+                             uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);
 uint32_t wasm_global_count(const wasm_module_t* mod);
 wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx);
 const wasm_reftype_t* wasm_global_reftype(const wasm_module_t* mod, uint32_t global_idx);
 int wasm_global_is_mutable(const wasm_module_t* mod, uint32_t global_idx);
+/* Do not store a host anyref through the returned pointer; use wasm_global_set_index. */
 wasm_value_t* wasm_module_global(wasm_module_t* mod, uint32_t global_idx);
 wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
 /* Fails with WASM_ERR_TYPE_MISMATCH for immutable globals and values of the wrong type. */

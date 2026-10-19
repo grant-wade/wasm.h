@@ -12,6 +12,7 @@ typedef struct wasm__label_t {
     uint64_t caught_tag_identity;
     uint32_t caught_count;
     wasm_value_t* caught_values;
+    const wasm_allocator_t* caught_allocator; /* source of caught_values */
     uint8_t opcode;
     uint8_t active_catch;
 } wasm__label_t;
@@ -19,17 +20,14 @@ struct wasm__call_frame_t {
     wasm_module_t* module;
     uint32_t func_idx;
     uint32_t sp_base;
-    wasm_value_t* locals;
+    wasm__slot_t* locals;
     wasm__label_t* labels;
     uint32_t lsp;
-    uint32_t max_labels;
     const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
     const uint32_t* op_at; /* the instruction it is running, for backtraces */
-    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates */
+    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates, set before each one */
     wasm_func_t* func;
-    wasm_functype_t* ft;
-    wasm_value_t* results_dst;
-    uint32_t num_results;
+    wasm_value_t* results_dst; /* where a root frame's results go */
     wasm__arena_mark_t arena_saved;
 };
 #define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
@@ -37,16 +35,9 @@ struct wasm__call_frame_t {
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
 #define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt, val)                \
-    do {                                   \
-        if ((rt)->sp >= (rt)->max_stack) { \
-            err = WASM_ERR_STACK_OVERFLOW; \
-            goto cleanup;                  \
-        }                                  \
-        (rt)->stack[(rt)->sp++] = (val);   \
-    } while (0)
-#define WASM__POP(rt) ((rt)->stack[--(rt)->sp])
-#define WASM__PEEK(rt) ((rt)->stack[(rt)->sp - 1])
+#define WASM__PUSH(rt) (&(rt)->stack[(rt)->sp++])
+#define WASM__POP(rt) (&(rt)->stack[--(rt)->sp])
+#define WASM__PEEK(rt) (&(rt)->stack[(rt)->sp - 1])
 #define WASM__TRAP(code) \
     do {                 \
         err = (code);    \

@@ -100,7 +100,7 @@ If using a hook manager, call `.githooks/pre-commit` from the existing hook inst
 
 `./cbuild -t wasm_runtime` builds `build/<config>/libwasm_runtime.a` (`wasm_runtime.lib` with MSVC). Link it, add `src/` to the application's include path, link the math library where it is separate (`-lm`), and include `wasm.h` without defining `WASM_IMPL`.
 
-To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform and allocator definitions consistently to every runtime translation unit. For platform-enabled POSIX builds, compile and link with `-pthread`.
+To build it elsewhere, compile every `.c` file listed in `build.c` and add `src/` to the include path. Apply platform definitions consistently to every runtime translation unit. For platform-enabled POSIX builds, compile and link with `-pthread`.
 
 ## Standalone header
 
@@ -125,7 +125,7 @@ To fuzz the module loader with Clang and ASan/UBSan:
 ./build/debug/wasm_load_fuzzer -runs=10000 -max_len=65536
 ```
 
-`wasm_exec_fuzzer` goes further: it compiles each input with every implemented proposal except threads enabled, stubs all its imports, instantiates it, and calls each exported function with zero arguments under a fuel budget and memory and table limits. Seed it with the modules `./cbuild --test` builds from `test/fuzz/corpus` into `build/debug/fuzz-corpus`:
+`wasm_exec_fuzzer` goes further: it compiles each input with every implemented proposal except threads enabled, stubs all its imports, instantiates it, and calls each exported function with zero arguments under a fuel budget and memory and table limits. A second instance repeats each call in small fuel steps, resuming after every stop and yielding from every stubbed import, and the fuzzer aborts if its results or memory differ. Seed it with the modules `./cbuild --test` builds from `test/fuzz/corpus` into `build/debug/fuzz-corpus`:
 
 ```sh
 ./cbuild --fuzzer --cc=clang -t wasm_exec_fuzzer

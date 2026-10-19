@@ -16,7 +16,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Module and runtime query functions take `const` pointers, `wasm_module_runtime` returns a non-`const` runtime, and `wasm_import_info_t` names are `const char*`.
 - `wasm_shared_memory_free` is now `wasm_memory_free`, which also frees memories from the new `wasm_memory_new`.
 - `frame_arena_size` (and `WASM_FRAME_ARENA_SIZE`, now 256 KiB) sets the size of each block of call frame storage. The runtime allocated the largest frame times the call depth limit up front, up to about 750 MB for a module with large frames, and a nested call needing more failed with `WASM_ERR_CALL_STACK_EXHAUSTED`. Blocks are now added as calls nest and released as they return, and running out of memory for a frame fails with `WASM_ERR_OOM`.
-- `wasm_error_t` has a new last member, `WASM_ERR_INTERRUPTED`.
+- `wasm_error_t` has new last members, `WASM_ERR_INTERRUPTED`, `WASM_YIELD`, and `WASM_ERR_SUSPENDED`.
+- A call stopped by fuel or `wasm_runtime_interrupt` stays suspended, and other calls on its runtime fail with `WASM_ERR_SUSPENDED` until `wasm_runtime_resume` or `wasm_runtime_cancel`.
+- `wasm_runtime_new` takes a required `wasm_allocator_t` before the configuration; `wasm_libc_allocator()` returns one over `malloc`.
+- `WASM_MALLOC`, `WASM_REALLOC`, `WASM_FREE`, `WASM_CALLOC`, `WASM_GC_ALLOC`, and `WASM_GC_FREE` are removed.
+- `wasm_memory_new`, `wasm_shared_memory_new`, and `wasm_table_new` take an allocator as their first argument.
+- Generated `wasm2api` options have an `allocator` field, defaulting to `wasm_libc_allocator()`.
+- In Zig, `Runtime.init` and `SharedMemory.init` take a `std.mem.Allocator` first.
+- `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two. A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 
 ### Security
 
@@ -25,29 +32,45 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `wasm_runtime_allocator` returns a runtime's copy of its allocator.
 - `wasm_runtime_interrupt` stops a running call from any thread with `WASM_ERR_INTERRUPTED`, at the next loop iteration, function entry, `memory.atomic.wait`, or WASI sleep. In Zig, `Runtime.interrupt` and `error.Interrupted`.
 - `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold` and `release`.
 - `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.
 - `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_index` and `wasm_global_set_index`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
 - `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, and `wasm_memory_base` and `wasm_memory_length` read a memory handle's data and size.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
+- `wasm_config_t.max_gc_heap_bytes` caps the GC heap. In Zig, `Config.max_gc_heap_bytes`.
 - Backtraces name each frame's module and function from the `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`, and `wasm_func_name` and `wasm_module_name` return those names.
 - `wasm_wasi_set_args`, `wasm_wasi_set_env`, and `wasm_wasi_preopen_dir` configure a runtime's WASI arguments, environment, and accessible directories. Since 1.2.0 required a preopen for every path operation, no embedder could give a guest file access. In Zig, `Runtime.setWasiArgs`, `setWasiEnv`, and `preopenDir`.
 - WASI `poll_oneoff`, which sleeps until the earliest clock subscription and reports file descriptor subscriptions ready at once, so `sleep` and `nanosleep` work in wasi-libc programs.
 - `wasm_runtime_disable_fuel` turns fuel metering off again; in Zig, `Runtime.disableFuel`.
+- `wasm_runtime_resume` continues a call suspended by running out of fuel, an interrupt, or a host function returning `WASM_YIELD`, and `wasm_runtime_suspended` and `wasm_runtime_cancel` report and discard it. In Zig, `Runtime.resumeCall`, `TypedFunc.resumeCall`, `Runtime.suspended`, `Runtime.cancel`, `error.Yield`, and `error.Suspended`.
 - The CLI `run` command runs a WASI command's `_start` with the remaining arguments as its argv, and `--dir HOST[::GUEST]` and `--env NAME=VALUE` configure its WASI environment. With `--wasi`, `call` passes the module path as `argv[0]`.
 
 ### Changed
 
 - Bulk instructions cost fuel for their size: a unit per 64 bytes or 8 elements they touch, on top of the unit per instruction. `memory.fill` over 4 GiB cost one unit, so fuel did not bound running time.
+- `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
+- `block`, `loop`, and `end` cost no fuel.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
-- Validated function bodies are translated to pre-decoded instructions, and `wasm_bench` runs about 2.6x faster.
+- The interpreter runs `wasm_bench` about 10x faster than 1.2.0. Operands and locals use untagged 8-byte slots, with stack maps tracing references for GC. Translation fuses common local, constant, arithmetic, comparison-and-branch, load/store, and `nop` sequences; calls push and pop frames inline, and indirect calls cache successful type matches.
+- A NaN result of `f64.add`, `f64.sub`, `f64.mul`, or `f64.div` carries the payload of its first NaN operand, made quiet.
 
 ### Fixed
 
 - An exception thrown inside a legacy `catch` or `catch_all` body was caught by a later clause of the same `try`.
 - `array.new` popped its initial value before allocating the array, so a collection during that allocation missed the value, and the array was filled with a reference into the freed heap.
 - The GC frees `externref` boxes made by `extern.convert_any` and the `exnref` objects made by `catch_ref` and `catch_all_ref` once nothing reaches them. Both lived until the runtime was freed and kept what they referred to alive, so a guest loop grew host memory without bound, and `any.convert_extern` slowed down as boxes accumulated.
+- Calls that trap set `wasm_runtime_last_error` and `wasm_runtime_error_message`, which reported `ok` after a trap.
+- The GC heap grows to hold live objects and allocations larger than its initial size, which failed with `WASM_ERR_OOM` once about 4 MiB was live.
+- A collection skips anyref values made by `any.convert_extern` from host `externref` values, which it dereferenced as GC objects and crashed on.
+- Collections during instantiation keep the GC objects that constant expressions are building; globals, tables, and element segments could end up referring to freed or reused objects.
+- `wasm_struct_new` and `wasm_array_new` keep the references they are given alive while allocating, which a collection during that allocation left pointing at freed objects.
+- `extern.convert_any` returns exactly the host `externref` that `any.convert_extern` received; odd values such as 1 came back as a different pointer and tested as `i31ref` in between.
+- A host value passed to Wasm as an `externref` or `anyref` could be read as a GC object, and changed by a collection, once a later GC heap covered its address.
+- Loading a module whose function body ends where a block type should start read a byte past the module.
+- Validating a `br_table` or an unreachable `array.new_fixed` with a count near 2^32 took minutes.
+- A host import reached through `call_indirect` or `call_ref` from another module had its results checked against the calling module's type indices, so a valid reference result failed with `WASM_ERR_TYPE_MISMATCH`.
 
 ## [1.2.0] - 2026-10-17
 

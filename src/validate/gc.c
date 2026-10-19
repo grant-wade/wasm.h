@@ -124,6 +124,9 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_gc(wasm__validator_t* v, cons
                     uint32_t i;
 
                     for (i = count; i > 0; i--) {
+                        const wasm__val_frame_t* frame = wasm__validator_frame(v);
+
+                        if (frame->unreachable && v->sp == frame->height) break;
                         err = wasm__validator_pop_expect_typed(v, at, elem_type, elem_ref_type);
                         if (err != WASM_OK) return err;
                     }

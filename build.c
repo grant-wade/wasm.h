@@ -28,6 +28,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/exec/gc.c",
     "src/exec/bulk.c",
     "src/exec/simd.c",
+    "src/exec/slots.c",
     "src/exec/interpreter.c",
     "src/gc.c",
     "src/handles.c",
@@ -811,9 +812,6 @@ int main(int argc, char** argv) {
     cbuild_target_add_command(ctx, header, cbuild_command_argv(ctx, "generate wasm.h", amalgamate_argv, 3));
 
     target_t* runtime = runtime_library("wasm_runtime");
-    target_t* test_runtime = runtime_library("wasm_test_runtime");
-    /* GCC and Clang resolve -include from the working directory; MSVC finds /FI through -I. */
-    cbuild_add_cflags(ctx, test_runtime, opt.msvc ? "/FItest/wasm_test_alloc.h" : "-include test/wasm_test_alloc.h");
     private_header_check();
 
     target_t* wasm2api = native_executable("wasm2api", "wasm2api.c", header);
@@ -824,7 +822,7 @@ int main(int argc, char** argv) {
     target_t* wasm_test = native_executable("wasm_test", "test/wasm_test.c", header);
     target_t* wasm_modular_test = native_executable("wasm_modular_test", "test/wasm_test.c", header);
     cbuild_add_define(ctx, wasm_modular_test, "WASM_TEST_MODULAR=1");
-    cbuild_add_link_target(ctx, wasm_modular_test, test_runtime);
+    cbuild_add_link_target(ctx, wasm_modular_test, runtime);
     target_t* runner = native_executable("wasm_runner", "test/fixture_runner.c", header);
     target_t* spectest_runner = native_executable("spectest_runner", "test/spectest_runner.c", header);
     target_t* spectest_modular_runner =

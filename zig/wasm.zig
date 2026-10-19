@@ -37,6 +37,10 @@ pub const Error = error{
     Trap,
     Exit,
     Interrupted,
+    /// A host function returns it to suspend the calling Wasm code until `Runtime.resumeCall`.
+    Yield,
+    /// The runtime holds a suspended call; resume or cancel it first.
+    Suspended,
 };
 
 const error_codes = .{
@@ -63,6 +67,8 @@ const error_codes = .{
     .{ c.WASM_ERR_TRAP, error.Trap },
     .{ c.WASM_ERR_EXIT, error.Exit },
     .{ c.WASM_ERR_INTERRUPTED, error.Interrupted },
+    .{ c.WASM_YIELD, error.Yield },
+    .{ c.WASM_ERR_SUSPENDED, error.Suspended },
 };
 
 fn check(code: c.wasm_error_t) Error!void {
@@ -358,6 +364,8 @@ pub const Config = struct {
     max_total_memory_bytes: ?u64 = null,
     /// Elements per table, at instantiation and on growth; 0 is unlimited.
     max_table_elements: ?u64 = null,
+    /// Bytes the GC heap may grow to, capping `initial_gc_heap_size`; 0 is unlimited.
+    max_gc_heap_bytes: ?u64 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
@@ -469,8 +477,52 @@ fn span(ptr: [*c]const u8) [:0]const u8 {
     return std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
 }
 
+/// Serves a `wasm_allocator_t` from the `std.mem.Allocator` its ctx points to.
+const AllocatorBridge = struct {
+    fn from(ctx: ?*anyopaque) std.mem.Allocator {
+        return @as(*const std.mem.Allocator, @ptrCast(@alignCast(ctx))).*;
+    }
+
+    fn alloc(ctx: ?*anyopaque, size: usize, alignment: usize) callconv(.c) ?*anyopaque {
+        return from(ctx).rawAlloc(size, .fromByteUnits(alignment), @returnAddress());
+    }
+
+    fn resize(ctx: ?*anyopaque, p: ?*anyopaque, old_size: usize, new_size: usize, alignment: usize) callconv(.c) ?*anyopaque {
+        const a = from(ctx);
+        const al: std.mem.Alignment = .fromByteUnits(alignment);
+        const old = @as([*]u8, @ptrCast(p))[0..old_size];
+        if (a.rawRemap(old, al, new_size, @returnAddress())) |moved| return moved;
+        const moved = a.rawAlloc(new_size, al, @returnAddress()) orelse return null;
+        const keep = @min(old_size, new_size);
+        @memcpy(moved[0..keep], old[0..keep]);
+        a.rawFree(old, al, @returnAddress());
+        return moved;
+    }
+
+    fn free(ctx: ?*anyopaque, p: ?*anyopaque, size: usize, alignment: usize) callconv(.c) void {
+        from(ctx).rawFree(@as([*]u8, @ptrCast(p))[0..size], .fromByteUnits(alignment), @returnAddress());
+    }
+
+    /// The returned allocator's ctx is `stored`, which must outlive every block it allocates.
+    fn wrap(stored: *const std.mem.Allocator) c.wasm_allocator_t {
+        return .{ .ctx = @constCast(stored), .alloc = alloc, .resize = resize, .free = free };
+    }
+
+    fn box(allocator: std.mem.Allocator) Error!*std.mem.Allocator {
+        const b = allocator.create(std.mem.Allocator) catch return error.OutOfMemory;
+        b.* = allocator;
+        return b;
+    }
+
+    fn unbox(ctx: ?*anyopaque) void {
+        const b: *std.mem.Allocator = @ptrCast(@alignCast(ctx));
+        b.*.destroy(b);
+    }
+};
+
 pub const Runtime = opaque {
-    pub fn init(config: Config) Error!*Runtime {
+    /// The runtime allocates everything it uses from `allocator`, which must outlive it.
+    pub fn init(allocator: std.mem.Allocator, config: Config) Error!*Runtime {
         var cfg: c.wasm_config_t = undefined;
         c.wasm_config_default(&cfg);
         if (config.max_stack_values) |v| cfg.max_stack_values = v;
@@ -483,20 +535,28 @@ pub const Runtime = opaque {
         if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
         if (config.max_total_memory_bytes) |v| cfg.max_total_memory_bytes = v;
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
+        if (config.max_gc_heap_bytes) |v| cfg.max_gc_heap_bytes = v;
         if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
-        return @ptrCast(c.wasm_runtime_new(&cfg) orelse return error.OutOfMemory);
+        const b = try AllocatorBridge.box(allocator);
+        const bridged = AllocatorBridge.wrap(b);
+        return @ptrCast(c.wasm_runtime_new(&bridged, &cfg) orelse {
+            allocator.destroy(b);
+            return error.OutOfMemory;
+        });
     }
 
     /// Free its modules first.
     pub fn deinit(rt: *Runtime) void {
+        const ctx = c.wasm_runtime_allocator(rt.raw()).*.ctx;
         c.wasm_runtime_free(rt.raw());
+        AllocatorBridge.unbox(ctx);
     }
 
     pub fn raw(rt: *Runtime) *c.wasm_runtime_t {
         return @ptrCast(rt);
     }
 
-    /// Describes the most recent error; empty when there is none.
+    /// Describes the most recent error; "ok" when there is none.
     pub fn errorMessage(rt: *Runtime) [:0]const u8 {
         return span(c.wasm_runtime_error_message(rt.raw()));
     }
@@ -584,7 +644,8 @@ pub const Runtime = opaque {
     }
 
     /// Binds `value` as the import global `module_name.name`; its kind gives the global's type.
-    /// `value` must outlive every module that imports it, which read and write it in place.
+    /// `value` must outlive every module that imports it, which read and write it in place, and
+    /// must not hold a host anyref.
     pub fn bindGlobal(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, value: *Value, mutable: bool) Error!void {
         var imp = std.mem.zeroes(c.wasm_global_import_t);
         imp.module = module_name.ptr;
@@ -643,7 +704,7 @@ pub const Runtime = opaque {
     }
 
     /// Keeps `value` alive across collections until `release`. Read it through the returned
-    /// pointer, which collections update when they move the object.
+    /// pointer, which collections update when they move the object. Do not store a host anyref there.
     pub fn hold(rt: *Runtime, value: Value) Error!*Value {
         const held = c.wasm_ref_hold(rt.raw(), value.toC()) orelse return error.OutOfMemory;
         return @ptrCast(held);
@@ -653,13 +714,14 @@ pub const Runtime = opaque {
         c.wasm_ref_release(rt.raw(), @ptrCast(held));
     }
 
-    /// Limits execution to `fuel` units; calls fail with `error.OutOfFuel` once it runs out.
+    /// Limits execution to `fuel` units; a call that runs out stops with `error.OutOfFuel`.
     pub fn setFuel(rt: *Runtime, fuel_units: u64) void {
         c.wasm_runtime_set_fuel(rt.raw(), fuel_units);
     }
 
-    /// Makes the running call, or the next one, fail with `error.Interrupted` at its next loop
-    /// iteration, function entry, atomic wait, or WASI sleep. Safe to call from any thread.
+    /// Makes the running call stop with `error.Interrupted` at its next loop iteration, function
+    /// entry, atomic wait, or WASI sleep, or the next call fail before it starts. Safe to call from
+    /// any thread.
     pub fn interrupt(rt: *Runtime) void {
         c.wasm_runtime_interrupt(rt.raw());
     }
@@ -671,6 +733,30 @@ pub const Runtime = opaque {
 
     pub fn fuel(rt: *Runtime) u64 {
         return c.wasm_runtime_fuel(rt.raw());
+    }
+
+    /// Why a call is suspended.
+    pub const Suspension = enum { out_of_fuel, interrupted, yield };
+
+    /// Why the last call is suspended, or null if none is.
+    pub fn suspended(rt: *Runtime) ?Suspension {
+        return switch (c.wasm_runtime_suspended(rt.raw())) {
+            c.WASM_ERR_OUT_OF_FUEL => .out_of_fuel,
+            c.WASM_ERR_INTERRUPTED => .interrupted,
+            c.WASM_YIELD => .yield,
+            else => null,
+        };
+    }
+
+    /// Continues the suspended call. `host_results` are the yielding host function's results and
+    /// must be empty after a fuel or interrupt stop; `results` receives the call's results.
+    pub fn resumeCall(rt: *Runtime, host_results: []const Value, results: []Value) Error!void {
+        try check(c.wasm_runtime_resume(rt.raw(), Value.cPtr(host_results), @intCast(host_results.len), Value.cPtrMut(results), @intCast(results.len)));
+    }
+
+    /// Discards the suspended call, if any.
+    pub fn cancel(rt: *Runtime) void {
+        c.wasm_runtime_cancel(rt.raw());
     }
 
     /// The status the guest passed to WASI `proc_exit` when a call failed with `error.Exit`.
@@ -760,6 +846,13 @@ pub fn TypedFunc(comptime Fn: type) type {
             inline for (0..sig.params.len) |i| params[i] = .from(args[i]);
             var results: [sig.results.len]Value = undefined;
             try self.module.callIndex(self.index, &params, &results);
+            return sig.unpackResults(&results);
+        }
+
+        /// Continues this function's suspended call; see `Runtime.resumeCall`.
+        pub fn resumeCall(self: Self, host_results: []const Value) Error!sig.Result {
+            var results: [sig.results.len]Value = undefined;
+            try self.module.runtime().resumeCall(host_results, &results);
             return sig.unpackResults(&results);
         }
     };
@@ -1059,24 +1152,35 @@ pub const Memory = struct {
 
 /// A memory for the threads proposal, shared by runtimes on separate threads through `Runtime.bindMemory`.
 /// It never moves when it grows, and must outlive every module that imports it.
-pub const SharedMemory = opaque {
+pub const SharedMemory = struct {
+    memory: *c.wasm_memory_t,
+    allocator: std.mem.Allocator,
+
     pub const Options = struct {
         pages: u64,
         max_pages: u64,
         memory64: bool = false,
     };
 
-    pub fn init(options: Options) Error!*SharedMemory {
-        const memory = c.wasm_shared_memory_new(options.pages, options.max_pages, @intFromBool(options.memory64));
-        return if (memory == null) error.OutOfMemory else @ptrCast(memory);
+    /// `allocator` must be thread-safe and outlive the memory.
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!*SharedMemory {
+        const shared = allocator.create(SharedMemory) catch return error.OutOfMemory;
+        shared.allocator = allocator;
+        const bridged = AllocatorBridge.wrap(&shared.allocator);
+        shared.memory = c.wasm_shared_memory_new(&bridged, options.pages, options.max_pages, @intFromBool(options.memory64)) orelse {
+            allocator.destroy(shared);
+            return error.OutOfMemory;
+        };
+        return shared;
     }
 
-    pub fn deinit(memory: *SharedMemory) void {
-        c.wasm_memory_free(memory.raw());
+    pub fn deinit(shared: *SharedMemory) void {
+        c.wasm_memory_free(shared.memory);
+        shared.allocator.destroy(shared);
     }
 
-    pub fn raw(memory: *SharedMemory) *c.wasm_memory_t {
-        return @ptrCast(@alignCast(memory));
+    pub fn raw(shared: *SharedMemory) *c.wasm_memory_t {
+        return shared.memory;
     }
 
     /// The bytes currently in bounds. Another thread may grow the memory, which keeps this slice valid.

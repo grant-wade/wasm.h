@@ -9,8 +9,13 @@
 static void wasm__skip_simd_immediates(wasm__reader_t* r);
 
 WASM_PRIVATE void wasm__skip_blocktype(wasm__reader_t* r) {
-    uint8_t lead = *r->ptr;
+    uint8_t lead;
 
+    if (!wasm__has(r, 1)) {
+        r->malformed = 1;
+        return;
+    }
+    lead = *r->ptr;
     if (lead == 0x40 || wasm__is_valtype_byte(lead)) {
         if (lead == 0x40)
             r->ptr++;
@@ -151,7 +156,7 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
 }
 
 WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_t* r, wasm__blocktype_t* blocktype) {
-    uint8_t lead = *r->ptr;
+    uint8_t lead;
     wasm_error_t err;
 
     blocktype->param_arity = 0;
@@ -163,6 +168,11 @@ WASM_PRIVATE wasm_error_t wasm__read_blocktype(wasm_module_t* mod, wasm__reader_
     blocktype->inline_result = WASM_TYPE_VOID;
     wasm__clear_reftype(&blocktype->inline_result_reftype);
 
+    if (!wasm__has(r, 1)) {
+        r->malformed = 1;
+        return WASM_ERR_MALFORMED;
+    }
+    lead = *r->ptr;
     if (lead == 0x40) {
         r->ptr++;
         return WASM_OK;

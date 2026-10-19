@@ -193,8 +193,9 @@ int64_t wasm_memory_grow(wasm_module_t* mod, uint32_t memory_index, uint64_t del
         return -1;
     }
     memory->pages = old;
-    nd = (uint8_t*)WASM_REALLOC(memory->data, new_size);
-    if (!nd && np > 0) return -1;
+    if (new_size == old_size) return (int64_t)old;
+    nd = (uint8_t*)wasm__resize_sized(&memory->allocator, memory->data, old_size, new_size, WASM__BLOCK_ALIGN);
+    if (!nd) return -1;
     if (new_size > old_size) memset(nd + old_size, 0, new_size - old_size);
     memory->data = nd;
     memory->pages = np;
@@ -244,7 +245,7 @@ wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64
         WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
         return WASM_ERR_OUT_OF_BOUNDS;
     }
-    *out_val = table->elems[index];
+    *out_val = wasm__anyref_to_host(mod->rt, table->elems[index]);
     return WASM_OK;
 }
 
@@ -260,6 +261,7 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     table->elems[index] = val;
     return WASM_OK;
 }
@@ -269,6 +271,7 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     uint64_t old_size;
 
     if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    if (wasm__anyref_from_host(mod->rt, &init) != WASM_OK) return -1;
     old_size = wasm__table_grow(mod->rt, table, delta, init);
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;
 }
@@ -312,7 +315,7 @@ wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx
     wasm_global_t* global = wasm__api_global(mod, global_idx);
 
     if (!global || !out_val) return WASM_ERR_MALFORMED;
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -328,6 +331,7 @@ wasm_error_t wasm_global_set_index(wasm_module_t* mod, uint32_t global_idx, wasm
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global %u type mismatch", (unsigned)global_idx);
         return WASM_ERR_TYPE_MISMATCH;
     }
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }
@@ -349,7 +353,7 @@ wasm_error_t wasm_global_get(const wasm_module_t* mod, const char* name, wasm_va
     err = wasm__resolve_exported_global(mod, name, &global, NULL);
     if (err != WASM_OK) return err;
 
-    *out_val = wasm__global_get_value(global);
+    *out_val = wasm__anyref_to_host(mod->rt, wasm__global_get_value(global));
     return WASM_OK;
 }
 
@@ -382,7 +386,7 @@ wasm_error_t wasm_global_set(wasm_module_t* mod, const char* name, wasm_value_t 
                           "global '%s' type mismatch", name);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
+    if (wasm__anyref_from_host(mod->rt, &val) != WASM_OK) return WASM_ERR_OOM;
     wasm__global_set_value(global, val);
     return WASM_OK;
 }
@@ -570,43 +574,41 @@ const wasm_functype_t* wasm_tag_functype(const wasm_module_t* mod, uint32_t tag_
     return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
 }
 
-wasm_memory_t* wasm_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
+static wasm_memory_t* wasm__memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages,
+                                       int is_64, int is_shared) {
     wasm_memory_t* memory;
 
-    if (pages > max_pages) return NULL;
-    memory = (wasm_memory_t*)WASM_CALLOC(1u, sizeof(*memory));
+    if (!wasm__allocator_valid(allocator) || pages > max_pages) return NULL;
+    memory = (wasm_memory_t*)wasm__alloc_zeroed_sized(allocator, sizeof(*memory), WASM__ALIGNOF(wasm_memory_t));
     if (!memory) return NULL;
+    memory->allocator = *allocator;
+    memory->is_shared = is_shared;
     memory->pages = pages;
     memory->max_pages = max_pages;
     memory->is_64 = is_64 != 0;
     if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory, 0) != WASM_OK) {
-        WASM_FREE(memory);
+        wasm__free_sized(allocator, memory, sizeof(*memory), WASM__ALIGNOF(wasm_memory_t));
         return NULL;
     }
     return memory;
 }
 
-wasm_memory_t* wasm_shared_memory_new(uint64_t pages, uint64_t max_pages, int is_64) {
-    wasm_memory_t* memory;
+wasm_memory_t* wasm_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages, int is_64) {
+    return wasm__memory_new(allocator, pages, max_pages, is_64, 0);
+}
 
-    if (pages > max_pages) return NULL;
-    memory = (wasm_memory_t*)WASM_CALLOC(1u, sizeof(*memory));
-    if (!memory) return NULL;
-    memory->pages = pages;
-    memory->max_pages = max_pages;
-    memory->is_64 = is_64 != 0;
-    memory->is_shared = 1;
-    if (max_pages > wasm__memory_page_limit(memory) || wasm__init_memory_storage(memory, 0) != WASM_OK) {
-        WASM_FREE(memory);
-        return NULL;
-    }
-    return memory;
+wasm_memory_t* wasm_shared_memory_new(const wasm_allocator_t* allocator, uint64_t pages, uint64_t max_pages,
+                                      int is_64) {
+    return wasm__memory_new(allocator, pages, max_pages, is_64, 1);
 }
 
 void wasm_memory_free(wasm_memory_t* memory) {
+    wasm_allocator_t allocator;
+
     if (!memory) return;
+    allocator = memory->allocator;
     wasm__free_memory(memory);
-    WASM_FREE(memory);
+    wasm__free_sized(&allocator, memory, sizeof(*memory), WASM__ALIGNOF(wasm_memory_t));
 }
 
 uint8_t* wasm_memory_base(wasm_memory_t* memory) {
@@ -617,32 +619,32 @@ uint64_t wasm_memory_length(const wasm_memory_t* memory) {
     return wasm__memory_byte_size(memory);
 }
 
-wasm_table_t* wasm_table_new(wasm_valtype_t elem_type, uint32_t size, uint32_t max_size) {
+wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
+                             uint32_t max_size) {
     wasm_table_t* table;
-    uint32_t i;
 
-    if (!wasm__is_ref_type(elem_type) || size > max_size) return NULL;
-    table = (wasm_table_t*)WASM_CALLOC(1u, sizeof(*table));
+    if (!wasm__allocator_valid(allocator) || !wasm__is_ref_type(elem_type) || size > max_size) return NULL;
+    table = (wasm_table_t*)wasm__alloc_zeroed_sized(allocator, sizeof(*table), WASM__ALIGNOF(wasm_table_t));
     if (!table) return NULL;
+    table->allocator = *allocator;
     table->reftype = elem_type;
     table->reftype_info.type = elem_type;
     table->reftype_info.nullable = 1;
     table->default_value = wasm_ref_null(elem_type);
     table->size = size;
     table->max_size = max_size;
-    if (size > 0) {
-        table->elems = (wasm_value_t*)wasm__malloc_array(size, sizeof(wasm_value_t));
-        if (!table->elems) {
-            WASM_FREE(table);
-            return NULL;
-        }
-        for (i = 0; i < size; i++) table->elems[i] = table->default_value;
+    if (wasm__init_table_storage(table) != WASM_OK) {
+        wasm__free_sized(allocator, table, sizeof(*table), WASM__ALIGNOF(wasm_table_t));
+        return NULL;
     }
     return table;
 }
 
 void wasm_table_free(wasm_table_t* table) {
+    wasm_allocator_t allocator;
+
     if (!table) return;
-    WASM_FREE(table->elems);
-    WASM_FREE(table);
+    allocator = table->allocator;
+    wasm__free_table(table);
+    wasm__free_sized(&allocator, table, sizeof(*table), WASM__ALIGNOF(wasm_table_t));
 }

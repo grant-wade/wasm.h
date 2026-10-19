@@ -12,7 +12,7 @@ test "build.zig.zon version matches the C header" {
 }
 
 test "typed calls convert parameters and results" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -48,7 +48,7 @@ test "typed calls convert parameters and results" {
 }
 
 test "signature and lookup failures" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -61,7 +61,7 @@ test "signature and lookup failures" {
 }
 
 test "dynamic arguments must match the function parameter types" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -81,7 +81,7 @@ test "dynamic arguments must match the function parameter types" {
 }
 
 test "traps and fuel" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -89,22 +89,73 @@ test "traps and fuel" {
     const div = try mod.func("div", fn (i32, i32) i32);
     try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
     try expectError(error.DivByZero, div.call(.{ 1, 0 }));
+    try expectEqualStrings("integer divide by zero", rt.errorMessage());
     const frame = rt.callFrame(0).?;
     try expectEqual(@as(?*wasm.Module, mod), frame.module);
     try expectError(error.IntOverflow, div.call(.{ std.math.minInt(i32), -1 }));
-    try expect(rt.errorMessage().len > 0);
+    try expectEqualStrings("integer overflow", rt.errorMessage());
 
     rt.setFuel(10_000);
     const spin = try mod.func("spin", fn () void);
     try expectError(error.OutOfFuel, spin.call(.{}));
+    try expectEqualStrings("out of fuel", rt.errorMessage());
     try expectEqual(@as(u64, 0), rt.fuel());
+    try expectEqual(wasm.Runtime.Suspension.out_of_fuel, rt.suspended().?);
+    try expectError(error.Suspended, div.call(.{ 9, 3 }));
+    rt.cancel();
+    try expectEqual(@as(?wasm.Runtime.Suspension, null), rt.suspended());
     try expectError(error.OutOfFuel, div.call(.{ 9, 3 }));
     rt.disableFuel();
-    try expectEqual(@as(i32, 3), try div.call(.{ 9, 3 }));
+    try expectEqual(@as(i32, 3), try div.resumeCall(&.{}));
+}
+
+fn hostAsk(x: i32) error{Yield}!i32 {
+    _ = x;
+    return error.Yield;
+}
+
+fn countInFuelSteps(rt: *wasm.Runtime, count: anytype, n: i32, steps: *u32) !i32 {
+    rt.setFuel(10);
+    var result = count.call(.{n});
+    while (true) {
+        return result catch |err| {
+            if (err != error.OutOfFuel) return err;
+            steps.* += 1;
+            rt.setFuel(10);
+            result = count.resumeCall(&.{});
+            continue;
+        };
+    }
+}
+
+test "resumable calls" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindFunc("env", "ask", hostAsk);
+    const mod = try rt.load(&resume_wasm);
+    defer mod.deinit();
+
+    const twice = try mod.func("twice", fn (i32) i32);
+    try expectError(error.Yield, twice.call(.{4}));
+    try expectEqual(wasm.Runtime.Suspension.yield, rt.suspended().?);
+    try expectEqual(@as(u32, 1), rt.callDepth());
+    try expectError(error.TypeMismatch, twice.resumeCall(&.{.from(@as(i64, 21))}));
+    try expectEqual(@as(i32, 42), try twice.resumeCall(&.{.from(@as(i32, 21))}));
+    try expectEqual(@as(?wasm.Runtime.Suspension, null), rt.suspended());
+
+    const count = try mod.func("count", fn (i32) i32);
+    var steps: u32 = 0;
+    try expectEqual(@as(i32, 1000), try countInFuelSteps(rt, count, 1000, &steps));
+    rt.disableFuel();
+    try expect(steps > 100);
+
+    try expectError(error.Yield, twice.call(.{1}));
+    rt.cancel();
+    try expectEqual(@as(i32, 3), try count.call(.{3}));
 }
 
 test "wasi configuration" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const args = [_][*:0]const u8{ "prog", "first" };
     const env = [_][*:0]const u8{"GREETING=hi"};
@@ -118,7 +169,7 @@ test "wasi configuration" {
 }
 
 test "untyped calls" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -132,7 +183,7 @@ test "untyped calls" {
 }
 
 test "globals" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -152,7 +203,7 @@ test "globals" {
 }
 
 test "linear memory" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -180,7 +231,7 @@ test "linear memory" {
 }
 
 test "introspection" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
@@ -244,7 +295,7 @@ fn hostEcho(state: *HostState, caller: *wasm.Module, ref: wasm.ExternRef) wasm.E
 }
 
 test "host functions and globals" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var state: HostState = .{};
@@ -293,7 +344,7 @@ test "host callbacks accept null buffers for empty arguments and results" {
             count.* += 1;
         }
     };
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     var count: u32 = 0;
     try rt.bindFuncContext("m", "f", &count, Host.start);
@@ -314,7 +365,7 @@ test "host callbacks accept null buffers for empty arguments and results" {
 
 test "host signatures must match the import" {
     inline for (.{ .{ "add3", hostPair }, .{ "log", hostIgnore } }) |wrong| {
-        const rt = try wasm.Runtime.init(.{});
+        const rt = try wasm.Runtime.init(std.testing.allocator, .{});
         defer rt.deinit();
         var state: HostState = .{};
         var base: wasm.Value = .from(@as(i32, 0));
@@ -330,7 +381,7 @@ test "host signatures must match the import" {
 }
 
 test "missing imports fail to load" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     try expectError(error.UnknownImport, rt.load(&host_wasm));
     try expect(rt.errorMessage().len > 0);
@@ -338,7 +389,7 @@ test "missing imports fail to load" {
 }
 
 test "compiled modules are inspected without imports and instantiated repeatedly" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const unbound = try rt.compile(&host_wasm);
@@ -357,7 +408,7 @@ test "compiled modules are inspected without imports and instantiated repeatedly
 }
 
 test "features" {
-    const rt = try wasm.Runtime.init(.{ .lazy_validation = false });
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{ .lazy_validation = false });
     defer rt.deinit();
 
     try expect(rt.features().simd);
@@ -372,13 +423,13 @@ test "features" {
 }
 
 test "shared memory across runtimes" {
-    const shared = try wasm.SharedMemory.init(.{ .pages = 1, .max_pages = 4 });
+    const shared = try wasm.SharedMemory.init(std.testing.allocator, .{ .pages = 1, .max_pages = 4 });
     defer shared.deinit();
 
     var modules: [2]*wasm.Module = undefined;
     var runtimes: [2]*wasm.Runtime = undefined;
     for (&runtimes, &modules) |*rt, *mod| {
-        rt.* = try wasm.Runtime.init(.{});
+        rt.* = try wasm.Runtime.init(std.testing.allocator, .{});
         rt.*.enableFeatures(.{ .threads = true });
         try rt.*.bindMemory("env", "memory", shared.raw());
         mod.* = try rt.*.load(&shared_wasm);
@@ -399,7 +450,7 @@ test "shared memory across runtimes" {
 }
 
 test "gc structs and arrays" {
-    const rt = try wasm.Runtime.init(.{});
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const mod = try rt.load(&gc_wasm);
     defer mod.deinit();
@@ -524,6 +575,24 @@ const host_wasm = [_]u8{
 //   (import "env" "memory" (memory 1 4 shared))
 //   (func (export "store") (param i32 i32) (i32.atomic.store (local.get 0) (local.get 1)))
 //   (func (export "load") (param i32) (result i32) (i32.atomic.load (local.get 0))))
+// (module
+//   (import "env" "ask" (func $ask (param i32) (result i32)))
+//   (func (export "twice") (param i32) (result i32) (i32.mul (call $ask (local.get 0)) (i32.const 2)))
+//   (func (export "count") (param $n i32) (result i32)
+//     (local $i i32)
+//     (loop $l
+//       (local.set $i (i32.add (local.get $i) (i32.const 1)))
+//       (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+//     (local.get $i)))
+const resume_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x73, 0x6b, 0x00, 0x00, 0x03, 0x03, 0x02,
+    0x00, 0x00, 0x07, 0x11, 0x02, 0x05, 0x74, 0x77, 0x69, 0x63, 0x65, 0x00, 0x01, 0x05, 0x63, 0x6f,
+    0x75, 0x6e, 0x74, 0x00, 0x02, 0x0a, 0x23, 0x02, 0x09, 0x00, 0x20, 0x00, 0x10, 0x00, 0x41, 0x02,
+    0x6c, 0x0b, 0x17, 0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x20,
+    0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x0b,
+};
+
 const shared_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x02, 0x60, 0x02, 0x7f, 0x7f, 0x00,
     0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x10, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x6d, 0x65, 0x6d,
@@ -546,3 +615,15 @@ const gc_wasm = [_]u8{
     0x02, 0x00, 0x05, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x01, 0x04, 0x69, 0x6e, 0x74, 0x73, 0x0a, 0x09,
     0x01, 0x00, 0x02, 0x00, 0x01, 0x78, 0x01, 0x01, 0x79,
 };
+
+test "allocation failures return errors without leaking" {
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const rt = wasm.Runtime.init(failing.allocator(), .{}) catch continue;
+        defer rt.deinit();
+        const mod = rt.load(&basic_wasm) catch continue;
+        mod.deinit();
+        if (!failing.has_induced_failure) break;
+    }
+}

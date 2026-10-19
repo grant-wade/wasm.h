@@ -13,6 +13,14 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+static wasm_error_t wasm__record_call_result(wasm_runtime_t* rt, wasm_error_t err) {
+    if (err == WASM_OK)
+        wasm_runtime_clear_error(rt);
+    else if (rt->last_error != err || rt->error_msg[0] == '\0')
+        WASM__SET_ERR(rt, err, "%s", wasm_error_string(err));
+    return err;
+}
+
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
                        wasm_value_t* results, uint32_t num_results) {
@@ -20,6 +28,7 @@ wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
     wasm_export_kind_t kind;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
     if (!func_name || !wasm_find_export(mod, func_name, &kind, &idx) || kind != WASM_EXPORT_FUNC) {
         WASM__SET_ERR(mod->rt, WASM_ERR_UNDEFINED_EXPORT, "export '%s' not found", func_name ? func_name : "");
         return WASM_ERR_UNDEFINED_EXPORT;
@@ -33,6 +42,12 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     wasm_functype_t* ft;
 
     if (!mod || !mod->rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(mod->rt);
+    if (mod->rt->suspended != WASM_OK) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_SUSPENDED, "%s",
+                      "runtime has a suspended call; resume or cancel it first");
+        return WASM_ERR_SUSPENDED;
+    }
     wasm__clear_backtrace(mod->rt);
     if (mod->is_compiled) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "module is compiled but not instantiated");
@@ -70,9 +85,9 @@ wasm_error_t wasm_call_index(wasm_module_t* mod, uint32_t func_idx,
     }
 
     {
-        wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results, num_results);
-        if (err == WASM__ERR_EXCEPTION) return wasm__report_uncaught_exception(mod->rt);
-        return err;
+        wasm_error_t err = wasm__interp(mod, func_idx, (wasm_value_t*)args, num_args, results);
+        if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(mod->rt);
+        return wasm__record_call_result(mod->rt, err);
     }
 }
 
@@ -83,6 +98,7 @@ wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
     uint32_t func_idx = 0;
 
     if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
     if (!wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) {
         WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "%s", "expected a non-null funcref");
         return WASM_ERR_TYPE_MISMATCH;
@@ -173,7 +189,8 @@ static wasm_error_t wasm__fmt_char_to_type(char ch,
     }
 }
 
-static wasm_error_t wasm__parse_fmt_string(const char* fmt,
+static wasm_error_t wasm__parse_fmt_string(const wasm_allocator_t* a,
+                                           const char* fmt,
                                            wasm_functype_t* out_type,
                                            const char** out_error) {
     const char* p;
@@ -241,20 +258,20 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
     out_type->num_params = num_params;
     out_type->num_results = num_results;
     if (num_params > 0) {
-        out_type->params = (wasm_valtype_t*)wasm__malloc_array(num_params, sizeof(wasm_valtype_t));
-        out_type->param_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_params, sizeof(wasm_reftype_t));
+        out_type->params = (wasm_valtype_t*)wasm__malloc_array(a, num_params, sizeof(wasm_valtype_t));
+        out_type->param_reftypes = (wasm_reftype_t*)wasm__calloc(a, num_params, sizeof(wasm_reftype_t));
         if (!out_type->params || !out_type->param_reftypes) {
             if (out_error) *out_error = "out of memory while parsing parameter types";
-            wasm__free_functype(out_type);
+            wasm__free_functype(a, out_type);
             return WASM_ERR_OOM;
         }
     }
     if (num_results > 0) {
-        out_type->results = (wasm_valtype_t*)wasm__malloc_array(num_results, sizeof(wasm_valtype_t));
-        out_type->result_reftypes = (wasm_reftype_t*)WASM_CALLOC(num_results, sizeof(wasm_reftype_t));
+        out_type->results = (wasm_valtype_t*)wasm__malloc_array(a, num_results, sizeof(wasm_valtype_t));
+        out_type->result_reftypes = (wasm_reftype_t*)wasm__calloc(a, num_results, sizeof(wasm_reftype_t));
         if (!out_type->results || !out_type->result_reftypes) {
             if (out_error) *out_error = "out of memory while parsing result types";
-            wasm__free_functype(out_type);
+            wasm__free_functype(a, out_type);
             return WASM_ERR_OOM;
         }
     }
@@ -274,7 +291,7 @@ static wasm_error_t wasm__parse_fmt_string(const char* fmt,
 
         err = wasm__fmt_char_to_type(*p, in_results, &is_void, &type, &ref_type);
         if (err != WASM_OK) {
-            wasm__free_functype(out_type);
+            wasm__free_functype(a, out_type);
             if (out_error) *out_error = "invalid format string";
             return err;
         }
@@ -316,11 +333,12 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     wasm_error_t err;
 
     memset(&parsed_type, 0, sizeof(parsed_type));
+    if (mod && mod->rt) wasm_runtime_clear_error(mod->rt);
     if (!mod || !func_name || !fmt)
         return wasm__set_fmt_error(mod ? mod->rt : NULL, WASM_ERR_MALFORMED,
                                    "invalid format call arguments", NULL);
 
-    err = wasm__parse_fmt_string(fmt, &parsed_type, &parse_error);
+    err = wasm__parse_fmt_string(&mod->rt->allocator, fmt, &parsed_type, &parse_error);
     if (err != WASM_OK)
         return wasm__set_fmt_error(mod->rt, err, "invalid format string", parse_error);
 
@@ -335,15 +353,15 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     }
 
     if (parsed_type.num_params > 0) {
-        args = (wasm_value_t*)wasm__malloc_array(parsed_type.num_params, sizeof(wasm_value_t));
+        args = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, parsed_type.num_params, sizeof(wasm_value_t));
         if (!args) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "args");
             goto cleanup;
         }
     }
     if (parsed_type.num_results > 0) {
-        results = (wasm_value_t*)wasm__malloc_array(parsed_type.num_results, sizeof(wasm_value_t));
-        result_ptrs = (void**)wasm__malloc_array(parsed_type.num_results, sizeof(void*));
+        results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, parsed_type.num_results, sizeof(wasm_value_t));
+        result_ptrs = (void**)wasm__malloc_array(&mod->rt->allocator, parsed_type.num_results, sizeof(void*));
         if (!results || !result_ptrs) {
             err = wasm__set_fmt_error(mod->rt, WASM_ERR_OOM, "call_fmt allocation failed", "results");
             goto cleanup;
@@ -430,10 +448,10 @@ static wasm_error_t wasm__call_fmt_va(wasm_module_t* mod,
     }
 
 cleanup:
-    WASM_FREE(args);
-    WASM_FREE(results);
-    WASM_FREE(result_ptrs);
-    wasm__free_functype(&parsed_type);
+    wasm__free(&mod->rt->allocator, args);
+    wasm__free(&mod->rt->allocator, results);
+    wasm__free(&mod->rt->allocator, result_ptrs);
+    wasm__free_functype(&mod->rt->allocator, &parsed_type);
     return err;
 }
 
@@ -460,7 +478,7 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                    "invalid host function binding arguments", NULL);
 
     memset(&type, 0, sizeof(type));
-    err = wasm__parse_fmt_string(fmt, &type, &parse_error);
+    err = wasm__parse_fmt_string(&rt->allocator, fmt, &type, &parse_error);
     if (err != WASM_OK)
         return wasm__set_fmt_error(rt, err, "invalid format string", parse_error);
 
@@ -472,6 +490,26 @@ wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
     imp.userdata = userdata;
 
     err = wasm__register_import_internal(rt, &imp, 0);
-    wasm__free_functype(&type);
+    wasm__free_functype(&rt->allocator, &type);
     return err;
+}
+
+wasm_error_t wasm_runtime_suspended(const wasm_runtime_t* rt) {
+    return rt ? rt->suspended : WASM_OK;
+}
+
+wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_results, uint32_t num_host_results,
+                                 wasm_value_t* results, uint32_t num_results) {
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
+    wasm__clear_backtrace(rt);
+    err = wasm__interp_resume(rt, host_results, num_host_results, results, num_results);
+    if (err == WASM__ERR_EXCEPTION) err = wasm__report_uncaught_exception(rt);
+    return wasm__record_call_result(rt, err);
+}
+
+void wasm_runtime_cancel(wasm_runtime_t* rt) {
+    wasm__interp_cancel(rt);
 }

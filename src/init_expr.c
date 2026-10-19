@@ -14,6 +14,7 @@
 #include <stdio.h>
 
 typedef struct wasm__init_expr_stack_t {
+    const wasm_allocator_t* allocator;
     wasm_value_t* values;
     uint32_t size;
     uint32_t cap;
@@ -22,7 +23,7 @@ typedef struct wasm__init_expr_stack_t {
 static wasm_error_t wasm__init_expr_stack_push(wasm__init_expr_stack_t* stack, wasm_value_t value) {
     if (stack->size >= stack->cap) {
         uint32_t new_cap = stack->cap ? stack->cap * 2u : 8u;
-        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->values, new_cap, sizeof(wasm_value_t));
+        wasm_value_t* values = (wasm_value_t*)wasm__realloc_array(stack->allocator, stack->values, new_cap, sizeof(wasm_value_t));
         if (!values) return WASM_ERR_OOM;
         stack->values = values;
         stack->cap = new_cap;
@@ -42,18 +43,29 @@ WASM_PRIVATE int wasm__init_value_matches(wasm_module_t* mod,
     return wasm__is_ref_type(value->type);
 }
 
+static wasm_error_t wasm__init_expr_stack_peek_expect(wasm_module_t* mod,
+                                                      const wasm__init_expr_stack_t* stack,
+                                                      wasm_valtype_t expected_type,
+                                                      const wasm_reftype_t* expected_ref,
+                                                      wasm_value_t* out_value) {
+    wasm_value_t value;
+
+    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
+    value = stack->values[stack->size - 1];
+    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
+    *out_value = value;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__init_expr_stack_pop_expect(wasm_module_t* mod,
                                                      wasm__init_expr_stack_t* stack,
                                                      wasm_valtype_t expected_type,
                                                      const wasm_reftype_t* expected_ref,
                                                      wasm_value_t* out_value) {
-    wasm_value_t value;
+    wasm_error_t err = wasm__init_expr_stack_peek_expect(mod, stack, expected_type, expected_ref, out_value);
 
-    if (stack->size == 0) return WASM_ERR_TYPE_MISMATCH;
-    value = stack->values[--stack->size];
-    if (!wasm__init_value_matches(mod, &value, expected_type, expected_ref)) return WASM_ERR_TYPE_MISMATCH;
-    *out_value = value;
-    return WASM_OK;
+    if (err == WASM_OK) stack->size--;
+    return err;
 }
 
 static wasm_error_t wasm__init_expr_stack_pop_typed(wasm__init_expr_stack_t* stack,
@@ -118,9 +130,12 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                          uint32_t max_global_index,
                                          wasm_value_t* out_value) {
     wasm__init_expr_stack_t stack;
+    wasm__gc_root_t root;
     wasm_error_t err = WASM_OK;
 
     memset(&stack, 0, sizeof(stack));
+    wasm__gc_push_root(mod->rt, &root, &stack.values, &stack.size);
+    stack.allocator = &mod->rt->allocator;
 
     for (;;) {
         uint8_t op;
@@ -398,11 +413,11 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                                 err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_I32, &length_value);
                                 if (err != WASM_OK) break;
-                                err = wasm__init_expr_stack_pop_expect(mod,
-                                                                       &stack,
-                                                                       expected_type,
-                                                                       &atype->field.storage.ref_type,
-                                                                       &init_value);
+                                err = wasm__init_expr_stack_peek_expect(mod,
+                                                                        &stack,
+                                                                        expected_type,
+                                                                        &atype->field.storage.ref_type,
+                                                                        &init_value);
                                 if (err != WASM_OK) break;
                                 if (length_value.of.i32 < 0) {
                                     err = WASM_ERR_OUT_OF_BOUNDS;
@@ -414,6 +429,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
                                     err = WASM_ERR_OOM;
                                     break;
                                 }
+                                init_value = stack.values[--stack.size];
                                 for (i = 0; i < count; i++) {
                                     err = wasm__gc_array_store_element(object, atype, i, init_value);
                                     if (err != WASM_OK) break;
@@ -474,7 +490,8 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                         err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_EXTERNREF, &value);
                         if (err != WASM_OK) break;
-                        value = wasm__anyref_from_externref_value(mod->rt, value);
+                        err = wasm__anyref_from_externref_value(mod->rt, value, &value);
+                        if (err != WASM_OK) break;
                         err = wasm__init_expr_stack_push(&stack, value);
                         break;
                     }
@@ -484,7 +501,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 
                         err = wasm__init_expr_stack_pop_typed(&stack, WASM_TYPE_ANYREF, &value);
                         if (err != WASM_OK) break;
-                        err = wasm__externref_from_anyref_value(mod->rt, mod, value, &extern_value);
+                        err = wasm__externref_from_anyref_value(mod->rt, value, &extern_value);
                         if (err != WASM_OK) break;
                         err = wasm__init_expr_stack_push(&stack, extern_value);
                         break;
@@ -522,6 +539,7 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
             *out_value = stack.values[0];
     }
 
-    WASM_FREE(stack.values);
+    wasm__gc_pop_root(mod->rt, &root);
+    wasm__free(&mod->rt->allocator, stack.values);
     return err;
 }

@@ -66,6 +66,7 @@ struct wasm_table_t {
     int is_64;
     int is_import;
     struct wasm_table_t* import_table;
+    wasm_allocator_t allocator; /* source of elems */
 };
 
 typedef struct wasm_data_segment_t {
@@ -101,6 +102,7 @@ struct wasm_memory_t {
     int is_shared;          /* shared memories never move and may be used by runtimes on other threads */
     uint64_t reserved_bytes; /* shared memories: size of the fixed reservation backing data */
     size_t shared_size;      /* shared memories: current size in bytes, read atomically while others grow it */
+    wasm_allocator_t allocator; /* source of data for memories that are not shared */
 };
 
 typedef struct wasm_tag_t {

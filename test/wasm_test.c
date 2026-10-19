@@ -75,27 +75,45 @@ static void wasm_test_thread_join(wasm_test_thread_t thread) {
 }
 #endif
 
-#ifdef WASM_TEST_MODULAR
-#include "wasm_test_alloc.h"
-#define WASM_TEST_ALLOC_LINKAGE
+#ifndef WASM_TEST_MODULAR
+#define WASM_IMPL
+#include "wasm.h"
 #else
-#define WASM_TEST_ALLOC_LINKAGE static
+#include "../src/module.h"
+#include "../src/runtime.h"
+#include "../src/values.h"
+#include "../src/portable.h"
+#include "../src/types/canonical.h"
+#include "../src/types/references.h"
+#include "../src/exec/frames.h"
+#include "../src/exec/interpreter.h"
+#include "../src/exec/state.h"
+#include "../src/exec/translate.h"
+#include "../src/platform/wasi_path.h"
+#include "../src/platform/wasi_state.h"
+#include "../src/simd/compare.h"
+#include "../src/simd/float.h"
+#include "../src/simd/integer_small.h"
+#include "../src/simd/integer_wide.h"
+#include "../src/simd/lanes.h"
 #endif
 
-typedef struct wasm_test_alloc_header {
-    size_t size;
-} wasm_test_alloc_header;
+
+#include <stddef.h>
+#include <stdint.h>
 
 typedef struct wasm_test_alloc_stats {
-    size_t malloc_calls;
-    size_t realloc_calls;
+    size_t alloc_calls;
+    size_t resize_calls;
     size_t free_calls;
-    size_t calloc_calls;
     size_t live_blocks;
     size_t peak_live_blocks;
+    size_t mismatches; /* frees and resizes whose size or alignment differ from the block's */
 } wasm_test_alloc_stats;
 
 static wasm_test_alloc_stats g_wasm_test_alloc_stats;
+
+static size_t g_wasm_test_alloc_fail_countdown;
 
 /* Counters change atomically because the threads test runs runtimes on several threads at once. */
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -147,97 +165,99 @@ static void wasm_test_record_live_alloc(void) {
     }
 }
 
-static void* wasm_test_alloc_block(size_t size, int zero_fill) {
-    wasm_test_alloc_header* header;
-    size_t payload_size = size ? size : 1u;
+/* Bookkeeping stored just before each block the test allocator returns. */
+typedef struct wasm_test_block_t {
+    void* raw;
+    size_t size;
+    size_t align;
+} wasm_test_block_t;
 
-    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
-
-    if (zero_fill)
-        header = (wasm_test_alloc_header*)calloc(1, sizeof(*header) + payload_size);
-    else
-        header = (wasm_test_alloc_header*)malloc(sizeof(*header) + payload_size);
-    if (!header) return NULL;
-
-    header->size = payload_size;
-    wasm_test_record_live_alloc();
-    return (void*)(header + 1);
+static int wasm_test_alloc_should_fail(void) {
+    if (g_wasm_test_alloc_fail_countdown == 0) return 0;
+    return --g_wasm_test_alloc_fail_countdown == 0;
 }
 
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_malloc(size_t size) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.malloc_calls, wasm_test_increment);
-    return wasm_test_alloc_block(size, 0);
-}
+static void* wasm_test_alloc_block(size_t size, size_t align) {
+    wasm_test_block_t block;
+    size_t pad = align < 16u ? 16u : align;
+    uint8_t* raw;
+    uint8_t* p;
 
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_calloc(size_t count, size_t size) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.calloc_calls, wasm_test_increment);
-    if (size != 0 && count > ((size_t)-1) / size) return NULL;
-    return wasm_test_alloc_block(count * size, 1);
-}
-
-WASM_TEST_ALLOC_LINKAGE void* wasm_test_realloc(void* ptr, size_t size) {
-    wasm_test_alloc_header* header;
-    wasm_test_alloc_header* resized;
-    size_t payload_size = size ? size : 1u;
-
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.realloc_calls, wasm_test_increment);
-    if (!ptr) return wasm_test_alloc_block(size, 0);
-    if (size == 0) {
-        free(((wasm_test_alloc_header*)ptr) - 1);
-        wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
+    if (size == 0 || align == 0 || (align & (align - 1u)) != 0) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
         return NULL;
     }
-    if (payload_size > ((size_t)-1) - sizeof(*header)) return NULL;
-
-    header = ((wasm_test_alloc_header*)ptr) - 1;
-    resized = (wasm_test_alloc_header*)realloc(header, sizeof(*resized) + payload_size);
-    if (!resized) return NULL;
-
-    resized->size = payload_size;
-    return (void*)(resized + 1);
+    if (size > SIZE_MAX - sizeof(block) - pad) return NULL;
+    raw = (uint8_t*)malloc(sizeof(block) + pad + size);
+    if (!raw) return NULL;
+    p = (uint8_t*)(((uintptr_t)raw + sizeof(block) + pad - 1u) & ~(uintptr_t)(pad - 1u));
+    block.raw = raw;
+    block.size = size;
+    block.align = align;
+    memcpy(p - sizeof(block), &block, sizeof(block));
+    memset(p, 0xA5, size);
+    wasm_test_record_live_alloc();
+    return p;
 }
 
-WASM_TEST_ALLOC_LINKAGE void wasm_test_free(void* ptr) {
-    wasm_test_counter_update(&g_wasm_test_alloc_stats.free_calls, wasm_test_increment);
-    if (!ptr) return;
+static void wasm_test_block_take(void* p, size_t size, size_t align, wasm_test_block_t* out) {
+    memcpy(out, (uint8_t*)p - sizeof(*out), sizeof(*out));
+    if (out->size != size || out->align != align)
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+}
 
-    free(((wasm_test_alloc_header*)ptr) - 1);
+static void wasm_test_block_release(const wasm_test_block_t* block) {
+    free(block->raw);
     wasm_test_counter_update(&g_wasm_test_alloc_stats.live_blocks, wasm_test_decrement_to_zero);
 }
+
+static void* wasm_test_alloc(void* ctx, size_t size, size_t align) {
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.alloc_calls, wasm_test_increment);
+    if (wasm_test_alloc_should_fail()) return NULL;
+    return wasm_test_alloc_block(size, align);
+}
+
+static void* wasm_test_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
+    wasm_test_block_t block;
+    void* moved;
+
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.resize_calls, wasm_test_increment);
+    if (!p) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+        return NULL;
+    }
+    if (wasm_test_alloc_should_fail()) return NULL;
+    wasm_test_block_take(p, old_size, align, &block);
+    moved = wasm_test_alloc_block(new_size, block.align);
+    if (!moved) return NULL;
+    memcpy(moved, p, block.size < new_size ? block.size : new_size);
+    wasm_test_block_release(&block);
+    return moved;
+}
+
+static void wasm_test_free(void* ctx, void* p, size_t size, size_t align) {
+    wasm_test_block_t block;
+
+    (void)ctx;
+    wasm_test_counter_update(&g_wasm_test_alloc_stats.free_calls, wasm_test_increment);
+    if (!p) {
+        wasm_test_counter_update(&g_wasm_test_alloc_stats.mismatches, wasm_test_increment);
+        return;
+    }
+    wasm_test_block_take(p, size, align, &block);
+    wasm_test_block_release(&block);
+}
+
+static const wasm_allocator_t wasm_test_allocator = { NULL, wasm_test_alloc, wasm_test_resize, wasm_test_free };
 
 static wasm_test_alloc_stats wasm_test_alloc_snapshot(void) {
     return g_wasm_test_alloc_stats;
 }
 
-#ifndef WASM_TEST_MODULAR
-#define WASM_MALLOC(sz) wasm_test_malloc(sz)
-#define WASM_REALLOC(p, sz) wasm_test_realloc((p), (sz))
-#define WASM_FREE(p) wasm_test_free(p)
-#define WASM_CALLOC(n, sz) wasm_test_calloc((n), (sz))
-
-#define WASM_IMPL
-#include "wasm.h"
-#else
-#include "../src/module.h"
-#include "../src/runtime.h"
-#include "../src/values.h"
-#include "../src/portable.h"
-#include "../src/types/canonical.h"
-#include "../src/types/references.h"
-#include "../src/exec/frames.h"
-#include "../src/exec/interpreter.h"
-#include "../src/exec/state.h"
-#include "../src/platform/wasi_path.h"
-#include "../src/platform/wasi_state.h"
-#include "../src/simd/compare.h"
-#include "../src/simd/float.h"
-#include "../src/simd/integer_small.h"
-#include "../src/simd/integer_wide.h"
-#include "../src/simd/lanes.h"
-#endif
-
 static wasm_error_t wasm_test_init_raw(wasm_runtime_t* rt, const wasm_config_t* config) {
-    return wasm__runtime_init(rt, config);
+    return wasm__runtime_init(rt, &wasm_test_allocator, config);
 }
 
 static void wasm_test_init_checked(wl_test_ctx* t, wasm_runtime_t* rt, const char* test_name) {
@@ -286,6 +306,12 @@ static void wasm_test_verify_case_cleanup(wl_test_ctx* t) {
                  "allocator leak after test %s: %zu live blocks",
                  case_name,
                  g_wasm_test_alloc_stats.live_blocks);
+    WL_CHECK_MSG(t, g_wasm_test_alloc_stats.mismatches == 0,
+                 "allocator misuse in test %s: %zu frees or resizes with the wrong size or alignment",
+                 case_name,
+                 g_wasm_test_alloc_stats.mismatches);
+    g_wasm_test_alloc_stats.mismatches = 0;
+    g_wasm_test_alloc_fail_countdown = 0;
 }
 
 #define wasm_init(rt) wasm_test_init_checked(t, (rt), ((t) && (t)->case_name) ? (t)->case_name : __func__)
@@ -897,9 +923,8 @@ WL_TEST(test_add) {
     wasm_destroy(&rt);
 
     alloc_after = wasm_test_alloc_snapshot();
-    alloc_delta = (alloc_after.malloc_calls - alloc_before.malloc_calls) +
-                  (alloc_after.realloc_calls - alloc_before.realloc_calls) +
-                  (alloc_after.calloc_calls - alloc_before.calloc_calls);
+    alloc_delta = (alloc_after.alloc_calls - alloc_before.alloc_calls) +
+                  (alloc_after.resize_calls - alloc_before.resize_calls);
     free_delta = alloc_after.free_calls - alloc_before.free_calls;
     WL_CHECK_MSG(t, alloc_delta > 0, "%s", "expected custom wasm allocators to be exercised");
     WL_CHECK_MSG(t, free_delta > 0, "%s", "expected custom wasm allocator frees during cleanup");
@@ -7330,7 +7355,7 @@ WL_TEST(test_runtime_config_rejects_zero_limits) {
     WL_CHECK_MSG(t, strstr(rt.error_msg, "invalid runtime config") != NULL, "%s", rt.error_msg);
     wasm_destroy(&rt);
 
-    WL_CHECK(t, wasm_runtime_new(&cfg) == NULL);
+    WL_CHECK(t, wasm_runtime_new(&wasm_test_allocator, &cfg) == NULL);
 }
 
 WL_TEST(test_runtime_config_limits_operand_stack_validation) {
@@ -7391,6 +7416,44 @@ WL_TEST(test_runtime_config_limits_operand_stack_validation) {
     m = wasm_load(&rt, mod.buf, mod.len);
     WL_CHECK_MSG(t, m == NULL, "%s", "expected load to fail when validator stack exceeds configured limit");
     WL_CHECK_MSG(t, strstr(rt.error_msg, "operand stack overflow") != NULL, "%s", rt.error_msg);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_runtime_operand_stack_overflow_traps_at_call) {
+    /* rec(n) keeps one value on the stack per pending call and returns n + 1. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x02,
+        0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x65, 0x63, 0x00, 0x00, 0x0a, 0x17, 0x01, 0x15, 0x00, 0x41, 0x01,
+        0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 0x00, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x00, 0x0b, 0x6a, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_config_t cfg;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 16;
+    cfg.max_call_depth = 1000;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "rec", &arg, 1, &result, 1));
+    WL_CHECK(t, result.of.i32 == 11);
+    arg = wasm_i32(100);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_ERR_STACK_OVERFLOW);
+    WL_CHECK(t, rt.sp == 0 && rt.call_frame_sp == 0);
+    arg = wasm_i32(5);
+    WASM_CHECK_OK(t, wasm_call(m, "rec", &arg, 1, &result, 1));
+    WL_CHECK(t, result.of.i32 == 6);
+
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -7549,6 +7612,7 @@ WL_TEST(test_frame_arena_allocator) {
     void* big;
 
     memset(&rt, 0, sizeof(rt));
+    rt.allocator = wasm_test_allocator;
 
     WASM_CHECK_OK(t, wasm__arena_init(&rt, 64));
     WL_CHECK_MSG(t, rt.frame_arena != NULL, "%s", "expected a first arena block");
@@ -7626,7 +7690,7 @@ WL_TEST(test_runtime_grows_frame_arena_for_execution) {
 
         emit_leb128_u32(&sec, 1);
         emit_leb128_u32(&body, 1);
-        emit_leb128_u32(&body, 1);
+        emit_leb128_u32(&body, 4);
         emit(&body, 0x7E);
         emit(&body, 0x41);
         emit_leb128_i32(&body, 7);
@@ -8045,6 +8109,55 @@ WL_TEST(test_validation_requires_data_count_for_memory_init) {
     wasm_destroy(&rt);
 }
 
+WL_TEST(test_validation_rejects_a_body_ending_before_its_blocktype) {
+    static const uint8_t header[] = { 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04,
+                                      0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x0a };
+    static const uint8_t bodies[][5] = { { 2, 0x00, 0x02 }, { 2, 0x00, 0x03 }, { 4, 0x00, 0x41, 0x00, 0x04 } };
+    size_t i;
+
+    for (i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        uint8_t bytes[32];
+        size_t len = sizeof(header);
+        wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
+        wasm_module_t* m;
+
+        WL_CHECK(t, rt != NULL);
+        if (!rt) return;
+        memcpy(bytes, header, sizeof(header));
+        bytes[len++] = (uint8_t)(bodies[i][0] + 2u);
+        bytes[len++] = 1;
+        memcpy(bytes + len, bodies[i], bodies[i][0] + 1u);
+        len += bodies[i][0] + 1u;
+        m = wasm_load(rt, bytes, len);
+        WL_CHECK_MSG(t, m == NULL, "body %u loaded", (unsigned)i);
+        wasm_module_free(m);
+        wasm_runtime_free(rt);
+    }
+}
+
+WL_TEST(test_validation_of_huge_immediate_counts_stays_bounded) {
+    static const uint8_t array_new_fixed_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x02, 0x5e, 0x7f, 0x00, 0x60,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a, 0x0e,
+        0x01, 0x0c, 0x00, 0x00, 0xfb, 0x08, 0x00, 0x80, 0xd0, 0xac, 0xf3, 0x0e, 0x1a, 0x0b,
+    };
+    static const uint8_t br_table_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x0a, 0x0d, 0x01, 0x0b, 0x00, 0x41, 0x00, 0x0e, 0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, array_new_fixed_bytes, sizeof(array_new_fixed_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    wasm_module_free(m);
+    m = wasm_load(&rt, br_table_bytes, sizeof(br_table_bytes));
+    WL_CHECK(t, m == NULL);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 WL_TEST(test_validation_rejects_code_body_count_mismatch) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -8417,8 +8530,11 @@ WL_TEST(test_public_api_tolerates_null_handles) {
     WL_CHECK(t, wasm_memory_length(NULL) == 0);
     wasm_memory_free(NULL);
     wasm_table_free(NULL);
-    WL_CHECK(t, wasm_memory_new(2, 1, 0) == NULL);
-    WL_CHECK(t, wasm_table_new(WASM_TYPE_I32, 1, 1) == NULL);
+    WL_CHECK(t, wasm_memory_new(&wasm_test_allocator, 2, 1, 0) == NULL);
+    WL_CHECK(t, wasm_memory_new(NULL, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_shared_memory_new(NULL, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(&wasm_test_allocator, WASM_TYPE_I32, 1, 1) == NULL);
+    WL_CHECK(t, wasm_table_new(NULL, WASM_TYPE_FUNCREF, 1, 1) == NULL);
     WL_CHECK(t, wasm_table_count(NULL) == 0);
     WL_CHECK(t, wasm_module_table(NULL, 0) == NULL);
     (void)wasm_table_type(NULL, 0);
@@ -8531,7 +8647,8 @@ static wasm_error_t wasm_test_forward_call(wasm_module_t* mod,
     wasm_test_forward_t* forward = (wasm_test_forward_t*)userdata;
 
     (void)mod;
-    return wasm__interp(forward->module, forward->func_index, (wasm_value_t*)args, num_args, results, num_results);
+    (void)num_results;
+    return wasm__interp(forward->module, forward->func_index, (wasm_value_t*)args, num_args, results);
 }
 
 /* Exceptions thrown by an imported function reach handlers on every call path, and tail
@@ -8721,6 +8838,107 @@ static wasm_error_t wasm_test_host_add(wasm_module_t* mod, const wasm_value_t* a
     return WASM_OK;
 }
 
+WL_TEST(test_allocator_contract) {
+    const wasm_allocator_t* libc = wasm_libc_allocator();
+    wasm_allocator_t missing = wasm_test_allocator;
+    wasm_runtime_t* rt;
+    size_t align;
+
+    WL_CHECK(t, libc && libc->alloc && libc->resize && libc->free);
+    for (align = 1; align <= 4096u; align *= 2u) {
+        uint8_t* p = (uint8_t*)libc->alloc(libc->ctx, 3u, align);
+        uint8_t* q;
+
+        WL_CHECK_MSG(t, p && ((uintptr_t)p & (align - 1u)) == 0, "alloc misaligned for %zu", align);
+        if (!p) continue;
+        memcpy(p, "abc", 3u);
+        q = (uint8_t*)libc->resize(libc->ctx, p, 3u, 5000u, align);
+        WL_CHECK_MSG(t, q && ((uintptr_t)q & (align - 1u)) == 0 && memcmp(q, "abc", 3u) == 0,
+                     "resize misaligned or lost data for %zu", align);
+        libc->free(libc->ctx, q ? q : p, q ? 5000u : 3u, align);
+    }
+
+    WL_CHECK(t, wasm_runtime_new(NULL, NULL) == NULL);
+    missing.resize = NULL;
+    WL_CHECK(t, wasm_runtime_new(&missing, NULL) == NULL);
+    WL_CHECK(t, wasm_memory_new(&missing, 1, 1, 0) == NULL);
+    WL_CHECK(t, wasm_table_new(&missing, WASM_TYPE_FUNCREF, 1, 1) == NULL);
+    rt = wasm_runtime_new(libc, NULL);
+    WL_CHECK(t, rt != NULL && wasm_runtime_allocator(rt)->alloc == libc->alloc);
+    wasm_runtime_free(rt);
+}
+
+WL_TEST(test_allocation_failures_unwind_without_leaks) {
+    /* Imports env.add; run(1) grows memory and a table, allocates GC objects, throws through try_table,
+     * calls through the table, and catches with a legacy try, returning 123. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x21, 0x07, 0x5f, 0x01, 0x7f, 0x01, 0x5e, 0x7f, 0x01,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7e, 0x00, 0x60, 0x01,
+        0x7f, 0x00, 0x60, 0x00, 0x02, 0x7f, 0x7e, 0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x61, 0x64, 0x64,
+        0x00, 0x03, 0x03, 0x05, 0x04, 0x02, 0x02, 0x02, 0x02, 0x04, 0x04, 0x01, 0x70, 0x00, 0x04, 0x05, 0x04, 0x01,
+        0x01, 0x01, 0x04, 0x0d, 0x05, 0x02, 0x00, 0x04, 0x00, 0x05, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x05, 0x0b,
+        0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x04, 0x09, 0x08, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x01,
+        0x02, 0x0a, 0x7e, 0x04, 0x07, 0x00, 0x20, 0x00, 0x41, 0x02, 0x6c, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x41, 0x03,
+        0x6c, 0x0b, 0x0e, 0x00, 0x06, 0x7f, 0x20, 0x00, 0x08, 0x01, 0x07, 0x01, 0x41, 0x01, 0x6a, 0x0b, 0x0b, 0x5d,
+        0x02, 0x01, 0x63, 0x00, 0x01, 0x63, 0x01, 0x41, 0x01, 0x40, 0x00, 0x1a, 0xd2, 0x01, 0x41, 0x02, 0xfc, 0x0f,
+        0x00, 0x1a, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x01, 0x41, 0x07, 0x41, 0x03, 0xfb, 0x06, 0x01, 0x21, 0x02,
+        0x02, 0x06, 0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x41, 0x01, 0x11, 0x02, 0x00, 0x23, 0x00, 0x6a,
+        0x42, 0x09, 0x08, 0x00, 0x0b, 0x00, 0x0b, 0x1a, 0x20, 0x01, 0xfb, 0x02, 0x00, 0x00, 0x6a, 0x20, 0x02, 0x41,
+        0x02, 0xfb, 0x0b, 0x01, 0x6a, 0x41, 0x10, 0x2d, 0x00, 0x00, 0x6a, 0x20, 0x00, 0x10, 0x03, 0x6a, 0x41, 0x01,
+        0x10, 0x00, 0x0b, 0x0b, 0x0b, 0x01, 0x00, 0x41, 0x10, 0x0b, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x58,
+        0x04, 0x6e, 0x61, 0x6d, 0x65, 0x01, 0x1e, 0x04, 0x00, 0x03, 0x61, 0x64, 0x64, 0x01, 0x06, 0x64, 0x6f, 0x75,
+        0x62, 0x6c, 0x65, 0x02, 0x06, 0x74, 0x72, 0x69, 0x70, 0x6c, 0x65, 0x03, 0x06, 0x6c, 0x65, 0x67, 0x61, 0x63,
+        0x79, 0x02, 0x09, 0x01, 0x04, 0x02, 0x01, 0x01, 0x73, 0x02, 0x01, 0x61, 0x03, 0x06, 0x01, 0x04, 0x01, 0x00,
+        0x01, 0x68, 0x04, 0x0e, 0x03, 0x00, 0x02, 0x70, 0x74, 0x01, 0x03, 0x61, 0x72, 0x72, 0x02, 0x02, 0x75, 0x6e,
+        0x07, 0x04, 0x01, 0x00, 0x01, 0x67, 0x0b, 0x08, 0x02, 0x00, 0x01, 0x65, 0x01, 0x02, 0x65, 0x31,
+    };
+    size_t fail_at;
+    int completed = 0;
+
+    for (fail_at = 1; fail_at < 100000u && !completed; fail_at++) {
+        wasm_runtime_t* rt;
+        wasm_module_t* compiled = NULL;
+        wasm_module_t* m = NULL;
+        wasm_value_t* held = NULL;
+        wasm_value_t arg = wasm_i32(1);
+        wasm_value_t result = wasm_i32(0);
+        wasm_value_t field = wasm_i32(4);
+        wasm_value_t object = wasm_ref_null(WASM_TYPE_STRUCTREF);
+        int32_t fmt_result = 0;
+        wasm_error_t err = WASM_ERR_OOM;
+
+        g_wasm_test_alloc_fail_countdown = fail_at;
+        rt = wasm_runtime_new(&wasm_test_allocator, NULL);
+        if (rt && wasm_bind_host_func(rt, "env", "add", "ii(i)", wasm_test_host_add, NULL) == WASM_OK) {
+            compiled = wasm_compile(rt, module_bytes, sizeof(module_bytes));
+            m = compiled ? wasm_instantiate(compiled) : NULL;
+            if (m) err = wasm_call(m, "run", &arg, 1, &result, 1);
+            if (err == WASM_OK) err = wasm_call_fmt(m, "run", "i(i)", 1, &fmt_result);
+            if (err == WASM_OK) err = wasm_struct_new(m, 0, &field, 1, &object);
+            if (err == WASM_OK) {
+                held = wasm_ref_hold(rt, object);
+                if (!held) err = WASM_ERR_OOM;
+            }
+            wasm_gc_collect(rt);
+        }
+        if (g_wasm_test_alloc_fail_countdown != 0) {
+            completed = 1;
+            WASM_CHECK_OK(t, err);
+            WASM_CHECK_I32(t, result.of.i32, 123);
+            WASM_CHECK_I32(t, fmt_result, 123);
+        }
+        g_wasm_test_alloc_fail_countdown = 0;
+        if (held) wasm_ref_release(rt, held);
+        wasm_module_free(m);
+        wasm_module_free(compiled);
+        wasm_runtime_free(rt);
+        WL_CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0, "%zu blocks leaked when allocation %zu failed",
+                     g_wasm_test_alloc_stats.live_blocks, fail_at);
+        if (g_wasm_test_alloc_stats.live_blocks != 0) break;
+    }
+    WL_CHECK_MSG(t, completed, "%s", "expected the run to succeed once no allocation fails");
+}
+
 WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     static const uint8_t module_bytes[] = {
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x03, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
@@ -8825,8 +9043,8 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
     WL_CHECK_MSG(t, compiled != NULL, "expected compile not to run the start function: %s", rt.error_msg);
     m = compiled ? wasm_instantiate(compiled) : NULL;
-    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE, "expected the start function to trap: %s",
-                 rt.error_msg);
+    WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE && strstr(rt.error_msg, "unreachable"),
+                 "expected the start function to trap: %s", rt.error_msg);
     wasm_module_free(m);
     wasm_module_free(compiled);
     wasm_destroy(&rt);
@@ -8885,6 +9103,75 @@ WL_TEST(test_bad_magic) {
     } else {
         WL_CHECK(t, rt.last_error == WASM_ERR_INVALID_MAGIC);
     }
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_f64_arithmetic_propagates_the_first_nan_operand) {
+    static const char* const names[] = { "add", "sub", "mul", "div" };
+    static const uint64_t cases[][3] = {
+        { UINT64_C(0x7FF0000000000001), UINT64_C(0x7FF8000000000002), UINT64_C(0x7FF8000000000001) },
+        { UINT64_C(0x7FF8000000000002), UINT64_C(0x7FF0000000000001), UINT64_C(0x7FF8000000000002) },
+        { UINT64_C(0x3FF0000000000000), UINT64_C(0xFFF0000000000003), UINT64_C(0xFFF8000000000003) },
+        { UINT64_C(0xFFF800000000000A), UINT64_C(0x3FF0000000000000), UINT64_C(0xFFF800000000000A) },
+        { UINT64_C(0x7FF800000000000A), UINT64_C(0xFFF800000000000B), UINT64_C(0x7FF800000000000A) },
+    };
+    wasm_builder_t mod = { 0 };
+    wasm_builder_t sec = { 0 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t i;
+    uint32_t k;
+
+    emit_header(&mod);
+    emit(&sec, 1);
+    emit(&sec, 0x60);
+    emit(&sec, 2);
+    emit(&sec, 0x7E);
+    emit(&sec, 0x7E);
+    emit(&sec, 1);
+    emit(&sec, 0x7E);
+    emit_section(&mod, 1, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) emit(&sec, 0);
+    emit_section(&mod, 3, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) emit_export_func(&sec, names[i], i);
+    emit_section(&mod, 7, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 4);
+    for (i = 0; i < 4; i++) {
+        static const uint8_t body[] = { 10, 0, 0x20, 0, 0xBF, 0x20, 1, 0xBF, 0, 0xBD, 0x0B };
+        uint8_t code[sizeof(body)];
+
+        memcpy(code, body, sizeof(body));
+        code[8] = (uint8_t)(0xA0 + i);
+        emit_bytes(&sec, code, sizeof(code));
+    }
+    emit_section(&mod, 10, sec.buf, sec.len);
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod.buf, mod.len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < 4; i++) {
+        for (k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+            wasm_value_t args[2];
+            wasm_value_t result = wasm_i64(0);
+
+            args[0] = wasm_i64((int64_t)cases[k][0]);
+            args[1] = wasm_i64((int64_t)cases[k][1]);
+            WASM_CHECK_OK(t, wasm_call(m, names[i], args, 2, &result, 1));
+            WL_CHECK_MSG(t, (uint64_t)result.of.i64 == cases[k][2], "f64.%s of %llx and %llx gave %llx", names[i],
+                         (unsigned long long)cases[k][0], (unsigned long long)cases[k][1],
+                         (unsigned long long)result.of.i64);
+        }
+    }
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -8947,6 +9234,107 @@ WL_TEST(test_div_by_zero) {
 
     err = wasm_call(m, "f", NULL, 0, &result, 1);
     WL_CHECK_MSG(t, err == WASM_ERR_DIV_BY_ZERO, "%s", "expected div by zero trap");
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static wasm_error_t wasm_test_host_trap(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    return WASM_ERR_TRAP;
+}
+
+static wasm_error_t wasm_test_host_refuse(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_set_error(mod->rt, WASM_ERR_TRAP, "host refused");
+    return WASM_ERR_TRAP;
+}
+
+static void wasm_test_expect_call_error(wl_test_ctx* t, const wasm_runtime_t* rt, const char* what, wasm_error_t err,
+                                        wasm_error_t expected, const char* message) {
+    WL_CHECK_MSG(t, err == expected, "%s: expected %s, got %s", what, wasm_error_string(expected),
+                 wasm_error_string(err));
+    WL_CHECK_MSG(t, wasm_runtime_last_error(rt) == err, "%s: last error %s does not match the returned code", what,
+                 wasm_error_string(wasm_runtime_last_error(rt)));
+    WL_CHECK_MSG(t, strcmp(wasm_runtime_error_message(rt), message) == 0, "%s: expected message '%s', got '%s'", what,
+                 message, wasm_runtime_error_message(rt));
+}
+
+WL_TEST(test_failed_calls_record_trap_codes_and_messages) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x19, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00,
+        0x00, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x72, 0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x00, 0x03, 0x07, 0x06, 0x00,
+        0x01, 0x02, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0d, 0x03,
+        0x01, 0x00, 0x00, 0x07, 0x3f, 0x08, 0x01, 0x74, 0x01, 0x00, 0x07, 0x75, 0x6e, 0x72, 0x65, 0x61, 0x63, 0x68,
+        0x00, 0x02, 0x03, 0x6f, 0x6f, 0x62, 0x00, 0x03, 0x03, 0x64, 0x69, 0x76, 0x00, 0x04, 0x04, 0x73, 0x70, 0x69,
+        0x6e, 0x00, 0x05, 0x05, 0x74, 0x68, 0x72, 0x6f, 0x77, 0x00, 0x06, 0x0b, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x72,
+        0x65, 0x66, 0x75, 0x73, 0x65, 0x00, 0x07, 0x04, 0x66, 0x61, 0x69, 0x6c, 0x00, 0x00, 0x09, 0x07, 0x01, 0x00,
+        0x41, 0x00, 0x0b, 0x01, 0x02, 0x0a, 0x29, 0x06, 0x03, 0x00, 0x00, 0x0b, 0x09, 0x00, 0x41, 0xf0, 0xa2, 0x04,
+        0x28, 0x02, 0x00, 0x0b, 0x07, 0x00, 0x41, 0x01, 0x20, 0x00, 0x6d, 0x0b, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00,
+        0x0b, 0x0b, 0x04, 0x00, 0x08, 0x00, 0x0b, 0x04, 0x00, 0x10, 0x01, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_value_t ref;
+    int32_t out = 0;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "fail", "()", wasm_test_host_trap, NULL));
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "env", "refuse", "()", wasm_test_host_refuse, NULL));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    wasm_test_expect_call_error(t, &rt, "unreachable", wasm_call(m, "unreach", NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "out-of-bounds load", wasm_call(m, "oob", NULL, 0, &result, 1),
+                                WASM_ERR_OUT_OF_BOUNDS, "out of bounds memory access");
+    arg = wasm_i32(0);
+    wasm_test_expect_call_error(t, &rt, "divide by zero", wasm_call(m, "div", &arg, 1, &result, 1),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+    arg = wasm_i32(1);
+    WASM_CHECK_OK(t, wasm_call(m, "div", &arg, 1, &result, 1));
+    WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_OK);
+    WL_CHECK(t, strcmp(wasm_runtime_error_message(&rt), "ok") == 0);
+
+    wasm_runtime_set_fuel(&rt, 5);
+    wasm_test_expect_call_error(t, &rt, "fuel", wasm_call(m, "spin", NULL, 0, NULL, 0), WASM_ERR_OUT_OF_FUEL,
+                                "out of fuel");
+    wasm_runtime_cancel(&rt);
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_test_expect_call_error(t, &rt, "uncaught exception", wasm_call(m, "throw", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "uncaught exception tag 0");
+
+    WASM_CHECK_OK(t, wasm_table_get(m, 0, 0, &ref));
+    wasm_test_expect_call_error(t, &rt, "wasm_call_ref", wasm_call_ref(&rt, ref, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_index", wasm_call_index(m, 2, NULL, 0, NULL, 0),
+                                WASM_ERR_UNREACHABLE, "unreachable executed");
+    wasm_test_expect_call_error(t, &rt, "wasm_call_fmt", wasm_call_fmt(m, "div", "i(i)", 0, &out),
+                                WASM_ERR_DIV_BY_ZERO, "integer divide by zero");
+
+    wasm_test_expect_call_error(t, &rt, "host message", wasm_call(m, "call_refuse", NULL, 0, NULL, 0), WASM_ERR_TRAP,
+                                "host refused");
+    wasm_test_expect_call_error(t, &rt, "imported host function", wasm_call(m, "fail", NULL, 0, NULL, 0),
+                                WASM_ERR_TRAP, "trap");
 
     wasm_module_free(m);
     wasm_destroy(&rt);
@@ -9125,8 +9513,17 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
         emit_leb128_u32(&sec, 1);
 
         emit_leb128_u32(&body, 0);
+        emit(&body, 0x02);
+        emit(&body, 0x7F);
+        emit(&body, 0x03);
+        emit(&body, 0x7F);
+        emit(&body, 0x02);
+        emit(&body, 0x40);
+        emit(&body, 0x0B);
         emit(&body, 0x41);
         emit_leb128_i32(&body, 42);
+        emit(&body, 0x0B);
+        emit(&body, 0x0B);
         emit(&body, 0x0B);
 
         emit_leb128_u32(&sec, body.len);
@@ -9149,12 +9546,13 @@ WL_TEST(test_public_fuel_helpers_account_for_finite_calls) {
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
     WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
 
-    wasm_runtime_set_fuel(&rt, 2);
+    wasm_runtime_set_fuel(&rt, 1);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) WASM_CHECK_I32(t, result.of.i32, 42);
     WASM_CHECK_I64(t, (int64_t)wasm_runtime_fuel(&rt), 0);
     WL_CHECK(t, wasm_call(m, "run", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    wasm_runtime_cancel(&rt);
 
     wasm_runtime_disable_fuel(&rt);
     err = wasm_call(m, "run", NULL, 0, &result, 1);
@@ -12762,7 +13160,7 @@ WL_TEST(test_threads_shared_memory_across_runtimes) {
     wasm_test_shared_worker_t workers[WORKERS + 1];
     wasm_test_thread_start_t starts[WORKERS + 1];
     wasm_test_thread_t threads[WORKERS + 1];
-    wasm_memory_t* memory = wasm_shared_memory_new(1, 1, 0);
+    wasm_memory_t* memory = wasm_shared_memory_new(&wasm_test_allocator, 1, 1, 0);
     wasm_test_shared_worker_t* waiter = &workers[WORKERS];
     wasm_value_t results[1];
     uint32_t counter;
@@ -13149,7 +13547,7 @@ WL_TEST(test_gc_typed_select_accepts_eqref_as_anyref) {
     err = wasm_call(m, "pick", args, 1, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
-        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected subtype operand to survive typed select");
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF, "%s", "expected the declared anyref result type");
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected null eqref result");
     }
 
@@ -13240,7 +13638,7 @@ WL_TEST(test_gc_table_set_accepts_eqref_into_anyref_table) {
     err = wasm_call(m, "run", NULL, 0, &result, 1);
     WASM_CHECK_OK(t, err);
     if (err == WASM_OK) {
-        WL_CHECK_MSG(t, result.type == WASM_TYPE_EQREF, "%s", "expected table.get to return the stored eqref value");
+        WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF, "%s", "expected the declared anyref result type");
         WL_CHECK_MSG(t, wasm__is_null_ref(&result), "%s", "expected table entry 0 to hold a null eqref");
     }
 
@@ -14231,7 +14629,13 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     wasm_table_t tables[1];
     wasm_value_t table_elems[1];
     wasm_func_t fake_func;
-    wasm_value_t frame_locals[1];
+    wasm_valtype_t fake_local_types[1];
+    uint32_t fake_local_slots[1] = { 0 };
+    uint32_t fake_ops[1] = { 0x01 };
+    uint32_t fake_op_offsets[2] = { 0, 0 };
+    uint32_t fake_maps[3] = { 0, 0, 1 };
+    uint32_t fake_map_bits[1] = { WASM__SLOT_KIND_ANY };
+    wasm__slot_t frame_locals[1];
     wasm_gc_struct_t* child;
     wasm_gc_struct_t* parent;
     wasm_gc_struct_t* table_root;
@@ -14282,10 +14686,23 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     tables[0].reftype = WASM_TYPE_STRUCTREF;
     wasm__gc_register_module(&rt, &mod);
 
+    fake_local_types[0] = WASM_TYPE_STRUCTREF;
     fake_func.num_locals = 1;
+    fake_func.locals = fake_local_types;
+    fake_func.local_slots = fake_local_slots;
+    fake_func.num_local_slots = 1;
+    fake_func.ops = fake_ops;
+    fake_func.num_ops = 1;
+    fake_func.op_offsets = fake_op_offsets;
+    fake_func.num_op_offsets = 1;
+    fake_func.stack_maps = fake_maps;
+    fake_func.num_stack_maps = 1;
+    fake_func.stack_map_bits = fake_map_bits;
+    fake_func.num_stack_map_bits = 1;
     rt.call_frame_sp = 1;
     rt.call_frames[0].func = &fake_func;
     rt.call_frames[0].locals = frame_locals;
+    rt.call_frames[0].op_at = fake_ops;
 
     child = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
     parent = wasm__gc_alloc_struct_object(&rt, &mod, 1, &types[1].of.struct_);
@@ -14325,8 +14742,8 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     globals[0].type = WASM_TYPE_STRUCTREF;
     globals[0].value = wasm__gc_type_ref_value(&mod, 1, &parent->header);
     table_elems[0] = wasm__gc_type_ref_value(&mod, 0, &table_root->header);
-    frame_locals[0] = wasm__gc_type_ref_value(&mod, 0, &local_root->header);
-    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &stack_root->header);
+    wasm__slot_set_ref(&frame_locals[0], (uintptr_t)&local_root->header);
+    wasm__slot_set_ref(&rt.stack[rt.sp++], (uintptr_t)&stack_root->header);
 
     wasm_gc_collect(&rt);
 
@@ -14341,10 +14758,10 @@ WL_TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     table_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)table_elems[0].of.gc_obj,
                                                   &types[0].of.struct_,
                                                   0);
-    local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)frame_locals[0].of.gc_obj,
+    local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&frame_locals[0]),
                                                   &types[0].of.struct_,
                                                   0);
-    stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)rt.stack[0].of.gc_obj,
+    stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&rt.stack[0]),
                                                   &types[0].of.struct_,
                                                   0);
 
@@ -14447,6 +14864,7 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     wasm_gc_struct_t* root;
     wasm_gc_struct_t* garbage;
     wasm_gc_struct_t* fresh;
+    wasm_value_t* held;
     size_t object_size = 0;
     size_t heap_size;
 
@@ -14486,7 +14904,7 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
         return;
     }
 
-    rt.stack[rt.sp++] = wasm__gc_type_ref_value(&mod, 0, &root->header);
+    held = wasm_ref_hold(&rt, wasm__gc_type_ref_value(&mod, 0, &root->header));
     fresh = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
 
     WL_CHECK_MSG(t, fresh != NULL,
@@ -14495,11 +14913,545 @@ WL_TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     WL_CHECK_MSG(t, wasm_test_gc_allocation_count(&rt) == 2,
                  "expected only the rooted object and the fresh allocation to remain, got %u",
                  (unsigned)wasm_test_gc_allocation_count(&rt));
-    WL_CHECK_MSG(t, rt.stack[0].of.gc_obj != NULL && rt.stack[0].of.gc_obj != &root->header,
+    WL_CHECK_MSG(t, held && held->of.gc_obj != NULL && held->of.gc_obj != &root->header,
                  "%s",
                  "expected collection to rewrite the rooted reference during retry");
 
+    wasm_ref_release(&rt, held);
     wasm__gc_unregister_module(&rt, &mod);
+    wasm_destroy(&rt);
+}
+
+static const uint8_t wasm_test_gc_growth_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1d, 0x06, 0x5f, 0x02, 0x7e, 0x00, 0x7e, 0x00, 0x5e,
+        0x63, 0x00, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x63, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x60, 0x00, 0x00, 0x03, 0x05, 0x04, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x01, 0x63, 0x01, 0x01, 0xd0, 0x01,
+        0x0b, 0x07, 0x1e, 0x04, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x01, 0x05,
+        0x63, 0x68, 0x65, 0x63, 0x6b, 0x00, 0x02, 0x05, 0x63, 0x6c, 0x65, 0x61, 0x72, 0x00, 0x03, 0x0a, 0xb9, 0x01,
+        0x04, 0x31, 0x02, 0x01, 0x63, 0x01, 0x01, 0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x21, 0x01, 0x03, 0x40, 0x20,
+        0x01, 0x20, 0x02, 0x42, 0x01, 0x42, 0x02, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x02, 0x41, 0x01, 0x6a,
+        0x21, 0x02, 0x20, 0x02, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0xfb, 0x0f, 0x0b, 0x31, 0x01, 0x01,
+        0x7f, 0x20, 0x00, 0xfb, 0x07, 0x01, 0x24, 0x00, 0x03, 0x40, 0x23, 0x00, 0x20, 0x01, 0x20, 0x01, 0xad, 0x20,
+        0x01, 0xad, 0x42, 0x03, 0x7e, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01,
+        0x20, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x23, 0x00, 0x0b, 0x4c, 0x02, 0x02, 0x7f, 0x01, 0x63, 0x00,
+        0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x23, 0x00, 0xfb, 0x0f, 0x4f, 0x0d, 0x01, 0x23, 0x00, 0x20, 0x00, 0xfb,
+        0x0b, 0x01, 0x21, 0x02, 0x20, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x00, 0xad, 0x51, 0x20, 0x02, 0xfb, 0x02,
+        0x00, 0x01, 0x20, 0x00, 0xad, 0x42, 0x03, 0x7e, 0x51, 0x71, 0x04, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21,
+        0x01, 0x0b, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x01, 0x0b, 0x06, 0x00,
+        0xd0, 0x01, 0x24, 0x00, 0x0b,
+};
+
+static wasm_module_t* wasm_test_gc_growth_load(wl_test_ctx* t, wasm_runtime_t* rt, const wasm_config_t* config) {
+    wasm_module_t* m;
+
+    wasm_init_config(rt, config);
+    m = wasm_load(rt, wasm_test_gc_growth_bytes, sizeof(wasm_test_gc_growth_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt->error_msg);
+    return m;
+}
+
+static int wasm_test_gc_held_array_intact(wasm_module_t* m, wasm_value_t array, uint32_t expected_len) {
+    uint32_t len = 0;
+    uint32_t i;
+
+    if (wasm_array_length(m, array, &len) != WASM_OK || len != expected_len) return 0;
+    for (i = 0; i < len; i++) {
+        wasm_value_t elem;
+        wasm_value_t first;
+        wasm_value_t second;
+
+        if (wasm_array_get_elem(m, array, i, &elem) != WASM_OK) return 0;
+        if (wasm_struct_get_field(m, elem, 0, &first) != WASM_OK ||
+            wasm_struct_get_field(m, elem, 1, &second) != WASM_OK)
+            return 0;
+        if (first.of.i64 != (int64_t)i || second.of.i64 != (int64_t)i * 3) return 0;
+    }
+    return 1;
+}
+
+WL_TEST(test_gc_heap_grows_with_live_data) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held;
+
+    wasm_config_default(&config);
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000000);
+        WL_CHECK_MSG(t, rt.gc_heap_size > (size_t)WASM_GC_HEAP_SIZE, "expected the heap to grow, size %zu",
+                     rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 64u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        size_t heap_size;
+
+        arg = wasm_i32(20000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 20000);
+        heap_size = rt.gc_heap_size;
+        WL_CHECK_MSG(t, heap_size > config.initial_gc_heap_size, "expected the heap to grow, size %zu", heap_size);
+
+        arg = wasm_i32(200000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        arg = wasm_i32(500000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WL_CHECK_MSG(t, rt.gc_heap_size > heap_size, "expected the heap to grow again, size %zu", rt.gc_heap_size);
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 200000);
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 20000));
+            wasm_ref_release(&rt, held);
+        }
+
+        WASM_CHECK_OK(t, wasm_call(m, "clear", NULL, 0, NULL, 0));
+        wasm_gc_collect(&rt);
+        WL_CHECK_MSG(t, rt.gc_heap_size == config.initial_gc_heap_size,
+                     "expected an empty heap to shrink to its initial size, size %zu", rt.gc_heap_size);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 0;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_heap_growth_respects_max_gc_heap_bytes) {
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+    wasm_value_t* held = NULL;
+    wasm_error_t err;
+
+    wasm_config_default(&config);
+    WL_CHECK(t, config.max_gc_heap_bytes == 0u);
+    config.max_gc_heap_bytes = 1024u * 1024u;
+    m = wasm_test_gc_growth_load(t, &rt, &config);
+    if (m) {
+        WL_CHECK_MSG(t, rt.gc_heap_size == 1024u * 1024u, "expected the initial heap to be capped, size %zu",
+                     rt.gc_heap_size);
+        arg = wasm_i32(2000);
+        WASM_CHECK_OK(t, wasm_call(m, "fill", &arg, 1, &result, 1));
+        held = wasm_ref_hold(&rt, result);
+        WL_CHECK(t, held != NULL);
+
+        arg = wasm_i32(100000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected WASM_ERR_OOM, got %s", wasm_error_string(err));
+        WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_OOM);
+        WL_CHECK_MSG(t, strstr(wasm_runtime_error_message(&rt), "limit") != NULL, "unexpected message '%s'",
+                     wasm_runtime_error_message(&rt));
+        WL_CHECK(t, rt.gc_heap_size <= 1024u * 1024u);
+
+        WASM_CHECK_OK(t, wasm_call(m, "check", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 2000);
+        if (held) WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+        arg = wasm_i32(1000);
+        WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 1000);
+
+        arg = wasm_i32(1000000);
+        err = wasm_call(m, "run", &arg, 1, &result, 1);
+        WL_CHECK_MSG(t, err == WASM_ERR_OOM, "expected an array larger than the limit to fail, got %s",
+                     wasm_error_string(err));
+        if (held) {
+            WL_CHECK(t, wasm_test_gc_held_array_intact(m, *held, 2000));
+            wasm_ref_release(&rt, held);
+        }
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_gc_host_externrefs_round_trip_through_anyref) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x24, 0x08, 0x5f, 0x01, 0x7e, 0x00, 0x5e, 0x63, 0x00,
+        0x01, 0x60, 0x01, 0x6f, 0x00, 0x60, 0x00, 0x00, 0x60, 0x02, 0x6f, 0x7f, 0x01, 0x6f, 0x60, 0x00, 0x01, 0x6f,
+        0x60, 0x01, 0x6f, 0x01, 0x7f, 0x60, 0x01, 0x6f, 0x01, 0x6f, 0x03, 0x0b, 0x0a, 0x02, 0x03, 0x04, 0x05, 0x05,
+        0x06, 0x07, 0x02, 0x02, 0x02, 0x04, 0x04, 0x01, 0x6e, 0x00, 0x01, 0x06, 0x06, 0x01, 0x6e, 0x01, 0xd0, 0x6e,
+        0x0b, 0x07, 0x5f, 0x0a, 0x04, 0x6b, 0x65, 0x65, 0x70, 0x00, 0x00, 0x05, 0x63, 0x6c, 0x65, 0x61, 0x72, 0x00,
+        0x01, 0x05, 0x63, 0x68, 0x75, 0x72, 0x6e, 0x00, 0x02, 0x06, 0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x03,
+        0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x00, 0x04, 0x05, 0x74, 0x65, 0x73, 0x74, 0x73, 0x00, 0x05, 0x08, 0x63,
+        0x61, 0x73, 0x74, 0x5f, 0x61, 0x6e, 0x79, 0x00, 0x06, 0x07, 0x63, 0x61, 0x73, 0x74, 0x5f, 0x65, 0x71, 0x00,
+        0x07, 0x08, 0x63, 0x61, 0x73, 0x74, 0x5f, 0x69, 0x33, 0x31, 0x00, 0x08, 0x0b, 0x63, 0x61, 0x73, 0x74, 0x5f,
+        0x73, 0x74, 0x72, 0x75, 0x63, 0x74, 0x00, 0x09, 0x0a, 0xc1, 0x01, 0x0a, 0x10, 0x00, 0x20, 0x00, 0xfb, 0x1a,
+        0x24, 0x00, 0x41, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0x26, 0x00, 0x0b, 0x0c, 0x00, 0xd0, 0x6e, 0x24, 0x00, 0x41,
+        0x00, 0xd0, 0x6e, 0x26, 0x00, 0x0b, 0x39, 0x02, 0x01, 0x6e, 0x01, 0x63, 0x01, 0x20, 0x00, 0xfb, 0x1a, 0x21,
+        0x02, 0x20, 0x01, 0xfb, 0x07, 0x01, 0x21, 0x03, 0x03, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6b, 0x21, 0x01, 0x20,
+        0x03, 0x20, 0x01, 0x20, 0x01, 0xad, 0xfb, 0x00, 0x00, 0xfb, 0x0e, 0x01, 0x42, 0x00, 0xfb, 0x00, 0x00, 0x1a,
+        0x20, 0x01, 0x0d, 0x00, 0x0b, 0x20, 0x02, 0xfb, 0x1b, 0x0b, 0x06, 0x00, 0x23, 0x00, 0xfb, 0x1b, 0x0b, 0x08,
+        0x00, 0x41, 0x00, 0x25, 0x00, 0xfb, 0x1b, 0x0b, 0x2a, 0x01, 0x01, 0x6e, 0x20, 0x00, 0xfb, 0x1a, 0x21, 0x01,
+        0x20, 0x01, 0xfb, 0x14, 0x6e, 0x20, 0x01, 0xfb, 0x14, 0x6d, 0x41, 0x01, 0x74, 0x72, 0x20, 0x01, 0xfb, 0x14,
+        0x6c, 0x41, 0x02, 0x74, 0x20, 0x01, 0xfb, 0x14, 0x6b, 0x41, 0x03, 0x74, 0x72, 0x72, 0x0b, 0x0b, 0x00, 0x20,
+        0x00, 0xfb, 0x1a, 0xfb, 0x16, 0x6e, 0xfb, 0x1b, 0x0b, 0x0a, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0xfb, 0x16, 0x6d,
+        0x1a, 0x0b, 0x0a, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0xfb, 0x16, 0x6c, 0x1a, 0x0b, 0x0a, 0x00, 0x20, 0x00, 0xfb,
+        0x1a, 0xfb, 0x16, 0x6b, 0x1a, 0x0b,
+    };
+    static int host_object;
+    const uintptr_t handles[] = { (uintptr_t)1u, (uintptr_t)3u, (uintptr_t)0x1234u, (uintptr_t)0x1235u,
+                                  (uintptr_t)&host_object, UINTPTR_MAX - 1u, UINTPTR_MAX };
+    const char* failing_casts[] = { "cast_eq", "cast_i31", "cast_struct" };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t max_boxes = 0;
+    size_t heap_size;
+    size_t i;
+    size_t j;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    for (i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) {
+        wasm_value_t args[2];
+        wasm_value_t result = wasm_i32(0);
+
+        args[0] = wasm_externref(handles[i]);
+        args[1] = wasm_i32(2000 * (int32_t)(i + 1));
+        WASM_CHECK_OK(t, wasm_call(m, "keep", args, 1, NULL, 0));
+        heap_size = rt.gc_heap_size;
+        WASM_CHECK_OK(t, wasm_call(m, "churn", args, 2, &result, 1));
+        WL_CHECK_MSG(t, rt.gc_heap_size > heap_size, "expected the heap to grow, size %zu", rt.gc_heap_size);
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        wasm_gc_collect(&rt);
+        WASM_CHECK_OK(t, wasm_call(m, "global", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        WASM_CHECK_OK(t, wasm_call(m, "table", NULL, 0, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+
+        WASM_CHECK_OK(t, wasm_call(m, "tests", args, 1, &result, 1));
+        WL_CHECK_MSG(t, result.of.i32 == 1, "value %p: expected only ref.test any to succeed, mask %d",
+                     (void*)handles[i], (int)result.of.i32);
+        WASM_CHECK_OK(t, wasm_call(m, "cast_any", args, 1, &result, 1));
+        WL_CHECK(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == handles[i]);
+        for (j = 0; j < sizeof(failing_casts) / sizeof(failing_casts[0]); j++)
+            WL_CHECK_MSG(t, wasm_call(m, failing_casts[j], args, 1, NULL, 0) == WASM_ERR_TRAP, "%s of %p succeeded",
+                         failing_casts[j], (void*)handles[i]);
+    }
+
+    for (i = 0; i < 20000; i++) {
+        wasm_value_t arg = wasm_externref(handles[i % (sizeof(handles) / sizeof(handles[0]))]);
+        wasm_value_t result = wasm_i32(0);
+
+        if (wasm_call(m, "tests", &arg, 1, &result, 1) != WASM_OK || result.of.i32 != 1) break;
+        if (rt.externref_boxes.count > max_boxes) max_boxes = rt.externref_boxes.count;
+    }
+    WL_CHECK_MSG(t, i == 20000, "conversion loop stopped at %u", (unsigned)i);
+    WL_CHECK_MSG(t, max_boxes < 4096, "expected unreachable boxes to be freed, %u live", (unsigned)max_boxes);
+
+    WASM_CHECK_OK(t, wasm_call(m, "clear", NULL, 0, NULL, 0));
+    wasm_gc_collect(&rt);
+    WL_CHECK_MSG(t, rt.externref_boxes.count == 0, "expected every box to be freed, %u live",
+                 (unsigned)rt.externref_boxes.count);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+#define WASM_TEST_HEAP_ARENA_SIZE (128u * 1024u)
+
+static int g_wasm_test_heap_arena_used[2];
+
+static uint8_t* wasm_test_heap_arena(int index) {
+    static uint8_t raw[2u * WASM_TEST_HEAP_ARENA_SIZE + 16u];
+    uintptr_t base = ((uintptr_t)raw + 15u) & ~(uintptr_t)15u;
+
+    return (uint8_t*)base + (size_t)index * WASM_TEST_HEAP_ARENA_SIZE;
+}
+
+static void* wasm_test_heap_alloc(void* ctx, size_t size, size_t align) {
+    int i;
+
+    if (align != 16u || size < 4096u || size > WASM_TEST_HEAP_ARENA_SIZE) return wasm_test_alloc(ctx, size, align);
+    for (i = 0; i < 2; i++) {
+        if (!g_wasm_test_heap_arena_used[i]) {
+            g_wasm_test_heap_arena_used[i] = 1;
+            return wasm_test_heap_arena(i);
+        }
+    }
+    return NULL;
+}
+
+static void* wasm_test_heap_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
+    if (p == wasm_test_heap_arena(0) || p == wasm_test_heap_arena(1)) return NULL;
+    return wasm_test_resize(ctx, p, old_size, new_size, align);
+}
+
+static void wasm_test_heap_free(void* ctx, void* p, size_t size, size_t align) {
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        if (p == wasm_test_heap_arena(i)) {
+            g_wasm_test_heap_arena_used[i] = 0;
+            return;
+        }
+    }
+    wasm_test_free(ctx, p, size, align);
+}
+
+WL_TEST(test_gc_host_refs_inside_a_later_heap_stay_host_values) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x27, 0x09, 0x5f, 0x01, 0x7e, 0x01, 0x60, 0x02, 0x6f,
+        0x6e, 0x00, 0x60, 0x00, 0x01, 0x6f, 0x60, 0x00, 0x01, 0x6e, 0x60, 0x01, 0x6e, 0x01, 0x7f, 0x60, 0x00, 0x01,
+        0x7f, 0x60, 0x01, 0x7e, 0x00, 0x60, 0x00, 0x01, 0x7e, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x09, 0x08, 0x01, 0x02,
+        0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x06, 0x11, 0x03, 0x6e, 0x01, 0xd0, 0x6e, 0x0b, 0x6e, 0x01, 0xd0, 0x6e,
+        0x0b, 0x63, 0x00, 0x01, 0xd0, 0x00, 0x0b, 0x07, 0x31, 0x07, 0x04, 0x6b, 0x65, 0x65, 0x70, 0x00, 0x00, 0x03,
+        0x65, 0x78, 0x74, 0x00, 0x01, 0x03, 0x61, 0x6e, 0x79, 0x00, 0x02, 0x05, 0x74, 0x65, 0x73, 0x74, 0x73, 0x00,
+        0x04, 0x03, 0x70, 0x69, 0x6e, 0x00, 0x05, 0x04, 0x6c, 0x69, 0x76, 0x65, 0x00, 0x06, 0x05, 0x63, 0x68, 0x75,
+        0x72, 0x6e, 0x00, 0x07, 0x0a, 0x75, 0x08, 0x0c, 0x00, 0x20, 0x00, 0xfb, 0x1a, 0x24, 0x00, 0x20, 0x01, 0x24,
+        0x01, 0x0b, 0x06, 0x00, 0x23, 0x00, 0xfb, 0x1b, 0x0b, 0x04, 0x00, 0x23, 0x01, 0x0b, 0x22, 0x00, 0x20, 0x00,
+        0xfb, 0x15, 0x6e, 0x20, 0x00, 0xfb, 0x15, 0x6d, 0x41, 0x01, 0x74, 0x72, 0x20, 0x00, 0xfb, 0x15, 0x6b, 0x41,
+        0x02, 0x74, 0x20, 0x00, 0xfb, 0x15, 0x6c, 0x41, 0x03, 0x74, 0x72, 0x72, 0x0b, 0x0e, 0x00, 0x23, 0x00, 0x10,
+        0x03, 0x23, 0x01, 0x10, 0x03, 0x41, 0x04, 0x74, 0x72, 0x0b, 0x09, 0x00, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x24,
+        0x02, 0x0b, 0x08, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x0b, 0x15, 0x00, 0x03, 0x40, 0x20, 0x00, 0xad,
+        0xfb, 0x00, 0x00, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d, 0x00, 0x0b, 0x0b,
+    };
+    static const wasm_allocator_t allocator = { NULL, wasm_test_heap_alloc, wasm_test_heap_resize,
+                                                wasm_test_heap_free };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m = NULL;
+    wasm_value_t args[2];
+    wasm_value_t result;
+    uintptr_t ext_bits;
+    uintptr_t any_bits;
+    int round;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 8192;
+    config.max_gc_heap_bytes = WASM_TEST_HEAP_ARENA_SIZE;
+    WASM_CHECK_OK(t, wasm__runtime_init(&rt, &allocator, &config));
+    WL_CHECK(t, rt.gc_heap == wasm_test_heap_arena(0));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        args[0] = wasm_i64(7);
+        WASM_CHECK_OK(t, wasm_call(m, "pin", args, 1, NULL, 0));
+        ext_bits = (uintptr_t)wasm_test_heap_arena(1);
+        any_bits = ext_bits + 64u;
+        args[0] = wasm_externref(ext_bits);
+        args[1] = wasm_externref(any_bits);
+        args[1].type = WASM_TYPE_ANYREF;
+        WASM_CHECK_OK(t, wasm_call(m, "keep", args, 2, NULL, 0));
+        for (round = 0; round < 6; round++) {
+            if (round % 2 == 0) {
+                wasm_gc_collect(&rt);
+            } else {
+                args[0] = wasm_i32(3000);
+                WASM_CHECK_OK(t, wasm_call(m, "churn", args, 1, NULL, 0));
+            }
+            WL_CHECK(t, rt.gc_heap == wasm_test_heap_arena(0) || rt.gc_heap == wasm_test_heap_arena(1));
+            WASM_CHECK_OK(t, wasm_call(m, "ext", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.type == WASM_TYPE_EXTERNREF && result.of.externref == ext_bits,
+                         "round %d: externref came back as %p", round, (void*)result.of.externref);
+            WASM_CHECK_OK(t, wasm_call(m, "any", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.type == WASM_TYPE_ANYREF && result.of.gc_ref == any_bits,
+                         "round %d: anyref came back as %p", round, (void*)result.of.gc_ref);
+            WASM_CHECK_OK(t, wasm_call(m, "tests", NULL, 0, &result, 1));
+            WL_CHECK_MSG(t, result.of.i32 == 0x11, "round %d: expected only ref.test any to succeed, mask 0x%x",
+                         round, (unsigned)result.of.i32);
+            WASM_CHECK_OK(t, wasm_call(m, "live", NULL, 0, &result, 1));
+            WASM_CHECK_I64(t, result.of.i64, 7);
+        }
+    }
+    wasm_module_free(m);
+    wasm__runtime_destroy(&rt);
+    WL_CHECK(t, !g_wasm_test_heap_arena_used[0] && !g_wasm_test_heap_arena_used[1]);
+}
+
+static const uint8_t wasm_test_init_pair_150000_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x04, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x04, 0x03, 0x02,
+        0x03, 0x03, 0x06, 0x1a, 0x01, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0xf0, 0x93, 0x09, 0xfb, 0x06, 0x00, 0x42,
+        0x09, 0x41, 0xf0, 0x93, 0x09, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x07, 0x13, 0x02, 0x06, 0x66, 0x69,
+        0x65, 0x6c, 0x64, 0x30, 0x00, 0x01, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x31, 0x00, 0x02, 0x0a, 0x26, 0x03,
+        0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x0a, 0x00, 0x23,
+        0x00, 0xfb, 0x02, 0x01, 0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x00, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00,
+        0x0b,
+};
+
+static const uint8_t wasm_test_init_pair_300000_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x16, 0x04, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x04, 0x03, 0x02,
+        0x03, 0x03, 0x06, 0x1a, 0x01, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0xe0, 0xa7, 0x12, 0xfb, 0x06, 0x00, 0x42,
+        0x09, 0x41, 0xe0, 0xa7, 0x12, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x07, 0x13, 0x02, 0x06, 0x66, 0x69,
+        0x65, 0x6c, 0x64, 0x30, 0x00, 0x01, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x31, 0x00, 0x02, 0x0a, 0x26, 0x03,
+        0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x0a, 0x00, 0x23,
+        0x00, 0xfb, 0x02, 0x01, 0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x00, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00,
+        0x0b,
+};
+
+static const uint8_t wasm_test_init_sequence_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1f, 0x06, 0x5e, 0x7e, 0x01, 0x5f, 0x02, 0x63, 0x00,
+        0x00, 0x63, 0x00, 0x00, 0x5e, 0x63, 0x00, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7e, 0x60, 0x00, 0x01, 0x7e,
+        0x60, 0x01, 0x7f, 0x01, 0x7e, 0x03, 0x0a, 0x09, 0x03, 0x04, 0x04, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x04,
+        0x18, 0x03, 0x40, 0x00, 0x63, 0x00, 0x00, 0x01, 0x42, 0x05, 0x41, 0xc0, 0x00, 0xfb, 0x06, 0x00, 0x0b, 0x63,
+        0x00, 0x00, 0x02, 0x63, 0x00, 0x00, 0x02, 0x06, 0x4f, 0x04, 0x63, 0x02, 0x00, 0x42, 0x17, 0x41, 0x80, 0x01,
+        0xfb, 0x06, 0x00, 0x41, 0x80, 0x02, 0xfb, 0x06, 0x02, 0x0b, 0x63, 0x00, 0x00, 0x42, 0x03, 0x41, 0x80, 0x04,
+        0xfb, 0x06, 0x00, 0x0b, 0x63, 0x01, 0x00, 0x42, 0x07, 0x41, 0x80, 0x08, 0xfb, 0x06, 0x00, 0x42, 0x09, 0x41,
+        0x80, 0x10, 0xfb, 0x06, 0x00, 0xfb, 0x00, 0x01, 0x0b, 0x63, 0x02, 0x00, 0x42, 0x13, 0x41, 0x80, 0x20, 0xfb,
+        0x06, 0x00, 0x42, 0x15, 0x41, 0x80, 0xc0, 0x00, 0xfb, 0x06, 0x00, 0xfb, 0x08, 0x02, 0x02, 0x0b, 0x07, 0x4c,
+        0x08, 0x08, 0x72, 0x65, 0x70, 0x65, 0x61, 0x74, 0x65, 0x64, 0x00, 0x01, 0x06, 0x67, 0x6c, 0x6f, 0x62, 0x61,
+        0x6c, 0x00, 0x02, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x30, 0x00, 0x03, 0x06, 0x66, 0x69, 0x65, 0x6c, 0x64,
+        0x31, 0x00, 0x04, 0x05, 0x66, 0x69, 0x78, 0x65, 0x64, 0x00, 0x05, 0x07, 0x64, 0x65, 0x66, 0x61, 0x75, 0x6c,
+        0x74, 0x00, 0x06, 0x06, 0x61, 0x63, 0x74, 0x69, 0x76, 0x65, 0x00, 0x07, 0x07, 0x70, 0x61, 0x73, 0x73, 0x69,
+        0x76, 0x65, 0x00, 0x08, 0x09, 0x35, 0x02, 0x05, 0x63, 0x00, 0x02, 0x42, 0x0b, 0x41, 0x80, 0x80, 0x01, 0xfb,
+        0x06, 0x00, 0x0b, 0x42, 0x0d, 0x41, 0x80, 0x80, 0x02, 0xfb, 0x06, 0x00, 0x0b, 0x06, 0x01, 0x41, 0x00, 0x0b,
+        0x63, 0x00, 0x02, 0x42, 0x0f, 0x41, 0x80, 0x80, 0x04, 0xfb, 0x06, 0x00, 0x0b, 0x42, 0x11, 0x41, 0x80, 0x80,
+        0x08, 0xfb, 0x06, 0x00, 0x0b, 0x0a, 0x6f, 0x09, 0x0e, 0x00, 0x20, 0x00, 0x20, 0x00, 0xfb, 0x0f, 0x41, 0x01,
+        0x6b, 0xfb, 0x0b, 0x00, 0x0b, 0x10, 0x00, 0x23, 0x00, 0x23, 0x00, 0xfb, 0x0f, 0x41, 0x01, 0x6b, 0xfb, 0x0b,
+        0x02, 0x10, 0x00, 0x0b, 0x06, 0x00, 0x23, 0x01, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x01,
+        0x00, 0x10, 0x00, 0x0b, 0x0a, 0x00, 0x23, 0x02, 0xfb, 0x02, 0x01, 0x01, 0x10, 0x00, 0x0b, 0x0b, 0x00, 0x23,
+        0x03, 0x20, 0x00, 0xfb, 0x0b, 0x02, 0x10, 0x00, 0x0b, 0x08, 0x00, 0x41, 0x00, 0x25, 0x00, 0x10, 0x00, 0x0b,
+        0x08, 0x00, 0x20, 0x00, 0x25, 0x01, 0x10, 0x00, 0x0b, 0x12, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x02, 0xfc,
+        0x0c, 0x00, 0x02, 0x20, 0x00, 0x25, 0x02, 0x10, 0x00, 0x0b,
+};
+
+static int64_t wasm_test_call_i64(wl_test_ctx* t, wasm_module_t* m, const char* name, int32_t arg, int has_arg) {
+    wasm_value_t value = wasm_i32(arg);
+    wasm_value_t result = wasm_i64(-1);
+    wasm_error_t err = wasm_call(m, name, &value, has_arg ? 1u : 0u, &result, 1);
+
+    WL_CHECK_MSG(t, err == WASM_OK, "%s: %s", name, wasm_runtime_error_message(wasm_module_runtime(m)));
+    return result.of.i64;
+}
+
+WL_TEST(test_gc_init_expressions_keep_their_operands_alive) {
+    const uint8_t* pairs[] = { wasm_test_init_pair_150000_bytes, wasm_test_init_pair_300000_bytes };
+    const size_t pair_sizes[] = { sizeof(wasm_test_init_pair_150000_bytes), sizeof(wasm_test_init_pair_300000_bytes) };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    size_t i;
+
+    for (i = 0; i < 2; i++) {
+        wasm_init(&rt);
+        m = wasm_load(&rt, pairs[i], pair_sizes[i]);
+        WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+        if (m) {
+            WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field0", 0, 0), 7);
+            WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field1", 0, 0), 9);
+        }
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 0;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, wasm_test_init_sequence_bytes, sizeof(wasm_test_init_sequence_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m) {
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "default", 0, 0), 5);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "repeated", 0, 0), 23);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "global", 0, 0), 3);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field0", 0, 0), 7);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "field1", 0, 0), 9);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "fixed", 0, 1), 19);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "fixed", 1, 1), 21);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "passive", 0, 1), 11);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "passive", 1, 1), 13);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "active", 0, 1), 15);
+        WASM_CHECK_I64(t, wasm_test_call_i64(t, m, "active", 1, 1), 17);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+static int wasm_test_gc_heap_fits(const wasm_runtime_t* rt, size_t size) {
+    size_t offset = wasm__align_up_size(rt->gc_heap_offset, (size_t)WASM__ALIGNOF(wasm_value_t));
+
+    return offset <= rt->gc_heap_size && size <= rt->gc_heap_size - offset;
+}
+
+static int wasm_test_big_array_intact(wasm_module_t* m, wasm_value_t array, uint32_t expected_len) {
+    uint32_t len = 0;
+    uint32_t i;
+
+    if (wasm_array_length(m, array, &len) != WASM_OK || len != expected_len) return 0;
+    for (i = 0; i < len; i++) {
+        wasm_value_t elem;
+
+        if (wasm_array_get_elem(m, array, i, &elem) != WASM_OK || elem.of.i64 != (int64_t)i * 7) return 0;
+    }
+    return 1;
+}
+
+WL_TEST(test_gc_host_constructors_keep_their_inputs_alive) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x5e, 0x7e, 0x01, 0x5f, 0x01, 0x63, 0x00,
+        0x00, 0x5e, 0x63, 0x00, 0x00,
+    };
+    wasm_config_t config;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t elems[16];
+    wasm_value_t null_ref = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t array = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t outer = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t garbage;
+    wasm_value_t field;
+    size_t struct_size = 0;
+    size_t pair_size = 0;
+    uint32_t i;
+
+    wasm_config_default(&config);
+    config.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &config);
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm__gc_struct_size(wasm__module_const_structtype(m, 1), &struct_size));
+    WL_CHECK(t, wasm__gc_array_total_size(wasm__module_const_arraytype(m, 2), 1, &pair_size));
+    for (i = 0; i < 16; i++) elems[i] = wasm_i64((int64_t)i * 7);
+
+    WASM_CHECK_OK(t, wasm_array_new(m, 0, elems, 16, &array));
+    while (wasm_test_gc_heap_fits(&rt, struct_size)) WASM_CHECK_OK(t, wasm_struct_new(m, 1, &null_ref, 1, &garbage));
+    WASM_CHECK_OK(t, wasm_struct_new(m, 1, &array, 1, &outer));
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, outer, 0, &field));
+    WL_CHECK(t, field.of.gc_obj != array.of.gc_obj);
+    WL_CHECK(t, wasm_test_big_array_intact(m, field, 16));
+
+    WASM_CHECK_OK(t, wasm_array_new(m, 0, elems, 16, &array));
+    while (wasm_test_gc_heap_fits(&rt, pair_size)) WASM_CHECK_OK(t, wasm_array_new(m, 2, &null_ref, 1, &garbage));
+    WASM_CHECK_OK(t, wasm_array_new(m, 2, &array, 1, &outer));
+    WASM_CHECK_OK(t, wasm_array_get_elem(m, outer, 0, &field));
+    WL_CHECK(t, field.of.gc_obj != array.of.gc_obj);
+    WL_CHECK(t, wasm_test_big_array_intact(m, field, 16));
+
+    wasm_module_free(m);
     wasm_destroy(&rt);
 }
 
@@ -16003,6 +16955,7 @@ WL_TEST(test_bulk_fuel_and_array_new_rooting) {
     wasm_runtime_set_fuel(&rt, 100);
     arg = wasm_i32(65536);
     WL_CHECK(t, wasm_call(m, "fill", &arg, 1, NULL, 0) == WASM_ERR_OUT_OF_FUEL);
+    wasm_runtime_cancel(&rt);
     wasm_runtime_disable_fuel(&rt);
 
     /* A held struct survives the collections below and follows the object as it moves. */
@@ -16093,9 +17046,1561 @@ WL_TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
             WL_CHECK_MSG(t, wasm_call(m, exports[i], NULL, 0, &result, i) == WASM_ERR_INTERRUPTED,
                          "expected %s to be interrupted: %s", exports[i], rt.error_msg);
             wasm_test_thread_join(thread);
+            wasm_runtime_cancel(&rt);
         }
     }
 #endif
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* State shared by the host imports of the resume test module. */
+typedef struct wasm_test_resume_host_t {
+    wasm_module_t* mod;
+    const char* reenter_export; /* export "reenter" calls with its argument */
+    uint64_t reenter_fuel;      /* fuel set before the inner call; 0 leaves fuel unchanged */
+    uint32_t yields;
+    int32_t last_arg;
+} wasm_test_resume_host_t;
+
+static wasm_error_t wasm_test_resume_yield(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_resume_host_t* host = (wasm_test_resume_host_t*)userdata;
+
+    (void)mod;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    host->yields++;
+    host->last_arg = args[0].of.i32;
+    return WASM_YIELD;
+}
+
+static wasm_error_t wasm_test_resume_reenter(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                             wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_resume_host_t* host = (wasm_test_resume_host_t*)userdata;
+    wasm_value_t inner = wasm_i64(0);
+    wasm_error_t err;
+
+    (void)num_args;
+    (void)num_results;
+    if (host->reenter_fuel) wasm_runtime_set_fuel(wasm_module_runtime(mod), host->reenter_fuel);
+    err = wasm_call(host->mod, host->reenter_export, args, 1, &inner, 1);
+    if (err != WASM_OK) return err;
+    results[0] = wasm_i32(inner.type == WASM_TYPE_I64 ? (int32_t)inner.of.i64 : inner.of.i32);
+    return WASM_OK;
+}
+
+static wasm_error_t wasm_test_resume_interrupt(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                               wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_interrupt(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+static wasm_module_t* wasm_test_load_resume_module(wl_test_ctx* t, wasm_runtime_t* rt, wasm_test_resume_host_t* host) {
+    /* Function indices: 0 yield, 1 reenter, 2 interrupt (imports), 3 sum, 4 count, 5 rec,
+     * 6 catch_after_yield, 7 tail_target, 8 tail, 9 tail_import, 10 outer, 11 gc_keep,
+     * 12 self_interrupt, 13 spin_until_flag, 14 fill, 15 grow, 16 catch_loop, 17 leaf,
+     * 18 call_after_interrupt, 19 nested_tail_import. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x20, 0x07, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f,
+        0x01, 0x7f, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x60, 0x02, 0x7f, 0x7f,
+        0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x2e, 0x03, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x05, 0x79, 0x69, 0x65,
+        0x6c, 0x64, 0x00, 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x07, 0x72, 0x65, 0x65, 0x6e, 0x74, 0x65, 0x72, 0x00,
+        0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x09, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x00, 0x02,
+        0x03, 0x12, 0x11, 0x04, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x06, 0x01, 0x06, 0x01, 0x06,
+        0x06, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0d, 0x03, 0x01, 0x00, 0x03, 0x07, 0xc0, 0x01, 0x10, 0x03, 0x6d,
+        0x65, 0x6d, 0x02, 0x00, 0x03, 0x73, 0x75, 0x6d, 0x00, 0x03, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x00, 0x04,
+        0x03, 0x72, 0x65, 0x63, 0x00, 0x05, 0x11, 0x63, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x61, 0x66, 0x74, 0x65, 0x72,
+        0x5f, 0x79, 0x69, 0x65, 0x6c, 0x64, 0x00, 0x06, 0x04, 0x74, 0x61, 0x69, 0x6c, 0x00, 0x08, 0x0b, 0x74, 0x61,
+        0x69, 0x6c, 0x5f, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x00, 0x09, 0x05, 0x6f, 0x75, 0x74, 0x65, 0x72, 0x00,
+        0x0a, 0x07, 0x67, 0x63, 0x5f, 0x6b, 0x65, 0x65, 0x70, 0x00, 0x0b, 0x0e, 0x73, 0x65, 0x6c, 0x66, 0x5f, 0x69,
+        0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x00, 0x0c, 0x0f, 0x73, 0x70, 0x69, 0x6e, 0x5f, 0x75, 0x6e,
+        0x74, 0x69, 0x6c, 0x5f, 0x66, 0x6c, 0x61, 0x67, 0x00, 0x0d, 0x04, 0x66, 0x69, 0x6c, 0x6c, 0x00, 0x0e, 0x04,
+        0x67, 0x72, 0x6f, 0x77, 0x00, 0x0f, 0x0a, 0x63, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x6c, 0x6f, 0x6f, 0x70, 0x00,
+        0x10, 0x14, 0x63, 0x61, 0x6c, 0x6c, 0x5f, 0x61, 0x66, 0x74, 0x65, 0x72, 0x5f, 0x69, 0x6e, 0x74, 0x65, 0x72,
+        0x72, 0x75, 0x70, 0x74, 0x00, 0x12, 0x12, 0x6e, 0x65, 0x73, 0x74, 0x65, 0x64, 0x5f, 0x74, 0x61, 0x69, 0x6c,
+        0x5f, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x00, 0x13, 0x0a, 0xd4, 0x02, 0x11, 0x26, 0x02, 0x01, 0x7f, 0x01,
+        0x7e, 0x02, 0x40, 0x03, 0x40, 0x20, 0x01, 0x20, 0x00, 0x4f, 0x0d, 0x01, 0x20, 0x02, 0x20, 0x01, 0xad, 0x7c,
+        0x21, 0x02, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x02, 0x0b, 0x17, 0x00,
+        0x20, 0x00, 0x45, 0x04, 0x7f, 0x20, 0x01, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x20, 0x01, 0x20, 0x00, 0x6a,
+        0x12, 0x04, 0x0b, 0x0b, 0x18, 0x00, 0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 0xe4, 0x00, 0x10, 0x00, 0x05, 0x20,
+        0x00, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x05, 0x6a, 0x0b, 0x0b, 0x14, 0x00, 0x02, 0x7f, 0x1f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x20, 0x00, 0x10, 0x00, 0x08, 0x00, 0x0b, 0x41, 0x7f, 0x0b, 0x0b, 0x09, 0x00, 0x20, 0x00,
+        0x10, 0x00, 0x41, 0x02, 0x6c, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x12, 0x07, 0x0b, 0x06, 0x00,
+        0x20, 0x00, 0x12, 0x00, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x10, 0x01, 0x41, 0x01, 0x6a, 0x0b, 0x27, 0x01, 0x01,
+        0x63, 0x00, 0x41, 0x01, 0xfb, 0x00, 0x00, 0x1a, 0x20, 0x00, 0xfb, 0x00, 0x00, 0x21, 0x01, 0x41, 0x05, 0xfb,
+        0x00, 0x00, 0x41, 0x00, 0x10, 0x00, 0x1a, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x01, 0xfb, 0x02, 0x00, 0x00, 0x6a,
+        0x0b, 0x21, 0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x01, 0x41, 0x03, 0x46, 0x04, 0x40, 0x10, 0x02, 0x0b, 0x20,
+        0x01, 0x41, 0x01, 0x6a, 0x21, 0x01, 0x20, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x01, 0x0b, 0x18,
+        0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x45,
+        0x0d, 0x00, 0x0b, 0x20, 0x00, 0x0b, 0x13, 0x00, 0x41, 0x10, 0x41, 0x07, 0x20, 0x00, 0xfc, 0x0b, 0x00, 0x41,
+        0x0f, 0x20, 0x00, 0x6a, 0x2d, 0x00, 0x00, 0x0b, 0x06, 0x00, 0x41, 0x01, 0x40, 0x00, 0x0b, 0x2c, 0x00, 0x20,
+        0x00, 0x03, 0x01, 0x21, 0x00, 0x20, 0x00, 0x45, 0x04, 0x40, 0x41, 0xcd, 0x00, 0x0f, 0x0b, 0x1f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x20, 0x00, 0x41, 0x02, 0x46, 0x04, 0x40, 0x10, 0x02, 0x0b, 0x20, 0x00, 0x41, 0x01, 0x6b,
+        0x08, 0x00, 0x0b, 0x00, 0x0b, 0x0b, 0x04, 0x00, 0x41, 0x05, 0x0b, 0x06, 0x00, 0x10, 0x02, 0x10, 0x11, 0x0b,
+        0x09, 0x00, 0x20, 0x00, 0x10, 0x09, 0x41, 0x01, 0x6a, 0x0b,
+    };
+    wasm_module_t* m;
+
+    memset(host, 0, sizeof(*host));
+    host->reenter_export = "sum";
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "yield", "i(i)", wasm_test_resume_yield, host));
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "reenter", "i(i)", wasm_test_resume_reenter, host));
+    WASM_CHECK_OK(t, wasm_bind_host_func(rt, "host", "interrupt", "()", wasm_test_resume_interrupt, host));
+    m = wasm_load(rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt->error_msg);
+    host->mod = m;
+    return m;
+}
+
+/* Runs export name with fuel units per step, resuming until it finishes; returns the step count. */
+static uint32_t wasm_test_run_in_fuel_steps(wl_test_ctx* t, wasm_module_t* m, const char* name,
+                                            const wasm_value_t* args, uint32_t num_args,
+                                            uint64_t fuel, int grow_fuel, wasm_value_t* result) {
+    wasm_runtime_t* rt = wasm_module_runtime(m);
+    uint32_t steps = 0;
+    wasm_error_t err;
+
+    wasm_runtime_set_fuel(rt, fuel);
+    err = wasm_call(m, name, args, num_args, result, 1);
+    while (err == WASM_ERR_OUT_OF_FUEL && steps < 1000000u) {
+        WL_CHECK(t, wasm_runtime_suspended(rt) == WASM_ERR_OUT_OF_FUEL);
+        if (grow_fuel) fuel *= 2u;
+        wasm_runtime_set_fuel(rt, fuel);
+        err = wasm_runtime_resume(rt, NULL, 0, result, 1);
+        steps++;
+    }
+    WL_CHECK_MSG(t, err == WASM_OK, "%s stopped with %s: %s", name, wasm_error_string(err), rt->error_msg);
+    WL_CHECK(t, wasm_runtime_suspended(rt) == WASM_OK);
+    wasm_runtime_disable_fuel(rt);
+    return steps;
+}
+
+static wasm_error_t wasm_test_calls_collect(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                            wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_gc_collect(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+static wasm_error_t wasm_test_calls_interrupt(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                              wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_runtime_interrupt(wasm_module_runtime(mod));
+    return WASM_OK;
+}
+
+/* Exports deep, ci, ci64, tail_ci, gcdeep, interrupt_at (function 10), and catcher. */
+static wasm_module_t* wasm_test_load_calls_module(wl_test_ctx* t, wasm_runtime_t* rt) {
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1d, 0x06, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
+        0x01, 0x7f, 0x01, 0x7f, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x02, 0x7e,
+        0x7f, 0x01, 0x7f, 0x02, 0x21, 0x02, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x07, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63,
+        0x74, 0x00, 0x03, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x09, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74,
+        0x00, 0x03, 0x03, 0x0d, 0x0c, 0x00, 0x01, 0x01, 0x00, 0x05, 0x00, 0x01, 0x03, 0x01, 0x01, 0x01, 0x01, 0x04,
+        0x07, 0x02, 0x70, 0x00, 0x04, 0x70, 0x04, 0x03, 0x0d, 0x03, 0x01, 0x00, 0x04, 0x07, 0x40, 0x07, 0x04, 0x64,
+        0x65, 0x65, 0x70, 0x00, 0x04, 0x02, 0x63, 0x69, 0x00, 0x05, 0x04, 0x63, 0x69, 0x36, 0x34, 0x00, 0x06, 0x07,
+        0x74, 0x61, 0x69, 0x6c, 0x5f, 0x63, 0x69, 0x00, 0x07, 0x06, 0x67, 0x63, 0x64, 0x65, 0x65, 0x70, 0x00, 0x08,
+        0x0c, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x5f, 0x61, 0x74, 0x00, 0x0a, 0x07, 0x63, 0x61,
+        0x74, 0x63, 0x68, 0x65, 0x72, 0x00, 0x0b, 0x09, 0x12, 0x02, 0x02, 0x00, 0x41, 0x00, 0x0b, 0x00, 0x02, 0x02,
+        0x03, 0x02, 0x01, 0x42, 0x01, 0x0b, 0x00, 0x01, 0x02, 0x0a, 0xd3, 0x02, 0x0c, 0x07, 0x00, 0x20, 0x00, 0x20,
+        0x01, 0x6a, 0x0b, 0x07, 0x00, 0x41, 0x00, 0x20, 0x00, 0x6b, 0x0b, 0x45, 0x03, 0x01, 0x7f, 0x01, 0x7e, 0x01,
+        0x7c, 0x20, 0x01, 0x20, 0x02, 0xa7, 0x20, 0x03, 0xaa, 0x72, 0x72, 0x04, 0x40, 0x00, 0x0b, 0x20, 0x00, 0x21,
+        0x01, 0x20, 0x00, 0xad, 0x21, 0x02, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x21, 0x03, 0x20,
+        0x00, 0x45, 0x04, 0x7f, 0x41, 0x00, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x04, 0x20, 0x01, 0x20, 0x02,
+        0xa7, 0x20, 0x03, 0xaa, 0x6a, 0x6a, 0x6a, 0x0b, 0x0b, 0x0b, 0x00, 0x20, 0x01, 0x20, 0x01, 0x20, 0x00, 0x11,
+        0x00, 0x00, 0x0b, 0x0b, 0x00, 0x20, 0x01, 0x20, 0x01, 0x20, 0x00, 0x11, 0x00, 0x01, 0x0b, 0x0b, 0x00, 0x20,
+        0x01, 0x20, 0x01, 0x20, 0x00, 0x13, 0x00, 0x00, 0x0b, 0x2b, 0x02, 0x01, 0x63, 0x02, 0x01, 0x7e, 0x20, 0x00,
+        0xfb, 0x00, 0x02, 0x21, 0x01, 0x20, 0x00, 0x45, 0x04, 0x7f, 0x10, 0x00, 0x10, 0x09, 0x10, 0x00, 0x41, 0x00,
+        0x05, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x08, 0x0b, 0x20, 0x01, 0xfb, 0x02, 0x02, 0x00, 0x6a, 0x0b, 0x1d,
+        0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0xfb, 0x00, 0x02, 0x1a, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00,
+        0x20, 0x00, 0x41, 0xa0, 0x9c, 0x01, 0x49, 0x0d, 0x00, 0x0b, 0x0b, 0x28, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x41,
+        0x03, 0x6c, 0x21, 0x01, 0x20, 0x00, 0x41, 0x03, 0x46, 0x04, 0x40, 0x10, 0x01, 0x0b, 0x20, 0x00, 0x45, 0x04,
+        0x7f, 0x20, 0x01, 0x05, 0x20, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x0a, 0x6a, 0x0b, 0x0b, 0x23, 0x01,
+        0x01, 0x7e, 0x20, 0x00, 0x41, 0xe8, 0x07, 0x6a, 0xad, 0x21, 0x01, 0x02, 0x7f, 0x1f, 0x40, 0x01, 0x00, 0x00,
+        0x00, 0x20, 0x00, 0x10, 0x0c, 0x1a, 0x0b, 0x41, 0x7f, 0x0f, 0x0b, 0x20, 0x01, 0xa7, 0x6a, 0x0b, 0x1f, 0x01,
+        0x01, 0x7f, 0x20, 0x00, 0x41, 0x07, 0x6a, 0x21, 0x01, 0x20, 0x00, 0x45, 0x04, 0x40, 0x41, 0x05, 0x08, 0x00,
+        0x0b, 0x20, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x0d, 0x6a, 0x0b, 0x20, 0x01, 0x01, 0x7f, 0x41, 0x01,
+        0x21, 0x01, 0x02, 0x7f, 0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, 0x20, 0x01, 0x20, 0x00, 0x10, 0x0c, 0x6a, 0x0f,
+        0x0b, 0x00, 0x0b, 0x20, 0x01, 0x6a, 0x08, 0x00, 0x0b,
+    };
+    wasm_import_t imp;
+    wasm_module_t* m;
+
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "host";
+    imp.name = "collect";
+    imp.func = wasm_test_calls_collect;
+    WASM_CHECK_OK(t, wasm_register_import(rt, &imp));
+    imp.name = "interrupt";
+    imp.func = wasm_test_calls_interrupt;
+    WASM_CHECK_OK(t, wasm_register_import(rt, &imp));
+    m = wasm_load(rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", wasm_runtime_error_message(rt));
+    return m;
+}
+
+static int32_t wasm_test_call_i32(wl_test_ctx* t, wasm_module_t* m, const char* name, int32_t arg) {
+    wasm_value_t value = wasm_i32(arg);
+    wasm_value_t result = wasm_i32(-1);
+
+    WASM_CHECK_OK(t, wasm_call(m, name, &value, 1, &result, 1));
+    return result.of.i32;
+}
+
+WL_TEST(test_calls_reach_the_depth_limit_with_fresh_locals_per_frame) {
+    static const size_t arena_sizes[] = { WASM_FRAME_ARENA_SIZE, 64 };
+    size_t k;
+
+    for (k = 0; k < sizeof(arena_sizes) / sizeof(arena_sizes[0]); k++) {
+        wasm_runtime_t rt;
+        wasm_config_t cfg;
+        wasm_module_t* m;
+        wasm_value_t arg;
+        wasm_value_t result = wasm_i32(0);
+        int round;
+
+        wasm_config_default(&cfg);
+        cfg.max_call_depth = 300;
+        cfg.frame_arena_size = arena_sizes[k];
+        wasm_init_config(&rt, &cfg);
+        m = wasm_test_load_calls_module(t, &rt);
+        if (!m) {
+            wasm_destroy(&rt);
+            continue;
+        }
+        for (round = 0; round < 3; round++) {
+            WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "deep", 299), 299 * 299 + 2 * 299);
+            arg = wasm_i32(300);
+            WL_CHECK(t, wasm_call(m, "deep", &arg, 1, &result, 1) == WASM_ERR_CALL_STACK_EXHAUSTED);
+            WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 300);
+            WL_CHECK(t, rt.call_frame_sp == 0 && rt.sp == 0);
+            WL_CHECK(t, rt.frame_arena != NULL && rt.frame_arena->prev == NULL && rt.frame_arena->used == 0u);
+        }
+        arg = wasm_i32(40);
+        WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "deep", &arg, 1, 1, 0, &result) > 500u);
+        WASM_CHECK_I32(t, result.of.i32, 40 * 40 + 2 * 40);
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+}
+
+WL_TEST(test_call_indirect_traps_on_mismatched_null_and_out_of_range_entries) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    args[1] = wasm_i32(21);
+    args[0] = wasm_i32(0);
+    WASM_CHECK_OK(t, wasm_call(m, "ci", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    WASM_CHECK_OK(t, wasm_call(m, "tail_ci", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    args[0] = wasm_i32(1);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_call(m, "tail_ci", args, 2, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+    args[0] = wasm_i32(2);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_UNINITIALIZED_TABLE);
+    args[0] = wasm_i32(4);
+    WL_CHECK(t, wasm_call(m, "ci", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    args[0] = wasm_i32(-1);
+    WL_CHECK(t, wasm_call(m, "tail_ci", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+
+    args[0] = wasm_i64(1);
+    WASM_CHECK_OK(t, wasm_call(m, "ci64", args, 2, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    args[0] = wasm_i64(0);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNINITIALIZED_TABLE);
+    args[0] = wasm_i64(3);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    args[0] = wasm_i64(((int64_t)1 << 32) + 1);
+    WL_CHECK(t, wasm_call(m, "ci64", args, 2, &result, 1) == WASM_ERR_UNDEFINED_ELEMENT);
+    WL_CHECK(t, rt.call_frame_sp == 0 && rt.sp == 0);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_cross_module_call_indirect_checks_types_per_calling_module) {
+    static const uint8_t a_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x03,
+        0x02, 0x01, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x02, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01, 0x00, 0x09, 0x07,
+        0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+    };
+    static const uint8_t b_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x17, 0x04, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60,
+        0x02, 0x7f, 0x7f, 0x01, 0x7e, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x02, 0x09, 0x01,
+        0x01, 0x61, 0x01, 0x74, 0x01, 0x70, 0x00, 0x02, 0x03, 0x04, 0x03, 0x02, 0x03, 0x02, 0x07, 0x16, 0x03, 0x02,
+        0x6f, 0x6b, 0x00, 0x00, 0x03, 0x62, 0x61, 0x64, 0x00, 0x01, 0x07, 0x74, 0x61, 0x69, 0x6c, 0x5f, 0x6f, 0x6b,
+        0x00, 0x02, 0x0a, 0x25, 0x03, 0x0b, 0x00, 0x20, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, 0x0b,
+        0x00, 0x20, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x01, 0x00, 0x0b, 0x0b, 0x00, 0x20, 0x00, 0x20, 0x00, 0x41,
+        0x00, 0x13, 0x00, 0x00, 0x0b,
+    };
+    static const uint8_t c_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x17, 0x04, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e, 0x60,
+        0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x09, 0x01,
+        0x01, 0x61, 0x01, 0x74, 0x01, 0x70, 0x00, 0x02, 0x03, 0x03, 0x02, 0x02, 0x03, 0x07, 0x0c, 0x02, 0x03, 0x62,
+        0x61, 0x64, 0x00, 0x00, 0x02, 0x6f, 0x6b, 0x00, 0x01, 0x0a, 0x19, 0x02, 0x0b, 0x00, 0x20, 0x00, 0x20, 0x00,
+        0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, 0x0b, 0x00, 0x20, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x01, 0x00, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_module_t* a;
+    wasm_module_t* b;
+    wasm_module_t* c;
+    wasm_value_t arg = wasm_i32(21);
+    wasm_value_t result = wasm_i32(0);
+    int round;
+
+    wasm_init(&rt);
+    a = wasm_load(&rt, a_bytes, sizeof(a_bytes));
+    WL_CHECK_MSG(t, a != NULL, "%s", rt.error_msg);
+    if (!a) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_register_module(&rt, "a", a));
+    for (round = 0; round < 4; round++) {
+        b = wasm_load(&rt, b_bytes, sizeof(b_bytes));
+        WL_CHECK_MSG(t, b != NULL, "%s", rt.error_msg);
+        if (!b) break;
+        WASM_CHECK_OK(t, wasm_call(b, "ok", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 42);
+        WASM_CHECK_OK(t, wasm_call(b, "tail_ok", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 42);
+        WL_CHECK(t, wasm_call(b, "bad", &arg, 1, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+        WASM_CHECK_OK(t, wasm_call(b, "ok", &arg, 1, &result, 1));
+        wasm_module_free(b);
+
+        c = wasm_load(&rt, c_bytes, sizeof(c_bytes));
+        WL_CHECK_MSG(t, c != NULL, "%s", rt.error_msg);
+        if (!c) break;
+        WL_CHECK(t, wasm_call(c, "bad", &arg, 1, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+        WASM_CHECK_OK(t, wasm_call(c, "ok", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 42);
+        WL_CHECK(t, wasm_call(c, "bad", &arg, 1, &result, 1) == WASM_ERR_INDIRECT_CALL_TYPE_MISMATCH);
+        wasm_module_free(c);
+    }
+    wasm_module_free(a);
+    wasm_destroy(&rt);
+}
+
+typedef struct wasm_test_make_host_t {
+    wasm_module_t* owner;
+    int yield;
+} wasm_test_make_host_t;
+
+static wasm_error_t wasm_test_make_struct(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                          wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_make_host_t* host = (wasm_test_make_host_t*)userdata;
+    wasm_value_t field = wasm_i32(7);
+
+    (void)mod;
+    (void)args;
+    (void)num_args;
+    (void)num_results;
+    if (host->yield) return WASM_YIELD;
+    return wasm_struct_new(host->owner, 1, &field, 1, &results[0]);
+}
+
+WL_TEST(test_imports_called_indirectly_from_another_module_check_results_against_their_own_type) {
+    /* a: types array, struct $s, func returning (ref null $s); imports host.make and exports it in table t.
+     * b: types struct $s, array, the same func type; calls t[0] and returns 7 + ref.is_null. */
+    static const uint8_t a_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x03, 0x5e, 0x7f, 0x00, 0x5f, 0x01, 0x7f, 0x00,
+        0x60, 0x00, 0x01, 0x63, 0x01, 0x02, 0x0d, 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x04, 0x6d, 0x61, 0x6b, 0x65,
+        0x00, 0x02, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01, 0x00, 0x09, 0x07, 0x01,
+        0x00, 0x41, 0x00, 0x0b, 0x01, 0x00,
+    };
+    static const uint8_t b_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x04, 0x5f, 0x01, 0x7f, 0x00, 0x5e, 0x7e, 0x00,
+        0x60, 0x00, 0x01, 0x63, 0x00, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x61, 0x01, 0x74, 0x01, 0x70,
+        0x00, 0x01, 0x03, 0x02, 0x01, 0x03, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00, 0x0a, 0x0d, 0x01,
+        0x0b, 0x00, 0x41, 0x07, 0x41, 0x00, 0x11, 0x02, 0x00, 0xd1, 0x6a, 0x0b,
+    };
+    wasm_runtime_t rt;
+    wasm_test_make_host_t host = { NULL, 0 };
+    wasm_import_t imp;
+    wasm_module_t* b;
+    wasm_value_t made;
+    wasm_value_t field = wasm_i32(9);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "host";
+    imp.name = "make";
+    imp.func = wasm_test_make_struct;
+    imp.userdata = &host;
+    WASM_CHECK_OK(t, wasm_register_import(&rt, &imp));
+    host.owner = wasm_load(&rt, a_bytes, sizeof(a_bytes));
+    WL_CHECK_MSG(t, host.owner != NULL, "%s", rt.error_msg);
+    if (!host.owner) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_register_module(&rt, "a", host.owner));
+    b = wasm_load(&rt, b_bytes, sizeof(b_bytes));
+    WL_CHECK_MSG(t, b != NULL, "%s", rt.error_msg);
+    if (b) {
+        WASM_CHECK_OK(t, wasm_call(b, "get", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        host.yield = 1;
+        WL_CHECK(t, wasm_call(b, "get", NULL, 0, &result, 1) == WASM_YIELD);
+        WASM_CHECK_OK(t, wasm_struct_new(host.owner, 1, &field, 1, &made));
+        WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &made, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        wasm_module_free(b);
+    }
+    wasm_module_free(host.owner);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_calls_interrupted_at_callee_entry_resume_there) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(5);
+    wasm_value_t result = wasm_i32(0);
+    uint32_t func_idx = 0;
+    uint32_t top_offset = 0;
+    uint32_t caller_offset = 0;
+
+    wasm_init(&rt);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WL_CHECK(t, wasm_call(m, "interrupt_at", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 4);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &top_offset));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 10);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 1, NULL, &func_idx, &caller_offset));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 10);
+    WL_CHECK(t, top_offset < caller_offset);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 45);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "deep", 10), 120);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_calls_keep_references_in_locals_through_collections_and_throws) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    cfg.frame_arena_size = 128;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_calls_module(t, &rt);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "gcdeep", 200), 200 * 201 / 2);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "catcher", 0), 1005);
+    WASM_CHECK_I32(t, wasm_test_call_i32(t, m, "catcher", 30), 1065);
+    arg = wasm_i32(12);
+    WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "gcdeep", &arg, 1, 1, 0, &result) > 100u);
+    WASM_CHECK_I32(t, result.of.i32, 12 * 13 / 2);
+    arg = wasm_i32(6);
+    WL_CHECK(t, wasm_test_run_in_fuel_steps(t, m, "catcher", &arg, 1, 1, 0, &result) > 50u);
+    WASM_CHECK_I32(t, result.of.i32, 1017);
+    WL_CHECK(t, rt.call_frame_sp == 0 && rt.frame_arena != NULL && rt.frame_arena->prev == NULL &&
+                    rt.frame_arena->used == 0u);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_fuel_steps_match_unmetered_runs) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t expected = wasm_i64(0);
+    wasm_value_t result = wasm_i64(0);
+    uint32_t steps;
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(1000);
+    WASM_CHECK_OK(t, wasm_call(m, "sum", args, 1, &expected, 1));
+    steps = wasm_test_run_in_fuel_steps(t, m, "sum", args, 1, 5, 0, &result);
+    WL_CHECK_MSG(t, steps > 100u, "expected many fuel stops, got %u", (unsigned)steps);
+    WASM_CHECK_I64(t, result.of.i64, expected.of.i64);
+    WASM_CHECK_I64(t, result.of.i64, 499500);
+
+    args[0] = wasm_i32(500);
+    args[1] = wasm_i32(0);
+    WASM_CHECK_OK(t, wasm_call(m, "count", args, 2, &expected, 1));
+    steps = wasm_test_run_in_fuel_steps(t, m, "count", args, 2, 3, 0, &result);
+    WL_CHECK(t, steps > 100u);
+    WASM_CHECK_I32(t, result.of.i32, expected.of.i32);
+    WASM_CHECK_I32(t, result.of.i32, 125250);
+
+    args[0] = wasm_i32(4096);
+    steps = wasm_test_run_in_fuel_steps(t, m, "fill", args, 1, 1, 1, &result);
+    WL_CHECK(t, steps > 0u);
+    WASM_CHECK_I32(t, result.of.i32, 7);
+
+    wasm_runtime_set_fuel(&rt, 10);
+    WL_CHECK(t, wasm_call(m, "grow", NULL, 0, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_OUT_OF_FUEL);
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 65536);
+    wasm_runtime_set_fuel(&rt, 5000);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 1);
+    WASM_CHECK_I64(t, (int64_t)wasm_memory_size(m, 0), 2 * 65536);
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_yielding_host_imports) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t host_result;
+    wasm_value_t result = wasm_i32(0);
+    uint32_t func_idx = 0;
+    char backtrace[256];
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 100);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 6);
+    WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, NULL));
+    WASM_CHECK_I32(t, (int32_t)func_idx, 5);
+    wasm_runtime_backtrace(&rt, backtrace, sizeof(backtrace));
+    WL_CHECK_MSG(t, backtrace[0] != '\0', "%s", "expected a backtrace while suspended");
+
+    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_SUSPENDED);
+    WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_SUSPENDED);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "suspended") != NULL, "%s", rt.error_msg);
+    {
+        static const uint8_t start_module[] = {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+            0x01, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+        };
+        WL_CHECK(t, wasm_load(&rt, start_module, sizeof(start_module)) == NULL);
+        WL_CHECK(t, wasm_runtime_last_error(&rt) == WASM_ERR_SUSPENDED);
+    }
+    WL_CHECK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    host_result = wasm_i64(7);
+    WL_CHECK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1) == WASM_ERR_TYPE_MISMATCH);
+    host_result = wasm_i32(7);
+    WL_CHECK(t, wasm_runtime_resume(&rt, &host_result, 1, NULL, 0) == WASM_ERR_TYPE_MISMATCH);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_YIELD);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 5 + 4 + 3 + 2 + 1 + 7);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    WL_CHECK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1) == WASM_ERR_MALFORMED);
+
+    arg = wasm_i32(3);
+    WL_CHECK(t, wasm_call(m, "catch_after_yield", &arg, 1, &result, 1) == WASM_YIELD);
+    host_result = wasm_i32(42);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "tail", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 6);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 1);
+    host_result = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 20);
+
+    arg = wasm_i32(7);
+    WL_CHECK(t, wasm_call(m, "tail_import", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, host.last_arg, 7);
+    host_result = wasm_i32(9);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 9);
+    WL_CHECK(t, wasm_call(m, "nested_tail_import", &arg, 1, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 2);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 10);
+
+    arg = wasm_i32(3);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_runtime_cancel(&rt);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 0);
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "sum", &arg, 1, &result, 1));
+    WASM_CHECK_I64(t, result.of.i64, 45);
+
+    arg = wasm_i32(1);
+    WL_CHECK(t, wasm_call_index(m, 0, &arg, 1, &result, 1) == WASM_ERR_TRAP);
+    WL_CHECK_MSG(t, strstr(rt.error_msg, "yielded outside") != NULL, "%s", rt.error_msg);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+    host.reenter_export = "rec";
+    WL_CHECK(t, wasm_call(m, "outer", &arg, 1, &result, 1) == WASM_ERR_TRAP);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+    arg = wasm_i32(2);
+    WL_CHECK(t, wasm_call(m, "rec", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_module_free(m);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_keeps_gc_objects_alive_across_collections) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(9);
+    wasm_value_t host_result = wasm_i32(0);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK(t, wasm_call(m, "gc_keep", &arg, 1, &result, 1) == WASM_YIELD);
+    wasm_gc_collect(&rt);
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 9 + 5);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_collects_with_references_on_the_operand_stack) {
+    /* yield_refs(n, ext) and yield_exn() yield in host.yield with GC, i31, extern, and exn references
+     * on the operand stack of two frames, returning n + 137 and 5; fuel_refs(n, ext) builds n boxes in
+     * a loop that carries a reference and returns n + 1003. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x28, 0x08, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f,
+        0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x02, 0x7f, 0x6f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01,
+        0x69, 0x01, 0x7f, 0x60, 0x01, 0x69, 0x00, 0x60, 0x01, 0x64, 0x00, 0x01, 0x64, 0x00, 0x02, 0x0e, 0x01, 0x04,
+        0x68, 0x6f, 0x73, 0x74, 0x05, 0x79, 0x69, 0x65, 0x6c, 0x64, 0x00, 0x01, 0x03, 0x05, 0x04, 0x01, 0x03, 0x04,
+        0x03, 0x0d, 0x03, 0x01, 0x00, 0x02, 0x07, 0x26, 0x03, 0x0a, 0x79, 0x69, 0x65, 0x6c, 0x64, 0x5f, 0x72, 0x65,
+        0x66, 0x73, 0x00, 0x02, 0x09, 0x79, 0x69, 0x65, 0x6c, 0x64, 0x5f, 0x65, 0x78, 0x6e, 0x00, 0x03, 0x09, 0x66,
+        0x75, 0x65, 0x6c, 0x5f, 0x72, 0x65, 0x66, 0x73, 0x00, 0x04, 0x0a, 0xcb, 0x01, 0x04, 0x21, 0x00, 0x41, 0x0a,
+        0xfb, 0x00, 0x00, 0x20, 0x00, 0x41, 0x14, 0xfb, 0x00, 0x00, 0x41, 0x01, 0x10, 0x00, 0x1a, 0xfb, 0x02, 0x00,
+        0x00, 0x6a, 0x21, 0x00, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x00, 0x6a, 0x0b, 0x29, 0x01, 0x01, 0x7f, 0x20, 0x01,
+        0x41, 0xe4, 0x00, 0xfb, 0x00, 0x00, 0x41, 0x07, 0xfb, 0x1c, 0x20, 0x00, 0x10, 0x01, 0x21, 0x02, 0xfb, 0x1d,
+        0x20, 0x02, 0x6a, 0x21, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x02, 0x6a, 0x21, 0x02, 0x1a, 0x20, 0x02, 0x0b,
+        0x21, 0x00, 0x02, 0x69, 0x1f, 0x40, 0x01, 0x03, 0x00, 0x41, 0x05, 0x08, 0x00, 0x0b, 0x00, 0x0b, 0x41, 0x02,
+        0x10, 0x00, 0x1a, 0x02, 0x05, 0x1f, 0x06, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x0b, 0x00, 0x0b, 0x0b, 0x5b, 0x02,
+        0x01, 0x7f, 0x01, 0x63, 0x00, 0x20, 0x01, 0x41, 0x03, 0xfb, 0x1c, 0x41, 0xe8, 0x07, 0xfb, 0x00, 0x00, 0x41,
+        0x00, 0xfb, 0x00, 0x00, 0x03, 0x07, 0x21, 0x03, 0x41, 0x05, 0xfb, 0x00, 0x00, 0x20, 0x03, 0xfb, 0x02, 0x00,
+        0x00, 0x41, 0x01, 0x6a, 0xfb, 0x00, 0x00, 0x20, 0x02, 0x41, 0x01, 0x6a, 0x21, 0x02, 0x20, 0x02, 0x20, 0x00,
+        0x49, 0x0d, 0x00, 0x21, 0x03, 0x1a, 0x20, 0x03, 0xd4, 0x0b, 0xfb, 0x02, 0x00, 0x00, 0x21, 0x02, 0xfb, 0x02,
+        0x00, 0x00, 0x20, 0x02, 0x6a, 0x21, 0x02, 0xfb, 0x1d, 0x20, 0x02, 0x6a, 0x21, 0x02, 0x1a, 0x20, 0x02, 0x0b,
+    };
+    static const uint64_t fuel_steps[] = { 1, 2, 3, 7, 50 };
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t args[2];
+    wasm_value_t host_result = wasm_i32(0);
+    wasm_value_t result = wasm_i32(0);
+    uint32_t i;
+
+    wasm_init(&rt);
+    memset(&host, 0, sizeof(host));
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "host", "yield", "i(i)", wasm_test_resume_yield, &host));
+    m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    args[0] = wasm_i32(4);
+    args[1] = wasm_externref((uintptr_t)0x1230u);
+    WL_CHECK(t, wasm_call(m, "yield_refs", args, 2, &result, 1) == WASM_YIELD);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 2);
+    wasm_gc_collect(&rt);
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 4 + 137);
+
+    WL_CHECK(t, wasm_call(m, "yield_exn", NULL, 0, &result, 1) == WASM_YIELD);
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, &host_result, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 5);
+
+    for (i = 0; i < sizeof(fuel_steps) / sizeof(fuel_steps[0]); i++) {
+        uint32_t steps = 0;
+        wasm_error_t err;
+
+        args[0] = wasm_i32(6);
+        wasm_runtime_set_fuel(&rt, fuel_steps[i]);
+        err = wasm_call(m, "fuel_refs", args, 2, &result, 1);
+        while (err == WASM_ERR_OUT_OF_FUEL && steps < 100000u) {
+            wasm_gc_collect(&rt);
+            wasm_runtime_set_fuel(&rt, fuel_steps[i]);
+            err = wasm_runtime_resume(&rt, NULL, 0, &result, 1);
+            steps++;
+        }
+        WL_CHECK_MSG(t, err == WASM_OK, "fuel step %u stopped with %s: %s", (unsigned)fuel_steps[i],
+                     wasm_error_string(err), rt.error_msg);
+        WL_CHECK(t, steps > 0);
+        WASM_CHECK_I32(t, result.of.i32, 6 + 1003);
+    }
+    wasm_runtime_disable_fuel(&rt);
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_resume_after_interrupts) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(10);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    WL_CHECK(t, wasm_call(m, "self_interrupt", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    wasm_runtime_interrupt(&rt);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 10);
+
+    arg = wasm_i32(5);
+    WL_CHECK(t, wasm_call(m, "catch_loop", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 77);
+
+    WL_CHECK(t, wasm_call(m, "call_after_interrupt", NULL, 0, &result, 1) == WASM_ERR_INTERRUPTED);
+    WASM_CHECK_I32(t, (int32_t)wasm_runtime_call_depth(&rt), 2);
+    WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 5);
+
+    wasm_runtime_interrupt(&rt);
+    WL_CHECK(t, wasm_call(m, "sum", &arg, 1, &result, 1) == WASM_ERR_INTERRUPTED);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+
+#if defined(WASM_TEST_THREADS)
+    {
+        wasm_test_thread_start_t start;
+        wasm_test_thread_t thread;
+        uint8_t* data = wasm_memory_data(m, 0);
+
+        memset(data, 0, 4);
+        start.fn = wasm_test_interrupt_later;
+        start.arg = &rt;
+        WL_CHECK(t, wasm_test_thread_spawn(&thread, &start));
+        WL_CHECK_MSG(t, wasm_call(m, "spin_until_flag", NULL, 0, &result, 1) == WASM_ERR_INTERRUPTED, "%s",
+                     rt.error_msg);
+        wasm_test_thread_join(thread);
+        WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+        data[0] = 1;
+        WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+        WL_CHECK(t, result.of.i32 > 0);
+    }
+#endif
+
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* Counts calls to host.tick, which returns arg * 3 + 1; it interrupts the runtime on call
+ * interrupt_at and yields on every multiple of yield_every. */
+typedef struct wasm_test_tick_t {
+    uint32_t calls;
+    uint32_t interrupt_at;
+    uint32_t yield_every;
+    int32_t last;
+} wasm_test_tick_t;
+
+static wasm_error_t wasm_test_tick(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                   wasm_value_t* results, uint32_t num_results, void* userdata) {
+    wasm_test_tick_t* tick = (wasm_test_tick_t*)userdata;
+
+    (void)num_args;
+    (void)num_results;
+    tick->calls++;
+    tick->last = (int32_t)((uint32_t)args[0].of.i32 * 3u + 1u);
+    results[0] = wasm_i32(tick->last);
+    if (tick->calls == tick->interrupt_at) wasm_runtime_interrupt(wasm_module_runtime(mod));
+    if (tick->yield_every && tick->calls % tick->yield_every == 0) return WASM_YIELD;
+    return WASM_OK;
+}
+
+/* Records each fused opcode at an instruction start of m's translated functions in seen. */
+static void wasm_test_note_fused_ops(const wasm_module_t* m, uint8_t* seen) {
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < m->num_funcs; i++) {
+        const wasm_func_t* func = &m->funcs[i];
+
+        for (j = 0; func->ops && j < func->num_op_offsets; j++) {
+            uint32_t op = func->ops[func->op_offsets[j * 2u]];
+
+            if (op >= WASM__OP_FUSED && op < WASM__OP_COUNT) seen[op - WASM__OP_FUSED] = 1;
+        }
+    }
+}
+
+/* Byte offsets a call reported at its fuel stops, in order. */
+typedef struct wasm_test_fuel_trace_t {
+    uint32_t* offsets;
+    uint32_t count;
+    uint32_t cap;
+} wasm_test_fuel_trace_t;
+
+/* Calls name in fuel steps of step units, resuming every fuel stop and answering yields with
+ * tick->last, collecting garbage at every stop if collect and appending each fuel stop's offset
+ * to trace if not NULL; returns the fuel the call used. */
+static uint64_t wasm_test_fused_call_in_steps(wl_test_ctx* t, wasm_module_t* m, const char* name,
+                                              const wasm_value_t* args, uint32_t num_args, uint64_t step,
+                                              wasm_test_tick_t* tick, int collect, wasm_test_fuel_trace_t* trace,
+                                              wasm_value_t* result) {
+    wasm_runtime_t* rt = wasm_module_runtime(m);
+    uint64_t used = 0;
+    uint32_t stops = 0;
+    wasm_error_t err;
+
+    wasm_runtime_set_fuel(rt, step);
+    err = wasm_call(m, name, args, num_args, result, 1);
+    while ((err == WASM_ERR_OUT_OF_FUEL || err == WASM_YIELD) && stops++ < 10000000u) {
+        wasm_value_t host_result = wasm_i32(tick ? tick->last : 0);
+        uint32_t offset = 0;
+
+        if (collect) wasm_gc_collect(rt);
+        if (err == WASM_YIELD) {
+            err = wasm_runtime_resume(rt, &host_result, 1, result, 1);
+            continue;
+        }
+        if (trace) {
+            WASM_CHECK_OK(t, wasm_runtime_call_frame(rt, 0, NULL, NULL, &offset));
+            if (trace->count == trace->cap) {
+                trace->cap = trace->cap ? trace->cap * 2u : 1024u;
+                trace->offsets = (uint32_t*)realloc(trace->offsets, trace->cap * sizeof(uint32_t));
+                if (!trace->offsets) abort();
+            }
+            trace->offsets[trace->count++] = offset;
+        }
+        used += step;
+        wasm_runtime_set_fuel(rt, step);
+        err = wasm_runtime_resume(rt, NULL, 0, result, 1);
+    }
+    WL_CHECK_MSG(t, err == WASM_OK, "%s in steps of %u stopped with %s: %s", name, (unsigned)step,
+                 wasm_error_string(err), rt->error_msg);
+    used += step - wasm_runtime_fuel(rt);
+    wasm_runtime_disable_fuel(rt);
+    return used;
+}
+
+/* Checks that name returns the same result unmetered, under one budget, and in fuel steps of 1
+ * to 5 units, where steps of 1 run every fused op one instruction at a time, and that the metered
+ * runs use the same fuel and report the same instruction at each fuel stop. */
+static void wasm_test_fused_matches_unfused(wl_test_ctx* t, wasm_module_t* m, const char* name,
+                                            const wasm_value_t* args, uint32_t num_args, wasm_test_tick_t* tick,
+                                            int collect, wasm_value_t* out) {
+    wasm_runtime_t* rt = wasm_module_runtime(m);
+    wasm_test_fuel_trace_t unfused = { NULL, 0, 0 };
+    wasm_value_t expected;
+    wasm_value_t result;
+    uint64_t used;
+    uint64_t step;
+
+    memset(&expected, 0, sizeof(expected));
+    if (tick) tick->calls = 0;
+    used = wasm_test_fused_call_in_steps(t, m, name, args, num_args, (uint64_t)1 << 40, tick, collect, NULL,
+                                         &expected);
+    if (!tick || !tick->yield_every) {
+        if (tick) tick->calls = 0;
+        memset(&result, 0, sizeof(result));
+        WASM_CHECK_OK(t, wasm_call(m, name, args, num_args, &result, 1));
+        WL_CHECK_MSG(t, memcmp(&result.of, &expected.of, sizeof(result.of)) == 0, "%s: unmetered result differs",
+                     name);
+    }
+    for (step = 1; step <= 5; step++) {
+        wasm_test_fuel_trace_t trace = { NULL, 0, 0 };
+        uint64_t step_used;
+        uint32_t i;
+
+        if (tick) tick->calls = 0;
+        memset(&result, 0, sizeof(result));
+        step_used = wasm_test_fused_call_in_steps(t, m, name, args, num_args, step, tick, collect,
+                                                  step == 1 ? &unfused : &trace, &result);
+        WL_CHECK_MSG(t, memcmp(&result.of, &expected.of, sizeof(result.of)) == 0,
+                     "%s: result in fuel steps of %u differs", name, (unsigned)step);
+        WL_CHECK_MSG(t, step_used == used, "%s: fuel steps of %u used %llu units, one budget used %llu", name,
+                     (unsigned)step, (unsigned long long)step_used, (unsigned long long)used);
+        for (i = 0; step > 1 && i < trace.count; i++) {
+            uint64_t at = (uint64_t)(i + 1u) * step - 1u;
+
+            if (at >= unfused.count) break;
+            if (trace.offsets[i] != unfused.offsets[at]) {
+                WL_CHECK_MSG(t, 0, "%s: fuel stop %u in steps of %u reports offset %u, not %u", name, (unsigned)i,
+                             (unsigned)step, (unsigned)trace.offsets[i], (unsigned)unfused.offsets[at]);
+                break;
+            }
+        }
+        free(trace.offsets);
+    }
+    free(unfused.offsets);
+    WL_CHECK(t, rt->suspended == WASM_OK);
+    if (out) *out = expected;
+}
+
+static void wasm_test_emit_local_op(wasm_builder_t* b, uint8_t op, uint32_t index) {
+    emit(b, op);
+    emit_leb128_u32(b, index);
+}
+
+static void wasm_test_emit_i32_const(wasm_builder_t* b, int32_t value) {
+    emit(b, 0x41);
+    emit_leb128_i32(b, value);
+}
+
+static void wasm_test_emit_i64_const(wasm_builder_t* b, int64_t value) {
+    emit(b, 0x42);
+    emit_leb128_i64(b, value);
+}
+
+/* Emits local h = (top ^ h * 31), for i64 if wide. */
+static void wasm_test_emit_mix(wasm_builder_t* b, uint32_t h, int wide) {
+    wasm_test_emit_local_op(b, 0x20, h);
+    if (wide)
+        wasm_test_emit_i64_const(b, 31);
+    else
+        wasm_test_emit_i32_const(b, 31);
+    emit(b, wide ? 0x7E : 0x6C);
+    emit(b, wide ? 0x85 : 0x73);
+    wasm_test_emit_local_op(b, 0x21, h);
+}
+
+/* Builds into mod a module exporting "f" of type (param type type) (result result) whose body
+ * is the local declarations locals followed by code. */
+static void wasm_test_emit_fused_module(wasm_builder_t* mod, uint8_t type, uint8_t result, const uint8_t* locals,
+                                        uint32_t locals_len, const wasm_builder_t* code) {
+    static const uint8_t funcs[] = { 1, 0 };
+    wasm_builder_t sec;
+
+    mod->len = 0;
+    emit_header(mod);
+    sec.len = 0;
+    emit(&sec, 1);
+    emit(&sec, 0x60);
+    emit(&sec, 2);
+    emit(&sec, type);
+    emit(&sec, type);
+    emit(&sec, 1);
+    emit(&sec, result);
+    emit_section(mod, 1, sec.buf, sec.len);
+    emit_section(mod, 3, funcs, sizeof(funcs));
+    sec.len = 0;
+    emit(&sec, 1);
+    emit_export_func(&sec, "f", 0);
+    emit_section(mod, 7, sec.buf, sec.len);
+    sec.len = 0;
+    emit(&sec, 1);
+    emit_leb128_u32(&sec, locals_len + code->len + 1u);
+    emit_bytes(&sec, locals, locals_len);
+    emit_bytes(&sec, code->buf, code->len);
+    emit(&sec, 0x0B);
+    emit_section(mod, 10, sec.buf, sec.len);
+}
+
+/* Loads mod, checks f over every pair of args against unfused execution, and notes its fused ops. */
+static void wasm_test_fused_sweep(wl_test_ctx* t, const wasm_builder_t* mod, const wasm_value_t* values,
+                                  uint32_t num_values, uint8_t* seen) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t i;
+    uint32_t j;
+
+    wasm_init(&rt);
+    m = wasm_load(&rt, mod->buf, mod->len);
+    WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < num_values; i++) {
+        for (j = 0; j < num_values; j++) {
+            wasm_value_t args[2];
+
+            args[0] = values[i];
+            args[1] = values[j];
+            wasm_test_fused_matches_unfused(t, m, "f", args, 2, NULL, 0, NULL);
+        }
+    }
+    wasm_test_note_fused_ops(m, seen);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+WL_TEST(test_fused_ops_match_unfused_execution) {
+    static const uint8_t i32_binops[] = { 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x6A,
+                                          0x6B, 0x6C, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    static const uint8_t i64_binops[] = { 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x7C,
+                                          0x7D, 0x7E, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A };
+    static const int64_t i64_consts[] = { -1, INT64_MIN, 65 };
+    static const uint64_t f64_consts[] = { UINT64_C(0x7FF8000000000001), UINT64_C(0x8000000000000000),
+                                           UINT64_C(0x3FF8000000000000), UINT64_C(0x7FF0000000000000),
+                                           UINT64_C(0xFFF4000000000002) };
+    static const uint8_t i32_locals[] = { 1, 3, 0x7F };
+    static const uint8_t i64_locals[] = { 1, 2, 0x7E };
+    static const uint8_t f64_locals[] = { 2, 1, 0x7E, 3, 0x7C };
+    wasm_value_t values[6];
+    wasm_builder_t code;
+    wasm_builder_t mod;
+    uint8_t seen[WASM__OP_COUNT - WASM__OP_FUSED];
+    uint32_t i;
+    uint32_t k;
+
+    memset(seen, 0, sizeof(seen));
+
+    code.len = 0;
+    for (i = 0; i < sizeof(i32_binops); i++) {
+        uint8_t op = i32_binops[i];
+        int shift = op >= 0x74;
+        int32_t consts[3];
+
+        consts[0] = shift ? 33 : -1;
+        consts[1] = shift ? -1 : INT32_MAX;
+        consts[2] = shift ? 4 : INT32_MIN;
+        for (k = 0; k < 3; k++) {
+            wasm_test_emit_local_op(&code, 0x20, 0);
+            wasm_test_emit_i32_const(&code, consts[k]);
+            emit(&code, op);
+            wasm_test_emit_mix(&code, 2, 0);
+        }
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        emit(&code, op);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_local_op(&code, 0x22, 3);
+        wasm_test_emit_i32_const(&code, consts[1]);
+        emit(&code, op);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        wasm_test_emit_local_op(&code, 0x22, 3);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        emit(&code, op);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_i32_const(&code, 9);
+        emit(&code, op);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        emit(&code, op);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_i32_const(&code, consts[2]);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        emit(&code, op);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 2);
+        wasm_test_emit_local_op(&code, 0x21, 3);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_local_op(&code, 0x21, 2);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_mix(&code, 2, 0);
+        wasm_test_emit_local_op(&code, 0x20, 2);
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_local_op(&code, 0x20, 0);
+        emit(&code, op);
+        wasm_test_emit_local_op(&code, 0x22, 3);
+        wasm_test_emit_local_op(&code, 0x21, 4);
+        wasm_test_emit_i32_const(&code, 5);
+        emit(&code, 0x6A);
+        wasm_test_emit_local_op(&code, 0x20, 4);
+        emit(&code, 0x6A);
+        wasm_test_emit_local_op(&code, 0x21, 2);
+    }
+    wasm_test_emit_local_op(&code, 0x20, 0);
+    wasm_test_emit_i32_const(&code, 7);
+    emit(&code, 0x6A);
+    wasm_test_emit_local_op(&code, 0x22, 3);
+    wasm_test_emit_local_op(&code, 0x21, 4);
+    wasm_test_emit_local_op(&code, 0x20, 3);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    emit(&code, 0x6C);
+    wasm_test_emit_local_op(&code, 0x21, 3);
+    wasm_test_emit_local_op(&code, 0x20, 1);
+    emit(&code, 0x69);
+    wasm_test_emit_local_op(&code, 0x21, 4);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    wasm_test_emit_i32_const(&code, 9);
+    emit(&code, 0x6A);
+    wasm_test_emit_local_op(&code, 0x22, 4);
+    wasm_test_emit_local_op(&code, 0x20, 3);
+    emit(&code, 0x73);
+    wasm_test_emit_local_op(&code, 0x20, 4);
+    emit(&code, 0x6A);
+    wasm_test_emit_mix(&code, 2, 0);
+    wasm_test_emit_local_op(&code, 0x20, 2);
+    wasm_test_emit_fused_module(&mod, 0x7F, 0x7F, i32_locals, sizeof(i32_locals), &code);
+    values[0] = wasm_i32(0);
+    values[1] = wasm_i32(-1);
+    values[2] = wasm_i32(INT32_MAX);
+    values[3] = wasm_i32(INT32_MIN);
+    values[4] = wasm_i32(33);
+    values[5] = wasm_i32(0x12345678);
+    wasm_test_fused_sweep(t, &mod, values, 6, seen);
+
+    code.len = 0;
+    for (i = 0; i < sizeof(i64_binops); i++) {
+        uint8_t op = i64_binops[i];
+
+        for (k = 0; k < sizeof(i64_consts) / sizeof(i64_consts[0]); k++) {
+            wasm_test_emit_local_op(&code, 0x20, 0);
+            wasm_test_emit_i64_const(&code, i64_consts[k]);
+            emit(&code, op);
+            if (op <= 0x5A) emit(&code, 0xAD);
+            wasm_test_emit_mix(&code, 2, 1);
+            wasm_test_emit_local_op(&code, 0x20, 1);
+            wasm_test_emit_local_op(&code, 0x22, 3);
+            wasm_test_emit_i64_const(&code, i64_consts[k]);
+            emit(&code, op);
+            if (op <= 0x5A) emit(&code, 0xAD);
+            wasm_test_emit_mix(&code, 2, 1);
+        }
+    }
+    wasm_test_emit_local_op(&code, 0x20, 2);
+    wasm_test_emit_fused_module(&mod, 0x7E, 0x7E, i64_locals, sizeof(i64_locals), &code);
+    values[0] = wasm_i64(0);
+    values[1] = wasm_i64(-1);
+    values[2] = wasm_i64(INT64_MIN);
+    values[3] = wasm_i64(63);
+    values[4] = wasm_i64(INT64_C(0x123456789ABCDEF0));
+    values[5] = wasm_i64(INT64_MAX);
+    wasm_test_fused_sweep(t, &mod, values, 6, seen);
+
+    code.len = 0;
+    for (i = 0; i < 10; i++) {
+        uint8_t op = (uint8_t)(0x46 + i);
+
+        for (k = 0; k < 4; k++) {
+            emit(&code, 0x02);
+            emit(&code, 0x40);
+            wasm_test_emit_local_op(&code, 0x20, 0);
+            if (k < 2) wasm_test_emit_local_op(&code, 0x22, 3);
+            if (k == 0) wasm_test_emit_i32_const(&code, -2);
+            if (k == 1 || k == 3) wasm_test_emit_local_op(&code, 0x20, 1);
+            if (k == 2) wasm_test_emit_i32_const(&code, 7);
+            emit(&code, op);
+            emit(&code, 0x0D);
+            emit(&code, 0);
+            wasm_test_emit_local_op(&code, 0x20, 2);
+            wasm_test_emit_i32_const(&code, (int32_t)(1u << (i * 3u + k)));
+            emit(&code, 0x6A);
+            wasm_test_emit_local_op(&code, 0x21, 2);
+            emit(&code, 0x0B);
+            wasm_test_emit_local_op(&code, 0x20, 2);
+            wasm_test_emit_i32_const(&code, 3);
+            emit(&code, 0x6C);
+            wasm_test_emit_local_op(&code, 0x21, 2);
+        }
+        wasm_test_emit_local_op(&code, 0x20, 1);
+        wasm_test_emit_i32_const(&code, -9);
+        emit(&code, op);
+        emit(&code, 0x04);
+        emit(&code, 0x7F);
+        wasm_test_emit_i32_const(&code, (int32_t)(100 + i));
+        emit(&code, 0x05);
+        wasm_test_emit_i32_const(&code, (int32_t)(200 + i));
+        emit(&code, 0x0B);
+        wasm_test_emit_local_op(&code, 0x20, 2);
+        emit(&code, 0x6A);
+        wasm_test_emit_local_op(&code, 0x21, 2);
+    }
+    wasm_test_emit_local_op(&code, 0x20, 2);
+    wasm_test_emit_fused_module(&mod, 0x7F, 0x7F, i32_locals, sizeof(i32_locals), &code);
+    values[0] = wasm_i32(0);
+    values[1] = wasm_i32(-1);
+    values[2] = wasm_i32(7);
+    values[3] = wasm_i32(-2);
+    values[4] = wasm_i32(INT32_MIN);
+    values[5] = wasm_i32(-9);
+    wasm_test_fused_sweep(t, &mod, values, 6, seen);
+
+    code.len = 0;
+    wasm_test_emit_local_op(&code, 0x20, 0);
+    emit(&code, 0xBF);
+    wasm_test_emit_local_op(&code, 0x21, 3);
+    wasm_test_emit_local_op(&code, 0x20, 1);
+    emit(&code, 0xBF);
+    wasm_test_emit_local_op(&code, 0x21, 4);
+    for (i = 0; i < 4; i++) {
+        uint8_t op = (uint8_t)(0xA0 + i);
+
+        wasm_test_emit_local_op(&code, 0x20, 4);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        emit(&code, op);
+        emit(&code, 0xBD);
+        wasm_test_emit_mix(&code, 2, 1);
+        wasm_test_emit_local_op(&code, 0x20, 3);
+        wasm_test_emit_local_op(&code, 0x22, 5);
+        wasm_test_emit_local_op(&code, 0x20, 4);
+        emit(&code, op);
+        emit(&code, 0xBD);
+        wasm_test_emit_mix(&code, 2, 1);
+        for (k = 0; k < sizeof(f64_consts) / sizeof(f64_consts[0]); k++) {
+            uint32_t b;
+
+            wasm_test_emit_local_op(&code, 0x20, 3);
+            wasm_test_emit_local_op(&code, 0x22, 5);
+            emit(&code, 0x44);
+            for (b = 0; b < 8; b++) emit(&code, (uint8_t)(f64_consts[k] >> (b * 8u)));
+            emit(&code, op);
+            emit(&code, 0xBD);
+            wasm_test_emit_mix(&code, 2, 1);
+        }
+    }
+    wasm_test_emit_local_op(&code, 0x20, 2);
+    wasm_test_emit_fused_module(&mod, 0x7E, 0x7E, f64_locals, sizeof(f64_locals), &code);
+    values[0] = wasm_i64(INT64_C(0x7FF4000000000001));
+    values[1] = wasm_i64(INT64_C(0x7FF8000000000003));
+    values[2] = wasm_i64((int64_t)UINT64_C(0xFFF8000000000000));
+    values[3] = wasm_i64(INT64_C(0x3FF8000000000000));
+    values[4] = wasm_i64((int64_t)UINT64_C(0x8000000000000000));
+    values[5] = wasm_i64(1);
+    wasm_test_fused_sweep(t, &mod, values, 6, seen);
+
+    {
+        /* moves(a, b), loops(n), fmove(bits), loads(p), load8(p), load64(p), nops(n), and refs(n) run
+         * local moves, five loops whose back edges are different fused branches and whose bodies call
+         * host.tick, f64 moves, loads from data at 0, nested blocks, and a loop that allocates next to
+         * live struct references. */
+        static const uint8_t module_bytes[] = {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1a, 0x05, 0x5f, 0x01, 0x7f, 0x01, 0x60, 0x01, 0x7f,
+            0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7e, 0x01, 0x7e, 0x60, 0x01, 0x7f, 0x01, 0x7e,
+            0x02, 0x0d, 0x01, 0x04, 0x68, 0x6f, 0x73, 0x74, 0x04, 0x74, 0x69, 0x63, 0x6b, 0x00, 0x01, 0x03, 0x09, 0x08,
+            0x02, 0x01, 0x03, 0x04, 0x01, 0x04, 0x01, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x40, 0x08, 0x05, 0x6d,
+            0x6f, 0x76, 0x65, 0x73, 0x00, 0x01, 0x05, 0x6c, 0x6f, 0x6f, 0x70, 0x73, 0x00, 0x02, 0x05, 0x66, 0x6d, 0x6f,
+            0x76, 0x65, 0x00, 0x03, 0x05, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x00, 0x04, 0x05, 0x6c, 0x6f, 0x61, 0x64, 0x38,
+            0x00, 0x05, 0x06, 0x6c, 0x6f, 0x61, 0x64, 0x36, 0x34, 0x00, 0x06, 0x04, 0x6e, 0x6f, 0x70, 0x73, 0x00, 0x07,
+            0x04, 0x72, 0x65, 0x66, 0x73, 0x00, 0x08, 0x0a, 0xe0, 0x04, 0x08, 0x75, 0x01, 0x03, 0x7f, 0x20, 0x00, 0x21,
+            0x02, 0x20, 0x01, 0x22, 0x03, 0x21, 0x04, 0x20, 0x02, 0x20, 0x03, 0x6a, 0x21, 0x04, 0x20, 0x04, 0x20, 0x00,
+            0x6a, 0x22, 0x02, 0x20, 0x03, 0x6a, 0x21, 0x03, 0x20, 0x03, 0x41, 0x7d, 0x6a, 0x21, 0x04, 0x20, 0x04, 0x41,
+            0xff, 0xff, 0xff, 0xff, 0x07, 0x6a, 0x22, 0x02, 0x1a, 0x20, 0x02, 0x41, 0x0c, 0x73, 0x21, 0x03, 0x20, 0x02,
+            0x20, 0x03, 0x6b, 0x21, 0x04, 0x20, 0x04, 0x21, 0x02, 0x20, 0x02, 0x20, 0x03, 0x22, 0x04, 0x20, 0x02, 0x6a,
+            0x6a, 0x21, 0x03, 0x20, 0x00, 0x20, 0x03, 0x20, 0x04, 0x6c, 0x20, 0x02, 0x6c, 0x6a, 0x22, 0x02, 0x1a, 0x20,
+            0x00, 0x20, 0x01, 0x22, 0x04, 0x6a, 0x22, 0x02, 0x20, 0x03, 0x20, 0x04, 0x20, 0x02, 0x6c, 0x6a, 0x6a, 0x20,
+            0x00, 0x77, 0x0b, 0x8f, 0x01, 0x01, 0x03, 0x7f, 0x03, 0x40, 0x20, 0x03, 0x20, 0x01, 0x10, 0x00, 0x6a, 0x21,
+            0x03, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x22, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x41, 0x00, 0x21, 0x01,
+            0x03, 0x40, 0x20, 0x03, 0x20, 0x01, 0x10, 0x00, 0x73, 0x21, 0x03, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x22, 0x01,
+            0x41, 0x28, 0x47, 0x0d, 0x00, 0x0b, 0x41, 0x00, 0x21, 0x01, 0x03, 0x40, 0x20, 0x03, 0x20, 0x01, 0x10, 0x00,
+            0x6a, 0x21, 0x03, 0x20, 0x01, 0x41, 0x03, 0x6a, 0x21, 0x01, 0x20, 0x01, 0x41, 0x32, 0x48, 0x0d, 0x00, 0x0b,
+            0x20, 0x00, 0x21, 0x01, 0x03, 0x40, 0x20, 0x03, 0x20, 0x01, 0x10, 0x00, 0x6b, 0x21, 0x03, 0x20, 0x01, 0x41,
+            0x7f, 0x6a, 0x21, 0x01, 0x20, 0x01, 0x20, 0x02, 0x4a, 0x0d, 0x00, 0x0b, 0x41, 0x07, 0x21, 0x01, 0x03, 0x40,
+            0x20, 0x03, 0x20, 0x01, 0x10, 0x00, 0x6a, 0x21, 0x03, 0x20, 0x01, 0x41, 0x01, 0x6b, 0x22, 0x01, 0x0d, 0x00,
+            0x0b, 0x20, 0x03, 0x0b, 0x23, 0x01, 0x03, 0x7c, 0x20, 0x00, 0xbf, 0x21, 0x01, 0x20, 0x01, 0x21, 0x02, 0x20,
+            0x02, 0x22, 0x03, 0x21, 0x01, 0x20, 0x01, 0x20, 0x03, 0x21, 0x02, 0x21, 0x03, 0x20, 0x03, 0x20, 0x02, 0x22,
+            0x01, 0x1a, 0xbd, 0x0b, 0x53, 0x01, 0x01, 0x7e, 0x20, 0x00, 0x28, 0x02, 0x00, 0xad, 0x21, 0x01, 0x20, 0x00,
+            0x2a, 0x02, 0x00, 0xbc, 0xad, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x21, 0x01, 0x20, 0x00, 0x35, 0x02, 0x00,
+            0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x21, 0x01, 0x20, 0x00, 0x29, 0x03, 0x08, 0x20, 0x01, 0x42, 0x07, 0x89,
+            0x85, 0x21, 0x01, 0x20, 0x00, 0x2b, 0x03, 0x10, 0xbd, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x21, 0x01, 0x20,
+            0x00, 0x2d, 0x00, 0x03, 0xad, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x21, 0x01, 0x20, 0x01, 0x0b, 0x07, 0x00,
+            0x20, 0x00, 0x2d, 0x00, 0x01, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x29, 0x03, 0x08, 0x0b, 0x60, 0x01, 0x02, 0x7f,
+            0x03, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x20, 0x01, 0x41, 0x07, 0x71, 0x0e,
+            0x07, 0x00, 0x01, 0x02, 0x03, 0x04, 0x04, 0x00, 0x01, 0x0b, 0x20, 0x02, 0x41, 0x01, 0x6a, 0x21, 0x02, 0x0c,
+            0x03, 0x0b, 0x20, 0x02, 0x41, 0x0a, 0x6a, 0x21, 0x02, 0x0b, 0x20, 0x02, 0x41, 0xe4, 0x00, 0x6a, 0x21, 0x02,
+            0x0b, 0x02, 0x40, 0x02, 0x40, 0x01, 0x0b, 0x0b, 0x0b, 0x20, 0x02, 0x02, 0x40, 0x0b, 0x41, 0x03, 0x73, 0x02,
+            0x40, 0x01, 0x0b, 0x21, 0x02, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x22, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b,
+            0x20, 0x02, 0x0b, 0x6e, 0x03, 0x01, 0x7f, 0x02, 0x63, 0x00, 0x01, 0x7f, 0x41, 0x01, 0xfb, 0x00, 0x00, 0x21,
+            0x02, 0x03, 0x40, 0x20, 0x02, 0x20, 0x01, 0x41, 0x03, 0x71, 0x20, 0x04, 0x20, 0x01, 0x6a, 0x6a, 0xfb, 0x05,
+            0x00, 0x00, 0x20, 0x02, 0x21, 0x03, 0x20, 0x03, 0x22, 0x02, 0x21, 0x03, 0x20, 0x03, 0x22, 0x02, 0x20, 0x03,
+            0x1a, 0x20, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x01, 0x10, 0x00, 0x6a, 0xfb, 0x00, 0x00, 0x21, 0x02, 0xfb,
+            0x02, 0x00, 0x00, 0x20, 0x04, 0x6a, 0x21, 0x04, 0x20, 0x04, 0x20, 0x02, 0xfb, 0x02, 0x00, 0x00, 0x73, 0x21,
+            0x04, 0x20, 0x01, 0x41, 0x01, 0x6a, 0x22, 0x01, 0x20, 0x00, 0x49, 0x0d, 0x00, 0x0b, 0x20, 0x04, 0x20, 0x03,
+            0xfb, 0x02, 0x00, 0x00, 0x6a, 0x0b, 0x0b, 0x1e, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x18, 0x01, 0x80, 0xff, 0x7f,
+            0x00, 0x00, 0xc0, 0x7f, 0x01, 0x00, 0xa0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        };
+        static const uint64_t nan_bits[] = { UINT64_C(0x7FF0000000000001), UINT64_C(0xFFF4000000000000),
+                                             UINT64_C(0x7FF8000000000000) };
+        wasm_runtime_t rt;
+        wasm_test_tick_t tick;
+        wasm_module_t* m;
+        wasm_value_t args[2];
+        wasm_value_t result;
+        wasm_value_t expected;
+        uint32_t func_idx = 0;
+        uint32_t offset = 0;
+        uint32_t interrupts = 0;
+
+        wasm_init(&rt);
+        memset(&tick, 0, sizeof(tick));
+        WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "host", "tick", "i(i)", wasm_test_tick, &tick));
+        m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+        WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+        if (!m) {
+            wasm_destroy(&rt);
+            return;
+        }
+
+        for (i = 0; i < 6; i++) {
+            args[0] = wasm_i32(i == 0 ? INT32_MAX : (int32_t)(i * 0x1234567u));
+            args[1] = wasm_i32(i == 1 ? -1 : (int32_t)i - 3);
+            wasm_test_fused_matches_unfused(t, m, "moves", args, 2, NULL, 0, NULL);
+        }
+
+        args[0] = wasm_i32(30);
+        wasm_test_fused_matches_unfused(t, m, "loops", args, 1, &tick, 0, &expected);
+        WASM_CHECK_I32(t, (int32_t)tick.calls, 124);
+        for (k = 1; k < 124; k++) {
+            int last_in_loop = k == 30 || k == 70 || k == 87 || k == 117;
+
+            tick.calls = 0;
+            tick.interrupt_at = k;
+            if (wasm_call(m, "loops", args, 1, &result, 1) != WASM_ERR_INTERRUPTED) continue;
+            interrupts++;
+            WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_ERR_INTERRUPTED);
+            WL_CHECK_MSG(t, tick.calls == k + (last_in_loop ? 1u : 0u), "interrupt after tick %u stopped after tick %u",
+                         (unsigned)k, (unsigned)tick.calls);
+            WASM_CHECK_OK(t, wasm_runtime_resume(&rt, NULL, 0, &result, 1));
+            WASM_CHECK_I32(t, result.of.i32, expected.of.i32);
+        }
+        tick.interrupt_at = 0;
+        WASM_CHECK_I32(t, (int32_t)interrupts, 123);
+
+        for (i = 0; i < sizeof(nan_bits) / sizeof(nan_bits[0]); i++) {
+            args[0] = wasm_i64((int64_t)nan_bits[i]);
+            wasm_test_fused_matches_unfused(t, m, "fmove", args, 1, NULL, 0, &result);
+            WL_CHECK_MSG(t, (uint64_t)result.of.i64 == nan_bits[i], "fmove changed NaN bits %llx to %llx",
+                         (unsigned long long)nan_bits[i], (unsigned long long)result.of.i64);
+        }
+
+        for (i = 0; i < 4; i++) {
+            args[0] = wasm_i32((int32_t)i);
+            wasm_test_fused_matches_unfused(t, m, "loads", args, 1, NULL, 0, NULL);
+        }
+        args[0] = wasm_i32(0);
+        WASM_CHECK_OK(t, wasm_call(m, "load64", args, 1, &result, 1));
+        WL_CHECK(t, (uint64_t)result.of.i64 == UINT64_C(0xFFFFFFFF7FA00001));
+        WASM_CHECK_OK(t, wasm_call(m, "load8", args, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 0x80);
+        {
+            static const char* const trapping[] = { "load8", "load64", "loads" };
+            static const int32_t addresses[] = { 65535, 65530, 65528 };
+
+            for (i = 0; i < 3; i++) {
+                uint32_t unfused_offset = 0;
+                wasm_error_t err;
+
+                args[0] = wasm_i32(addresses[i]);
+                WL_CHECK(t, wasm_call(m, trapping[i], args, 1, &result, 1) == WASM_ERR_OUT_OF_BOUNDS);
+                WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, &func_idx, &offset));
+                wasm_runtime_set_fuel(&rt, 1);
+                err = wasm_call(m, trapping[i], args, 1, &result, 1);
+                while (err == WASM_ERR_OUT_OF_FUEL) {
+                    wasm_runtime_set_fuel(&rt, 1);
+                    err = wasm_runtime_resume(&rt, NULL, 0, &result, 1);
+                }
+                wasm_runtime_disable_fuel(&rt);
+                WL_CHECK(t, err == WASM_ERR_OUT_OF_BOUNDS);
+                WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, NULL, &unfused_offset));
+                WASM_CHECK_I32(t, (int32_t)offset, (int32_t)unfused_offset);
+                if (i < 2) WASM_CHECK_I32(t, (int32_t)offset, 2);
+            }
+            WL_CHECK(t, offset > 2);
+        }
+
+        args[0] = wasm_i32(21);
+        wasm_test_fused_matches_unfused(t, m, "nops", args, 1, NULL, 0, &result);
+        WASM_CHECK_I32(t, result.of.i32, 856);
+
+        args[0] = wasm_i32(20);
+        wasm_test_fused_matches_unfused(t, m, "refs", args, 1, &tick, 1, &expected);
+        tick.yield_every = 3;
+        wasm_test_fused_matches_unfused(t, m, "refs", args, 1, &tick, 1, &result);
+        tick.yield_every = 0;
+        WASM_CHECK_I32(t, result.of.i32, expected.of.i32);
+
+        wasm_test_note_fused_ops(m, seen);
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+
+    {
+        /* lcloads(p) folds loads of every width from p plus constants into an i64; stores(p, v) stores
+         * v, its f32 bits, v * 0x123456789, and a signaling f64 NaN from locals at p and returns a
+         * hash of what it stored; lc8(p), lc32(p), and lc64(p) load the byte, word, or doubleword
+         * ending 2, 7, or 12 bytes past p. */
+        static const uint8_t module_bytes[] = {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7e, 0x60, 0x02,
+            0x7f, 0x7f, 0x01, 0x7e, 0x03, 0x06, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+            0x28, 0x05, 0x07, 0x6c, 0x63, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x00, 0x00, 0x06, 0x73, 0x74, 0x6f, 0x72, 0x65,
+            0x73, 0x00, 0x01, 0x03, 0x6c, 0x63, 0x38, 0x00, 0x02, 0x04, 0x6c, 0x63, 0x33, 0x32, 0x00, 0x03, 0x04, 0x6c,
+            0x63, 0x36, 0x34, 0x00, 0x04, 0x0a, 0xe8, 0x01, 0x05, 0x61, 0x01, 0x01, 0x7e, 0x20, 0x00, 0x41, 0x04, 0x6a,
+            0x28, 0x02, 0x00, 0xad, 0x21, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x2a, 0x02, 0x02, 0xbc, 0xad, 0x20, 0x01,
+            0x42, 0x07, 0x89, 0x85, 0x21, 0x01, 0x20, 0x00, 0x41, 0x02, 0x6a, 0x35, 0x02, 0x01, 0x20, 0x01, 0x42, 0x07,
+            0x89, 0x85, 0x21, 0x01, 0x20, 0x00, 0x41, 0x08, 0x6a, 0x29, 0x03, 0x03, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85,
+            0x21, 0x01, 0x20, 0x00, 0x41, 0x78, 0x6a, 0x2b, 0x03, 0x10, 0xbd, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x21,
+            0x01, 0x20, 0x00, 0x41, 0x05, 0x6a, 0x2d, 0x00, 0x02, 0xad, 0x20, 0x01, 0x42, 0x07, 0x89, 0x85, 0x0b, 0x61,
+            0x03, 0x01, 0x7d, 0x01, 0x7c, 0x01, 0x7e, 0x20, 0x01, 0xbe, 0x21, 0x02, 0x42, 0x81, 0x80, 0x80, 0x80, 0x80,
+            0x80, 0x80, 0xfa, 0xff, 0x00, 0xbf, 0x21, 0x03, 0x20, 0x01, 0xac, 0x42, 0x89, 0xcf, 0x95, 0x9a, 0x12, 0x7e,
+            0x21, 0x04, 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x04, 0x20, 0x00, 0x20, 0x02, 0x38, 0x02, 0x08, 0x20, 0x00,
+            0x20, 0x04, 0x3e, 0x02, 0x0c, 0x20, 0x00, 0x20, 0x04, 0x37, 0x03, 0x10, 0x20, 0x00, 0x20, 0x03, 0x39, 0x03,
+            0x18, 0x20, 0x00, 0x29, 0x03, 0x04, 0x20, 0x00, 0x29, 0x03, 0x0c, 0x85, 0x20, 0x00, 0x29, 0x03, 0x14, 0x85,
+            0x20, 0x00, 0x29, 0x03, 0x18, 0x85, 0x0b, 0x0b, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x2d, 0x00, 0x00, 0xad,
+            0x0b, 0x0b, 0x00, 0x20, 0x00, 0x41, 0x02, 0x6a, 0x28, 0x02, 0x01, 0xad, 0x0b, 0x0a, 0x00, 0x20, 0x00, 0x41,
+            0x04, 0x6a, 0x29, 0x03, 0x00, 0x0b, 0x0b, 0x26, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x20, 0x01, 0x80, 0xff, 0x7f,
+            0x00, 0x00, 0xc0, 0x7f, 0x01, 0x00, 0xa0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0x01, 0x00, 0xf4, 0x7f, 0x00, 0x00, 0xf0, 0xff,
+        };
+        static const int32_t loads[] = { 8, 9, 12, 100, 65512 };
+        static const char* const ends[] = { "lc8", "lc32", "lc64" };
+        static const int32_t end_args[] = { 65534, 65529, 65524 };
+        static const char* const trapping[] = { "lcloads", "lcloads", "lcloads", "lcloads", "stores", "stores",
+                                                "stores", "stores", "lc8", "lc32", "lc64" };
+        static const int32_t traps[] = { 65530, 65525, 0, -1, 65530, 65528, 65520, 65512, 65535, 65530, 65525 };
+        static const uint8_t f32_bits[] = { 0x01, 0x00, 0xa0, 0x7f };
+        static const uint8_t f64_bits[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x7f };
+        wasm_runtime_t rt;
+        wasm_module_t* m;
+        wasm_value_t args[2];
+        wasm_value_t result;
+        uint8_t* data;
+
+        wasm_init(&rt);
+        m = wasm_load(&rt, module_bytes, sizeof(module_bytes));
+        WL_CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+        if (!m) {
+            wasm_destroy(&rt);
+            return;
+        }
+        for (i = 0; i < sizeof(loads) / sizeof(loads[0]); i++) {
+            args[0] = wasm_i32(loads[i]);
+            wasm_test_fused_matches_unfused(t, m, "lcloads", args, 1, NULL, 1, NULL);
+        }
+        for (i = 0; i < 3; i++) {
+            args[0] = wasm_i32((int32_t)(100u + i * 40u));
+            args[1] = wasm_i32(i == 0 ? 0x7FA00001 : i == 1 ? -1 : 12345);
+            wasm_test_fused_matches_unfused(t, m, "stores", args, 2, NULL, 1, NULL);
+        }
+        for (i = 0; i < 3; i++) {
+            args[0] = wasm_i32(end_args[i]);
+            wasm_test_fused_matches_unfused(t, m, ends[i], args, 1, NULL, 0, NULL);
+        }
+        data = wasm_memory_data(m, 0);
+        WL_CHECK(t, memcmp(data + 108, f32_bits, sizeof(f32_bits)) == 0);
+        WL_CHECK(t, memcmp(data + 124, f64_bits, sizeof(f64_bits)) == 0);
+        for (i = 0; i < sizeof(traps) / sizeof(traps[0]); i++) {
+            const char* name = trapping[i];
+            uint32_t num_args = strcmp(name, "stores") == 0 ? 2u : 1u;
+            uint8_t fused_tail[64];
+            uint32_t fused_offset = 0;
+            uint32_t unfused_offset = 0;
+            wasm_error_t err;
+
+            args[0] = wasm_i32(traps[i]);
+            args[1] = wasm_i32(-7);
+            memset(data + 65472, 0, 64);
+            WL_CHECK(t, wasm_call(m, name, args, num_args, &result, 1) == WASM_ERR_OUT_OF_BOUNDS);
+            WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, NULL, &fused_offset));
+            memcpy(fused_tail, data + 65472, 64);
+            memset(data + 65472, 0, 64);
+            wasm_runtime_set_fuel(&rt, 1);
+            err = wasm_call(m, name, args, num_args, &result, 1);
+            while (err == WASM_ERR_OUT_OF_FUEL) {
+                wasm_runtime_set_fuel(&rt, 1);
+                err = wasm_runtime_resume(&rt, NULL, 0, &result, 1);
+            }
+            wasm_runtime_disable_fuel(&rt);
+            WL_CHECK(t, err == WASM_ERR_OUT_OF_BOUNDS);
+            WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, 0, NULL, NULL, &unfused_offset));
+            WL_CHECK_MSG(t, fused_offset == unfused_offset, "%s(%d) trapped at %u, not %u", name, (int)traps[i],
+                         (unsigned)fused_offset, (unsigned)unfused_offset);
+            WL_CHECK_MSG(t, memcmp(fused_tail, data + 65472, 64) == 0, "%s(%d) stored differently before trapping",
+                         name, (int)traps[i]);
+        }
+        wasm_test_note_fused_ops(m, seen);
+        wasm_module_free(m);
+        wasm_destroy(&rt);
+    }
+
+    for (i = 0; i < WASM__OP_COUNT - WASM__OP_FUSED; i++)
+        WL_CHECK_MSG(t, seen[i], "fused op %u never formed", (unsigned)(WASM__OP_FUSED + i));
+}
+
+WL_TEST(test_resume_reentered_calls_unwind_on_fuel) {
+    wasm_runtime_t rt;
+    wasm_test_resume_host_t host;
+    wasm_module_t* m;
+    wasm_value_t arg = wasm_i32(1000);
+    wasm_value_t result = wasm_i32(0);
+
+    wasm_init(&rt);
+    m = wasm_test_load_resume_module(t, &rt, &host);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+
+    host.reenter_fuel = 5;
+    WL_CHECK(t, wasm_call(m, "outer", &arg, 1, &result, 1) == WASM_ERR_OUT_OF_FUEL);
+    WL_CHECK(t, wasm_runtime_suspended(&rt) == WASM_OK);
+    host.reenter_fuel = 0;
+    wasm_runtime_disable_fuel(&rt);
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "outer", &arg, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 46);
 
     wasm_module_free(m);
     wasm_destroy(&rt);
@@ -16194,8 +18699,8 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
         wasm_module_free(c);
     }
 
-    memory = wasm_memory_new(1, 2, 0);
-    table = wasm_table_new(WASM_TYPE_FUNCREF, 1, UINT32_MAX);
+    memory = wasm_memory_new(&wasm_test_allocator, 1, 2, 0);
+    table = wasm_table_new(&wasm_test_allocator, WASM_TYPE_FUNCREF, 1, UINT32_MAX);
     WL_CHECK(t, memory != NULL && table != NULL);
     memset(&memory_import, 0, sizeof(memory_import));
     memory_import.module = "host";
@@ -16392,6 +18897,12 @@ int main(void) {
         { "wasmgc: collector traces roots and rewrites live graphs", test_gc_collect_marks_runtime_roots_and_preserves_object_graphs },
         { "GC: collection marks deep object chains without recursion", test_gc_collect_marks_deep_object_chains_iteratively },
         { "wasmgc: allocator retries after collecting unreachable objects", test_gc_allocator_retries_after_collection_on_heap_exhaustion },
+        { "gc: the heap grows to fit live data and keeps objects intact", test_gc_heap_grows_with_live_data },
+        { "gc: heap growth stops at max_gc_heap_bytes with WASM_ERR_OOM", test_gc_heap_growth_respects_max_gc_heap_bytes },
+        { "gc: host externrefs round-trip exactly through anyref and are never i31 or eq", test_gc_host_externrefs_round_trip_through_anyref },
+        { "gc: host references whose bits fall inside a later GC heap stay host values", test_gc_host_refs_inside_a_later_heap_stay_host_values },
+        { "gc: init expressions keep their operands, globals, tables, and segments alive", test_gc_init_expressions_keep_their_operands_alive },
+        { "gc: wasm_struct_new and wasm_array_new keep their inputs alive", test_gc_host_constructors_keep_their_inputs_alive },
         { "wasmgc: runtime executes struct, array, i31, and conversion ops", test_gc_runtime_executes_struct_array_i31_and_conversion_ops },
         { "wasmgc: runtime executes casts and branch-on-cast ops", test_gc_runtime_executes_cast_and_branch_cast_opcodes },
         { "wasmgc: runtime executes segment-backed array ops", test_gc_runtime_executes_segment_backed_array_ops },
@@ -16414,8 +18925,11 @@ int main(void) {
         { "feature gate: disabled sign-extension rejects module load", test_feature_gate_sign_extension_disabled },
         { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
         { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
+        { "allocator: libc alignment and invalid allocators", test_allocator_contract },
+        { "allocator: every failing allocation unwinds without leaks", test_allocation_failures_unwind_without_leaks },
         { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
         { "runtime config: validator stack limit is enforced at load", test_runtime_config_limits_operand_stack_validation },
+        { "runtime: operand stack overflow traps at the call that needs the space", test_runtime_operand_stack_overflow_traps_at_call },
         { "runtime config: validator label limit is enforced at load", test_runtime_config_limits_label_depth_validation },
         { "runtime config: lazy validation defers body checks until first call", test_lazy_validation_defers_body_errors_until_first_call },
         { "runtime config: lazy validation still validates startup bodies at load", test_lazy_validation_still_runs_startup_bodies_at_load },
@@ -16427,6 +18941,8 @@ int main(void) {
         { "validation: stack type errors are rejected at load", test_validation_rejects_stack_type_errors },
         { "validation: memory.init requires a data count section", test_validation_requires_data_count_for_memory_init },
         { "validation: code body count must match declared functions", test_validation_rejects_code_body_count_mismatch },
+        { "validation: a body that ends before a blocktype is rejected", test_validation_rejects_a_body_ending_before_its_blocktype },
+        { "validation: huge array.new_fixed and br_table counts validate in bounded time", test_validation_of_huge_immediate_counts_stays_bounded },
         { "validation: data count must match data segment count", test_validation_rejects_data_count_mismatch },
         { "validation: call_indirect requires a funcref table", test_validation_rejects_call_indirect_on_externref_table },
         { "validation: invalid load alignment is rejected at load", test_validation_rejects_invalid_load_alignment },
@@ -16445,13 +18961,28 @@ int main(void) {
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
         { "memory: growth by a callee or host is visible to the caller", test_memory_grown_by_callee_or_host_is_visible_to_caller },
         { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
+        { "calls: recursion reaches the depth limit with fresh locals in every frame", test_calls_reach_the_depth_limit_with_fresh_locals_per_frame },
+        { "calls: call_indirect traps on mismatched, null, and out-of-range entries", test_call_indirect_traps_on_mismatched_null_and_out_of_range_entries },
+        { "calls: cross-module call_indirect checks types per calling module", test_cross_module_call_indirect_checks_types_per_calling_module },
+        { "calls: imports called indirectly from another module check results against their own type", test_imports_called_indirectly_from_another_module_check_results_against_their_own_type },
+        { "calls: an interrupt at a callee's entry suspends and resumes there", test_calls_interrupted_at_callee_entry_resume_there },
+        { "calls: references in locals survive collections and throws through deep chains", test_calls_keep_references_in_locals_through_collections_and_throws },
+        { "resume: fuel stops resumed step by step match unmetered runs", test_resume_fuel_steps_match_unmetered_runs },
+        { "resume: yielding host imports suspend nested frames until resumed or cancelled", test_resume_yielding_host_imports },
+        { "resume: GC objects in suspended frames survive collections", test_resume_keeps_gc_objects_alive_across_collections },
+        { "resume: collections while suspended trace references on the operand stack", test_resume_collects_with_references_on_the_operand_stack },
+        { "resume: interrupted calls continue where they stopped", test_resume_after_interrupts },
+        { "resume: a call re-entered from a host function unwinds when it runs out of fuel", test_resume_reentered_calls_unwind_on_fuel },
+        { "fused ops: results, traps, fuel stops, interrupts, and collections match unfused execution", test_fused_ops_match_unfused_execution },
         { "public api: register_module links instances; table, global, funcref, and host object APIs", test_register_module_links_instances_and_host_objects },
         { "backtrace: frames name their module and function from the name section", test_backtraces_name_modules_and_functions },
         { "gc: unreachable externref boxes and exnrefs are freed", test_gc_collects_unreachable_externref_boxes_and_exnrefs },
         { "gc: bulk instructions pay fuel for their size; array.new and held values stay rooted", test_bulk_fuel_and_array_new_rooting },
         { "load: repeated and out-of-order sections are malformed", test_load_rejects_misordered_sections },
         { "reject bad magic number", test_bad_magic },
+        { "f64 arithmetic: a NaN result takes the first NaN operand's payload", test_f64_arithmetic_propagates_the_first_nan_operand },
         { "trap on i32.div_s by zero", test_div_by_zero },
+        { "public api: failed calls record the trap code and message", test_failed_calls_record_trap_codes_and_messages },
         { "public api: backtrace helpers expose trap call stacks", test_public_backtrace_helpers_capture_traps },
         { "public api: fuel helpers meter finite execution", test_public_fuel_helpers_account_for_finite_calls },
         { "public api: fuel helpers stop infinite loops", test_public_fuel_helpers_trap_in_infinite_loop },

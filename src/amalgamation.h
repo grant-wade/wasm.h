@@ -43,6 +43,7 @@
 #include "validate/function.c"
 #include "load.c"
 #include "exec/frames.c"
+#include "exec/slots.c"
 #include "gc.c"
 #include "exec/calls.c"
 #include "exec/translate.c"

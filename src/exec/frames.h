@@ -13,6 +13,16 @@ WASM_PRIVATE void wasm__capture_backtrace(wasm_runtime_t* rt, uint32_t base_fram
 
 WASM_PRIVATE uint32_t wasm__visible_call_stack_depth(const wasm_runtime_t* rt);
 
+/* Returns the slot kinds of frame frame_index's operand stack, covering *out_slots slots from its
+ * base, or NULL if none of its slots holds a reference the collector traces. */
+WASM_PRIVATE const uint32_t* wasm__frame_stack_map(const wasm_runtime_t* rt, uint32_t frame_index, uint32_t* out_slots);
+
+#ifndef NDEBUG
+/* Aborts unless each reference slot of rt's frames, by stack map or local type, holds null or a
+ * value of its kind the runtime knows. */
+WASM_PRIVATE void wasm__check_stack_maps(const wasm_runtime_t* rt);
+#endif
+
 WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
                                          uint32_t depth,
                                          wasm_module_t** out_module,

@@ -9,13 +9,13 @@
 #include <string.h>
 
 #if WASM_ENABLE_PLATFORM
-WASM_PRIVATE char* wasm__wasi_strdup(const char* text) {
+WASM_PRIVATE char* wasm__wasi_strdup(const wasm_allocator_t* a, const char* text) {
     size_t len;
     char* copy;
 
     if (!text) return NULL;
     len = strlen(text);
-    copy = (char*)WASM_MALLOC(len + 1u);
+    copy = (char*)wasm__malloc(a, len + 1u);
     if (!copy) return NULL;
     memcpy(copy, text, len + 1u);
     return copy;
@@ -66,25 +66,25 @@ WASM_PRIVATE uint8_t wasm__wasi_filetype_from_mode(int mode) {
     return WASM__WASI_FILETYPE_UNKNOWN;
 }
 
-WASM_PRIVATE void wasm__wasi_fd_entry_reset(wasm__wasi_fd_entry_t* entry) {
+WASM_PRIVATE void wasm__wasi_fd_entry_reset(const wasm_allocator_t* a, wasm__wasi_fd_entry_t* entry) {
     if (!entry) return;
     if (entry->owns_host_fd && entry->host_fd >= 0) (void)wasm__wasi_host_close(entry->host_fd);
-    WASM_FREE(entry->host_path);
-    WASM_FREE(entry->preopen_path);
+    wasm__free(a, entry->host_path);
+    wasm__free(a, entry->preopen_path);
     memset(entry, 0, sizeof(*entry));
     entry->host_fd = -1;
 }
 
-WASM_PRIVATE void wasm__wasi_strings_free(wasm__wasi_strings_t* strings) {
+WASM_PRIVATE void wasm__wasi_strings_free(const wasm_allocator_t* a, wasm__wasi_strings_t* strings) {
     uint32_t i;
 
     if (!strings) return;
-    for (i = 0; i < strings->count; i++) WASM_FREE(strings->items[i]);
-    WASM_FREE(strings->items);
+    for (i = 0; i < strings->count; i++) wasm__free(a, strings->items[i]);
+    wasm__free(a, strings->items);
     memset(strings, 0, sizeof(*strings));
 }
 
-WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, uint32_t count,
+WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(const wasm_allocator_t* a, wasm__wasi_strings_t* strings, uint32_t count,
                                                  const char* const* values) {
     wasm__wasi_strings_t copy;
     uint32_t i;
@@ -93,22 +93,22 @@ WASM_PRIVATE wasm_error_t wasm__wasi_strings_set(wasm__wasi_strings_t* strings, 
     memset(&copy, 0, sizeof(copy));
     copy.is_set = 1;
     if (count > 0u) {
-        copy.items = (char**)WASM_CALLOC(count, sizeof(char*));
+        copy.items = (char**)wasm__calloc(a, count, sizeof(char*));
         if (!copy.items) return WASM_ERR_OOM;
     }
     for (i = 0; i < count; i++) {
         if (!values[i]) {
-            wasm__wasi_strings_free(&copy);
+            wasm__wasi_strings_free(a, &copy);
             return WASM_ERR_MALFORMED;
         }
-        copy.items[i] = wasm__wasi_strdup(values[i]);
+        copy.items[i] = wasm__wasi_strdup(a, values[i]);
         if (!copy.items[i]) {
-            wasm__wasi_strings_free(&copy);
+            wasm__wasi_strings_free(a, &copy);
             return WASM_ERR_OOM;
         }
         copy.count = i + 1u;
     }
-    wasm__wasi_strings_free(strings);
+    wasm__wasi_strings_free(a, strings);
     *strings = copy;
     return WASM_OK;
 }
@@ -120,10 +120,10 @@ WASM_PRIVATE void wasm__wasi_state_destroy(wasm_runtime_t* rt) {
     if (!rt || !rt->wasi_state) return;
 
     state = rt->wasi_state;
-    for (i = 0; i < WASM__WASI_MAX_FDS; i++) wasm__wasi_fd_entry_reset(&state->fds[i]);
-    wasm__wasi_strings_free(&state->args);
-    wasm__wasi_strings_free(&state->env);
-    WASM_FREE(state);
+    for (i = 0; i < WASM__WASI_MAX_FDS; i++) wasm__wasi_fd_entry_reset(&rt->allocator, &state->fds[i]);
+    wasm__wasi_strings_free(&rt->allocator, &state->args);
+    wasm__wasi_strings_free(&rt->allocator, &state->env);
+    wasm__free(&rt->allocator, state);
     rt->wasi_state = NULL;
 }
 
@@ -156,13 +156,13 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
 
     if (!rt || !rt->wasi_state) return WASM_ERR_MALFORMED;
     if (host_path) {
-        copied_host_path = wasm__wasi_strdup(host_path);
+        copied_host_path = wasm__wasi_strdup(&rt->allocator, host_path);
         if (!copied_host_path) return WASM_ERR_OOM;
     }
     if (preopen_path) {
-        copied_preopen_path = wasm__wasi_strdup(preopen_path);
+        copied_preopen_path = wasm__wasi_strdup(&rt->allocator, preopen_path);
         if (!copied_preopen_path) {
-            WASM_FREE(copied_host_path);
+            wasm__free(&rt->allocator, copied_host_path);
             return WASM_ERR_OOM;
         }
     }
@@ -185,8 +185,8 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_add_fd(wasm_runtime_t* rt,
         return WASM_OK;
     }
 
-    WASM_FREE(copied_host_path);
-    WASM_FREE(copied_preopen_path);
+    wasm__free(&rt->allocator, copied_host_path);
+    wasm__free(&rt->allocator, copied_preopen_path);
     if (owns_host_fd && host_fd >= 0) (void)wasm__wasi_host_close(host_fd);
     return WASM_ERR_OOM;
 }
@@ -199,7 +199,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_preopen_dir(wasm_runtime_t* rt, const
 
     if (!rt || !rt->wasi_state || !host_path || !guest_path || !guest_path[0]) return WASM_ERR_MALFORMED;
 #if defined(_WIN32)
-    if (!wasm__wasi_windows_stat_path(host_path, &st)) return WASM_ERR_MALFORMED;
+    if (!wasm__wasi_windows_stat_path(&rt->allocator, host_path, &st)) return WASM_ERR_MALFORMED;
 #elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
     {
         int flags = O_RDONLY;
@@ -237,7 +237,7 @@ WASM_PRIVATE wasm_error_t wasm__wasi_state_ensure(wasm_runtime_t* rt) {
     if (!rt) return WASM_ERR_MALFORMED;
     if (rt->wasi_state) return WASM_OK;
 
-    state = (wasm__wasi_state_t*)WASM_CALLOC(1u, sizeof(*state));
+    state = (wasm__wasi_state_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*state));
     if (!state) return WASM_ERR_OOM;
 
     state->fds[WASM__WASI_FD_STDIN].host_fd = -1;
@@ -263,7 +263,7 @@ WASM_PRIVATE wasm__wasi_fd_entry_t* wasm__wasi_fd_entry(wasm_runtime_t* rt, uint
     return &rt->wasi_state->fds[fd];
 }
 
-static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
+static int wasm__wasi_read_guest_bytes(const wasm_allocator_t* a, wasm_memory_t* memory,
                                        uint64_t mem_size,
                                        uint32_t ptr,
                                        uint32_t len,
@@ -273,7 +273,7 @@ static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
     if (!memory || !out_bytes) return 0;
     *out_bytes = NULL;
     if (!wasm__range_in_bounds_u64((uint64_t)ptr, (uint64_t)len, mem_size)) return 0;
-    copy = (uint8_t*)WASM_MALLOC((size_t)len + 1u);
+    copy = (uint8_t*)wasm__malloc(a, (size_t)len + 1u);
     if (!copy) return 0;
     if (len > 0u) memcpy(copy, memory->data + ptr, len);
     copy[len] = 0u;
@@ -281,7 +281,7 @@ static int wasm__wasi_read_guest_bytes(wasm_memory_t* memory,
     return 1;
 }
 
-WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
+WASM_PRIVATE int wasm__wasi_read_guest_string(const wasm_allocator_t* a, wasm_memory_t* memory,
                                         uint64_t mem_size,
                                         uint32_t ptr,
                                         uint32_t len,
@@ -290,7 +290,7 @@ WASM_PRIVATE int wasm__wasi_read_guest_string(wasm_memory_t* memory,
 
     if (!out_text) return 0;
     *out_text = NULL;
-    if (!wasm__wasi_read_guest_bytes(memory, mem_size, ptr, len, &bytes)) return 0;
+    if (!wasm__wasi_read_guest_bytes(a, memory, mem_size, ptr, len, &bytes)) return 0;
     *out_text = (char*)bytes;
     return 1;
 }
@@ -331,7 +331,7 @@ WASM_PRIVATE int wasm__wasi_path_walk(const char* path, uint32_t depth, uint32_t
     return 1;
 }
 
-WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
+WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(const wasm_allocator_t* a, wasm_memory_t* memory,
                                            uint64_t mem_size,
                                            uint32_t ptr,
                                            uint32_t len,
@@ -340,9 +340,9 @@ WASM_PRIVATE uint32_t wasm__wasi_read_guest_path(wasm_memory_t* memory,
 
     if (!out_path) return WASM__WASI_ERRNO_FAULT;
     *out_path = NULL;
-    if (!wasm__wasi_read_guest_string(memory, mem_size, ptr, len, &path)) return WASM__WASI_ERRNO_FAULT;
+    if (!wasm__wasi_read_guest_string(a, memory, mem_size, ptr, len, &path)) return WASM__WASI_ERRNO_FAULT;
     if (strlen(path) != (size_t)len || !wasm__wasi_path_walk(path, 0u, NULL)) {
-        WASM_FREE(path);
+        wasm__free(a, path);
         return WASM__WASI_ERRNO_NOTCAPABLE;
     }
     *out_path = path;
@@ -494,7 +494,7 @@ WASM_PRIVATE int wasm__wasi_host_pwrite(int fd, const void* buf, size_t len, uin
 #endif
 #if WASM_ENABLE_PLATFORM
 #if defined(_WIN32)
-WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out_wide) {
+WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const wasm_allocator_t* a, const char* text, wchar_t** out_wide) {
     int count;
     wchar_t* wide;
 
@@ -502,17 +502,17 @@ WASM_PRIVATE int wasm__wasi_windows_utf8_to_wide(const char* text, wchar_t** out
     *out_wide = NULL;
     count = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
     if (count <= 0) return 0;
-    wide = (wchar_t*)wasm__malloc_array((size_t)count, sizeof(wchar_t));
+    wide = (wchar_t*)wasm__malloc_array(a, (size_t)count, sizeof(wchar_t));
     if (!wide) return 0;
     if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, count) <= 0) {
-        WASM_FREE(wide);
+        wasm__free(a, wide);
         return 0;
     }
     *out_wide = wide;
     return 1;
 }
 
-WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out_text) {
+WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wasm_allocator_t* a, const wchar_t* text, char** out_text) {
     int count;
     char* utf8;
 
@@ -520,10 +520,10 @@ WASM_PRIVATE int wasm__wasi_windows_wide_to_utf8(const wchar_t* text, char** out
     *out_text = NULL;
     count = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
     if (count <= 0) return 0;
-    utf8 = (char*)WASM_MALLOC((size_t)count);
+    utf8 = (char*)wasm__malloc(a, (size_t)count);
     if (!utf8) return 0;
     if (WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, count, NULL, NULL) <= 0) {
-        WASM_FREE(utf8);
+        wasm__free(a, utf8);
         return 0;
     }
     *out_text = utf8;
@@ -545,7 +545,7 @@ WASM_PRIVATE int wasm__wasi_windows_path_is_absolute(const char* path) {
     return ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':';
 }
 
-WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path, char** out_path) {
+WASM_PRIVATE int wasm__wasi_windows_join_path(const wasm_allocator_t* a, const char* base, const char* path, char** out_path) {
     size_t base_len;
     size_t path_len;
     char* joined;
@@ -553,11 +553,11 @@ WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path
     if (!path || !out_path) return 0;
     *out_path = NULL;
     if (wasm__wasi_windows_path_is_absolute(path)) return 0;
-    if (!base || !base[0]) return (*out_path = wasm__wasi_strdup(path)) != NULL;
+    if (!base || !base[0]) return (*out_path = wasm__wasi_strdup(a, path)) != NULL;
 
     base_len = strlen(base);
     path_len = strlen(path);
-    joined = (char*)WASM_MALLOC(base_len + 1u + path_len + 1u);
+    joined = (char*)wasm__malloc(a, base_len + 1u + path_len + 1u);
     if (!joined) return 0;
     memcpy(joined, base, base_len);
     if (base_len > 0u && joined[base_len - 1u] != '\\' && joined[base_len - 1u] != '/') joined[base_len++] = '\\';
@@ -567,28 +567,28 @@ WASM_PRIVATE int wasm__wasi_windows_join_path(const char* base, const char* path
     return 1;
 }
 
-WASM_PRIVATE int wasm__wasi_windows_stat_path(const char* path, wasm__wasi_host_stat_t* st) {
+WASM_PRIVATE int wasm__wasi_windows_stat_path(const wasm_allocator_t* a, const char* path, wasm__wasi_host_stat_t* st) {
     wchar_t* wide = NULL;
     int ok;
 
     if (!path || !st) return 0;
-    if (!wasm__wasi_windows_utf8_to_wide(path, &wide)) return 0;
+    if (!wasm__wasi_windows_utf8_to_wide(a, path, &wide)) return 0;
     ok = _wstat64(wide, st) == 0;
-    WASM_FREE(wide);
+    wasm__free(a, wide);
     return ok;
 }
 
-WASM_PRIVATE int wasm__wasi_windows_open_path(const char* path, int oflags) {
+WASM_PRIVATE int wasm__wasi_windows_open_path(const wasm_allocator_t* a, const char* path, int oflags) {
     wchar_t* wide = NULL;
     int fd;
 
     if (!path) return -1;
-    if (!wasm__wasi_windows_utf8_to_wide(path, &wide)) {
+    if (!wasm__wasi_windows_utf8_to_wide(a, path, &wide)) {
         errno = EINVAL;
         return -1;
     }
     fd = _wopen(wide, oflags, _S_IREAD | _S_IWRITE);
-    WASM_FREE(wide);
+    wasm__free(a, wide);
     return fd;
 }
 
@@ -627,13 +627,13 @@ WASM_PRIVATE uint32_t wasm__wasi_windows_error_to_wasi(DWORD error_code) {
     }
 }
 
-WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm__wasi_fd_entry_t* entry,
+WASM_PRIVATE int wasm__wasi_windows_resolve_path(const wasm_allocator_t* a, const wasm__wasi_fd_entry_t* entry,
                                            const char* path,
                                            char** out_path) {
     const char* base_path = wasm__wasi_entry_host_path(entry);
 
     if (!entry || !path || !out_path || !base_path) return 0;
-    return wasm__wasi_windows_join_path(base_path, path, out_path);
+    return wasm__wasi_windows_join_path(a, base_path, path, out_path);
 }
 
 WASM_PRIVATE uint8_t wasm__wasi_windows_filetype_from_attributes(DWORD attributes) {
@@ -642,7 +642,7 @@ WASM_PRIVATE uint8_t wasm__wasi_windows_filetype_from_attributes(DWORD attribute
     return WASM__WASI_FILETYPE_REGULAR_FILE;
 }
 
-WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_target) {
+WASM_PRIVATE int wasm__wasi_windows_readlink_path(const wasm_allocator_t* a, const char* path, char** out_target) {
     wchar_t* wide_path = NULL;
     HANDLE handle = INVALID_HANDLE_VALUE;
     DWORD wide_len;
@@ -652,7 +652,7 @@ WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_t
 
     if (!path || !out_target) return 0;
     *out_target = NULL;
-    if (!wasm__wasi_windows_utf8_to_wide(path, &wide_path)) return 0;
+    if (!wasm__wasi_windows_utf8_to_wide(a, path, &wide_path)) return 0;
     handle = CreateFileW(wide_path, 0,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING,
@@ -662,10 +662,10 @@ WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_t
 
     wide_len = GetFinalPathNameByHandleW(handle, NULL, 0u, FILE_NAME_NORMALIZED);
     if (wide_len == 0u) goto cleanup;
-    wide_target = (wchar_t*)WASM_MALLOC(((size_t)wide_len + 1u) * sizeof(wchar_t));
+    wide_target = (wchar_t*)wasm__malloc(a, ((size_t)wide_len + 1u) * sizeof(wchar_t));
     if (!wide_target) goto cleanup;
     if (GetFinalPathNameByHandleW(handle, wide_target, wide_len + 1u, FILE_NAME_NORMALIZED) == 0u) goto cleanup;
-    if (!wasm__wasi_windows_wide_to_utf8(wide_target, &utf8_target)) goto cleanup;
+    if (!wasm__wasi_windows_wide_to_utf8(a, wide_target, &utf8_target)) goto cleanup;
     if (strncmp(utf8_target, "\\\\?\\UNC\\", 8u) == 0)
         memmove(utf8_target + 1u, utf8_target + 7u, strlen(utf8_target + 7u) + 1u);
     else if (strncmp(utf8_target, "\\\\?\\", 4u) == 0)
@@ -676,9 +676,9 @@ WASM_PRIVATE int wasm__wasi_windows_readlink_path(const char* path, char** out_t
 
 cleanup:
     if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
-    WASM_FREE(wide_path);
-    WASM_FREE(wide_target);
-    WASM_FREE(utf8_target);
+    wasm__free(a, wide_path);
+    wasm__free(a, wide_target);
+    wasm__free(a, utf8_target);
     return ok;
 }
 
@@ -705,7 +705,7 @@ WASM_PRIVATE void wasm__wasi_store_filestat(uint8_t* dst, const wasm__wasi_host_
     wasm__store_le64(dst + 56u, wasm__wasi_stat_time_ns(st, 2));
 }
 
-WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st) {
+WASM_PRIVATE int wasm__wasi_entry_stat(const wasm_allocator_t* a, const wasm__wasi_fd_entry_t* entry, wasm__wasi_host_stat_t* st) {
     if (!entry || !st) return 0;
     if (entry->host_fd >= 0) return wasm__wasi_host_fstat(entry->host_fd, st);
 #if defined(_WIN32)
@@ -713,9 +713,10 @@ WASM_PRIVATE int wasm__wasi_entry_stat(const wasm__wasi_fd_entry_t* entry, wasm_
         const char* host_path = wasm__wasi_entry_host_path(entry);
 
         if (!host_path) return 0;
-        return wasm__wasi_windows_stat_path(host_path, st);
+        return wasm__wasi_windows_stat_path(a, host_path, st);
     }
 #else
+    (void)a;
     return 0;
 #endif
 }

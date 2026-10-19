@@ -8,6 +8,8 @@
 #include "memory_internal.h"
 #include "reader.h"
 #include "exec/frames.h"
+#include "exec/interpreter.h"
+#include "gc.h"
 #include "platform/wasi_state.h"
 #include "platform/emscripten.h"
 #include "internal/gc_types.h"
@@ -113,7 +115,7 @@ WASM_PRIVATE wasm_tag_import_t* wasm__find_tag_import(wasm_runtime_t* rt,
 }
 
 static void wasm__gc_heap_destroy(wasm_runtime_t* rt) {
-    WASM_GC_FREE(rt->gc_heap);
+    wasm__free_sized(&rt->allocator, rt->gc_heap, rt->gc_heap_size, WASM__BLOCK_ALIGN);
     rt->gc_heap = NULL;
     rt->gc_heap_size = 0;
     rt->gc_heap_offset = 0;
@@ -152,15 +154,29 @@ WASM_PRIVATE int wasm__gc_ptr_in_heap(const wasm_runtime_t* rt, const void* ptr)
 
 WASM_PRIVATE wasm_error_t wasm__gc_heap_init(wasm_runtime_t* rt, size_t size) {
     wasm__gc_heap_destroy(rt);
+    if (rt->max_gc_heap_bytes != 0 && size > rt->max_gc_heap_bytes) size = (size_t)rt->max_gc_heap_bytes;
+    rt->gc_heap_min_size = size;
     if (size == 0) return WASM_OK;
 
-    rt->gc_heap = (uint8_t*)WASM_GC_ALLOC(size);
+    rt->gc_heap = (uint8_t*)wasm__alloc_sized(&rt->allocator, size, WASM__BLOCK_ALIGN);
     if (!rt->gc_heap) return WASM_ERR_OOM;
 
     rt->gc_heap_size = size;
     rt->gc_heap_offset = 0;
     rt->gc_allocations = NULL;
     return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, wasm_value_t* const* values,
+                                     const uint32_t* count) {
+    root->prev = rt->gc_roots;
+    root->values = values;
+    root->count = count;
+    rt->gc_roots = root;
+}
+
+WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root) {
+    rt->gc_roots = root->prev;
 }
 
 void wasm_runtime_interrupt(wasm_runtime_t* rt) {
@@ -213,9 +229,12 @@ static wasm_gc_header_t* wasm__gc_alloc_object(wasm_runtime_t* rt,
 
     object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
     if (!object) {
-        wasm_gc_collect(rt);
+        if (wasm__gc_collect(rt, object_size) != WASM_OK) return NULL;
         object = (wasm_gc_header_t*)wasm__gc_bump_alloc(rt, object_size, (size_t)WASM__ALIGNOF(wasm_value_t));
-        if (!object) return NULL;
+        if (!object) {
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "no room for a %zu-byte GC object", object_size);
+            return NULL;
+        }
     }
 
     memset(object, 0, object_size);
@@ -254,19 +273,18 @@ WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
     return object;
 }
 
-/* Block storage starts this far into a block, and allocations are aligned to it. */
-#define WASM__ARENA_ALIGN ((size_t)16u)
-#define WASM__ARENA_HEADER \
-    ((sizeof(wasm__arena_chunk_t) + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN)
+static void wasm__arena_free_chunk(wasm_runtime_t* rt, wasm__arena_chunk_t* chunk) {
+    if (chunk) wasm__free_sized(&rt->allocator, chunk, WASM__ARENA_HEADER + chunk->size, WASM__ARENA_ALIGN);
+}
 
 WASM_PRIVATE void wasm__arena_destroy(wasm_runtime_t* rt) {
     while (rt->frame_arena) {
         wasm__arena_chunk_t* prev = rt->frame_arena->prev;
 
-        WASM_FREE(rt->frame_arena);
+        wasm__arena_free_chunk(rt, rt->frame_arena);
         rt->frame_arena = prev;
     }
-    WASM_FREE(rt->frame_arena_spare);
+    wasm__arena_free_chunk(rt, rt->frame_arena_spare);
     rt->frame_arena_spare = NULL;
     rt->frame_arena_size = 0;
 }
@@ -279,7 +297,7 @@ static wasm__arena_chunk_t* wasm__arena_new_chunk(wasm_runtime_t* rt, size_t min
         rt->frame_arena_spare = NULL;
     } else {
         if (size > SIZE_MAX - WASM__ARENA_HEADER) return NULL;
-        chunk = (wasm__arena_chunk_t*)WASM_MALLOC(WASM__ARENA_HEADER + size);
+        chunk = (wasm__arena_chunk_t*)wasm__alloc_sized(&rt->allocator, WASM__ARENA_HEADER + size, WASM__ARENA_ALIGN);
         if (!chunk) return NULL;
         chunk->size = size;
     }
@@ -318,15 +336,15 @@ WASM_PRIVATE wasm__arena_mark_t wasm__arena_mark(const wasm_runtime_t* rt) {
     return mark;
 }
 
-WASM_PRIVATE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
+WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
     while (rt->frame_arena && rt->frame_arena != mark.chunk) {
         wasm__arena_chunk_t* chunk = rt->frame_arena;
 
         rt->frame_arena = chunk->prev;
         if (rt->frame_arena_spare && rt->frame_arena_spare->size >= chunk->size) {
-            WASM_FREE(chunk);
+            wasm__arena_free_chunk(rt, chunk);
         } else {
-            WASM_FREE(rt->frame_arena_spare);
+            wasm__arena_free_chunk(rt, rt->frame_arena_spare);
             rt->frame_arena_spare = chunk;
         }
     }
@@ -346,12 +364,15 @@ void wasm_config_default(wasm_config_t* config) {
     config->max_memory_bytes = (uint64_t)WASM_MAX_MEMORY_BYTES;
     config->max_total_memory_bytes = 0;
     config->max_table_elements = (uint64_t)WASM_MAX_TABLE_ELEMENTS;
+    config->max_gc_heap_bytes = (uint64_t)WASM_MAX_GC_HEAP_BYTES;
 }
 
 static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
     if (max_stack == 0) return WASM_ERR_MALFORMED;
 
-    rt->stack = (wasm_value_t*)wasm__malloc_array((size_t)max_stack, sizeof(*rt->stack));
+    if (sizeof(*rt->stack) > SIZE_MAX / (size_t)max_stack) return WASM_ERR_OOM;
+    rt->stack = (wasm__slot_t*)wasm__alloc_sized(&rt->allocator, (size_t)max_stack * sizeof(*rt->stack),
+                                                 WASM__ALIGNOF(wasm__slot_t));
     if (!rt->stack) return WASM_ERR_OOM;
 
     rt->max_stack = max_stack;
@@ -360,7 +381,7 @@ static wasm_error_t wasm__stack_init(wasm_runtime_t* rt, uint32_t max_stack) {
 }
 
 static void wasm__stack_destroy(wasm_runtime_t* rt) {
-    WASM_FREE(rt->stack);
+    wasm__free_sized(&rt->allocator, rt->stack, (size_t)rt->max_stack * sizeof(*rt->stack), WASM__ALIGNOF(wasm__slot_t));
     rt->stack = NULL;
     rt->max_stack = 0;
     rt->sp = 0;
@@ -369,15 +390,15 @@ static void wasm__stack_destroy(wasm_runtime_t* rt) {
 static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
     if (max_depth == 0) return WASM_ERR_MALFORMED;
 
-    rt->backtrace_func_indices = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_func_indices));
+    rt->backtrace_func_indices = (uint32_t*)wasm__malloc_array(&rt->allocator, (size_t)max_depth, sizeof(*rt->backtrace_func_indices));
     if (!rt->backtrace_func_indices) return WASM_ERR_OOM;
 
-    rt->backtrace_offsets = (uint32_t*)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_offsets));
-    rt->backtrace_modules = (wasm_module_t**)wasm__malloc_array((size_t)max_depth, sizeof(*rt->backtrace_modules));
+    rt->backtrace_offsets = (uint32_t*)wasm__malloc_array(&rt->allocator, (size_t)max_depth, sizeof(*rt->backtrace_offsets));
+    rt->backtrace_modules = (wasm_module_t**)wasm__malloc_array(&rt->allocator, (size_t)max_depth, sizeof(*rt->backtrace_modules));
     if (!rt->backtrace_offsets || !rt->backtrace_modules) {
-        WASM_FREE(rt->backtrace_func_indices);
-        WASM_FREE(rt->backtrace_offsets);
-        WASM_FREE(rt->backtrace_modules);
+        wasm__free(&rt->allocator, rt->backtrace_func_indices);
+        wasm__free(&rt->allocator, rt->backtrace_offsets);
+        wasm__free(&rt->allocator, rt->backtrace_modules);
         rt->backtrace_func_indices = NULL;
         rt->backtrace_offsets = NULL;
         rt->backtrace_modules = NULL;
@@ -389,20 +410,22 @@ static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth)
 }
 
 static void wasm__backtrace_destroy(wasm_runtime_t* rt) {
-    WASM_FREE(rt->backtrace_func_indices);
-    WASM_FREE(rt->backtrace_offsets);
-    WASM_FREE(rt->backtrace_modules);
+    wasm__free(&rt->allocator, rt->backtrace_func_indices);
+    wasm__free(&rt->allocator, rt->backtrace_offsets);
+    wasm__free(&rt->allocator, rt->backtrace_modules);
     rt->backtrace_func_indices = NULL;
     rt->backtrace_offsets = NULL;
     rt->backtrace_modules = NULL;
     rt->backtrace_depth = 0;
 }
 
-wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config) {
-    wasm_runtime_t* rt = (wasm_runtime_t*)WASM_MALLOC(sizeof(*rt));
+wasm_runtime_t* wasm_runtime_new(const wasm_allocator_t* allocator, const wasm_config_t* config) {
+    wasm_runtime_t* rt;
 
+    if (!wasm__allocator_valid(allocator)) return NULL;
+    rt = (wasm_runtime_t*)wasm__alloc_sized(allocator, sizeof(*rt), WASM__ALIGNOF(wasm_runtime_t));
     if (!rt) return NULL;
-    if (wasm__runtime_init(rt, config) != WASM_OK) {
+    if (wasm__runtime_init(rt, allocator, config) != WASM_OK) {
         wasm_runtime_free(rt);
         return NULL;
     }
@@ -410,18 +433,31 @@ wasm_runtime_t* wasm_runtime_new(const wasm_config_t* config) {
 }
 
 void wasm_runtime_free(wasm_runtime_t* rt) {
+    wasm_allocator_t allocator;
+
     if (!rt) return;
+    allocator = rt->allocator;
     wasm__runtime_destroy(rt);
-    WASM_FREE(rt);
+    wasm__free_sized(&allocator, rt, sizeof(*rt), WASM__ALIGNOF(wasm_runtime_t));
 }
 
-WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_config_t* config) {
+const wasm_allocator_t* wasm_runtime_allocator(const wasm_runtime_t* rt) {
+    return rt ? &rt->allocator : NULL;
+}
+
+WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_allocator_t* allocator,
+                                             const wasm_config_t* config) {
     wasm_config_t cfg;
     wasm_error_t err;
 
     if (!rt) return WASM_ERR_MALFORMED;
 
     memset(rt, 0, sizeof(*rt));
+    if (!wasm__allocator_valid(allocator)) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "invalid allocator");
+        return WASM_ERR_MALFORMED;
+    }
+    rt->allocator = *allocator;
     rt->next_tag_identity = 1;
 
     if (config)
@@ -442,6 +478,7 @@ WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_conf
     rt->max_memory_bytes = cfg.max_memory_bytes;
     rt->max_total_memory_bytes = cfg.max_total_memory_bytes;
     rt->max_table_elements = cfg.max_table_elements;
+    rt->max_gc_heap_bytes = cfg.max_gc_heap_bytes;
 
     err = wasm__stack_init(rt, cfg.max_stack_values);
     if (err != WASM_OK) {
@@ -525,6 +562,7 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
 
     if (!rt) return;
 
+    wasm__interp_cancel(rt);
     while (rt->failed_modules) {
         wasm_module_t* failed = rt->failed_modules;
         rt->failed_modules = failed->failed_next;
@@ -533,63 +571,68 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     }
 
     for (i = 0; i < rt->num_imports; i++) {
-        WASM_FREE((void*)rt->imports[i].module);
-        WASM_FREE((void*)rt->imports[i].name);
-        wasm__free_functype(&rt->imports[i].type);
+        wasm__free(&rt->allocator, (void*)rt->imports[i].module);
+        wasm__free(&rt->allocator, (void*)rt->imports[i].name);
+        wasm__free_functype(&rt->allocator, &rt->imports[i].type);
     }
     for (i = 0; i < rt->num_global_imports; i++) {
-        WASM_FREE((void*)rt->global_imports[i].module);
-        WASM_FREE((void*)rt->global_imports[i].name);
+        wasm__free(&rt->allocator, (void*)rt->global_imports[i].module);
+        wasm__free(&rt->allocator, (void*)rt->global_imports[i].name);
     }
     for (i = 0; i < rt->num_table_imports; i++) {
-        WASM_FREE((void*)rt->table_imports[i].module);
-        WASM_FREE((void*)rt->table_imports[i].name);
+        wasm__free(&rt->allocator, (void*)rt->table_imports[i].module);
+        wasm__free(&rt->allocator, (void*)rt->table_imports[i].name);
     }
     for (i = 0; i < rt->num_memory_imports; i++) {
-        WASM_FREE((void*)rt->memory_imports[i].module);
-        WASM_FREE((void*)rt->memory_imports[i].name);
+        wasm__free(&rt->allocator, (void*)rt->memory_imports[i].module);
+        wasm__free(&rt->allocator, (void*)rt->memory_imports[i].name);
     }
     for (i = 0; i < rt->num_tag_imports; i++) {
-        WASM_FREE((void*)rt->tag_imports[i].module);
-        WASM_FREE((void*)rt->tag_imports[i].name);
-        wasm__free_functype(&rt->tag_imports[i].type);
+        wasm__free(&rt->allocator, (void*)rt->tag_imports[i].module);
+        wasm__free(&rt->allocator, (void*)rt->tag_imports[i].name);
+        wasm__free_functype(&rt->allocator, &rt->tag_imports[i].type);
     }
-    WASM_FREE(rt->imports);
-    WASM_FREE(rt->func_refs);
-    WASM_FREE(rt->global_imports);
-    WASM_FREE(rt->table_imports);
-    WASM_FREE(rt->memory_imports);
-    WASM_FREE(rt->tag_imports);
-    for (i = 0; i < rt->externref_boxes.capacity; i++) WASM_FREE(rt->externref_boxes.slots[i]);
+    wasm__free(&rt->allocator, rt->imports);
+    wasm__free(&rt->allocator, rt->func_refs);
+    wasm__free(&rt->allocator, rt->global_imports);
+    wasm__free(&rt->allocator, rt->table_imports);
+    wasm__free(&rt->allocator, rt->memory_imports);
+    wasm__free(&rt->allocator, rt->tag_imports);
+    for (i = 0; i < rt->externref_boxes.capacity; i++) wasm__free(&rt->allocator, rt->externref_boxes.slots[i]);
     for (i = 0; i < rt->exception_objects.capacity; i++) {
         wasm__exception_object_t* exception_object = (wasm__exception_object_t*)rt->exception_objects.slots[i];
 
         if (!exception_object) continue;
-        WASM_FREE(exception_object->values);
-        WASM_FREE(exception_object);
+        wasm__free(&rt->allocator, exception_object->values);
+        wasm__free(&rt->allocator, exception_object);
     }
     while (rt->linked_funcs) {
         wasm__linked_func_t* next = rt->linked_funcs->next;
 
-        WASM_FREE(rt->linked_funcs);
+        wasm__free(&rt->allocator, rt->linked_funcs);
         rt->linked_funcs = next;
     }
     while (rt->held_values) {
         wasm__held_block_t* next = rt->held_values->next;
 
-        WASM_FREE(rt->held_values);
+        wasm__free(&rt->allocator, rt->held_values);
         rt->held_values = next;
     }
-    wasm__handle_set_free(&rt->exception_objects);
-    wasm__handle_set_free(&rt->externref_boxes);
+    wasm__handle_set_free(&rt->allocator, &rt->exception_objects);
+    wasm__handle_set_free(&rt->allocator, &rt->externref_boxes);
     rt->handle_gc_threshold = 0;
-    WASM_FREE(rt->validator_stack);
-    WASM_FREE(rt->validator_stack_reftypes);
-    WASM_FREE(rt->validator_frames);
-    WASM_FREE(rt->validator_local_init_bits);
-    WASM_FREE(rt->validator_local_init_entry_bits);
-    WASM_FREE(rt->validator_heights);
-    wasm__free_exception_state(&rt->pending_exception);
+    wasm__free(&rt->allocator, rt->validator_stack);
+    wasm__free(&rt->allocator, rt->validator_stack_reftypes);
+    wasm__free(&rt->allocator, rt->validator_frames);
+    wasm__free(&rt->allocator, rt->validator_local_init_bits);
+    wasm__free(&rt->allocator, rt->validator_local_init_entry_bits);
+    wasm__free(&rt->allocator, rt->validator_stack_slots);
+    wasm__free(&rt->allocator, rt->validator_stack_refs);
+    wasm__free(&rt->allocator, rt->validator_heights);
+    wasm__free(&rt->allocator, rt->validator_operand_types);
+    wasm__free(&rt->allocator, rt->validator_maps);
+    wasm__free(&rt->allocator, rt->validator_map_bits);
+    wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
     wasm__backtrace_destroy(rt);
     wasm__call_frame_stack_destroy(rt);
     wasm__arena_destroy(rt);
@@ -616,18 +659,18 @@ WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
 
     if (rt->num_imports >= rt->cap_imports) {
         uint32_t new_cap = rt->cap_imports ? rt->cap_imports * 2 : 16;
-        wasm_import_t* a = (wasm_import_t*)wasm__realloc_array(rt->imports, new_cap, sizeof(wasm_import_t));
+        wasm_import_t* a = (wasm_import_t*)wasm__realloc_array(&rt->allocator, rt->imports, new_cap, sizeof(wasm_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->imports = a;
         rt->cap_imports = new_cap;
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = wasm__strdup(imp->module);
-    copy.name = wasm__strdup(imp->name);
+    copy.module = wasm__strdup(&rt->allocator, imp->module);
+    copy.name = wasm__strdup(&rt->allocator, imp->name);
     if (!copy.module || !copy.name) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return WASM_ERR_OOM;
     }
     copy.func = imp->func;
@@ -635,14 +678,14 @@ WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
     copy.type_module = imp->type_module;
     copy.type_index = imp->type_index;
     copy.has_type_context = imp->has_type_context;
-    err = wasm__copy_functype(&copy.type, &imp->type);
+    err = wasm__copy_functype(&rt->allocator, &copy.type, &imp->type);
     if (err != WASM_OK) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return err;
     }
     if (zeroed_type_is_unspecified && wasm__functype_is_zeroed(&imp->type))
-        wasm__functype_mark_unspecified(&copy.type);
+        wasm__functype_mark_unspecified(&rt->allocator, &copy.type);
 
     rt->imports[rt->num_imports++] = copy;
     return WASM_OK;
@@ -663,18 +706,18 @@ wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_i
     if (rt->num_global_imports >= rt->cap_global_imports) {
         uint32_t new_cap = rt->cap_global_imports ? rt->cap_global_imports * 2 : 16;
         wasm_global_import_t* a =
-            (wasm_global_import_t*)wasm__realloc_array(rt->global_imports, new_cap, sizeof(wasm_global_import_t));
+            (wasm_global_import_t*)wasm__realloc_array(&rt->allocator, rt->global_imports, new_cap, sizeof(wasm_global_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->global_imports = a;
         rt->cap_global_imports = new_cap;
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = wasm__strdup(imp->module);
-    copy.name = wasm__strdup(imp->name);
+    copy.module = wasm__strdup(&rt->allocator, imp->module);
+    copy.name = wasm__strdup(&rt->allocator, imp->name);
     if (!copy.module || !copy.name) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return WASM_ERR_OOM;
     }
     copy.type = imp->type;
@@ -696,24 +739,24 @@ wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_imp
     if (rt->num_table_imports >= rt->cap_table_imports) {
         uint32_t new_cap = rt->cap_table_imports ? rt->cap_table_imports * 2 : 16;
         wasm_table_import_t* a =
-            (wasm_table_import_t*)wasm__realloc_array(rt->table_imports, new_cap, sizeof(wasm_table_import_t));
+            (wasm_table_import_t*)wasm__realloc_array(&rt->allocator, rt->table_imports, new_cap, sizeof(wasm_table_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->table_imports = a;
         rt->cap_table_imports = new_cap;
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = wasm__strdup(imp->module);
-    copy.name = wasm__strdup(imp->name);
+    copy.module = wasm__strdup(&rt->allocator, imp->module);
+    copy.name = wasm__strdup(&rt->allocator, imp->name);
     if (!copy.module || !copy.name) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return WASM_ERR_OOM;
     }
     copy.table = wasm__table_actual(imp->table);
     if (!copy.table) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         if (rt) WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid table import");
         return WASM_ERR_MALFORMED;
     }
@@ -733,24 +776,24 @@ wasm_error_t wasm_register_memory_import(wasm_runtime_t* rt, const wasm_memory_i
     if (rt->num_memory_imports >= rt->cap_memory_imports) {
         uint32_t new_cap = rt->cap_memory_imports ? rt->cap_memory_imports * 2 : 16;
         wasm_memory_import_t* a =
-            (wasm_memory_import_t*)wasm__realloc_array(rt->memory_imports, new_cap, sizeof(wasm_memory_import_t));
+            (wasm_memory_import_t*)wasm__realloc_array(&rt->allocator, rt->memory_imports, new_cap, sizeof(wasm_memory_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->memory_imports = a;
         rt->cap_memory_imports = new_cap;
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = wasm__strdup(imp->module);
-    copy.name = wasm__strdup(imp->name);
+    copy.module = wasm__strdup(&rt->allocator, imp->module);
+    copy.name = wasm__strdup(&rt->allocator, imp->name);
     if (!copy.module || !copy.name) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return WASM_ERR_OOM;
     }
     copy.memory = wasm__memory_actual(imp->memory);
     if (!copy.memory) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         if (rt) WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "invalid memory import");
         return WASM_ERR_MALFORMED;
     }
@@ -771,25 +814,25 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
     if (rt->num_tag_imports >= rt->cap_tag_imports) {
         uint32_t new_cap = rt->cap_tag_imports ? rt->cap_tag_imports * 2 : 16;
         wasm_tag_import_t* a =
-            (wasm_tag_import_t*)wasm__realloc_array(rt->tag_imports, new_cap, sizeof(wasm_tag_import_t));
+            (wasm_tag_import_t*)wasm__realloc_array(&rt->allocator, rt->tag_imports, new_cap, sizeof(wasm_tag_import_t));
         if (!a) return WASM_ERR_OOM;
         rt->tag_imports = a;
         rt->cap_tag_imports = new_cap;
     }
 
     memset(&copy, 0, sizeof(copy));
-    copy.module = wasm__strdup(imp->module);
-    copy.name = wasm__strdup(imp->name);
+    copy.module = wasm__strdup(&rt->allocator, imp->module);
+    copy.name = wasm__strdup(&rt->allocator, imp->name);
     if (!copy.module || !copy.name) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return WASM_ERR_OOM;
     }
 
-    err = wasm__copy_functype(&copy.type, &imp->type);
+    err = wasm__copy_functype(&rt->allocator, &copy.type, &imp->type);
     if (err != WASM_OK) {
-        WASM_FREE((void*)copy.module);
-        WASM_FREE((void*)copy.name);
+        wasm__free(&rt->allocator, (void*)copy.module);
+        wasm__free(&rt->allocator, (void*)copy.name);
         return err;
     }
     copy.type_module = imp->type_module;

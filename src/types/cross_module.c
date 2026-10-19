@@ -1,6 +1,7 @@
 #include "cross_module.h"
 #include "../module.h"
 #include "../internal/alloc.h"
+#include "../runtime.h"
 #include "canonical.h"
 #include "references.h"
 #include "../values.h"
@@ -321,11 +322,11 @@ WASM_PRIVATE int wasm__functype_equal_across_modules(const wasm_module_t* lhs_mo
         return 0;
 
     memo_size = (size_t)lhs_mod->num_types * (size_t)rhs_mod->num_types;
-    memo = memo_size ? (uint8_t*)WASM_MALLOC(memo_size) : NULL;
+    memo = memo_size ? (uint8_t*)wasm__malloc(&lhs_mod->rt->allocator, memo_size) : NULL;
     if (memo_size && !memo) return 0;
     if (memo_size) memset(memo, 0, memo_size);
     result = wasm__cross_type_equal_visit(lhs_mod, lhs_type_idx, rhs_mod, rhs_type_idx, memo);
-    WASM_FREE(memo);
+    wasm__free(&lhs_mod->rt->allocator, memo);
     return result;
 }
 
@@ -346,12 +347,12 @@ WASM_PRIVATE int wasm__functype_is_subtype_across_modules(const wasm_module_t* l
         return 0;
 
     memo_size = (size_t)lhs_mod->num_types * (size_t)rhs_mod->num_types;
-    memo = memo_size ? (uint8_t*)WASM_MALLOC(memo_size) : NULL;
+    memo = memo_size ? (uint8_t*)wasm__malloc(&lhs_mod->rt->allocator, memo_size) : NULL;
     if (memo_size && !memo) return 0;
     if (memo_size) memset(memo, 0, memo_size);
 
     result = wasm__cross_type_is_subtype_with_memo(lhs_mod, lhs_type_idx, rhs_mod, rhs_type_idx, memo);
 
-    WASM_FREE(memo);
+    wasm__free(&lhs_mod->rt->allocator, memo);
     return result;
 }

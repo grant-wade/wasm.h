@@ -24,8 +24,6 @@ const RuntimeOptions = struct {
     platform: bool,
     werror: bool,
     sources: []const []const u8,
-    /// Extra C flags for this build of the runtime only.
-    flags: []const []const u8 = &.{},
 };
 
 pub fn build(b: *std.Build) !void {
@@ -62,7 +60,7 @@ pub fn build(b: *std.Build) !void {
 
     const test_step = b.step("test", "Run the Zig wrapper tests and the modular C regression tests");
     test_step.dependOn(&b.addRunArtifact(wrapper_tests).step);
-    test_step.dependOn(cTests(b, target, optimize, platform, werror, sources, runtime.library));
+    test_step.dependOn(cTests(b, target, optimize, platform, werror, runtime.library));
 
     const cross_step = b.step("cross", "Compile the runtime and wrapper tests for every target in cross_targets");
     for (cross_targets) |triple| {
@@ -127,7 +125,6 @@ fn addRuntimeLibrary(b: *std.Build, name: []const u8, opts: RuntimeOptions) *std
     var flags: std.ArrayList([]const u8) = .empty;
     flags.appendSlice(b.allocator, &.{ "-std=c99", "-Wall", "-Wextra", "-Wmissing-prototypes" }) catch @panic("OOM");
     if (opts.werror) flags.append(b.allocator, "-Werror") catch @panic("OOM");
-    flags.appendSlice(b.allocator, opts.flags) catch @panic("OOM");
     module.addCSourceFiles(.{ .root = b.path("src"), .files = opts.sources, .flags = flags.items });
     module.addIncludePath(b.path("src"));
     module.addCMacro("_POSIX_C_SOURCE", "200809L");
@@ -149,23 +146,11 @@ fn cTests(
     optimize: std.builtin.Optimize,
     platform: bool,
     werror: bool,
-    sources: []const []const u8,
     runtime: *std.Build.Step.Compile,
 ) *std.Build.Step {
     const step = b.step("c-test", "Run the modular C regression tests against the Zig-built runtime");
-    // wasm_test.c supplies these allocator hooks to count the runtime's allocations.
-    const alloc_runtime = addRuntimeLibrary(b, "wasm_test_runtime", .{
-        .target = target,
-        .optimize = optimize,
-        .platform = platform,
-        .werror = werror,
-        .sources = sources,
-        // Relative to the build root, where Zig runs the compiler.
-        .flags = &.{ "-include", "test/wasm_test_alloc.h" },
-    });
-
     const cases = [_]struct { name: []const u8, source: []const u8, runtime: *std.Build.Step.Compile }{
-        .{ .name = "wasm_modular_test", .source = "test/wasm_test.c", .runtime = alloc_runtime },
+        .{ .name = "wasm_modular_test", .source = "test/wasm_test.c", .runtime = runtime },
         .{ .name = "wasm_modular_core_test", .source = "test/wasm_core_test.c", .runtime = runtime },
     };
     for (cases) |case| {

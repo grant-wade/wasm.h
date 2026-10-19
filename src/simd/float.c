@@ -350,10 +350,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
-        wasm_value_t converted =
-            (subop == 0xF8) ? wasm__trunc_sat_i32_s((double)wasm__v128_get_f32(value, lane))
-                            : wasm__trunc_sat_i32_u((double)wasm__v128_get_f32(value, lane));
-        wasm__v128_set_i32(&result, lane, converted.of.i32);
+        if (subop == 0xF8)
+            wasm__v128_set_i32(&result, lane, wasm__trunc_sat_i32_s((double)wasm__v128_get_f32(value, lane)));
+        else
+            wasm__v128_set_u32(&result, lane, wasm__trunc_sat_i32_u((double)wasm__v128_get_f32(value, lane)));
     }
 
     return result;
@@ -378,10 +378,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const 
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) {
-        wasm_value_t converted =
-            (subop == 0xFC) ? wasm__trunc_sat_i32_s(wasm__v128_get_f64(value, lane))
-                            : wasm__trunc_sat_i32_u(wasm__v128_get_f64(value, lane));
-        wasm__v128_set_i32(&result, lane, converted.of.i32);
+        if (subop == 0xFC)
+            wasm__v128_set_i32(&result, lane, wasm__trunc_sat_i32_s(wasm__v128_get_f64(value, lane)));
+        else
+            wasm__v128_set_u32(&result, lane, wasm__trunc_sat_i32_u(wasm__v128_get_f64(value, lane)));
     }
     wasm__v128_set_u32(&result, 2, 0u);
     wasm__v128_set_u32(&result, 3, 0u);

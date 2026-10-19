@@ -8,10 +8,6 @@ WASM_PRIVATE wasm_value_t wasm__f32_bits(uint32_t bits);
 
 WASM_PRIVATE wasm_value_t wasm__f64_bits(uint64_t bits);
 
-WASM_PRIVATE wasm_value_t wasm__u32_bits(uint32_t value);
-
-WASM_PRIVATE wasm_value_t wasm__u64_bits(uint64_t value);
-
 WASM_PRIVATE uintptr_t wasm__gc_i31_encode(int32_t value);
 
 WASM_PRIVATE int32_t wasm__gc_i31_get_s(uintptr_t bits);
@@ -102,21 +98,21 @@ WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type);
 /* Numeric values already carry their declared type tag, so only references need retagging. */
 WASM_PRIVATE_INLINE int wasm__is_numeric_valtype(wasm_valtype_t type);
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_s(double value);
+WASM_PRIVATE int32_t wasm__trunc_sat_i32_s(double value);
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i32_u(double value);
+WASM_PRIVATE uint32_t wasm__trunc_sat_i32_u(double value);
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_s(double value);
+WASM_PRIVATE int64_t wasm__trunc_sat_i64_s(double value);
 
-WASM_PRIVATE wasm_value_t wasm__trunc_sat_i64_u(double value);
+WASM_PRIVATE uint64_t wasm__trunc_sat_i64_u(double value);
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, wasm_value_t* out_value);
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_s(double value, int32_t* out_value);
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, wasm_value_t* out_value);
+WASM_PRIVATE wasm_error_t wasm__trunc_i32_u(double value, uint32_t* out_value);
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, wasm_value_t* out_value);
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_s(double value, int64_t* out_value);
 
-WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, wasm_value_t* out_value);
+WASM_PRIVATE wasm_error_t wasm__trunc_i64_u(double value, uint64_t* out_value);
 
 WASM_PRIVATE float wasm__f32_min(float lhs, float rhs);
 

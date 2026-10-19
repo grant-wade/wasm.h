@@ -79,6 +79,8 @@ WASM_PRIVATE void wasm__validator_destroy(wasm__validator_t* v) {
     if (!v) return;
     v->stack = NULL;
     v->stack_reftypes = NULL;
+    v->stack_slots = NULL;
+    v->stack_refs = NULL;
     v->frames = NULL;
     v->stack_capacity = 0;
     v->frame_capacity = 0;
@@ -108,16 +110,26 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
 
     if (!rt->validator_stack) {
-        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack));
+        rt->validator_stack = (wasm_valtype_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity, sizeof(*rt->validator_stack));
         if (!rt->validator_stack) return WASM_ERR_OOM;
     }
     if (!rt->validator_stack_reftypes) {
         rt->validator_stack_reftypes =
-            (wasm_reftype_t*)wasm__malloc_array((size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
+            (wasm_reftype_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity, sizeof(*rt->validator_stack_reftypes));
         if (!rt->validator_stack_reftypes) return WASM_ERR_OOM;
     }
+    if (!rt->validator_stack_slots) {
+        rt->validator_stack_slots =
+            (uint32_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity + 1u, sizeof(uint32_t));
+        if (!rt->validator_stack_slots) return WASM_ERR_OOM;
+    }
+    if (!rt->validator_stack_refs) {
+        rt->validator_stack_refs =
+            (uint32_t*)wasm__malloc_array(&rt->allocator, (size_t)stack_capacity + 1u, sizeof(uint32_t));
+        if (!rt->validator_stack_refs) return WASM_ERR_OOM;
+    }
     if (!rt->validator_frames) {
-        rt->validator_frames = (wasm__val_frame_t*)WASM_CALLOC(frame_capacity, sizeof(*rt->validator_frames));
+        rt->validator_frames = (wasm__val_frame_t*)wasm__calloc(&rt->allocator, frame_capacity, sizeof(*rt->validator_frames));
         if (!rt->validator_frames) return WASM_ERR_OOM;
     } else {
         memset(rt->validator_frames, 0, (size_t)frame_capacity * sizeof(*rt->validator_frames));
@@ -125,6 +137,10 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
 
     v->stack = rt->validator_stack;
     v->stack_reftypes = rt->validator_stack_reftypes;
+    v->stack_slots = rt->validator_stack_slots;
+    v->stack_refs = rt->validator_stack_refs;
+    v->stack_slots[0] = 0;
+    v->stack_refs[0] = 0;
     v->frames = rt->validator_frames;
     v->stack_capacity = stack_capacity;
     v->frame_capacity = frame_capacity;
@@ -144,12 +160,12 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
         if (total_words > (uint64_t)(SIZE_MAX / sizeof(uint64_t))) return WASM_ERR_OOM;
         bytes = (size_t)total_words * sizeof(uint64_t);
         if (bytes > rt->validator_local_init_capacity) {
-            uint64_t* bits = (uint64_t*)WASM_REALLOC(rt->validator_local_init_bits, bytes);
+            uint64_t* bits = (uint64_t*)wasm__realloc(&rt->allocator, rt->validator_local_init_bits, bytes);
             uint64_t* entry_bits;
 
             if (!bits) return WASM_ERR_OOM;
             rt->validator_local_init_bits = bits;
-            entry_bits = (uint64_t*)WASM_REALLOC(rt->validator_local_init_entry_bits, bytes);
+            entry_bits = (uint64_t*)wasm__realloc(&rt->allocator, rt->validator_local_init_entry_bits, bytes);
             if (!entry_bits) return WASM_ERR_OOM;
             rt->validator_local_init_entry_bits = entry_bits;
             rt->validator_local_init_capacity = bytes;
@@ -255,7 +271,10 @@ WASM_PRIVATE wasm_error_t wasm__validator_push_typed(wasm__validator_t* v,
                                                const wasm_reftype_t* ref_type) {
     if (v->sp >= v->stack_capacity)
         return wasm__validator_error(v, at, "operand stack overflow");
+    v->stack_slots[v->sp + 1] = v->stack_slots[v->sp] + wasm__valtype_slots(type);
+    v->stack_refs[v->sp + 1] = v->stack_refs[v->sp] + (wasm__slot_kind(type) != WASM__SLOT_KIND_NONE);
     v->stack[v->sp++] = type;
+    if (v->stack_slots[v->sp] > v->max_slots) v->max_slots = v->stack_slots[v->sp];
     if (ref_type && wasm__has_reftype_info(ref_type))
         v->stack_reftypes[v->sp - 1] = *ref_type;
     else

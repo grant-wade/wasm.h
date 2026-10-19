@@ -28,8 +28,6 @@ WASM_PRIVATE wasm_valtype_t wasm__table_copy_size_type(const wasm_table_t* dst_t
 
 WASM_PRIVATE uint64_t wasm__table_index_value(const wasm_table_t* table, const wasm_value_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__table_index_result(const wasm_table_t* table, uint64_t value);
-
 WASM_PRIVATE uint32_t wasm__memory_page_size(const wasm_memory_t* memory);
 
 WASM_PRIVATE uint64_t wasm__memory_page_limit(const wasm_memory_t* memory);
@@ -45,8 +43,9 @@ WASM_PRIVATE uint64_t wasm__memory_byte_size(const wasm_memory_t* memory);
 
 WASM_PRIVATE int wasm__memory_byte_size_fits_host(const wasm_memory_t* memory, size_t* out_size);
 
+/* base_addr is the address operand, zero-extended for a 32-bit memory. */
 WASM_PRIVATE int wasm__memory_effective_addr(const wasm_memory_t* memory,
-                                       const wasm_value_t* base,
+                                       uint64_t base_addr,
                                        uint64_t offset,
                                        uint64_t* out_addr);
 
@@ -66,11 +65,11 @@ WASM_PRIVATE wasm_error_t wasm__init_table_storage(wasm_table_t* table);
 
 WASM_PRIVATE wasm_error_t wasm__append_data_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_custom_section(wasm_custom_section_t* section);
+WASM_PRIVATE void wasm__free_custom_section(const wasm_allocator_t* a, wasm_custom_section_t* section);
 
 WASM_PRIVATE wasm_error_t wasm__append_custom_sections(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_elem_segment(wasm_elem_segment_t* segment);
+WASM_PRIVATE void wasm__free_elem_segment(const wasm_allocator_t* a, wasm_elem_segment_t* segment);
 
 WASM_PRIVATE wasm_error_t wasm__append_elem_segments(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
