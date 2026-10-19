@@ -10,6 +10,7 @@
         "build.zig.zon",
         "src",
         "zig/wasm.zig",
+        "zig/wasm2zig.zig",
         "LICENSE",
     },
 }

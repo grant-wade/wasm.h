@@ -231,7 +231,7 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `src/amalgamation.h` | Assembly order for the generated header. |
 | `build.c`, `cbuild.h` | Build and test graph, and the vendored cbuild single header it uses. |
 | `build.zig`, `build.zig.zon` | Zig package: runtime library, Zig module, and its tests. |
-| `zig/` | Zig bindings (`wasm.zig`) and their tests. |
+| `zig/` | Zig bindings (`wasm.zig`), the `wasm2zig` bindings generator, and their tests. |
 | `tools/amalgamate.c` | Deterministic header generator and freshness check. |
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |

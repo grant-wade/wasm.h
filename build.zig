@@ -58,8 +58,40 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    const test_step = b.step("test", "Run the Zig wrapper tests and the modular C regression tests");
+    const host_runtime = addRuntime(b, .{
+        .target = b.graph.host,
+        .optimize = optimize,
+        .platform = false,
+        .werror = werror,
+        .sources = sources,
+    }, false);
+    const wasm2zig = b.addExecutable(.{
+        .name = "wasm2zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/wasm2zig.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "wasm", .module = host_runtime.module }},
+        }),
+    });
+    b.installArtifact(wasm2zig);
+
+    const bindings_tests = b.addTest(.{
+        .name = "wasm2zig_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/wasm2zig_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "wasm", .module = runtime.module },
+                .{ .name = "guest", .module = bindingsModule(b, wasm2zig, runtime.module, b.path("zig/testdata/guest.wasm")) },
+            },
+        }),
+    });
+
+    const test_step = b.step("test", "Run the Zig wrapper and wasm2zig tests and the modular C regression tests");
     test_step.dependOn(&b.addRunArtifact(wrapper_tests).step);
+    test_step.dependOn(&b.addRunArtifact(bindings_tests).step);
     test_step.dependOn(cTests(b, target, optimize, platform, werror, runtime.library));
 
     const cross_step = b.step("cross", "Compile the runtime and wrapper tests for every target in cross_targets");
@@ -86,6 +118,22 @@ pub fn build(b: *std.Build) !void {
         });
         cross_step.dependOn(&cross_tests.step);
     }
+}
+
+/// A module of the Zig bindings wasm2zig generates for `wasm_file`, which imports `wasm` from
+/// `wasm_h`, this package as a dependency of `b`.
+pub fn addBindings(b: *std.Build, wasm_h: *std.Build.Dependency, wasm_file: std.Build.LazyPath) *std.Build.Module {
+    return bindingsModule(b, wasm_h.artifact("wasm2zig"), wasm_h.module("wasm"), wasm_file);
+}
+
+fn bindingsModule(b: *std.Build, tool: *std.Build.Step.Compile, wasm_module: *std.Build.Module, wasm_file: std.Build.LazyPath) *std.Build.Module {
+    const run = b.addRunArtifact(tool);
+    run.addFileArg(wasm_file);
+    const source = run.addOutputFileArg("bindings.zig");
+    return b.createModule(.{
+        .root_source_file = source,
+        .imports = &.{.{ .name = "wasm", .module = wasm_module }},
+    });
 }
 
 const Runtime = struct {

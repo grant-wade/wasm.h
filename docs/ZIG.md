@@ -93,6 +93,27 @@ _ = try api.handle.call(.{ ptr, len });
 
 Function types become `TypedFunc` fields, and `TypedFunc`, `Global(T)`, `Memory`, and `Table` stay as they are. An optional field is null when the module lacks the export; a missing required export fails with `error.UndefinedExport`, and an export of another kind or type with `error.TypeMismatch`. `Instance.exportsAs(Api)` resolves and binds in one step.
 
+### Generated bindings
+
+`addBindings` in the package's `build.zig` runs `wasm2zig` on a Wasm file at build time and returns a module with an `Exports` struct for `resolve` and an `Imports` namespace holding each function import's type, grouped by import module:
+
+```zig
+const wasm_h_build = @import("wasm_h");
+
+const guest = wasm_h_build.addBindings(b, wasm_h, b.path("guest.wasm"));
+exe.root_module.addImport("guest", guest);
+```
+
+```zig
+const guest = @import("guest");
+
+comptime wasm.checkHost(guest.Imports.env, Env);
+try rt.bindAllContext("env", Env, &state);
+const plan = try compiled.resolve(guest.Exports);
+```
+
+Value types without a Zig equivalent, such as GC references, appear as `wasm.Value`. Tag exports and non-function imports are left out. `zig build` also installs `wasm2zig`, which takes the module and output paths.
+
 `wasm.Pool(Api)` keeps instances of one compiled module ready: `fill` instantiates ahead of time, `acquire` returns an idle or new instance with its exports bound, and `release` frees it.
 
 ```zig
@@ -259,7 +280,7 @@ Free the shared memory only after every module that imports it. Shared memories 
 From a checkout:
 
 ```sh
-zig build test              # Zig wrapper tests under std.testing.allocator, plus the modular C regression tests built by Zig
+zig build test              # Zig wrapper and wasm2zig tests under std.testing.allocator, plus the modular C regression tests built by Zig
 zig build test -Doptimize=safe -Dplatform=false
 zig build cross             # compile for every target in cross_targets in build.zig
 ```

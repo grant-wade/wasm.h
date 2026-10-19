@@ -44,6 +44,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_import_check` reports whether a runtime's bindings resolve an import of a compiled module. In Zig, `Runtime.checkImport` and `Runtime.unresolvedImports`.
 - `wasm_func_ref_target` returns the instance and function index a funcref refers to. In Zig, `Runtime.funcRef` and `Runtime.callRef`.
 - Zig `ModuleInfo.resolve` returns a `Plan` that binds a struct of typed exports to each instance of a module, `Instance.exportsAs` binds one directly, and `Pool` keeps instances of a compiled module ready with their exports bound.
+- `wasm2zig`, installed by `zig build`, generates Zig `Exports` and `Imports` declarations from a Wasm module, and `addBindings` in `build.zig` runs it at build time.
 - Zig `Runtime.bindAll` and `Runtime.bindAllContext` bind every public function of a namespace, and `checkHost` checks a namespace against import signatures at compile time.
 - Zig `Table`, `Global`, `Instance.global`, `Runtime.registerModule`, `Runtime.lastError`, `Memory.slice`, `Memory.load`, `Memory.store`, and `Config.features` and `Config.fuel`.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
