@@ -1168,6 +1168,71 @@ pub fn checkHost(comptime Imports: type, comptime Host: type) void {
     }
 }
 
+/// Fails to compile unless each field of `Spec` (see `Bound`) names an export of `Generated`, the
+/// `Exports` struct wasm2zig writes, with the same kind and Wasm types. A `Value` matches any type,
+/// and an optional field may name a missing export.
+pub fn checkExports(comptime Generated: type, comptime Spec: type) void {
+    const fields = @typeInfo(Spec).@"struct";
+    for (fields.field_names, fields.field_types) |name, T| {
+        const B = BoundField(T);
+        const S = if (@typeInfo(B) == .optional) @typeInfo(B).optional.child else B;
+        if (!@hasField(Generated, name)) {
+            if (S != B) continue;
+            @compileError(@typeName(Generated) ++ " has no export " ++ name);
+        }
+        const G = BoundField(@FieldType(Generated, name));
+        if (!exportMatches(S, G))
+            @compileError("export " ++ name ++ " has type " ++ @typeName(@FieldType(Generated, name)) ++ ", not " ++ @typeName(T));
+    }
+}
+
+fn exportMatches(comptime S: type, comptime G: type) bool {
+    if (S.extern_kind != G.extern_kind) return false;
+    return switch (S.extern_kind) {
+        .func => matchesWasmTypes(Signature(S.FnType).params, Signature(G.FnType).params) and
+            matchesWasmTypes(Signature(S.FnType).results, Signature(G.FnType).results),
+        .global => matchesWasmTypes(&.{S.ValueType}, &.{G.ValueType}),
+        else => true,
+    };
+}
+
+/// Whether each of `spec` has the Wasm type of its counterpart in `generated`; `Value` matches any.
+fn matchesWasmTypes(comptime spec: []const type, comptime generated: []const type) bool {
+    if (spec.len != generated.len) return false;
+    for (spec, generated) |s, g| {
+        const expected = ValType.of(s) orelse continue;
+        if (expected != ValType.of(g)) return false;
+    }
+    return true;
+}
+
+/// The function type of a `Spec` field: a function type, `TypedFunc`, or an optional of either.
+fn SpecFn(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .optional => |o| SpecFn(o.child),
+        .@"fn" => T,
+        else => if (@hasDecl(T, "FnType")) T.FnType else @compileError(@typeName(T) ++ " is not a function export"),
+    };
+}
+
+/// The type of parameter `i` of `Spec`'s function export `name`.
+pub fn ExportParam(comptime Spec: type, comptime name: []const u8, comptime i: usize) type {
+    return Signature(SpecFn(@FieldType(Spec, name))).params[i];
+}
+
+/// The result of `Spec`'s function export `name`: `void`, a value, or a tuple.
+pub fn ExportResult(comptime Spec: type, comptime name: []const u8) type {
+    return Signature(SpecFn(@FieldType(Spec, name))).Result;
+}
+
+/// Calls the function export `name` of `exports`, a `Bound(Spec)`. A missing optional export fails
+/// with `error.UndefinedExport`.
+pub fn callExport(exports: anytype, comptime name: []const u8, args: anytype) Error!ExportResult(@TypeOf(exports), name) {
+    const field = @field(exports, name);
+    const func = if (@typeInfo(@TypeOf(field)) == .optional) field orelse return error.UndefinedExport else field;
+    return func.call(args);
+}
+
 fn sameWasmTypes(comptime expected: []const type, comptime actual: []const type) bool {
     if (expected.len != actual.len) return false;
     for (expected, actual) |e, a| {

@@ -46,6 +46,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_func_ref_target` returns the instance and function index a funcref refers to. In Zig, `Runtime.funcRef` and `Runtime.callRef`.
 - Zig `ModuleInfo.resolve` returns a `Plan` that binds a struct of typed exports to each instance of a module, `Instance.exportsAs` binds one directly, and `Pool` keeps instances of a compiled module ready with their exports bound.
 - `wasm2zig`, installed by `zig build`, generates Zig `Exports` and `Imports` declarations from a Wasm module, and `addBindings` in `build.zig` runs it at build time.
+- `wasm2zig` bindings declare `Api(Spec)`, which calls a module's exports as methods, and Zig `checkExports` checks a struct of exports against the generated `Exports` at compile time.
+- `examples/zig` builds a C library to Wasm and embeds it from Zig with generated bindings.
 - Zig `Runtime.bindAll` and `Runtime.bindAllContext` bind every public function of a namespace, and `checkHost` checks a namespace against import signatures at compile time.
 - Zig host functions take `GuestSlice`, `GuestBytes`, and `GuestPtr` parameters for ranges of the caller's memory, and a leading `*Runtime` caller; `Runtime.bindFuncDynamic` binds functions with signatures known at run time.
 - Zig `bool`, enum, and packed struct values convert to and from `i32` and `i64`.

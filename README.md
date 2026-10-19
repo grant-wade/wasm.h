@@ -116,7 +116,7 @@ const add = try instance.func("add", fn (i32, i32) i32);
 const sum = try add.call(.{ 2, 40 });
 ```
 
-See the [Zig guide](docs/ZIG.md) for installation, compiled modules, typed exports, host imports, memory, and threads.
+See the [Zig guide](docs/ZIG.md) for installation, compiled modules, typed exports, host imports, memory, and threads, and [`examples/zig`](examples/zig) for a project that compiles a C library to Wasm and embeds it.
 
 ## CLI
 

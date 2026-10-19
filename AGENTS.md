@@ -23,7 +23,8 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - `wasm2api.c`: generator for typed C wrappers around Wasm exports and imports.
 - `build.zig`, `build.zig.zon`: Zig 0.17 package; it compiles every `.c` file under `src/`, so new units need no change there.
 - `zig/wasm.zig`: Zig bindings over the C API; `zig/wasm_test.zig` tests them.
-- `zig/wasm2zig.zig`: generator for Zig `Exports` and `Imports` declarations from a Wasm module, run at build time by `addBindings` in `build.zig`; `zig/wasm2zig_test.zig` tests its output for `zig/testdata/guest.wasm` (source in `guest.wat`).
+- `zig/wasm2zig.zig`: generator for Zig `Exports`, `Api`, and `Imports` declarations from a Wasm module, run at build time by `addBindings` in `build.zig`; `zig/wasm2zig_test.zig` tests its output for `zig/testdata/guest.wasm` (source in `guest.wat`).
+- `examples/zig/`: standalone Zig project that compiles `guest/calc.c` to Wasm and embeds it; `./cbuild --test` runs it as `zig_example`.
 - `test/wl.h`: local test support/platform layer.
 - `test/wl_test.c`: tests for `test/wl.h`.
 - `test/fixture_runner.c`: runner for emcc-generated Wasm fixtures.

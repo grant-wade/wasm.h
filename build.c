@@ -725,6 +725,17 @@ static void zig_package_tests(void) {
         opt.werror ? "-Dwerror=true" : "-Dwerror=false",
     };
     add_test("zig", NULL, args, COUNT(args), "zig", NULL);
+
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) return;
+    const char* example_args[] = {
+        zig, "build", "run", "--summary", "none",
+        "--build-file", fmt("%s/examples/zig/build.zig", cwd),
+        "--cache-dir", out_path("zig-cache"),
+        "--prefix", out_path("zig-example-out"),
+        opt.release ? "-Doptimize=fast" : "-Doptimize=debug",
+    };
+    add_test("zig_example", NULL, example_args, COUNT(example_args), "zig", NULL);
 }
 
 static void read_options(int argc, char** argv) {
