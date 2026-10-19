@@ -23475,8 +23475,10 @@ WASM_INLINE uint64_t wasm__f64_binop(uint32_t op, const wasm__slot_t* a, const w
 
 #if defined(__GNUC__) || defined(__clang__)
 #define WASM__NOINLINE __attribute__((noinline))
+#define WASM__UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
 #define WASM__NOINLINE
+#define WASM__UNLIKELY(x) (x)
 #endif
 
 /* args holds the slots of ft's parameters just above rt->sp. */
@@ -23505,6 +23507,14 @@ static WASM__NOINLINE wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod
     if (call_args != args_buf) wasm__free(&mod->rt->allocator, call_args);
     if (call_results != results_buf) wasm__free(&mod->rt->allocator, call_results);
     return err;
+}
+
+/* Copies callee's parameter slots from args into locals and zeroes its other locals. */
+static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__slot_t* args, const wasm_func_t* callee) {
+    uint32_t i;
+
+    for (i = 0; i < callee->param_slots; i++) locals[i] = args[i];
+    if (i < callee->num_local_slots) memset(locals + i, 0, (callee->num_local_slots - i) * sizeof(*locals));
 }
 #undef WASM__NOINLINE
 
@@ -25305,9 +25315,9 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         wasm__arena_chunk_t* chunk = rt->frame_arena;
         wasm__call_frame_t* next;
 
-        if (!callee->ops || rt->call_frame_sp >= rt->max_call_frames ||
-            callee->max_stack > rt->max_stack - (uint32_t)(sp - stack) || !chunk ||
-            callee->frame_bytes > chunk->size - chunk->used) {
+        if (WASM__UNLIKELY(!callee->ops || rt->call_frame_sp >= rt->max_call_frames ||
+                           callee->max_stack > rt->max_stack - (uint32_t)(sp - stack) || !chunk ||
+                           callee->frame_bytes > chunk->size - chunk->used)) {
             rt->sp = (uint32_t)(sp - stack);
             err = wasm__push_call_frame(call_mod, call_idx, sp, call_results_dst);
             if (err != WASM_OK) {
@@ -25332,8 +25342,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         next->arena_saved.chunk = chunk;
         next->arena_saved.used = chunk->used;
         chunk->used += callee->frame_bytes;
-        for (i = 0; i < callee->param_slots; i++) locals[i] = sp[i];
-        if (i < callee->num_local_slots) memset(locals + i, 0, (callee->num_local_slots - i) * sizeof(*locals));
+        wasm__init_locals(locals, sp, callee);
         cf = next;
         if (call_mod != mod) {
             mod = call_mod;
@@ -25437,6 +25446,7 @@ cleanup:
 #undef WASM__UNARY
 #undef WASM__CALL_OUT
 #undef WASM__SET_READER
+#undef WASM__UNLIKELY
 #undef WASM__IS_TAIL_CALL
 #undef WASM__MEMORY_PTR
 #undef WASM__ENTER_FRAME
