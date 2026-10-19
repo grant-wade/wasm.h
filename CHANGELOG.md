@@ -23,6 +23,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_memory_new`, `wasm_shared_memory_new`, and `wasm_table_new` take an allocator as their first argument.
 - Generated `wasm2api` options have an `allocator` field, defaulting to `wasm_libc_allocator()`.
 - In Zig, `Runtime.init` and `SharedMemory.init` take a `std.mem.Allocator` first.
+- `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two. A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 
 ### Security
 
@@ -52,9 +53,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `memory.grow` and `table.grow` within their maximum run out of fuel before growing when the budget cannot cover them.
 - `block`, `loop`, and `end` cost no fuel.
 - A shared memory a module defines reserves address space only up to `max_memory_bytes`. It reserved its declared maximum, up to 4 GiB, regardless of the limit.
-- The interpreter runs `wasm_bench` about 10x faster than 1.2.0.
-- A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
-- `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two.
+- The interpreter runs `wasm_bench` about 10x faster than 1.2.0. Operands and locals use untagged 8-byte slots, with stack maps tracing references for GC. Translation fuses common local, constant, arithmetic, comparison-and-branch, load/store, and `nop` sequences; calls push and pop frames inline, and indirect calls cache successful type matches.
 - A NaN result of `f64.add`, `f64.sub`, `f64.mul`, or `f64.div` carries the payload of its first NaN operand, made quiet.
 
 ### Fixed

@@ -8903,7 +8903,7 @@ WL_TEST(test_allocation_failures_unwind_without_leaks) {
         wasm_value_t arg = wasm_i32(1);
         wasm_value_t result = wasm_i32(0);
         wasm_value_t field = wasm_i32(4);
-        wasm_value_t object;
+        wasm_value_t object = wasm_ref_null(WASM_TYPE_STRUCTREF);
         int32_t fmt_result = 0;
         wasm_error_t err = WASM_ERR_OOM;
 
