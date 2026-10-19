@@ -8911,7 +8911,7 @@ WL_TEST(test_allocation_failures_unwind_without_leaks) {
         rt = wasm_runtime_new(&wasm_test_allocator, NULL);
         if (rt && wasm_bind_host_func(rt, "env", "add", "ii(i)", wasm_test_host_add, NULL) == WASM_OK) {
             compiled = wasm_compile(rt, module_bytes, sizeof(module_bytes));
-            m = compiled ? wasm_instantiate(compiled) : NULL;
+            m = compiled ? wasm_instantiate(rt, compiled, NULL) : NULL;
             if (m) err = wasm_call(m, "run", &arg, 1, &result, 1);
             if (err == WASM_OK) err = wasm_call_fmt(m, "run", "i(i)", 1, &fmt_result);
             if (err == WASM_OK) err = wasm_struct_new(m, 0, &field, 1, &object);
@@ -8989,8 +8989,12 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     WL_CHECK(t, wasm_memory_data(compiled, 0) == NULL);
     WL_CHECK(t, wasm_module_global(compiled, 0) == NULL);
 
-    m = wasm_instantiate(compiled);
+    m = wasm_instantiate(&rt, compiled, NULL);
     WL_CHECK_MSG(t, m == NULL && strstr(rt.error_msg, "env"), "expected unresolved imports to fail: %s", rt.error_msg);
+    for (index = 0; index < wasm_import_count(compiled); index++) {
+        WL_CHECK(t, wasm_import_check(&rt, compiled, index) == WASM_ERR_UNKNOWN_IMPORT);
+    }
+    WL_CHECK(t, wasm_import_check(&rt, compiled, wasm_import_count(compiled)) == WASM_ERR_MALFORMED);
 
     memset(&memory, 0, sizeof(memory));
     memory.data = (uint8_t*)calloc(1, WASM_PAGE_SIZE);
@@ -9019,10 +9023,13 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
     WASM_CHECK_OK(t, wasm_register_memory_import(&rt, &memory_import));
     WASM_CHECK_OK(t, wasm_register_table_import(&rt, &table_import));
     WASM_CHECK_OK(t, wasm_register_global_import(&rt, &global_import));
+    for (index = 0; index < wasm_import_count(compiled); index++) {
+        WASM_CHECK_OK(t, wasm_import_check(&rt, compiled, index));
+    }
 
-    first = wasm_instantiate(compiled);
+    first = wasm_instantiate(&rt, compiled, NULL);
     WL_CHECK_MSG(t, first != NULL, "%s", rt.error_msg);
-    second = wasm_instantiate(compiled);
+    second = wasm_instantiate(&rt, compiled, NULL);
     WL_CHECK_MSG(t, second != NULL, "%s", rt.error_msg);
     if (first && second) {
         WL_CHECK(t, memory.data[0] == 'h' && memory.data[1] == 'i');
@@ -9042,12 +9049,83 @@ WL_TEST(test_compile_inspects_without_imports_and_instantiates_repeatedly) {
 
     compiled = wasm_compile(&rt, trapping_start_bytes, sizeof(trapping_start_bytes));
     WL_CHECK_MSG(t, compiled != NULL, "expected compile not to run the start function: %s", rt.error_msg);
-    m = compiled ? wasm_instantiate(compiled) : NULL;
+    m = compiled ? wasm_instantiate(&rt, compiled, NULL) : NULL;
     WL_CHECK_MSG(t, m == NULL && rt.last_error == WASM_ERR_UNREACHABLE && strstr(rt.error_msg, "unreachable"),
                  "expected the start function to trap: %s", rt.error_msg);
     wasm_module_free(m);
     wasm_module_free(compiled);
     wasm_destroy(&rt);
+}
+
+static wasm_error_t wasm_test_host_context(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                           wasm_value_t* results, uint32_t num_results, void* userdata) {
+    const int32_t* context = (const int32_t*)wasm_module_userdata(mod);
+
+    (void)args;
+    (void)num_args;
+    (void)num_results;
+    (void)userdata;
+    results[0] = wasm_i32(context ? *context : -1);
+    return WASM_OK;
+}
+
+WL_TEST(test_instantiate_in_another_runtime_with_userdata) {
+    /* (import "env" "ctx" (func (result i32))), a start function storing its result in a global,
+       and an export "seen" returning the global. */
+    static const uint8_t module_bytes[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x00, 0x00,
+        0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x63, 0x74, 0x78, 0x00, 0x00, 0x03, 0x03, 0x02, 0x01, 0x00,
+        0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b, 0x07, 0x08, 0x01, 0x04, 0x73, 0x65, 0x65, 0x6e, 0x00, 0x02,
+        0x08, 0x01, 0x01, 0x0a, 0x0d, 0x02, 0x06, 0x00, 0x10, 0x00, 0x24, 0x00, 0x0b, 0x04, 0x00, 0x23, 0x00, 0x0b,
+    };
+    wasm_runtime_t* owner = wasm_runtime_new(wasm_libc_allocator(), NULL);
+    wasm_runtime_t* host = wasm_runtime_new(wasm_libc_allocator(), NULL);
+    wasm_runtime_t* wrong = wasm_runtime_new(wasm_libc_allocator(), NULL);
+    wasm_module_t* compiled = NULL;
+    wasm_module_t* first = NULL;
+    wasm_module_t* second = NULL;
+    wasm_value_t result = wasm_i32(0);
+    int32_t first_context = 77;
+    int32_t second_context = 5;
+
+    WL_CHECK(t, owner && host && wrong);
+    if (!owner || !host || !wrong) goto done;
+    compiled = wasm_compile(owner, module_bytes, sizeof(module_bytes));
+    WL_CHECK_MSG(t, compiled != NULL, "%s", wasm_runtime_error_message(owner));
+    if (!compiled) goto done;
+    WASM_CHECK_OK(t, wasm_bind_host_func(host, "env", "ctx", "(i)", wasm_test_host_context, NULL));
+    WASM_CHECK_OK(t, wasm_bind_host_func(wrong, "env", "ctx", "i(i)", wasm_test_host_context, NULL));
+
+    WL_CHECK(t, wasm_import_check(owner, compiled, 0) == WASM_ERR_UNKNOWN_IMPORT);
+    WL_CHECK_MSG(t, strstr(wasm_runtime_error_message(owner), "env.ctx") != NULL, "%s",
+                 wasm_runtime_error_message(owner));
+    WL_CHECK(t, wasm_import_check(wrong, compiled, 0) == WASM_ERR_TYPE_MISMATCH);
+    WASM_CHECK_OK(t, wasm_import_check(host, compiled, 0));
+    WL_CHECK(t, wasm_instantiate(wrong, compiled, NULL) == NULL);
+    WL_CHECK(t, wasm_runtime_last_error(wrong) == WASM_ERR_TYPE_MISMATCH);
+
+    first = wasm_instantiate(host, compiled, &first_context);
+    second = wasm_instantiate(host, compiled, &second_context);
+    WL_CHECK_MSG(t, first && second, "%s", wasm_runtime_error_message(host));
+    if (first && second) {
+        WL_CHECK(t, wasm_module_runtime(first) == host);
+        WL_CHECK(t, wasm_module_userdata(first) == &first_context);
+        WASM_CHECK_OK(t, wasm_call(first, "seen", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 77);
+        WASM_CHECK_OK(t, wasm_call(second, "seen", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 5);
+    }
+    WL_CHECK(t, wasm_instantiate(host, first, NULL) == NULL);
+    WL_CHECK(t, wasm_runtime_last_error(host) == WASM_ERR_MALFORMED);
+    WL_CHECK(t, wasm_import_check(host, first, 0) == WASM_ERR_MALFORMED);
+
+done:
+    wasm_module_free(second);
+    wasm_module_free(first);
+    wasm_module_free(compiled);
+    wasm_runtime_free(wrong);
+    wasm_runtime_free(host);
+    wasm_runtime_free(owner);
 }
 
 WL_TEST(test_load_rejects_misordered_sections) {
@@ -18678,6 +18756,16 @@ WL_TEST(test_register_module_links_instances_and_host_objects) {
     arg = wasm_i32(5);
     WASM_CHECK_OK(t, wasm_call_ref(&rt, ref, &arg, 1, &result, 1));
     WL_CHECK(t, result.of.i32 == 10);
+    {
+        wasm_module_t* target = NULL;
+        uint32_t target_idx = UINT32_MAX;
+
+        WASM_CHECK_OK(t, wasm_func_ref_target(&rt, ref, &target, &target_idx));
+        WL_CHECK(t, target == a && wasm_func_functype(a, target_idx) != NULL);
+        WL_CHECK(t, wasm_func_ref_target(&rt, wasm_ref_null(WASM_TYPE_FUNCREF), &target, NULL) ==
+                        WASM_ERR_TYPE_MISMATCH && target == NULL);
+        WL_CHECK(t, wasm_func_ref_target(&rt, wasm_i32(0), NULL, NULL) == WASM_ERR_TYPE_MISMATCH);
+    }
     WASM_CHECK_OK(t, wasm_table_get(a, 0, 1, &value));
     WL_CHECK(t, wasm_call_ref(&rt, value, &arg, 1, &result, 1) == WASM_ERR_TYPE_MISMATCH);
     WL_CHECK(t, wasm_table_grow(a, 0, 1, ref) == 2);
@@ -18958,6 +19046,7 @@ int main(void) {
         { "exceptions: imports that throw reach handlers on every call path", test_exceptions_from_imports_reach_handlers_on_all_call_paths },
         { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
         { "public api: compile inspects without imports and instantiates repeatedly", test_compile_inspects_without_imports_and_instantiates_repeatedly },
+        { "public api: instantiate in another runtime with userdata", test_instantiate_in_another_runtime_with_userdata },
         { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
         { "memory: growth by a callee or host is visible to the caller", test_memory_grown_by_callee_or_host_is_visible_to_caller },
         { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },

@@ -136,7 +136,7 @@ pub const ValType = enum(c.wasm_valtype_t) {
 /// The bytes of a v128 in memory order, lane 0 first.
 pub const V128 = @Vector(16, u8);
 
-/// A function reference: a function index in the module that produced it.
+/// A function reference, valid across the runtime that produced it; see `Runtime.funcRef`.
 pub const FuncRef = enum(u32) {
     null = std.math.maxInt(u32),
     _,
@@ -366,6 +366,10 @@ pub const Config = struct {
     max_table_elements: ?u64 = null,
     /// Bytes the GC heap may grow to, capping `initial_gc_heap_size`; 0 is unlimited.
     max_gc_heap_bytes: ?u64 = null,
+    /// Replaces the default enabled proposals.
+    features: ?Features = null,
+    /// Sets an initial fuel budget; see `Runtime.setFuel`.
+    fuel: ?u64 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
@@ -460,15 +464,14 @@ pub const TypeKind = enum(c.wasm_comptype_kind_t) {
 };
 
 pub const CallFrame = struct {
-    module: ?*Module,
+    instance: ?*Instance,
     func_index: u32,
     offset: u32,
 
     /// The function's name from its module's "name" section.
     pub fn funcName(frame: CallFrame) ?[:0]const u8 {
-        const mod = frame.module orelse return null;
-        const name = c.wasm_func_name(mod.raw(), frame.func_index) orelse return null;
-        return span(name);
+        const instance = frame.instance orelse return null;
+        return instance.info().funcName(frame.func_index);
     }
 };
 
@@ -539,10 +542,13 @@ pub const Runtime = opaque {
         if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
         const b = try AllocatorBridge.box(allocator);
         const bridged = AllocatorBridge.wrap(b);
-        return @ptrCast(c.wasm_runtime_new(&bridged, &cfg) orelse {
+        const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&bridged, &cfg) orelse {
             allocator.destroy(b);
             return error.OutOfMemory;
         });
+        if (config.features) |set| rt.setFeatures(set);
+        if (config.fuel) |units| rt.setFuel(units);
+        return rt;
     }
 
     /// Free its modules first.
@@ -561,8 +567,19 @@ pub const Runtime = opaque {
         return span(c.wasm_runtime_error_message(rt.raw()));
     }
 
+    /// The most recent error, or null when there is none.
+    pub fn lastError(rt: *Runtime) ?Error {
+        check(c.wasm_runtime_last_error(rt.raw())) catch |err| return err;
+        return null;
+    }
+
     pub fn clearError(rt: *Runtime) void {
         c.wasm_runtime_clear_error(rt.raw());
+    }
+
+    fn fail(rt: *Runtime, err: Error, message: [:0]const u8) Error {
+        c.wasm_runtime_set_error(rt.raw(), errorCode(err), message);
+        return err;
     }
 
     pub fn features(rt: *Runtime) Features {
@@ -586,32 +603,56 @@ pub const Runtime = opaque {
         c.wasm_runtime_enable_all_features(rt.raw());
     }
 
-    /// `bytes` is copied and may be freed afterwards.
-    pub fn load(rt: *Runtime, bytes: []const u8) Error!*Module {
-        const mod = c.wasm_load(rt.raw(), bytes.ptr, bytes.len) orelse {
-            check(c.wasm_runtime_last_error(rt.raw())) catch |err| return err;
-            return error.Malformed;
-        };
-        return @ptrCast(mod);
+    fn lastErrorOr(rt: *Runtime, fallback: Error) Error {
+        return rt.lastError() orelse fallback;
     }
 
-    /// Decodes and validates `bytes` without resolving imports or running code. The result supports
-    /// introspection but not calls; create instances with `Module.instantiate`.
-    pub fn compile(rt: *Runtime, bytes: []const u8) Error!*Module {
-        const mod = c.wasm_compile(rt.raw(), bytes.ptr, bytes.len) orelse {
-            check(c.wasm_runtime_last_error(rt.raw())) catch |err| return err;
-            return error.Malformed;
-        };
-        return @ptrCast(mod);
+    /// `bytes` is copied and may be freed afterwards.
+    pub fn load(rt: *Runtime, bytes: []const u8) Error!*Instance {
+        return @ptrCast(c.wasm_load(rt.raw(), bytes.ptr, bytes.len) orelse return rt.lastErrorOr(error.Malformed));
+    }
+
+    pub fn compile(rt: *Runtime, bytes: []const u8) Error!*CompiledModule {
+        return @ptrCast(c.wasm_compile(rt.raw(), bytes.ptr, bytes.len) orelse return rt.lastErrorOr(error.Malformed));
+    }
+
+    /// `compiled` may come from another runtime, including one on another thread.
+    pub fn instantiate(rt: *Runtime, compiled: *const CompiledModule) Error!*Instance {
+        return rt.instantiateRaw(compiled, null);
+    }
+
+    /// `context` (a single-item pointer) becomes the instance's userdata before its start function
+    /// runs, and functions bound with `bindInstanceFunc` receive it.
+    pub fn instantiateContext(rt: *Runtime, compiled: *const CompiledModule, context: anytype) Error!*Instance {
+        comptime requireSinglePointer(@TypeOf(context), "context");
+        return rt.instantiateRaw(compiled, @ptrCast(@constCast(context)));
+    }
+
+    fn instantiateRaw(rt: *Runtime, compiled: *const CompiledModule, userdata: ?*anyopaque) Error!*Instance {
+        return @ptrCast(c.wasm_instantiate(rt.raw(), compiled.raw(), userdata) orelse return rt.lastErrorOr(error.Malformed));
+    }
+
+    pub fn checkImport(rt: *Runtime, compiled: *const CompiledModule, import_index: u32) Error!void {
+        try check(c.wasm_import_check(rt.raw(), compiled.raw(), import_index));
+    }
+
+    /// Iterates the imports of `compiled` that this runtime's bindings do not resolve.
+    pub fn unresolvedImports(rt: *Runtime, compiled: *const CompiledModule) UnresolvedImports {
+        return .{ .runtime = rt, .compiled = compiled };
+    }
+
+    /// `instance` must belong to this runtime and outlive the modules that import from it.
+    pub fn registerModule(rt: *Runtime, module_name: [:0]const u8, instance: *Instance) Error!void {
+        try check(c.wasm_register_module(rt.raw(), module_name.ptr, instance.raw()));
     }
 
     /// Binds a Zig function as the import `module_name.name` for modules loaded afterwards.
     ///
-    /// `func` may take a leading `*Module` (the caller) followed by Wasm-typed parameters, and may return
+    /// `func` may take a leading `*Instance` (the caller) followed by Wasm-typed parameters, and may return
     /// `void`, one Wasm-typed value, a tuple of them, or an error union of those. A returned error traps with
     /// its name as the message: members of `Error` keep their code, anything else becomes `error.Trap`.
     pub fn bindFunc(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, comptime func: anytype) Error!void {
-        return rt.bindHost(module_name, name, null, HostFunc(void, func));
+        return rt.bindHost(module_name, name, null, HostFunc(.none, void, func));
     }
 
     /// Like `bindFunc`, with `context` (a single-item pointer) passed as `func`'s first parameter.
@@ -624,9 +665,39 @@ pub const Runtime = opaque {
         comptime func: anytype,
     ) Error!void {
         const Context = @TypeOf(context);
-        if (@typeInfo(Context) != .pointer or @typeInfo(Context).pointer.size != .one)
-            @compileError("context must be a single-item pointer, found " ++ @typeName(Context));
-        return rt.bindHost(module_name, name, @ptrCast(@constCast(context)), HostFunc(Context, func));
+        comptime requireSinglePointer(Context, "context");
+        return rt.bindHost(module_name, name, @ptrCast(@constCast(context)), HostFunc(.binding, Context, func));
+    }
+
+    /// Like `bindFunc`, with the calling instance's context (see `instantiateContext`) passed as
+    /// `func`'s first parameter, whose type must match it. A call from an instance without a
+    /// context traps.
+    pub fn bindInstanceFunc(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, comptime func: anytype) Error!void {
+        const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
+        if (params.len == 0) @compileError("the first parameter of an instance function must be its context pointer");
+        const Context = params[0] orelse @compileError("anytype parameters are not supported");
+        comptime requireSinglePointer(Context, "an instance function's first parameter");
+        return rt.bindHost(module_name, name, null, HostFunc(.instance, Context, func));
+    }
+
+    /// Binds each public function of `Host` as the import `module_name.<function name>`, as `bindFunc` does.
+    pub fn bindAll(rt: *Runtime, module_name: [:0]const u8, comptime Host: type) Error!void {
+        inline for (comptime hostFuncNames(Host)) |name| try rt.bindFunc(module_name, name, @field(Host, name));
+    }
+
+    /// Like `bindAll`, binding the functions whose first parameter has `context`'s type as
+    /// `bindFuncContext` does.
+    pub fn bindAllContext(rt: *Runtime, module_name: [:0]const u8, comptime Host: type, context: anytype) Error!void {
+        const Context = @TypeOf(context);
+        inline for (comptime hostFuncNames(Host)) |name| {
+            const func = @field(Host, name);
+            const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
+            if (params.len > 0 and params[0] == Context) {
+                try rt.bindFuncContext(module_name, name, context, func);
+            } else {
+                try rt.bindFunc(module_name, name, func);
+            }
+        }
     }
 
     fn bindHost(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, userdata: ?*anyopaque, comptime Host: type) Error!void {
@@ -697,6 +768,20 @@ pub const Runtime = opaque {
     /// modules. Needs the `platform` build option.
     pub fn bindEmscripten(rt: *Runtime) Error!void {
         try check(c.wasm_bind_emscripten_stubs(rt.raw()));
+    }
+
+    pub fn callRef(rt: *Runtime, ref: FuncRef, args: []const Value, results: []Value) Error!void {
+        try check(c.wasm_call_ref(rt.raw(), Value.from(ref).toC(), Value.cPtr(args), @intCast(args.len), Value.cPtrMut(results), @intCast(results.len)));
+    }
+
+    /// The function `ref` refers to, checked against `Fn` as `Instance.func` does.
+    pub fn funcRef(rt: *Runtime, ref: FuncRef, comptime Fn: type) Error!TypedFunc(Fn) {
+        var mod: ?*c.wasm_module_t = null;
+        var index: u32 = 0;
+        check(c.wasm_func_ref_target(rt.raw(), Value.from(ref).toC(), &mod, &index)) catch |err|
+            return rt.fail(err, "funcref does not refer to a live function");
+        const instance: *Instance = @ptrCast(mod.?);
+        return instance.funcAt(index, Fn);
     }
 
     pub fn collectGarbage(rt: *Runtime) void {
@@ -779,19 +864,87 @@ pub const Runtime = opaque {
         var frame: CallFrame = undefined;
         var mod: ?*c.wasm_module_t = null;
         check(c.wasm_runtime_call_frame(rt.raw(), depth, &mod, &frame.func_index, &frame.offset)) catch return null;
-        frame.module = @ptrCast(mod);
+        frame.instance = @ptrCast(mod);
         return frame;
     }
 };
 
-/// The C callback for a bound Zig function. `Context` is `void` when there is no context parameter.
-fn HostFunc(comptime Context: type, comptime func: anytype) type {
+/// An import of a compiled module that a runtime's bindings do not resolve.
+pub const ImportProblem = struct {
+    import: Import,
+    err: Error,
+    /// The runtime's error message, valid until its next error.
+    message: [:0]const u8,
+};
+
+pub const UnresolvedImports = struct {
+    runtime: *Runtime,
+    compiled: *const CompiledModule,
+    index: u32 = 0,
+
+    pub fn next(self: *UnresolvedImports) ?ImportProblem {
+        const info = self.compiled.info();
+        while (self.index < info.importCount()) {
+            const i = self.index;
+            self.index += 1;
+            self.runtime.checkImport(self.compiled, i) catch |err| return .{
+                .import = info.importAt(i),
+                .err = err,
+                .message = self.runtime.errorMessage(),
+            };
+        }
+        return null;
+    }
+};
+
+fn requireSinglePointer(comptime T: type, comptime what: []const u8) void {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one)
+        @compileError(what ++ " must be a single-item pointer, found " ++ @typeName(T));
+}
+
+fn hostFuncNames(comptime Host: type) []const [:0]const u8 {
+    var names: []const [:0]const u8 = &.{};
+    for (@typeInfo(Host).@"struct".decl_names) |name| {
+        if (@typeInfo(@TypeOf(@field(Host, name))) == .@"fn") names = names ++ .{name};
+    }
+    return names;
+}
+
+/// Fails to compile unless `Host` has a function with the Wasm signature of each function type
+/// `Imports` declares, ignoring leading context and `*Instance` parameters.
+pub fn checkHost(comptime Imports: type, comptime Host: type) void {
+    for (@typeInfo(Imports).@"struct".decl_names) |name| {
+        const Expected = @field(Imports, name);
+        if (@TypeOf(Expected) != type or @typeInfo(Expected) != .@"fn") continue;
+        if (!@hasDecl(Host, name)) @compileError(@typeName(Host) ++ " has no function for import " ++ name);
+        const Actual = @TypeOf(@field(Host, name));
+        const expected = Signature(Expected);
+        const actual = Signature(Actual);
+        var first: usize = 0;
+        while (first < actual.params.len and @typeInfo(actual.params[first]) == .pointer) first += 1;
+        if (!sameWasmTypes(expected.params, actual.params[first..]) or !sameWasmTypes(expected.results, actual.results))
+            @compileError(@typeName(Host) ++ "." ++ name ++ " does not match import type " ++ @typeName(Expected));
+    }
+}
+
+fn sameWasmTypes(comptime expected: []const type, comptime actual: []const type) bool {
+    if (expected.len != actual.len) return false;
+    for (expected, actual) |e, a| {
+        if (ValType.of(e) != ValType.of(a)) return false;
+    }
+    return true;
+}
+
+const ContextSource = enum { none, binding, instance };
+
+/// The C callback for a bound Zig function. `Context` is `void` when `source` is `.none`.
+fn HostFunc(comptime source: ContextSource, comptime Context: type, comptime func: anytype) type {
     const Fn = @TypeOf(func);
     const sig = Signature(Fn);
-    const context_count: usize = @intFromBool(Context != void);
+    const context_count: usize = @intFromBool(source != .none);
     if (context_count == 1 and (sig.params.len == 0 or sig.params[0] != Context))
         @compileError("the first parameter of a bound function must be the context type " ++ @typeName(Context));
-    const has_caller = sig.params.len > context_count and sig.params[context_count] == *Module;
+    const has_caller = sig.params.len > context_count and sig.params[context_count] == *Instance;
     const first = context_count + @intFromBool(has_caller);
     const wasm_params = sig.params[first..];
 
@@ -811,7 +964,14 @@ fn HostFunc(comptime Context: type, comptime func: anytype) type {
         ) callconv(.c) c.wasm_error_t {
             if (num_args != wasm_params.len or num_results != sig.results.len) return c.WASM_ERR_TYPE_MISMATCH;
             var call_args: std.meta.ArgsTuple(Fn) = undefined;
-            if (context_count == 1) call_args[0] = @ptrCast(@alignCast(userdata.?));
+            switch (source) {
+                .none => {},
+                .binding => call_args[0] = @ptrCast(@alignCast(userdata.?)),
+                .instance => call_args[0] = @ptrCast(@alignCast(c.wasm_module_userdata(mod) orelse {
+                    c.wasm_runtime_set_error(c.wasm_module_runtime(mod), c.WASM_ERR_TRAP, "the calling instance has no context");
+                    return c.WASM_ERR_TRAP;
+                })),
+            }
             if (has_caller) call_args[context_count] = @ptrCast(mod.?);
             inline for (wasm_params, 0..) |T, i| {
                 const values: [*]const Value = @ptrCast(args);
@@ -820,7 +980,7 @@ fn HostFunc(comptime Context: type, comptime func: anytype) type {
             const returned = @call(.auto, func, call_args);
             const result = if (sig.returns_error) returned catch |err| {
                 const code = errorCode(err);
-                c.wasm_runtime_set_error(@constCast(c.wasm_module_runtime(mod)), code, @errorName(err));
+                c.wasm_runtime_set_error(c.wasm_module_runtime(mod), code, @errorName(err));
                 return code;
             } else returned;
             if (sig.results.len > 0) {
@@ -836,8 +996,11 @@ fn HostFunc(comptime Context: type, comptime func: anytype) type {
 pub fn TypedFunc(comptime Fn: type) type {
     const sig = Signature(Fn);
     return struct {
-        module: *Module,
+        instance: *Instance,
         index: u32,
+
+        pub const extern_kind = ExternKind.func;
+        pub const FnType = Fn;
 
         const Self = @This();
 
@@ -845,310 +1008,586 @@ pub fn TypedFunc(comptime Fn: type) type {
             var params: [sig.params.len]Value = undefined;
             inline for (0..sig.params.len) |i| params[i] = .from(args[i]);
             var results: [sig.results.len]Value = undefined;
-            try self.module.callIndex(self.index, &params, &results);
+            try self.instance.callIndex(self.index, &params, &results);
             return sig.unpackResults(&results);
         }
 
         /// Continues this function's suspended call; see `Runtime.resumeCall`.
         pub fn resumeCall(self: Self, host_results: []const Value) Error!sig.Result {
             var results: [sig.results.len]Value = undefined;
-            try self.module.runtime().resumeCall(host_results, &results);
+            try self.instance.runtime().resumeCall(host_results, &results);
             return sig.unpackResults(&results);
         }
     };
 }
 
-pub const Module = opaque {
-    /// Free modules before the runtime that loaded them.
-    pub fn deinit(mod: *Module) void {
-        c.wasm_module_free(mod.raw());
+/// The imports, exports, types, and custom sections of a compiled module or instance.
+pub const ModuleInfo = opaque {
+    pub fn raw(info: *const ModuleInfo) *c.wasm_module_t {
+        return @ptrCast(@constCast(info));
     }
 
-    pub fn raw(mod: *Module) *c.wasm_module_t {
-        return @ptrCast(mod);
+    pub fn runtime(info: *const ModuleInfo) *Runtime {
+        return @ptrCast(c.wasm_module_runtime(info.raw()));
     }
 
-    /// Creates an instance of a module from `Runtime.compile`, resolving the imports bound on its
-    /// runtime. Free each instance and the compiled module separately.
-    pub fn instantiate(mod: *Module) Error!*Module {
-        const instance = c.wasm_instantiate(mod.raw()) orelse {
-            check(c.wasm_runtime_last_error(c.wasm_module_runtime(mod.raw()))) catch |err| return err;
-            return error.Malformed;
-        };
-        return @ptrCast(instance);
+    /// The module's name from its "name" section.
+    pub fn name(info: *const ModuleInfo) ?[:0]const u8 {
+        const ptr = c.wasm_module_name(info.raw()) orelse return null;
+        return span(ptr);
     }
 
-    pub fn runtime(mod: *Module) *Runtime {
-        return @ptrCast(@constCast(c.wasm_module_runtime(mod.raw())));
+    pub fn exportCount(info: *const ModuleInfo) u32 {
+        return c.wasm_export_count(info.raw());
     }
 
-    fn fail(mod: *Module, err: Error, message: [:0]const u8) Error {
-        c.wasm_runtime_set_error(mod.runtime().raw(), errorCode(err), message);
-        return err;
-    }
-
-    /// Calls an exported function with untyped values; `results.len` must match its result count.
-    pub fn call(mod: *Module, name: [:0]const u8, args: []const Value, results: []Value) Error!void {
-        try check(c.wasm_call(mod.raw(), name.ptr, Value.cPtr(args), @intCast(args.len), Value.cPtrMut(results), @intCast(results.len)));
-    }
-
-    pub fn callIndex(mod: *Module, func_index: u32, args: []const Value, results: []Value) Error!void {
-        try check(c.wasm_call_index(mod.raw(), func_index, Value.cPtr(args), @intCast(args.len), Value.cPtrMut(results), @intCast(results.len)));
-    }
-
-    /// Looks up an exported function and checks that it has `Fn`'s signature, where a `Value`
-    /// parameter or result accepts any type.
-    pub fn func(mod: *Module, name: []const u8, comptime Fn: type) Error!TypedFunc(Fn) {
-        const exp = mod.findExport(name) orelse return mod.fail(error.UndefinedExport, "no export with that name");
-        if (exp.kind != .func) return mod.fail(error.TypeMismatch, "export is not a function");
-        return mod.funcAt(exp.index, Fn);
-    }
-
-    pub fn funcAt(mod: *Module, func_index: u32, comptime Fn: type) Error!TypedFunc(Fn) {
-        const ft = mod.funcType(func_index) orelse return mod.fail(error.UndefinedExport, "function index out of range");
-        if (!ft.matches(Fn)) return mod.fail(error.TypeMismatch, "function signature does not match " ++ @typeName(Fn));
-        return .{ .module = mod, .index = func_index };
-    }
-
-    pub fn getGlobal(mod: *Module, comptime T: type, name: [:0]const u8) Error!T {
-        var value: Value = undefined;
-        try check(c.wasm_global_get(mod.raw(), name.ptr, @ptrCast(&value)));
-        return value.to(T);
-    }
-
-    pub fn setGlobal(mod: *Module, name: [:0]const u8, value: anytype) Error!void {
-        try check(c.wasm_global_set(mod.raw(), name.ptr, Value.from(value).toC()));
-    }
-
-    pub fn globalCount(mod: *Module) u32 {
-        return c.wasm_global_count(mod.raw());
-    }
-
-    pub fn globalType(mod: *Module, global_index: u32) ValType {
-        return @fromBackingInt(c.wasm_global_type(mod.raw(), global_index));
-    }
-
-    pub fn globalIsMutable(mod: *Module, global_index: u32) bool {
-        return c.wasm_global_is_mutable(mod.raw(), global_index) != 0;
-    }
-
-    pub fn memoryCount(mod: *Module) u32 {
-        return c.wasm_memory_count(mod.raw());
-    }
-
-    pub fn memory(mod: *Module, memory_index: u32) ?Memory {
-        if (memory_index >= mod.memoryCount()) return null;
-        return .{ .module = mod, .index = memory_index };
-    }
-
-    pub fn tableCount(mod: *Module) u32 {
-        return c.wasm_table_count(mod.raw());
-    }
-
-    pub fn table(mod: *Module, table_index: u32) ?*c.wasm_table_t {
-        return c.wasm_module_table(mod.raw(), table_index);
-    }
-
-    pub fn exportCount(mod: *Module) u32 {
-        return c.wasm_export_count(mod.raw());
-    }
-
-    pub fn exportAt(mod: *Module, export_index: u32) Export {
+    pub fn exportAt(info: *const ModuleInfo, export_index: u32) Export {
         var len: usize = 0;
-        const name = c.wasm_export_name_bytes(mod.raw(), export_index, &len);
+        const export_name = c.wasm_export_name_bytes(info.raw(), export_index, &len);
         return .{
-            .name = if (name == null) "" else name[0..len],
-            .kind = @fromBackingInt(c.wasm_export_kind(mod.raw(), export_index)),
-            .index = c.wasm_export_index(mod.raw(), export_index),
+            .name = if (export_name == null) "" else export_name[0..len],
+            .kind = @fromBackingInt(c.wasm_export_kind(info.raw(), export_index)),
+            .index = c.wasm_export_index(info.raw(), export_index),
         };
     }
 
-    pub fn findExport(mod: *Module, name: []const u8) ?Export {
+    pub fn findExport(info: *const ModuleInfo, export_name: []const u8) ?Export {
         var kind: c.wasm_export_kind_t = undefined;
         var index: u32 = undefined;
-        if (c.wasm_find_export_bytes(mod.raw(), name.ptr, name.len, &kind, &index) == 0) return null;
-        return .{ .name = name, .kind = @fromBackingInt(kind), .index = index };
+        if (c.wasm_find_export_bytes(info.raw(), export_name.ptr, export_name.len, &kind, &index) == 0) return null;
+        return .{ .name = export_name, .kind = @fromBackingInt(kind), .index = index };
     }
 
-    pub fn exports(mod: *Module) Iterator(Export, exportCount, exportAt) {
-        return .{ .module = mod };
+    pub fn exports(info: *const ModuleInfo) Iterator(Export, exportCount, exportAt) {
+        return .{ .info = info };
     }
 
-    pub fn importCount(mod: *Module) u32 {
-        return c.wasm_import_count(mod.raw());
+    pub fn importCount(info: *const ModuleInfo) u32 {
+        return c.wasm_import_count(info.raw());
     }
 
-    pub fn importAt(mod: *Module, import_index: u32) Import {
-        const info = c.wasm_import_info(mod.raw(), import_index).*;
+    pub fn importAt(info: *const ModuleInfo, import_index: u32) Import {
+        const imp = c.wasm_import_info(info.raw(), import_index).*;
         return .{
-            .module = span(info.module),
-            .name = span(info.name),
-            .kind = @fromBackingInt(@intCast(info.kind)),
-            .index = info.index,
-            .type_index = info.type_index,
-            .type = @fromBackingInt(info.type),
-            .mutable = info.is_mutable != 0,
+            .module = span(imp.module),
+            .name = span(imp.name),
+            .kind = @fromBackingInt(@intCast(imp.kind)),
+            .index = imp.index,
+            .type_index = imp.type_index,
+            .type = @fromBackingInt(imp.type),
+            .mutable = imp.is_mutable != 0,
         };
     }
 
-    pub fn imports(mod: *Module) Iterator(Import, importCount, importAt) {
-        return .{ .module = mod };
+    pub fn imports(info: *const ModuleInfo) Iterator(Import, importCount, importAt) {
+        return .{ .info = info };
     }
 
-    pub fn customSectionCount(mod: *Module) u32 {
-        return c.wasm_custom_section_count(mod.raw());
+    pub fn customSectionCount(info: *const ModuleInfo) u32 {
+        return c.wasm_custom_section_count(info.raw());
     }
 
-    pub fn customSectionAt(mod: *Module, section_index: u32) CustomSection {
+    pub fn customSectionAt(info: *const ModuleInfo, section_index: u32) CustomSection {
         var len: usize = 0;
-        const data = c.wasm_custom_section_data(mod.raw(), section_index, &len);
+        const data = c.wasm_custom_section_data(info.raw(), section_index, &len);
         return .{
-            .name = span(c.wasm_custom_section_name(mod.raw(), section_index)),
+            .name = span(c.wasm_custom_section_name(info.raw(), section_index)),
             .data = if (data == null) &.{} else data[0..len],
         };
     }
 
-    pub fn customSections(mod: *Module) Iterator(CustomSection, customSectionCount, customSectionAt) {
-        return .{ .module = mod };
+    pub fn customSections(info: *const ModuleInfo) Iterator(CustomSection, customSectionCount, customSectionAt) {
+        return .{ .info = info };
     }
 
-    /// The contents of the first custom section called `name`.
-    pub fn customSection(mod: *Module, name: [:0]const u8) ?[]const u8 {
+    /// The contents of the first custom section called `section_name`.
+    pub fn customSection(info: *const ModuleInfo, section_name: [:0]const u8) ?[]const u8 {
         var len: usize = 0;
-        const data = c.wasm_custom_section_find(mod.raw(), name.ptr, &len);
+        const data = c.wasm_custom_section_find(info.raw(), section_name.ptr, &len);
         return if (data == null) null else data[0..len];
     }
 
-    pub fn funcCount(mod: *Module) u32 {
-        return c.wasm_func_count(mod.raw());
+    pub fn funcCount(info: *const ModuleInfo) u32 {
+        return c.wasm_func_count(info.raw());
     }
 
-    pub fn funcType(mod: *Module, func_index: u32) ?FuncType {
-        return .fromC(c.wasm_func_functype(mod.raw(), func_index));
+    pub fn funcType(info: *const ModuleInfo, func_index: u32) ?FuncType {
+        return .fromC(c.wasm_func_functype(info.raw(), func_index));
     }
 
-    pub fn typeCount(mod: *Module) u32 {
-        return c.wasm_type_count(mod.raw());
+    /// The function's name from the module's "name" section.
+    pub fn funcName(info: *const ModuleInfo, func_index: u32) ?[:0]const u8 {
+        const ptr = c.wasm_func_name(info.raw(), func_index) orelse return null;
+        return span(ptr);
     }
 
-    pub fn typeKind(mod: *Module, type_index: u32) TypeKind {
-        return @fromBackingInt(c.wasm_type_kind(mod.raw(), type_index));
+    pub fn typeCount(info: *const ModuleInfo) u32 {
+        return c.wasm_type_count(info.raw());
+    }
+
+    pub fn typeKind(info: *const ModuleInfo, type_index: u32) TypeKind {
+        return @fromBackingInt(c.wasm_type_kind(info.raw(), type_index));
     }
 
     /// The signature of function type `type_index`, or null for struct and array types.
-    pub fn typeFunc(mod: *Module, type_index: u32) ?FuncType {
-        return .fromC(c.wasm_type_functype(mod.raw(), type_index));
+    pub fn typeFunc(info: *const ModuleInfo, type_index: u32) ?FuncType {
+        return .fromC(c.wasm_type_functype(info.raw(), type_index));
     }
 
-    pub fn tagCount(mod: *Module) u32 {
-        return c.wasm_tag_count(mod.raw());
+    pub fn tagCount(info: *const ModuleInfo) u32 {
+        return c.wasm_tag_count(info.raw());
     }
 
-    pub fn tagType(mod: *Module, tag_index: u32) ?FuncType {
-        return .fromC(c.wasm_tag_functype(mod.raw(), tag_index));
+    pub fn tagType(info: *const ModuleInfo, tag_index: u32) ?FuncType {
+        return .fromC(c.wasm_tag_functype(info.raw(), tag_index));
     }
 
-    /// Allocates a GC struct of type `type_index`. GC references stay valid only while Wasm can reach them.
-    pub fn structNew(mod: *Module, type_index: u32, fields: []const Value) Error!Value {
-        var ref: Value = undefined;
-        try check(c.wasm_struct_new(mod.raw(), type_index, Value.cPtr(fields), @intCast(fields.len), @ptrCast(&ref)));
-        return ref;
+    pub fn globalCount(info: *const ModuleInfo) u32 {
+        return c.wasm_global_count(info.raw());
     }
 
-    pub fn structGet(mod: *Module, ref: Value, field_index: u32) Error!Value {
-        var value: Value = undefined;
-        try check(c.wasm_struct_get_field(mod.raw(), ref.toC(), field_index, @ptrCast(&value)));
-        return value;
+    pub fn globalType(info: *const ModuleInfo, global_index: u32) ValType {
+        return @fromBackingInt(c.wasm_global_type(info.raw(), global_index));
     }
 
-    pub fn structSet(mod: *Module, ref: Value, field_index: u32, value: Value) Error!void {
-        try check(c.wasm_struct_set_field(mod.raw(), ref.toC(), field_index, value.toC()));
+    pub fn globalIsMutable(info: *const ModuleInfo, global_index: u32) bool {
+        return c.wasm_global_is_mutable(info.raw(), global_index) != 0;
     }
 
-    pub fn arrayNew(mod: *Module, type_index: u32, elems: []const Value) Error!Value {
-        var ref: Value = undefined;
-        try check(c.wasm_array_new(mod.raw(), type_index, Value.cPtr(elems), @intCast(elems.len), @ptrCast(&ref)));
-        return ref;
+    pub fn memoryCount(info: *const ModuleInfo) u32 {
+        return c.wasm_memory_count(info.raw());
     }
 
-    pub fn arrayLen(mod: *Module, ref: Value) Error!u32 {
-        var len: u32 = undefined;
-        try check(c.wasm_array_length(mod.raw(), ref.toC(), &len));
-        return len;
+    pub fn tableCount(info: *const ModuleInfo) u32 {
+        return c.wasm_table_count(info.raw());
     }
 
-    pub fn arrayGet(mod: *Module, ref: Value, elem_index: u32) Error!Value {
-        var value: Value = undefined;
-        try check(c.wasm_array_get_elem(mod.raw(), ref.toC(), elem_index, @ptrCast(&value)));
-        return value;
+    pub fn tableType(info: *const ModuleInfo, table_index: u32) ValType {
+        return @fromBackingInt(c.wasm_table_type(info.raw(), table_index));
     }
 
-    pub fn arraySet(mod: *Module, ref: Value, elem_index: u32, value: Value) Error!void {
-        try check(c.wasm_array_set_elem(mod.raw(), ref.toC(), elem_index, value.toC()));
+    /// Looks up and type-checks the exports `Spec` names; see `Plan`.
+    pub fn resolve(info: *const ModuleInfo, comptime Spec: type) Error!Plan(Spec) {
+        const fields = @typeInfo(Spec).@"struct";
+        var plan: Plan(Spec) = undefined;
+        inline for (fields.field_names, fields.field_types, 0..) |field_name, T, i| {
+            const B = BoundField(T);
+            const optional = @typeInfo(B) == .optional;
+            const X = if (optional) @typeInfo(B).optional.child else B;
+            plan.indices[i] = try info.resolveExport(field_name, X);
+            if (!optional and plan.indices[i] == null)
+                return info.runtime().fail(error.UndefinedExport, "missing export '" ++ field_name ++ "'");
+        }
+        return plan;
     }
 
-    pub fn setUserdata(mod: *Module, ptr: ?*anyopaque) void {
-        c.wasm_module_set_userdata(mod.raw(), ptr);
-    }
-
-    pub fn userdata(mod: *Module, comptime T: type) ?*T {
-        return @ptrCast(@alignCast(c.wasm_module_userdata(mod.raw())));
+    fn resolveExport(info: *const ModuleInfo, comptime export_name: [:0]const u8, comptime X: type) Error!?u32 {
+        const exp = info.findExport(export_name) orelse return null;
+        const rt = info.runtime();
+        if (exp.kind != X.extern_kind)
+            return rt.fail(error.TypeMismatch, "export '" ++ export_name ++ "' is not a " ++ @tagName(X.extern_kind));
+        switch (X.extern_kind) {
+            .func => {
+                const ft = info.funcType(exp.index) orelse return error.Malformed;
+                if (!ft.matches(X.FnType))
+                    return rt.fail(error.TypeMismatch, "export '" ++ export_name ++ "' does not match " ++ @typeName(X.FnType));
+            },
+            .global => if (ValType.of(X.ValueType)) |expected| {
+                if (info.globalType(exp.index) != expected)
+                    return rt.fail(error.TypeMismatch, "export '" ++ export_name ++ "' is not a global of type " ++ @typeName(X.ValueType));
+            },
+            else => {},
+        }
+        return exp.index;
     }
 };
 
-pub fn Iterator(comptime T: type, comptime count: fn (*Module) u32, comptime at: fn (*Module, u32) T) type {
-    return struct {
-        module: *Module,
-        index: u32 = 0,
+/// The bound form of a `Spec` field type: function types become `TypedFunc`, and `TypedFunc`,
+/// `Global`, `Memory`, `Table`, and optionals of them stay as they are.
+fn BoundField(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .@"fn" => TypedFunc(T),
+        .optional => |o| ?BoundField(o.child),
+        .@"struct" => if (@hasDecl(T, "extern_kind")) T else @compileError("not an export type: " ++ @typeName(T)),
+        else => @compileError("not an export type: " ++ @typeName(T)),
+    };
+}
 
-        pub fn next(self: *@This()) ?T {
-            if (self.index >= count(self.module)) return null;
-            defer self.index += 1;
-            return at(self.module, self.index);
+/// `Spec`'s exports bound to one instance. Each `Spec` field names an export and gives a function type,
+/// `TypedFunc`, `Global(T)`, `Memory`, or `Table`; an optional field is null when the export is missing.
+pub fn Bound(comptime Spec: type) type {
+    const fields = @typeInfo(Spec).@"struct";
+    var types: [fields.field_names.len]type = undefined;
+    for (fields.field_types, 0..) |T, i| types[i] = BoundField(T);
+    return @Struct(.auto, null, fields.field_names, &types, &@splat(.{}));
+}
+
+/// The export indices of `Spec` (see `Bound`), resolved once against a module and valid for each of
+/// its instances.
+pub fn Plan(comptime Spec: type) type {
+    const field_names = @typeInfo(Spec).@"struct".field_names;
+    return struct {
+        indices: [field_names.len]?u32,
+
+        /// `instance` must be an instance of the module the plan was resolved against.
+        pub fn on(plan: @This(), instance: *Instance) Bound(Spec) {
+            var bound: Bound(Spec) = undefined;
+            inline for (field_names, 0..) |field_name, i| {
+                const B = @FieldType(Bound(Spec), field_name);
+                if (@typeInfo(B) == .optional) {
+                    @field(bound, field_name) = if (plan.indices[i]) |index| .{ .instance = instance, .index = index } else null;
+                } else {
+                    @field(bound, field_name) = .{ .instance = instance, .index = plan.indices[i].? };
+                }
+            }
+            return bound;
         }
     };
 }
 
-/// One of a module's linear memories, defined or imported.
+/// A decoded and validated module that is not instantiated. It supports introspection, and
+/// `Runtime.instantiate` creates instances of it in any runtime, concurrently from several threads.
+pub const CompiledModule = opaque {
+    /// Free it after the instantiations that use it finish, and before its runtime.
+    pub fn deinit(compiled: *CompiledModule) void {
+        c.wasm_module_free(compiled.raw());
+    }
+
+    pub fn raw(compiled: *const CompiledModule) *c.wasm_module_t {
+        return @ptrCast(@constCast(compiled));
+    }
+
+    pub fn info(compiled: *const CompiledModule) *const ModuleInfo {
+        return @ptrCast(compiled);
+    }
+
+    /// The runtime that compiled it.
+    pub fn runtime(compiled: *const CompiledModule) *Runtime {
+        return compiled.info().runtime();
+    }
+
+    pub fn resolve(compiled: *const CompiledModule, comptime Spec: type) Error!Plan(Spec) {
+        return compiled.info().resolve(Spec);
+    }
+};
+
+/// An instantiated module, with its own memories, tables, and globals.
+pub const Instance = opaque {
+    /// Free instances before the runtime that holds them.
+    pub fn deinit(instance: *Instance) void {
+        c.wasm_module_free(instance.raw());
+    }
+
+    pub fn raw(instance: *Instance) *c.wasm_module_t {
+        return @ptrCast(instance);
+    }
+
+    pub fn info(instance: *Instance) *const ModuleInfo {
+        return @ptrCast(instance);
+    }
+
+    pub fn runtime(instance: *Instance) *Runtime {
+        return instance.info().runtime();
+    }
+
+    fn fail(instance: *Instance, err: Error, message: [:0]const u8) Error {
+        return instance.runtime().fail(err, message);
+    }
+
+    /// Calls an exported function with untyped values; `results.len` must match its result count.
+    pub fn call(instance: *Instance, name: [:0]const u8, args: []const Value, results: []Value) Error!void {
+        try check(c.wasm_call(instance.raw(), name.ptr, Value.cPtr(args), @intCast(args.len), Value.cPtrMut(results), @intCast(results.len)));
+    }
+
+    pub fn callIndex(instance: *Instance, func_index: u32, args: []const Value, results: []Value) Error!void {
+        try check(c.wasm_call_index(instance.raw(), func_index, Value.cPtr(args), @intCast(args.len), Value.cPtrMut(results), @intCast(results.len)));
+    }
+
+    /// Looks up an exported function and checks that it has `Fn`'s signature, where a `Value`
+    /// parameter or result accepts any type.
+    pub fn func(instance: *Instance, name: []const u8, comptime Fn: type) Error!TypedFunc(Fn) {
+        const exp = instance.info().findExport(name) orelse return instance.fail(error.UndefinedExport, "no export with that name");
+        if (exp.kind != .func) return instance.fail(error.TypeMismatch, "export is not a function");
+        return instance.funcAt(exp.index, Fn);
+    }
+
+    pub fn funcAt(instance: *Instance, func_index: u32, comptime Fn: type) Error!TypedFunc(Fn) {
+        const ft = instance.info().funcType(func_index) orelse return instance.fail(error.UndefinedExport, "function index out of range");
+        if (!ft.matches(Fn)) return instance.fail(error.TypeMismatch, "function signature does not match " ++ @typeName(Fn));
+        return .{ .instance = instance, .index = func_index };
+    }
+
+    /// Binds the exports `Spec` describes; see `Bound`.
+    pub fn exportsAs(instance: *Instance, comptime Spec: type) Error!Bound(Spec) {
+        return (try instance.info().resolve(Spec)).on(instance);
+    }
+
+    /// The exported global `name`, checked to have type `T` (any type for `Value`).
+    pub fn global(instance: *Instance, name: []const u8, comptime T: type) Error!Global(T) {
+        const exp = instance.info().findExport(name) orelse return instance.fail(error.UndefinedExport, "no export with that name");
+        if (exp.kind != .global) return instance.fail(error.TypeMismatch, "export is not a global");
+        if (ValType.of(T)) |expected| {
+            if (instance.info().globalType(exp.index) != expected) return instance.fail(error.TypeMismatch, "global type does not match " ++ @typeName(T));
+        }
+        return .{ .instance = instance, .index = exp.index };
+    }
+
+    pub fn getGlobal(instance: *Instance, comptime T: type, name: [:0]const u8) Error!T {
+        var value: Value = undefined;
+        try check(c.wasm_global_get(instance.raw(), name.ptr, @ptrCast(&value)));
+        return value.to(T);
+    }
+
+    pub fn setGlobal(instance: *Instance, name: [:0]const u8, value: anytype) Error!void {
+        try check(c.wasm_global_set(instance.raw(), name.ptr, Value.from(value).toC()));
+    }
+
+    pub fn memory(instance: *Instance, memory_index: u32) ?Memory {
+        if (memory_index >= instance.info().memoryCount()) return null;
+        return .{ .instance = instance, .index = memory_index };
+    }
+
+    pub fn table(instance: *Instance, table_index: u32) ?Table {
+        if (table_index >= instance.info().tableCount()) return null;
+        return .{ .instance = instance, .index = table_index };
+    }
+
+    /// Allocates a GC struct of type `type_index`. GC references stay valid only while Wasm can reach them.
+    pub fn structNew(instance: *Instance, type_index: u32, fields: []const Value) Error!Value {
+        var ref: Value = undefined;
+        try check(c.wasm_struct_new(instance.raw(), type_index, Value.cPtr(fields), @intCast(fields.len), @ptrCast(&ref)));
+        return ref;
+    }
+
+    pub fn structGet(instance: *Instance, ref: Value, field_index: u32) Error!Value {
+        var value: Value = undefined;
+        try check(c.wasm_struct_get_field(instance.raw(), ref.toC(), field_index, @ptrCast(&value)));
+        return value;
+    }
+
+    pub fn structSet(instance: *Instance, ref: Value, field_index: u32, value: Value) Error!void {
+        try check(c.wasm_struct_set_field(instance.raw(), ref.toC(), field_index, value.toC()));
+    }
+
+    pub fn arrayNew(instance: *Instance, type_index: u32, elems: []const Value) Error!Value {
+        var ref: Value = undefined;
+        try check(c.wasm_array_new(instance.raw(), type_index, Value.cPtr(elems), @intCast(elems.len), @ptrCast(&ref)));
+        return ref;
+    }
+
+    pub fn arrayLen(instance: *Instance, ref: Value) Error!u32 {
+        var len: u32 = undefined;
+        try check(c.wasm_array_length(instance.raw(), ref.toC(), &len));
+        return len;
+    }
+
+    pub fn arrayGet(instance: *Instance, ref: Value, elem_index: u32) Error!Value {
+        var value: Value = undefined;
+        try check(c.wasm_array_get_elem(instance.raw(), ref.toC(), elem_index, @ptrCast(&value)));
+        return value;
+    }
+
+    pub fn arraySet(instance: *Instance, ref: Value, elem_index: u32, value: Value) Error!void {
+        try check(c.wasm_array_set_elem(instance.raw(), ref.toC(), elem_index, value.toC()));
+    }
+
+    pub fn setUserdata(instance: *Instance, ptr: ?*anyopaque) void {
+        c.wasm_module_set_userdata(instance.raw(), ptr);
+    }
+
+    pub fn userdata(instance: *Instance, comptime T: type) ?*T {
+        return @ptrCast(@alignCast(c.wasm_module_userdata(instance.raw())));
+    }
+};
+
+pub fn Iterator(comptime T: type, comptime count: fn (*const ModuleInfo) u32, comptime at: fn (*const ModuleInfo, u32) T) type {
+    return struct {
+        info: *const ModuleInfo,
+        index: u32 = 0,
+
+        pub fn next(self: *@This()) ?T {
+            if (self.index >= count(self.info)) return null;
+            defer self.index += 1;
+            return at(self.info, self.index);
+        }
+    };
+}
+
+/// One of an instance's globals, defined or imported, holding a `T` (any type for `Value`).
+pub fn Global(comptime T: type) type {
+    return struct {
+        instance: *Instance,
+        index: u32,
+
+        pub const extern_kind = ExternKind.global;
+        pub const ValueType = T;
+
+        const Self = @This();
+
+        pub fn get(self: Self) Error!T {
+            var value: Value = undefined;
+            try check(c.wasm_global_get_index(self.instance.raw(), self.index, @ptrCast(&value)));
+            return value.to(T);
+        }
+
+        /// Fails with `error.TypeMismatch` for immutable globals.
+        pub fn set(self: Self, value: T) Error!void {
+            try check(c.wasm_global_set_index(self.instance.raw(), self.index, Value.from(value).toC()));
+        }
+
+        pub fn isMutable(self: Self) bool {
+            return self.instance.info().globalIsMutable(self.index);
+        }
+    };
+}
+
+/// One of an instance's linear memories, defined or imported.
 pub const Memory = struct {
-    module: *Module,
+    instance: *Instance,
     index: u32,
+
+    pub const extern_kind = ExternKind.memory;
 
     /// The memory's bytes. Growing the memory invalidates the slice unless the memory is shared.
     pub fn data(self: Memory) []u8 {
-        const ptr = c.wasm_memory_data(self.module.raw(), self.index);
+        const ptr = c.wasm_memory_data(self.instance.raw(), self.index);
         return if (ptr == null) &.{} else ptr[0..@intCast(self.size())];
     }
 
     /// The size in bytes.
     pub fn size(self: Memory) u64 {
-        return c.wasm_memory_size(self.module.raw(), self.index);
+        return c.wasm_memory_size(self.instance.raw(), self.index);
     }
 
     /// Grows the memory by `delta_pages`, returning the old size in pages, or null when it cannot grow.
     pub fn grow(self: Memory, delta_pages: u64) ?u64 {
-        const old = c.wasm_memory_grow(self.module.raw(), self.index, delta_pages);
+        const old = c.wasm_memory_grow(self.instance.raw(), self.index, delta_pages);
         return if (old < 0) null else @intCast(old);
     }
 
+    /// The `len` bytes at `offset`, invalidated as `data` is.
+    pub fn slice(self: Memory, offset: u64, len: u64) Error![]u8 {
+        const bytes = self.data();
+        if (offset > bytes.len or len > bytes.len - offset) return error.OutOfBounds;
+        return bytes[@intCast(offset)..][0..@intCast(len)];
+    }
+
+    /// Reads a little-endian integer or float at `offset`.
+    pub fn load(self: Memory, comptime T: type, offset: u64) Error!T {
+        const Bits = @Int(.unsigned, @bitSizeOf(T));
+        const bytes = try self.slice(offset, @sizeOf(T));
+        return @bitCast(std.mem.readInt(Bits, bytes[0..@sizeOf(T)], .little));
+    }
+
+    /// Writes a little-endian integer or float at `offset`.
+    pub fn store(self: Memory, comptime T: type, offset: u64, value: T) Error!void {
+        const Bits = @Int(.unsigned, @bitSizeOf(T));
+        const bytes = try self.slice(offset, @sizeOf(T));
+        std.mem.writeInt(Bits, bytes[0..@sizeOf(T)], @bitCast(value), .little);
+    }
+
     pub fn read(self: Memory, offset: u64, dst: []u8) Error!void {
-        try check(c.wasm_memory_read(self.module.raw(), self.index, offset, dst.ptr, dst.len));
+        try check(c.wasm_memory_read(self.instance.raw(), self.index, offset, dst.ptr, dst.len));
     }
 
     pub fn write(self: Memory, offset: u64, src: []const u8) Error!void {
-        try check(c.wasm_memory_write(self.module.raw(), self.index, offset, src.ptr, src.len));
+        try check(c.wasm_memory_write(self.instance.raw(), self.index, offset, src.ptr, src.len));
     }
 
     /// Reads a NUL-terminated string at `offset`, truncated to fit `buffer`.
     pub fn readString(self: Memory, offset: u64, buffer: []u8) Error![:0]const u8 {
-        try check(c.wasm_memory_get_string(self.module.raw(), self.index, offset, buffer.ptr, buffer.len));
+        try check(c.wasm_memory_get_string(self.instance.raw(), self.index, offset, buffer.ptr, buffer.len));
         return span(buffer.ptr);
     }
 
     pub fn raw(self: Memory) *c.wasm_memory_t {
-        return c.wasm_module_memory(self.module.raw(), self.index);
+        return c.wasm_module_memory(self.instance.raw(), self.index);
     }
 };
+
+/// One of an instance's tables, defined or imported.
+pub const Table = struct {
+    instance: *Instance,
+    index: u32,
+
+    pub const extern_kind = ExternKind.table;
+
+    pub fn elemType(self: Table) ValType {
+        return self.instance.info().tableType(self.index);
+    }
+
+    pub fn size(self: Table) u64 {
+        return c.wasm_table_size(self.instance.raw(), self.index);
+    }
+
+    /// Reads element `elem_index` as `T`, such as `FuncRef`, `ExternRef`, or `Value`.
+    pub fn get(self: Table, comptime T: type, elem_index: u64) Error!T {
+        var value: Value = undefined;
+        try check(c.wasm_table_get(self.instance.raw(), self.index, elem_index, @ptrCast(&value)));
+        return value.to(T);
+    }
+
+    /// Stores `value`, which must match the element type.
+    pub fn set(self: Table, elem_index: u64, value: anytype) Error!void {
+        try check(c.wasm_table_set(self.instance.raw(), self.index, elem_index, Value.from(value).toC()));
+    }
+
+    /// Adds `delta` elements set to `init`, returning the old size, or null when the table cannot grow.
+    pub fn grow(self: Table, delta: u64, init: anytype) ?u64 {
+        const old = c.wasm_table_grow(self.instance.raw(), self.index, delta, Value.from(init).toC());
+        return if (old < 0) null else @intCast(old);
+    }
+
+    pub fn raw(self: Table) *c.wasm_table_t {
+        return c.wasm_module_table(self.instance.raw(), self.index);
+    }
+};
+
+/// Instances of one compiled module, created ahead of use and bound to `Spec`'s exports.
+/// Released instances are freed, not reused.
+pub fn Pool(comptime Spec: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        runtime: *Runtime,
+        compiled: *const CompiledModule,
+        plan: Plan(Spec),
+        idle: std.ArrayList(*Instance) = .empty,
+
+        const Self = @This();
+
+        pub const Lease = struct {
+            instance: *Instance,
+            exports: Bound(Spec),
+        };
+
+        /// Instances are created in `rt`. `compiled` must outlive the pool.
+        pub fn init(allocator: std.mem.Allocator, rt: *Runtime, compiled: *const CompiledModule) Error!Self {
+            return .{ .allocator = allocator, .runtime = rt, .compiled = compiled, .plan = try compiled.resolve(Spec) };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.idle.items) |instance| instance.deinit();
+            self.idle.deinit(self.allocator);
+        }
+
+        /// Instantiates until `count` instances are idle.
+        pub fn fill(self: *Self, count: usize) Error!void {
+            self.idle.ensureTotalCapacity(self.allocator, count) catch return error.OutOfMemory;
+            while (self.idle.items.len < count) self.idle.appendAssumeCapacity(try self.runtime.instantiate(self.compiled));
+        }
+
+        /// An idle instance, or a new one when none is idle.
+        pub fn acquire(self: *Self) Error!Lease {
+            const instance = self.idle.pop() orelse try self.runtime.instantiate(self.compiled);
+            return .{ .instance = instance, .exports = self.plan.on(instance) };
+        }
+
+        pub fn release(self: *Self, lease: Lease) void {
+            _ = self;
+            lease.instance.deinit();
+        }
+    };
+}
 
 /// A memory for the threads proposal, shared by runtimes on separate threads through `Runtime.bindMemory`.
 /// It never moves when it grows, and must outlive every module that imports it.

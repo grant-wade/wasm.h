@@ -8,7 +8,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - `wasm_init` and `wasm_destroy` are removed, and `wasm_runtime_new` returns NULL when the configuration is invalid or allocation fails.
 - Runtime state functions are `wasm_runtime_set_fuel`, `wasm_runtime_fuel`, `wasm_runtime_enable_feature`, `wasm_runtime_disable_feature`, `wasm_runtime_enable_all_features`, `wasm_runtime_call_depth`, `wasm_runtime_call_frame`, and `wasm_runtime_backtrace`, replacing `wasm_set_fuel`, `wasm_get_fuel`, `wasm_enable_feature`, `wasm_disable_feature`, `wasm_enable_all_features`, `wasm_get_call_stack_depth`, `wasm_get_call_frame_info`, and `wasm_dump_backtrace`.
-- `wasm_runtime_call_frame` takes a `wasm_module_t** out_module` after `depth`, and any of its outputs may be NULL. In Zig, `CallFrame` has a `module` field.
+- `wasm_runtime_call_frame` takes a `wasm_module_t** out_module` after `depth`, and any of its outputs may be NULL. In Zig, `CallFrame` has an `instance` field.
 - `wasm_free_module` is `wasm_module_free`, and `wasm_module_get_userdata` is `wasm_module_userdata`.
 - `wasm_memory_data`, `wasm_memory_size`, and `wasm_memory_grow` take a memory index and replace their `_at` variants.
 - `wasm_memory_ref_at`, `wasm_table_ref_at`, and `wasm_global_value_ref_at` are `wasm_module_memory`, `wasm_module_table`, and `wasm_module_global`.
@@ -23,6 +23,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_memory_new`, `wasm_shared_memory_new`, and `wasm_table_new` take an allocator as their first argument.
 - Generated `wasm2api` options have an `allocator` field, defaulting to `wasm_libc_allocator()`.
 - In Zig, `Runtime.init` and `SharedMemory.init` take a `std.mem.Allocator` first.
+- `wasm_instantiate` takes the runtime to instantiate in and the instance's userdata: `wasm_instantiate(rt, compiled, userdata)`.
+- In Zig, `Module` is split into `CompiledModule`, which `Runtime.compile` returns, and `Instance`, which `Runtime.load` and `Runtime.instantiate` return. Introspection is on `ModuleInfo`, reached through `info()`, `Module.instantiate` is `Runtime.instantiate`, host functions take a `*wasm.Instance` caller, and `TypedFunc` and `Memory` have an `instance` field.
 - `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two. A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 
 ### Security
@@ -38,6 +40,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.
 - `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_index` and `wasm_global_set_index`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
 - `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, and `wasm_memory_base` and `wasm_memory_length` read a memory handle's data and size.
+- `wasm_instantiate` instantiates a compiled module in any runtime, including runtimes on other threads at the same time, and sets the instance's userdata before its start function runs. In Zig, `Runtime.instantiate`, `Runtime.instantiateContext`, and `Runtime.bindInstanceFunc`, which passes the calling instance's context to a host function.
+- `wasm_import_check` reports whether a runtime's bindings resolve an import of a compiled module. In Zig, `Runtime.checkImport` and `Runtime.unresolvedImports`.
+- `wasm_func_ref_target` returns the instance and function index a funcref refers to. In Zig, `Runtime.funcRef` and `Runtime.callRef`.
+- Zig `ModuleInfo.resolve` returns a `Plan` that binds a struct of typed exports to each instance of a module, `Instance.exportsAs` binds one directly, and `Pool` keeps instances of a compiled module ready with their exports bound.
+- Zig `Runtime.bindAll` and `Runtime.bindAllContext` bind every public function of a namespace, and `checkHost` checks a namespace against import signatures at compile time.
+- Zig `Table`, `Global`, `Instance.global`, `Runtime.registerModule`, `Runtime.lastError`, `Memory.slice`, `Memory.load`, `Memory.store`, and `Config.features` and `Config.fuel`.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
 - `wasm_config_t.max_gc_heap_bytes` caps the GC heap. In Zig, `Config.max_gc_heap_bytes`.
 - Backtraces name each frame's module and function from the `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`, and `wasm_func_name` and `wasm_module_name` return those names.

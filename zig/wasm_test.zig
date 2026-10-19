@@ -91,7 +91,7 @@ test "traps and fuel" {
     try expectError(error.DivByZero, div.call(.{ 1, 0 }));
     try expectEqualStrings("integer divide by zero", rt.errorMessage());
     const frame = rt.callFrame(0).?;
-    try expectEqual(@as(?*wasm.Module, mod), frame.module);
+    try expectEqual(@as(?*wasm.Instance, mod), frame.instance);
     try expectError(error.IntOverflow, div.call(.{ std.math.minInt(i32), -1 }));
     try expectEqualStrings("integer overflow", rt.errorMessage());
 
@@ -196,10 +196,10 @@ test "globals" {
     try expectError(error.TypeMismatch, mod.getGlobal(i64, "counter"));
     try expect(std.meta.isError(mod.setGlobal("scale", @as(f64, 1.0))));
 
-    try expectEqual(@as(u32, 2), mod.globalCount());
-    try expectEqual(wasm.ValType.i32, mod.globalType(0));
-    try expect(mod.globalIsMutable(0));
-    try expect(!mod.globalIsMutable(1));
+    try expectEqual(@as(u32, 2), mod.info().globalCount());
+    try expectEqual(wasm.ValType.i32, mod.info().globalType(0));
+    try expect(mod.info().globalIsMutable(0));
+    try expect(!mod.info().globalIsMutable(1));
 }
 
 test "linear memory" {
@@ -208,7 +208,7 @@ test "linear memory" {
     const mod = try rt.load(&basic_wasm);
     defer mod.deinit();
 
-    try expectEqual(@as(u32, 1), mod.memoryCount());
+    try expectEqual(@as(u32, 1), mod.info().memoryCount());
     try expectEqual(@as(?wasm.Memory, null), mod.memory(1));
     const memory = mod.memory(0).?;
     try expectEqual(@as(u64, wasm.page_size), memory.size());
@@ -238,25 +238,25 @@ test "introspection" {
 
     var names: [16][]const u8 = undefined;
     var count: usize = 0;
-    var it = mod.exports();
+    var it = mod.info().exports();
     while (it.next()) |exp| : (count += 1) names[count] = exp.name;
-    try expectEqual(@as(usize, mod.exportCount()), count);
+    try expectEqual(@as(usize, mod.info().exportCount()), count);
     try expectEqualStrings("memory", names[0]);
     try expectEqualStrings("bump", names[count - 1]);
 
-    const add = mod.findExport("add").?;
+    const add = mod.info().findExport("add").?;
     try expectEqual(wasm.ExternKind.func, add.kind);
-    try expectEqual(@as(?wasm.Export, null), mod.findExport("nope"));
-    const add_type = mod.funcType(add.index).?;
+    try expectEqual(@as(?wasm.Export, null), mod.info().findExport("nope"));
+    const add_type = mod.info().funcType(add.index).?;
     try expectEqualSlices(wasm.ValType, &.{ .i32, .i32 }, add_type.params);
     try expectEqualSlices(wasm.ValType, &.{.i32}, add_type.results);
     try expect(add_type.matches(fn (i32, i32) i32));
     try expect(!add_type.matches(fn (i32, i32) void));
-    try expectEqual(wasm.TypeKind.func, mod.typeKind(0));
+    try expectEqual(wasm.TypeKind.func, mod.info().typeKind(0));
 
-    try expectEqualStrings("abc", mod.customSection("meta").?);
-    try expectEqual(@as(?[]const u8, null), mod.customSection("other"));
-    var sections = mod.customSections();
+    try expectEqualStrings("abc", mod.info().customSection("meta").?);
+    try expectEqual(@as(?[]const u8, null), mod.info().customSection("other"));
+    var sections = mod.info().customSections();
     const first = sections.next().?;
     try expectEqualStrings("meta", first.name);
     try expectEqualStrings("abc", first.data);
@@ -275,7 +275,7 @@ fn hostLog(state: *HostState, value: i32) void {
     state.logged = value;
 }
 
-fn hostAdd3(caller: *wasm.Module, a: i32, b: i32, c: i32) i32 {
+fn hostAdd3(caller: *wasm.Instance, a: i32, b: i32, c: i32) i32 {
     _ = caller.runtime();
     return a + b + c;
 }
@@ -288,7 +288,7 @@ fn hostFail() error{HostRefused}!void {
     return error.HostRefused;
 }
 
-fn hostEcho(state: *HostState, caller: *wasm.Module, ref: wasm.ExternRef) wasm.ExternRef {
+fn hostEcho(state: *HostState, caller: *wasm.Instance, ref: wasm.ExternRef) wasm.ExternRef {
     _ = caller;
     state.callers += 1;
     return ref;
@@ -328,12 +328,12 @@ test "host functions and globals" {
     try expectEqual(@as(usize, 1), state.callers);
     try expectEqual(@as(?*HostState, &state), ref.toPtr(HostState));
 
-    try expectEqual(@as(u32, 6), mod.importCount());
-    const log_import = mod.importAt(0);
+    try expectEqual(@as(u32, 6), mod.info().importCount());
+    const log_import = mod.info().importAt(0);
     try expectEqualStrings("env", log_import.module);
     try expectEqualStrings("log", log_import.name);
     try expectEqual(wasm.ExternKind.func, log_import.kind);
-    try expectEqual(wasm.ExternKind.global, mod.importAt(5).kind);
+    try expectEqual(wasm.ExternKind.global, mod.info().importAt(5).kind);
 }
 
 fn hostIgnore() void {}
@@ -394,14 +394,13 @@ test "compiled modules are inspected without imports and instantiated repeatedly
 
     const unbound = try rt.compile(&host_wasm);
     defer unbound.deinit();
-    try expectError(error.UnknownImport, unbound.instantiate());
+    try expectError(error.UnknownImport, rt.instantiate(unbound));
 
     const compiled = try rt.compile(&basic_wasm);
     defer compiled.deinit();
-    try expectError(error.Malformed, (try compiled.func("add", fn (i32, i32) i32)).call(.{ 1, 2 }));
-    const first = try compiled.instantiate();
+    const first = try rt.instantiate(compiled);
     defer first.deinit();
-    const second = try compiled.instantiate();
+    const second = try rt.instantiate(compiled);
     defer second.deinit();
     try expectEqual(@as(i32, 3), try (try first.func("add", fn (i32, i32) i32)).call(.{ 1, 2 }));
     try expectEqual(@as(i32, 7), try (try second.func("add", fn (i32, i32) i32)).call(.{ 3, 4 }));
@@ -426,7 +425,7 @@ test "shared memory across runtimes" {
     const shared = try wasm.SharedMemory.init(std.testing.allocator, .{ .pages = 1, .max_pages = 4 });
     defer shared.deinit();
 
-    var modules: [2]*wasm.Module = undefined;
+    var modules: [2]*wasm.Instance = undefined;
     var runtimes: [2]*wasm.Runtime = undefined;
     for (&runtimes, &modules) |*rt, *mod| {
         rt.* = try wasm.Runtime.init(std.testing.allocator, .{});
@@ -455,9 +454,9 @@ test "gc structs and arrays" {
     const mod = try rt.load(&gc_wasm);
     defer mod.deinit();
 
-    try expectEqual(wasm.TypeKind.@"struct", mod.typeKind(0));
-    try expectEqual(wasm.TypeKind.array, mod.typeKind(1));
-    try expectEqual(@as(?wasm.FuncType, null), mod.typeFunc(0));
+    try expectEqual(wasm.TypeKind.@"struct", mod.info().typeKind(0));
+    try expectEqual(wasm.TypeKind.array, mod.info().typeKind(1));
+    try expectEqual(@as(?wasm.FuncType, null), mod.info().typeFunc(0));
 
     const point = try mod.structNew(0, &.{ .from(@as(i32, 3)), .from(@as(i64, 4)) });
     try expectEqual(@as(i64, 4), try (try mod.structGet(point, 1)).to(i64));
@@ -627,3 +626,272 @@ test "allocation failures return errors without leaking" {
         if (!failing.has_induced_failure) break;
     }
 }
+
+const BasicExports = struct {
+    add: fn (i32, i32) i32,
+    bump: wasm.TypedFunc(fn () i32),
+    memory: wasm.Memory,
+    counter: wasm.Global(i32),
+    scale: wasm.Global(f64),
+    absent: ?fn () void,
+};
+
+test "plans bind the exports of each instance" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const compiled = try rt.compile(&basic_wasm);
+    defer compiled.deinit();
+
+    const plan = try compiled.resolve(BasicExports);
+    const first = try rt.instantiate(compiled);
+    defer first.deinit();
+    const second = try rt.instantiate(compiled);
+    defer second.deinit();
+
+    const a = plan.on(first);
+    const b = plan.on(second);
+    try expectEqual(@as(i32, 5), try a.add.call(.{ 2, 3 }));
+    try expectEqual(@as(?wasm.TypedFunc(fn () void), null), a.absent);
+    try a.counter.set(100);
+    try expectEqual(@as(i32, 101), try a.bump.call(.{}));
+    try expectEqual(@as(i32, 8), try b.bump.call(.{}));
+    try expectEqual(@as(f64, 2.5), try b.scale.get());
+    try expect(a.counter.isMutable());
+    try expectError(error.TypeMismatch, b.scale.set(1.0));
+    try expectEqualStrings("hello", (try a.memory.slice(16, 5)));
+
+    const bound = try first.exportsAs(struct { counter: wasm.Global(wasm.Value) });
+    try expectEqual(@as(i32, 101), try (try bound.counter.get()).to(i32));
+    try expectEqual(@as(i32, 101), try (try first.global("counter", i32)).get());
+    try expectError(error.TypeMismatch, first.global("counter", i64));
+
+    try expectError(error.UndefinedExport, compiled.resolve(struct { nope: fn () void }));
+    try expectEqualStrings("missing export 'nope'", rt.errorMessage());
+    try expectError(error.TypeMismatch, compiled.resolve(struct { add: fn (i32) i32 }));
+    try expectError(error.TypeMismatch, compiled.resolve(struct { add: wasm.Memory }));
+    try expectEqualStrings("export 'add' is not a memory", rt.errorMessage());
+    try expectError(error.TypeMismatch, compiled.resolve(struct { scale: wasm.Global(i32) }));
+    try expectEqual(@as(?wasm.Error, error.TypeMismatch), rt.lastError());
+}
+
+test "pools hand out fresh instances" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const compiled = try rt.compile(&basic_wasm);
+    defer compiled.deinit();
+
+    var pool = try wasm.Pool(BasicExports).init(std.testing.allocator, rt, compiled);
+    defer pool.deinit();
+    try pool.fill(2);
+    try expectEqual(@as(usize, 2), pool.idle.items.len);
+
+    var leases: [3]wasm.Pool(BasicExports).Lease = undefined;
+    for (&leases) |*lease| lease.* = try pool.acquire();
+    try expectEqual(@as(usize, 0), pool.idle.items.len);
+    for (leases) |lease| try expectEqual(@as(i32, 8), try lease.exports.bump.call(.{}));
+    for (leases) |lease| pool.release(lease);
+}
+
+const Tenant = struct { id: i32 };
+
+fn tenantId(tenant: *const Tenant) i32 {
+    return tenant.id;
+}
+
+test "instances carry their own context from the start function on" {
+    const owner = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer owner.deinit();
+    const compiled = try owner.compile(&ctx_wasm);
+    defer compiled.deinit();
+
+    var missing = owner.unresolvedImports(compiled);
+    const problem = missing.next().?;
+    try expectEqualStrings("env", problem.import.module);
+    try expectEqualStrings("ctx", problem.import.name);
+    try expectEqual(error.UnknownImport, problem.err);
+    try expectEqualStrings("unresolved: env.ctx", problem.message);
+    try expectEqual(@as(?wasm.ImportProblem, null), missing.next());
+
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindInstanceFunc("env", "ctx", tenantId);
+    try rt.checkImport(compiled, 0);
+    var resolved = rt.unresolvedImports(compiled);
+    try expectEqual(@as(?wasm.ImportProblem, null), resolved.next());
+
+    const first_tenant: Tenant = .{ .id = 77 };
+    const second_tenant: Tenant = .{ .id = 5 };
+    const first = try rt.instantiateContext(compiled, &first_tenant);
+    defer first.deinit();
+    const second = try rt.instantiateContext(compiled, &second_tenant);
+    defer second.deinit();
+    try expectEqual(rt, first.runtime());
+    try expectEqual(@as(i32, 77), try (try first.func("seen", fn () i32)).call(.{}));
+    try expectEqual(@as(i32, 5), try (try second.func("seen", fn () i32)).call(.{}));
+
+    try expectError(error.Trap, rt.instantiate(compiled));
+    try expectEqualStrings("the calling instance has no context", rt.errorMessage());
+
+    const wrong = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer wrong.deinit();
+    try wrong.bindFunc("env", "ctx", hostIgnore);
+    try expectError(error.TypeMismatch, wrong.checkImport(compiled, 0));
+}
+
+fn instantiateOnThread(compiled: *const wasm.CompiledModule, id: i32, seen: *i32) !void {
+    const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
+    defer rt.deinit();
+    try rt.bindInstanceFunc("env", "ctx", tenantId);
+    const tenant: Tenant = .{ .id = id };
+    for (0..20) |_| {
+        const instance = try rt.instantiateContext(compiled, &tenant);
+        defer instance.deinit();
+        seen.* = try (try instance.func("seen", fn () i32)).call(.{});
+    }
+}
+
+test "runtimes on other threads instantiate one compiled module" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const owner = try wasm.Runtime.init(std.heap.smp_allocator, .{});
+    defer owner.deinit();
+    const compiled = try owner.compile(&ctx_wasm);
+    defer compiled.deinit();
+
+    var seen: [4]i32 = @splat(0);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, &seen, 0..) |*thread, *slot, i| {
+        thread.* = try std.Thread.spawn(.{}, instantiateOnThread, .{ compiled, @as(i32, @intCast(i)) + 10, slot });
+    }
+    for (threads) |thread| thread.join();
+    try expectEqual([4]i32{ 10, 11, 12, 13 }, seen);
+}
+
+test "tables, funcrefs, and registered modules" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const lib = try rt.load(&table_wasm);
+    defer lib.deinit();
+
+    const table = lib.table(0).?;
+    try expectEqual(@as(?wasm.Table, null), lib.table(1));
+    try expectEqual(wasm.ValType.funcref, table.elemType());
+    try expectEqual(@as(u64, 2), table.size());
+    const ref = try table.get(wasm.FuncRef, 0);
+    try expectEqual(wasm.FuncRef.null, try table.get(wasm.FuncRef, 1));
+    try expectError(error.OutOfBounds, table.get(wasm.FuncRef, 2));
+
+    const double = try rt.funcRef(ref, fn (i32) i32);
+    try expectEqual(@as(i32, 14), try double.call(.{7}));
+    try expectError(error.TypeMismatch, rt.funcRef(ref, fn () void));
+    try expectError(error.TypeMismatch, rt.funcRef(.null, fn (i32) i32));
+    var results: [1]wasm.Value = undefined;
+    try rt.callRef(ref, &.{.from(@as(i32, 4))}, &results);
+    try expectEqual(@as(i32, 8), try results[0].to(i32));
+
+    try table.set(1, ref);
+    try expectEqual(@as(?u64, 2), table.grow(2, wasm.FuncRef.null));
+    try expectEqual(@as(?u64, null), table.grow(1, wasm.FuncRef.null));
+    try expectEqual(@as(u64, 4), table.size());
+    try expectError(error.TypeMismatch, table.set(0, @as(i32, 1)));
+
+    try rt.registerModule("lib", lib);
+    const user = try rt.load(&link_wasm);
+    defer user.deinit();
+    try expectEqual(@as(i32, 12), try (try user.func("quad", fn (i32) i32)).call(.{3}));
+}
+
+const EnvHost = struct {
+    pub fn log(state: *HostState, value: i32) void {
+        state.logged = value;
+    }
+
+    pub fn add3(caller: *wasm.Instance, a: i32, b: i32, c: i32) i32 {
+        _ = caller;
+        return a + b + c;
+    }
+
+    pub fn pair() struct { i32, i64 } {
+        return .{ -2, 1 << 40 };
+    }
+
+    pub fn fail() error{HostRefused}!void {
+        return error.HostRefused;
+    }
+
+    pub fn echo(state: *HostState, caller: *wasm.Instance, ref: wasm.ExternRef) wasm.ExternRef {
+        _ = caller;
+        state.callers += 1;
+        return ref;
+    }
+};
+
+const EnvImports = struct {
+    pub const log = fn (i32) void;
+    pub const add3 = fn (i32, i32, i32) i32;
+    pub const pair = fn () struct { i32, i64 };
+    pub const fail = fn () void;
+    pub const echo = fn (wasm.ExternRef) wasm.ExternRef;
+    pub const base = wasm.Global(i32);
+};
+
+test "namespaces bind every host function" {
+    comptime wasm.checkHost(EnvImports, EnvHost);
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    var state: HostState = .{};
+    var base: wasm.Value = .from(@as(i32, 100));
+    try rt.bindAllContext("env", EnvHost, &state);
+    try rt.bindGlobal("env", "base", &base, true);
+    const mod = try rt.load(&host_wasm);
+    defer mod.deinit();
+    try expectEqual(@as(i32, 103), try (try mod.func("run", fn () i32)).call(.{}));
+    try expectEqual(@as(i32, 42), state.logged);
+}
+
+test "typed memory access" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const mod = try rt.load(&basic_wasm);
+    defer mod.deinit();
+    const memory = mod.memory(0).?;
+
+    try memory.store(u32, 200, 0xdead_beef);
+    try expectEqual(@as(u8, 0xef), memory.data()[200]);
+    try expectEqual(@as(u32, 0xdead_beef), try memory.load(u32, 200));
+    try memory.store(f64, 208, -1.5);
+    try expectEqual(@as(f64, -1.5), try memory.load(f64, 208));
+    try expectError(error.OutOfBounds, memory.load(u64, wasm.page_size - 4));
+    try expectError(error.OutOfBounds, memory.slice(wasm.page_size, 1));
+    try expectEqual(@as(usize, 0), (try memory.slice(wasm.page_size, 0)).len);
+}
+
+test "config sets features and fuel" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{ .features = .{ .simd = false, .multi_value = true }, .fuel = 50 });
+    defer rt.deinit();
+    try expect(!rt.features().simd);
+    try expectEqual(@as(u64, 50), rt.fuel());
+    try expectEqual(@as(?wasm.Error, null), rt.lastError());
+}
+
+const ctx_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60,
+    0x00, 0x00, 0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x63, 0x74, 0x78, 0x00, 0x00, 0x03,
+    0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b, 0x07, 0x08, 0x01, 0x04,
+    0x73, 0x65, 0x65, 0x6e, 0x00, 0x02, 0x08, 0x01, 0x01, 0x0a, 0x0d, 0x02, 0x06, 0x00, 0x10, 0x00,
+    0x24, 0x00, 0x0b, 0x04, 0x00, 0x23, 0x00, 0x0b,
+};
+
+const table_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00, 0x04, 0x05, 0x01, 0x70, 0x01, 0x02, 0x04, 0x07, 0x12, 0x02, 0x05, 0x74,
+    0x61, 0x62, 0x6c, 0x65, 0x01, 0x00, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x00, 0x09,
+    0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x41,
+    0x02, 0x6c, 0x0b,
+};
+
+const link_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x02, 0x0e, 0x01, 0x03, 0x6c, 0x69, 0x62, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x71, 0x75, 0x61, 0x64, 0x00, 0x01, 0x0a, 0x0a,
+    0x01, 0x08, 0x00, 0x20, 0x00, 0x10, 0x00, 0x10, 0x00, 0x0b,
+};

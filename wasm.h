@@ -587,9 +587,12 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
    running code. The result supports the introspection functions but cannot be called; pass it
    to wasm_instantiate, as often as needed, and free it with wasm_module_free. */
 wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
-/* Instantiates a compiled module in its runtime, resolving imports registered there and
-   running the start function, without validating function bodies again. */
-wasm_module_t* wasm_instantiate(const wasm_module_t* compiled);
+/* rt may be any runtime, on any thread, and userdata is the instance's before its start function
+   runs. Free compiled, and its runtime, after every concurrent instantiation of it finishes. */
+wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compiled, void* userdata);
+/* Returns WASM_OK, WASM_ERR_UNKNOWN_IMPORT, or WASM_ERR_TYPE_MISMATCH for rt's binding of an import
+   of a compiled module, with rt's error message describing a failure. */
+wasm_error_t wasm_import_check(wasm_runtime_t* rt, const wasm_module_t* compiled, uint32_t import_index);
 void wasm_module_free(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
@@ -603,6 +606,9 @@ wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char
 wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
                            const wasm_value_t* args, uint32_t num_args,
                            wasm_value_t* results, uint32_t num_results);
+/* The instance and function index a non-null funcref refers to. Outputs may be NULL. */
+wasm_error_t wasm_func_ref_target(const wasm_runtime_t* rt, wasm_value_t funcref, wasm_module_t** out_module,
+                                  uint32_t* out_func_idx);
 wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                  const char* func_name, const char* fmt,
                                  wasm_host_func_t callback, void* userdata);
@@ -12977,6 +12983,153 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     return WASM_OK;
 }
 
+static wasm_error_t wasm__import_mismatch(wasm_runtime_t* rt, const char* kind, const wasm_import_info_t* info) {
+    WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "%s import type mismatch: %.64s.%.64s", kind, info->module, info->name);
+    return WASM_ERR_TYPE_MISMATCH;
+}
+
+/* The match functions return WASM_ERR_UNKNOWN_IMPORT, without setting an error, when rt binds
+   nothing named like info. */
+static wasm_error_t wasm__match_func_import(wasm_runtime_t* rt,
+                                            const wasm_module_t* mod,
+                                            const wasm_import_info_t* info,
+                                            uint32_t type_index,
+                                            const wasm_import_t** out_binding) {
+    const wasm_functype_t* import_type = wasm__module_const_functype(mod, type_index);
+    uint32_t j;
+
+    *out_binding = NULL;
+    for (j = rt->num_imports; j > 0u; j--) {
+        const wasm_import_t* binding = &rt->imports[j - 1u];
+
+        if (strcmp(binding->module, info->module) != 0 || strcmp(binding->name, info->name) != 0) continue;
+        if (!wasm__functype_is_unspecified(&binding->type) &&
+            !((binding->has_type_context && binding->type_module &&
+               wasm__functype_is_subtype_across_modules(binding->type_module, binding->type_index, mod,
+                                                        type_index)) ||
+              (!binding->has_type_context && wasm__functype_is_subtype(mod, &binding->type, import_type)))) {
+            return wasm__import_mismatch(rt, "function", info);
+        }
+        *out_binding = binding;
+        return WASM_OK;
+    }
+    if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "function", info);
+    return WASM_ERR_UNKNOWN_IMPORT;
+}
+
+static wasm_error_t wasm__match_table_import(wasm_runtime_t* rt,
+                                             const wasm_module_t* mod,
+                                             const wasm_import_info_t* info,
+                                             const wasm_table_t* declared,
+                                             wasm_table_t** out_table) {
+    wasm_table_import_t* timp = wasm__find_table_import(rt, info->module, info->name);
+    wasm_table_t* bound;
+
+    *out_table = NULL;
+    if (!timp) {
+        if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "table", info);
+        return WASM_ERR_UNKNOWN_IMPORT;
+    }
+    bound = wasm__table_actual(timp->table);
+    if (!bound) return WASM_ERR_MALFORMED;
+    if (!wasm__tabletype_matches_import(mod, bound, declared->reftype, &declared->reftype_info, declared->size,
+                                        declared->max_size, declared->is_64)) {
+        return wasm__import_mismatch(rt, "table", info);
+    }
+    *out_table = bound;
+    return WASM_OK;
+}
+
+/* With create_emscripten_memory zero, an Emscripten env.memory import the stubs would create
+   matches with *out_memory NULL. */
+static wasm_error_t wasm__match_memory_import(wasm_runtime_t* rt,
+                                              const wasm_import_info_t* info,
+                                              const wasm_memory_t* declared,
+                                              int create_emscripten_memory,
+                                              wasm_memory_t** out_memory) {
+    wasm_memory_import_t* mimp = wasm__find_memory_import(rt, info->module, info->name);
+    wasm_memory_t* bound;
+
+    *out_memory = NULL;
+#if WASM_ENABLE_PLATFORM
+    if (!mimp && rt->emscripten_stubs_enabled && strcmp(info->module, "env") == 0 &&
+        strcmp(info->name, "memory") == 0) {
+        wasm_error_t err;
+
+        if (!create_emscripten_memory) return WASM_OK;
+        err = wasm__ensure_emscripten_memory_import(rt, declared->pages, declared->max_pages, declared->is_64);
+        if (err != WASM_OK) return err;
+        mimp = wasm__find_memory_import(rt, info->module, info->name);
+    }
+#else
+    (void)create_emscripten_memory;
+#endif
+    if (!mimp) {
+        if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "memory", info);
+        return WASM_ERR_UNKNOWN_IMPORT;
+    }
+    bound = wasm__memory_actual(mimp->memory);
+    if (!bound) return WASM_ERR_MALFORMED;
+    if (!wasm__memorytype_matches_import(bound, declared)) return wasm__import_mismatch(rt, "memory", info);
+    *out_memory = bound;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__match_global_import(wasm_runtime_t* rt,
+                                              const wasm_module_t* mod,
+                                              const wasm_import_info_t* info,
+                                              wasm_valtype_t type,
+                                              const wasm_reftype_t* ref_type,
+                                              int is_mutable,
+                                              wasm_global_import_t** out_binding) {
+    wasm_global_import_t* gimp = wasm__find_global_import(rt, info->module, info->name);
+
+    *out_binding = NULL;
+    if (!gimp) {
+        if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "global", info);
+        return WASM_ERR_UNKNOWN_IMPORT;
+    }
+    if (!wasm__globaltype_matches_import(mod, gimp->type, &gimp->ref_type, gimp->is_mutable, type, ref_type,
+                                         is_mutable)) {
+        return wasm__import_mismatch(rt, "global", info);
+    }
+    if (!gimp->value) return WASM_ERR_MALFORMED;
+    if (!wasm__runtime_value_matches_type(mod, gimp->value, gimp->type, &gimp->ref_type)) {
+        WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global import value mismatch: %.64s.%.64s", info->module,
+                      info->name);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    *out_binding = gimp;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__match_tag_import(wasm_runtime_t* rt,
+                                           const wasm_module_t* mod,
+                                           const wasm_import_info_t* info,
+                                           uint32_t type_index,
+                                           wasm_tag_import_t** out_binding) {
+    wasm_tag_import_t* timp = wasm__find_tag_import(rt, info->module, info->name);
+
+    *out_binding = NULL;
+    if (!timp) {
+        if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "tag", info);
+        return WASM_ERR_UNKNOWN_IMPORT;
+    }
+    if (!((timp->has_type_context && timp->type_module &&
+           wasm__functype_equal_across_modules(timp->type_module, timp->type_index, mod, type_index)) ||
+          (!timp->has_type_context &&
+           wasm__functype_equal(&timp->type, wasm__module_const_functype(mod, type_index))))) {
+        return wasm__import_mismatch(rt, "tag", info);
+    }
+    *out_binding = timp;
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__unresolved_import(wasm_runtime_t* rt, const wasm_import_info_t* info) {
+    WASM__SET_ERR(rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
+    return WASM_ERR_UNKNOWN_IMPORT;
+}
+
 static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                              wasm__reader_t* r,
                                              wasm_import_info_t* info,
@@ -12984,10 +13137,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
     if (kind == 0x00) {
         uint32_t ti = wasm__read_leb128_u32(r);
         uint32_t fi;
-        const wasm_functype_t* import_type = wasm__module_const_functype(mod, ti);
-        uint32_t j;
+        const wasm_import_t* binding;
+        wasm_error_t err;
 
-        if (!import_type) {
+        if (!wasm__module_const_functype(mod, ti)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)ti);
             return WASM_ERR_MALFORMED;
         }
@@ -12999,44 +13152,15 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         info->index = fi;
         info->type_index = ti;
         if (mod->is_compiled) return WASM_OK;
-        for (j = mod->rt->num_imports; j > 0u; j--) {
-            uint32_t binding_index = j - 1u;
-
-            if (strcmp(mod->rt->imports[binding_index].module, info->module) == 0 &&
-                strcmp(mod->rt->imports[binding_index].name, info->name) == 0) {
-                if (!wasm__functype_is_unspecified(&mod->rt->imports[binding_index].type) &&
-                    !((mod->rt->imports[binding_index].has_type_context &&
-                       mod->rt->imports[binding_index].type_module &&
-                       wasm__functype_is_subtype_across_modules(
-                           mod->rt->imports[binding_index].type_module,
-                           mod->rt->imports[binding_index].type_index,
-                           mod,
-                           ti)) ||
-                      (!mod->rt->imports[binding_index].has_type_context &&
-                       wasm__functype_is_subtype(mod, &mod->rt->imports[binding_index].type, import_type)))) {
-                    WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                                  "function import type mismatch: %.64s.%.64s", info->module, info->name);
-                    return WASM_ERR_TYPE_MISMATCH;
-                }
-                mod->funcs[fi].host_func = mod->rt->imports[binding_index].func;
-                mod->funcs[fi].host_userdata = mod->rt->imports[binding_index].userdata;
-                break;
-            }
-        }
-        if (!mod->funcs[fi].host_func) {
-            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "function import type mismatch: %.64s.%.64s",
-                              info->module, info->name);
-                return WASM_ERR_TYPE_MISMATCH;
-            }
-            /* Defer unresolved function imports until after validation so
-             * invalid modules still report structural errors first. */
-        }
+        /* Unresolved function imports fail after validation. */
+        err = wasm__match_func_import(mod->rt, mod, info, ti, &binding);
+        if (err == WASM_ERR_UNKNOWN_IMPORT) return WASM_OK;
+        if (err != WASM_OK) return err;
+        mod->funcs[fi].host_func = binding->func;
+        mod->funcs[fi].host_userdata = binding->userdata;
     } else if (kind == 0x01) {
         uint32_t table_index;
         wasm_table_t* table;
-        wasm_table_import_t* timp;
         wasm_table_t* bound_table;
         wasm_error_t err;
         if (wasm__append_tables(mod, 1, &table_index) != WASM_OK) return WASM_ERR_OOM;
@@ -13047,48 +13171,23 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         table = &mod->tables[table_index];
         err = wasm__read_table_type(mod, r, table);
         if (err != WASM_OK) return err;
-        timp = mod->is_compiled ? NULL : wasm__find_table_import(mod->rt, info->module, info->name);
-        if (!timp) {
-            if (!mod->is_compiled && wasm__has_import_named(mod->rt, info->module, info->name)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "table import type mismatch: %.64s.%.64s",
-                              info->module, info->name);
-                return WASM_ERR_TYPE_MISMATCH;
-            }
-            table->is_import = 1;
-            table->import_table = NULL;
-            info->index = table_index;
-            info->type = table->reftype;
-            info->ref_type = table->reftype_info;
-            return WASM_OK;
-        }
-        bound_table = wasm__table_actual(timp->table);
-        if (!bound_table) return WASM_ERR_MALFORMED;
-        if (!wasm__tabletype_matches_import(mod,
-                                            bound_table,
-                                            table->reftype,
-                                            &table->reftype_info,
-                                            table->size,
-                                            table->max_size,
-                                            table->is_64)) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                          "table import type mismatch: %.64s.%.64s",
-                          info->module, info->name);
-            return WASM_ERR_TYPE_MISMATCH;
-        }
         table->is_import = 1;
+        table->import_table = NULL;
+        info->index = table_index;
+        info->type = table->reftype;
+        info->ref_type = table->reftype_info;
+        if (mod->is_compiled) return WASM_OK;
+        err = wasm__match_table_import(mod->rt, mod, info, table, &bound_table);
+        if (err == WASM_ERR_UNKNOWN_IMPORT) return WASM_OK;
+        if (err != WASM_OK) return err;
         table->import_table = bound_table;
         table->size = bound_table->size;
         table->max_size = bound_table->max_size;
         table->is_64 = bound_table->is_64;
         table->elems = bound_table->elems;
-        info->index = table_index;
-        info->type = table->reftype;
-        info->ref_type = table->reftype_info;
     } else if (kind == 0x02) {
         uint32_t memory_index;
         wasm_memory_t* memory;
-        wasm_memory_import_t* mimp;
         wasm_memory_t* bound_memory;
         wasm_error_t err;
 
@@ -13102,42 +13201,12 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (err != WASM_OK) return err;
         err = wasm__validate_memory_limits(mod, memory_index, memory);
         if (err != WASM_OK) return err;
-        if (mod->is_compiled) {
-            memory->is_import = 1;
-            info->index = memory_index;
-            return WASM_OK;
-        }
-        mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
-#if WASM_ENABLE_PLATFORM
-        if (!mimp && mod->rt && mod->rt->emscripten_stubs_enabled &&
-            strcmp(info->module, "env") == 0 && strcmp(info->name, "memory") == 0) {
-            err = wasm__ensure_emscripten_memory_import(mod->rt,
-                                                        memory->pages,
-                                                        memory->max_pages,
-                                                        memory->is_64);
-            if (err != WASM_OK) return err;
-            mimp = wasm__find_memory_import(mod->rt, info->module, info->name);
-        }
-#endif
-        if (!mimp) {
-            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "memory import type mismatch: %.64s.%.64s",
-                              info->module, info->name);
-                return WASM_ERR_TYPE_MISMATCH;
-            }
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_UNKNOWN_IMPORT;
-        }
-        bound_memory = wasm__memory_actual(mimp->memory);
-        if (!bound_memory) return WASM_ERR_MALFORMED;
-        if (!wasm__memorytype_matches_import(bound_memory, memory)) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                          "memory import type mismatch: %.64s.%.64s",
-                          info->module, info->name);
-            return WASM_ERR_TYPE_MISMATCH;
-        }
         memory->is_import = 1;
+        info->index = memory_index;
+        if (mod->is_compiled) return WASM_OK;
+        err = wasm__match_memory_import(mod->rt, info, memory, 1, &bound_memory);
+        if (err == WASM_ERR_UNKNOWN_IMPORT) return wasm__unresolved_import(mod->rt, info);
+        if (err != WASM_OK) return err;
         memory->import_memory = bound_memory;
         memory->pages = wasm__memory_pages(bound_memory);
         memory->max_pages = bound_memory->max_pages;
@@ -13145,10 +13214,10 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         memory->page_size = bound_memory->page_size;
         memory->is_shared = bound_memory->is_shared;
         memory->data = bound_memory->data;
-        info->index = memory_index;
     } else if (kind == 0x03) {
         uint32_t gi;
-        wasm_global_import_t* gimp;
+        wasm_global_import_t* gimp = NULL;
+        wasm_value_t* placeholder = NULL;
         wasm_valtype_t type;
         wasm_reftype_t ref_type;
         uint8_t is_mutable;
@@ -13167,60 +13236,23 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         }
 
         if (mod->is_compiled) {
-            wasm_value_t* placeholder = (wasm_value_t*)wasm__malloc(&mod->rt->allocator, sizeof(*placeholder));
-
+            placeholder = (wasm_value_t*)wasm__malloc(&mod->rt->allocator, sizeof(*placeholder));
             if (!placeholder) return WASM_ERR_OOM;
-            if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) {
-                wasm__free(&mod->rt->allocator, placeholder);
-                return WASM_ERR_OOM;
-            }
             *placeholder = wasm__default_value(type);
-            mod->globals[gi].type = type;
-            mod->globals[gi].ref_type = ref_type;
-            mod->globals[gi].is_mutable = is_mutable;
-            mod->globals[gi].is_import = 1;
-            mod->globals[gi].import_value = placeholder;
-            mod->num_global_imports++;
-            info->index = gi;
-            info->type = type;
-            info->ref_type = ref_type;
-            info->is_mutable = (int)is_mutable;
-            return WASM_OK;
+        } else {
+            err = wasm__match_global_import(mod->rt, mod, info, type, &ref_type, (int)is_mutable, &gimp);
+            if (err == WASM_ERR_UNKNOWN_IMPORT) return wasm__unresolved_import(mod->rt, info);
+            if (err != WASM_OK) return err;
         }
-        gimp = wasm__find_global_import(mod->rt, info->module, info->name);
-        if (!gimp) {
-            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "global import type mismatch: %.64s.%.64s",
-                              info->module, info->name);
-                return WASM_ERR_TYPE_MISMATCH;
-            }
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_UNKNOWN_IMPORT;
+        if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) {
+            wasm__free(&mod->rt->allocator, placeholder);
+            return WASM_ERR_OOM;
         }
-        if (!wasm__globaltype_matches_import(mod,
-                                             gimp->type,
-                                             &gimp->ref_type,
-                                             gimp->is_mutable,
-                                             type,
-                                             &ref_type,
-                                             (int)is_mutable)) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "global import type mismatch: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_TYPE_MISMATCH;
-        }
-        if (!gimp->value) return WASM_ERR_MALFORMED;
-        if (!wasm__runtime_value_matches_type(mod, gimp->value, gimp->type, &gimp->ref_type)) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                          "global import value mismatch: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_TYPE_MISMATCH;
-        }
-        if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) return WASM_ERR_OOM;
-
         mod->globals[gi].type = type;
         mod->globals[gi].ref_type = ref_type;
         mod->globals[gi].is_mutable = is_mutable;
         mod->globals[gi].is_import = 1;
-        mod->globals[gi].import_value = gimp->value;
+        mod->globals[gi].import_value = placeholder ? placeholder : gimp->value;
         mod->num_global_imports++;
         info->index = gi;
         info->type = type;
@@ -13229,7 +13261,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
     } else if (kind == 0x04) {
         uint32_t tag_index;
         uint32_t type_index;
-        wasm_tag_import_t* timp;
+        wasm_tag_import_t* timp = NULL;
         const wasm_functype_t* import_type;
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
 
@@ -13245,46 +13277,74 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "non-empty tag result type");
             return WASM_ERR_TYPE_MISMATCH;
         }
-        if (mod->is_compiled) {
-            if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
-            mod->tags[tag_index].type_idx = type_index;
-            mod->tags[tag_index].identity = wasm__alloc_tag_identity(mod->rt);
-            info->index = tag_index;
-            info->type_index = type_index;
-            return WASM_OK;
-        }
-        timp = wasm__find_tag_import(mod->rt, info->module, info->name);
-        if (!timp) {
-            if (wasm__has_import_named(mod->rt, info->module, info->name)) {
-                WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                              "tag import type mismatch: %.64s.%.64s",
-                              info->module, info->name);
-                return WASM_ERR_TYPE_MISMATCH;
-            }
-            WASM__SET_ERR(mod->rt, WASM_ERR_UNKNOWN_IMPORT, "unresolved: %.64s.%.64s", info->module, info->name);
-            return WASM_ERR_UNKNOWN_IMPORT;
-        }
-        if (!((timp->has_type_context && timp->type_module &&
-               wasm__functype_equal_across_modules(timp->type_module,
-                                                   timp->type_index,
-                                                   mod,
-                                                   type_index)) ||
-              (!timp->has_type_context && wasm__functype_equal(&timp->type, import_type)))) {
-            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
-                          "tag import type mismatch: %.64s.%.64s",
-                          info->module, info->name);
-            return WASM_ERR_TYPE_MISMATCH;
+        if (!mod->is_compiled) {
+            err = wasm__match_tag_import(mod->rt, mod, info, type_index, &timp);
+            if (err == WASM_ERR_UNKNOWN_IMPORT) return wasm__unresolved_import(mod->rt, info);
+            if (err != WASM_OK) return err;
         }
         if (wasm__append_tags(mod, 1, &tag_index) != WASM_OK) return WASM_ERR_OOM;
         mod->tags[tag_index].type_idx = type_index;
-        mod->tags[tag_index].identity = timp->identity;
+        mod->tags[tag_index].identity = timp ? timp->identity : wasm__alloc_tag_identity(mod->rt);
         info->index = tag_index;
-        info->type_index = mod->tags[tag_index].type_idx;
+        info->type_index = type_index;
     } else {
         return WASM_ERR_MALFORMED;
     }
 
     return WASM_OK;
+}
+
+wasm_error_t wasm_import_check(wasm_runtime_t* rt, const wasm_module_t* compiled, uint32_t import_index) {
+    const wasm_import_info_t* info;
+    wasm_error_t err;
+
+    if (!rt) return WASM_ERR_MALFORMED;
+    wasm_runtime_clear_error(rt);
+    if (!compiled || !compiled->is_compiled || import_index >= compiled->num_imports) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "wasm_import_check requires an import of a compiled module");
+        return WASM_ERR_MALFORMED;
+    }
+    info = &compiled->imports[import_index];
+    switch (info->kind) {
+        case WASM_IMPORT_FUNC: {
+            const wasm_import_t* binding;
+
+            err = wasm__match_func_import(rt, compiled, info, info->type_index, &binding);
+            break;
+        }
+        case WASM_IMPORT_TABLE: {
+            wasm_table_t* bound;
+
+            err = wasm__match_table_import(rt, compiled, info, &compiled->tables[info->index], &bound);
+            break;
+        }
+        case WASM_IMPORT_MEM: {
+            wasm_memory_t* bound;
+
+            err = wasm__match_memory_import(rt, info, &compiled->memories[info->index], 0, &bound);
+            break;
+        }
+        case WASM_IMPORT_GLOBAL: {
+            const wasm_global_t* global = &compiled->globals[info->index];
+            wasm_global_import_t* binding;
+
+            err = wasm__match_global_import(rt, compiled, info, global->type, &global->ref_type,
+                                            global->is_mutable, &binding);
+            break;
+        }
+        case WASM_IMPORT_TAG: {
+            wasm_tag_import_t* binding;
+
+            err = wasm__match_tag_import(rt, compiled, info, info->type_index, &binding);
+            break;
+        }
+        default:
+            err = WASM_ERR_MALFORMED;
+            break;
+    }
+    if (err == WASM_ERR_UNKNOWN_IMPORT) return wasm__unresolved_import(rt, info);
+    if (err != WASM_OK && rt->last_error == WASM_OK) WASM__SET_ERR(rt, err, "%s", wasm_error_string(err));
+    return err;
 }
 
 /* Parses an import description into temporaries so a shared compact-import type can be re-read per item. */
@@ -18528,8 +18588,6 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 #include <string.h>
 #include <stdio.h>
 
-/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
-   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
 /* Position of each known non-custom section in the order the binary format requires: tags follow
    memories and the data count precedes code. Custom and unknown ids rank 0. */
 static uint32_t wasm__section_rank(uint8_t sid) {
@@ -18538,11 +18596,14 @@ static uint32_t wasm__section_rank(uint8_t sid) {
     return sid < 14u ? ranks[sid] : 0u;
 }
 
+/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
+   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
 static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const uint8_t* bytes,
                                         size_t len,
                                         int compile_only,
-                                        const wasm_module_t* compiled) {
+                                        const wasm_module_t* compiled,
+                                        void* userdata) {
     wasm__reader_t r;
     uint32_t version;
     uint32_t last_rank = 0;
@@ -18581,6 +18642,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         return NULL;
     }
     mod->rt = rt;
+    mod->host_userdata = userdata;
     mod->identity = wasm__alloc_tag_identity(rt);
     mod->start_func = UINT32_MAX;
     mod->is_compiled = compile_only;
@@ -18816,20 +18878,20 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
 }
 
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
-    return wasm__load_module(rt, bytes, len, 0, NULL);
+    return wasm__load_module(rt, bytes, len, 0, NULL, NULL);
 }
 
 wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
-    return wasm__load_module(rt, bytes, len, 1, NULL);
+    return wasm__load_module(rt, bytes, len, 1, NULL, NULL);
 }
 
-wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
-    if (!compiled || !compiled->rt) return NULL;
-    if (!compiled->is_compiled) {
-        WASM__SET_ERR(compiled->rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
+wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compiled, void* userdata) {
+    if (!rt) return NULL;
+    if (!compiled || !compiled->is_compiled) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
         return NULL;
     }
-    return wasm__load_module(compiled->rt, compiled->module_bytes, compiled->module_size, 0, compiled);
+    return wasm__load_module(rt, compiled->module_bytes, compiled->module_size, 0, compiled, userdata);
 }
 
 void wasm_module_free(wasm_module_t* mod) {
@@ -25713,6 +25775,20 @@ wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
         return WASM_ERR_UNDEFINED_ELEMENT;
     }
     return wasm_call_index(mod, func_idx, args, num_args, results, num_results);
+}
+
+wasm_error_t wasm_func_ref_target(const wasm_runtime_t* rt, wasm_value_t funcref, wasm_module_t** out_module,
+                                  uint32_t* out_func_idx) {
+    wasm_module_t* mod = NULL;
+    uint32_t func_idx = 0;
+
+    if (out_module) *out_module = NULL;
+    if (out_func_idx) *out_func_idx = 0;
+    if (!rt || !wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) return WASM_ERR_TYPE_MISMATCH;
+    if (!wasm__resolve_func_ref(rt, funcref.of.funcref, &mod, &func_idx) || !mod) return WASM_ERR_UNDEFINED_ELEMENT;
+    if (out_module) *out_module = mod;
+    if (out_func_idx) *out_func_idx = func_idx;
+    return WASM_OK;
 }
 
 static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,

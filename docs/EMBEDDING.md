@@ -45,16 +45,17 @@ wasm_module_t* instance;
 
 if (!compiled) { /* malformed or invalid: wasm_runtime_error_message(rt) */ }
 for (uint32_t i = 0; i < wasm_import_count(compiled); i++) {
-    const wasm_import_info_t* info = wasm_import_info(compiled, i);
-    /* register a binding for info->module / info->name */
+    if (wasm_import_check(rt, compiled, i) != WASM_OK) {
+        /* unbound or mistyped: wasm_runtime_error_message(rt) names it */
+    }
 }
-instance = wasm_instantiate(compiled);
+instance = wasm_instantiate(rt, compiled, &tenant_state);
 /* ... */
 wasm_module_free(instance);
 wasm_module_free(compiled);
 ```
 
-A compiled module supports the introspection functions, but calls, memory access, and global reads fail. `wasm_instantiate` resolves imports registered on the runtime at that point and does not validate function bodies again. Each instance has its own globals, memories, and tables, and is freed independently of the compiled module.
+A compiled module supports the introspection functions, but calls, memory access, and global reads fail. `wasm_import_check` reports whether a runtime's bindings resolve one of its imports. `wasm_instantiate` resolves the imports registered on its runtime argument at that point and does not validate function bodies again when that runtime enables the same features. Its last argument becomes the instance's userdata (see `wasm_module_userdata`) before the start function runs. Each instance has its own globals, memories, and tables, and is freed independently of the compiled module.
 
 ## Configuration
 
@@ -221,7 +222,7 @@ Use `wasm_memory_write` for writes and `wasm_memory_get_string` for bounded, nul
 
 Exported globals can be accessed by name with `wasm_global_get` and `wasm_global_set`, and any global by index with `wasm_global_get_index` and `wasm_global_set_index`; setters check mutability and type. Index-based type and mutability introspection is available through the `wasm_global_*` accessors.
 
-Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`. `wasm_call_ref` calls the function a funcref refers to, such as one read from a table.
+Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`. `wasm_call_ref` calls the function a funcref refers to, such as one read from a table, and `wasm_func_ref_target` returns its instance and function index.
 
 ## GC references
 
@@ -248,6 +249,8 @@ wasm_runtime_enable_feature(rt, WASM_FEATURE_THREADS);
 wasm_register_memory_import(rt, &imp);
 wasm_module_t* mod = wasm_load(rt, bytes, len);
 ```
+
+A module compiled once can be instantiated in every thread's runtime: `wasm_instantiate` only reads the compiled module, so several threads may instantiate it at once. Free it, and the runtime that compiled it, after they finish.
 
 A shared memory exported by one module can be imported the same way. Free it with `wasm_memory_free` (or free its owning module) only after every importing module is freed. Shared memories never move when they grow, so their data pointers stay valid. `wasm_memory_base` and `wasm_memory_length` return the data and byte size of a memory handle.
 

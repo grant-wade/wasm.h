@@ -110,6 +110,20 @@ wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
     return wasm_call_index(mod, func_idx, args, num_args, results, num_results);
 }
 
+wasm_error_t wasm_func_ref_target(const wasm_runtime_t* rt, wasm_value_t funcref, wasm_module_t** out_module,
+                                  uint32_t* out_func_idx) {
+    wasm_module_t* mod = NULL;
+    uint32_t func_idx = 0;
+
+    if (out_module) *out_module = NULL;
+    if (out_func_idx) *out_func_idx = 0;
+    if (!rt || !wasm__uses_funcref_storage(funcref.type) || wasm__is_null_ref(&funcref)) return WASM_ERR_TYPE_MISMATCH;
+    if (!wasm__resolve_func_ref(rt, funcref.of.funcref, &mod, &func_idx) || !mod) return WASM_ERR_UNDEFINED_ELEMENT;
+    if (out_module) *out_module = mod;
+    if (out_func_idx) *out_func_idx = func_idx;
+    return WASM_OK;
+}
+
 static wasm_error_t wasm__resolve_exported_func(wasm_module_t* mod,
                                                 const char* name,
                                                 uint32_t* out_index,

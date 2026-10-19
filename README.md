@@ -110,13 +110,13 @@ The repository is also a Zig 0.17 package. It builds the runtime with Zig's C co
 ```zig
 const rt = try wasm.Runtime.init(allocator, .{});
 defer rt.deinit();
-const mod = try rt.load(bytes);
-defer mod.deinit();
-const add = try mod.func("add", fn (i32, i32) i32);
+const instance = try rt.load(bytes);
+defer instance.deinit();
+const add = try instance.func("add", fn (i32, i32) i32);
 const sum = try add.call(.{ 2, 40 });
 ```
 
-See the [Zig guide](docs/ZIG.md) for installation, host imports, memory, and threads.
+See the [Zig guide](docs/ZIG.md) for installation, compiled modules, typed exports, host imports, memory, and threads.
 
 ## CLI
 

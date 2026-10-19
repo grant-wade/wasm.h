@@ -36,18 +36,18 @@ pub fn main() !void {
     const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
     defer rt.deinit();
 
-    const mod = rt.load(bytes) catch |err| {
+    const instance = rt.load(bytes) catch |err| {
         std.debug.print("load failed ({s}): {s}\n", .{ @errorName(err), rt.errorMessage() });
         return err;
     };
-    defer mod.deinit();
+    defer instance.deinit();
 
-    const add = try mod.func("add", fn (i32, i32) i32);
+    const add = try instance.func("add", fn (i32, i32) i32);
     std.debug.print("{d}\n", .{try add.call(.{ 2, 40 })});
 }
 ```
 
-`Runtime.init` takes the `std.mem.Allocator` the runtime allocates everything from, which must outlive it, and a `Config` whose fields override `wasm_config_default`. `load` copies its input, so the bytes may be freed afterwards. Free every module before its runtime.
+`Runtime.init` takes the `std.mem.Allocator` the runtime allocates everything from, which must outlive it, and a `Config` whose fields override `wasm_config_default`; its `features` and `fuel` fields set the enabled proposals and an initial fuel budget. `load` copies its input, so the bytes may be freed afterwards, and returns an `*Instance`. Free every instance and compiled module before its runtime.
 
 For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memory and table at instantiation and on growth, `max_gc_heap_bytes` caps the GC heap, and `max_function_locals` caps the locals a function may declare; 0 removes a limit:
 
@@ -55,7 +55,55 @@ For untrusted modules, `max_memory_bytes` and `max_table_elements` cap each memo
 const rt = try wasm.Runtime.init(allocator, .{ .max_memory_bytes = 64 * 1024 * 1024, .max_table_elements = 100_000 });
 ```
 
-`Runtime.compile` decodes and validates without resolving imports or running code; the result supports introspection, and `Module.instantiate` creates independent instances of it.
+## Compiled modules and instances
+
+`Runtime.compile` decodes and validates without resolving imports or running code. It returns a `*CompiledModule`, which supports introspection but not calls; `Runtime.instantiate` creates independent instances of it:
+
+```zig
+const compiled = try rt.compile(bytes);
+defer compiled.deinit();
+
+var missing = rt.unresolvedImports(compiled);
+while (missing.next()) |problem| std.debug.print("{s}.{s}: {s}\n", .{ problem.import.module, problem.import.name, problem.message });
+
+const instance = try rt.instantiate(compiled);
+defer instance.deinit();
+```
+
+`CompiledModule.info()` and `Instance.info()` return a `*const ModuleInfo` with the module's exports, imports, types, names, and custom sections. `Runtime.checkImport` checks one import against the runtime's bindings, and `unresolvedImports` iterates the imports they do not resolve.
+
+The runtime passed to `instantiate` may differ from the one that compiled the module, and may run on another thread; see [Threads](#threads).
+
+### Typed exports
+
+A struct whose fields name exports and give their types describes a module's interface. `CompiledModule.resolve` looks up and checks every field once and returns a `Plan`; `Plan.on` binds it to any instance of that module without further lookups:
+
+```zig
+const Api = struct {
+    handle: fn (u32, u32) u32,
+    memory: wasm.Memory,
+    requests: wasm.Global(i64),
+    table: ?wasm.Table,
+};
+
+const plan = try compiled.resolve(Api);
+const api = plan.on(instance);
+_ = try api.handle.call(.{ ptr, len });
+```
+
+Function types become `TypedFunc` fields, and `TypedFunc`, `Global(T)`, `Memory`, and `Table` stay as they are. An optional field is null when the module lacks the export; a missing required export fails with `error.UndefinedExport`, and an export of another kind or type with `error.TypeMismatch`. `Instance.exportsAs(Api)` resolves and binds in one step.
+
+`wasm.Pool(Api)` keeps instances of one compiled module ready: `fill` instantiates ahead of time, `acquire` returns an idle or new instance with its exports bound, and `release` frees it.
+
+```zig
+var pool = try wasm.Pool(Api).init(allocator, rt, compiled);
+defer pool.deinit();
+try pool.fill(8);
+
+const lease = try pool.acquire();
+defer pool.release(lease);
+_ = try lease.exports.handle.call(.{ ptr, len });
+```
 
 Errors are the `wasm.Error` set, one per `wasm_error_t` code; `Runtime.errorMessage` describes the most recent one. A guest that calls WASI `proc_exit` stops with `error.Exit`, and `Runtime.exitCode` returns its status:
 
@@ -79,7 +127,7 @@ while (rt.suspended() == .out_of_fuel) {
 
 ## Typed functions
 
-`Module.func` looks up an export and checks its signature against a Zig function type. Calls validate argument values against the Wasm parameters, including values passed as `wasm.Value`. Parameters and results map to Wasm types as follows:
+`Instance.func` looks up an export and checks its signature against a Zig function type. Calls validate argument values against the Wasm parameters, including values passed as `wasm.Value`. Parameters and results map to Wasm types as follows:
 
 | Zig type | Wasm type |
 | --- | --- |
@@ -94,18 +142,18 @@ while (rt.suspended() == .out_of_fuel) {
 A function with several results returns a tuple:
 
 ```zig
-const divmod = try mod.func("divmod", fn (i32, i32) struct { i32, i32 });
+const divmod = try instance.func("divmod", fn (i32, i32) struct { i32, i32 });
 const q, const r = try divmod.call(.{ 17, 5 });
 ```
 
-`Module.call` and `Module.callIndex` take `[]const wasm.Value` and `[]wasm.Value` for calls whose types are only known at run time. `Value.from` wraps a Zig value and `Value.to` unwraps one.
+`Instance.call` and `Instance.callIndex` take `[]const wasm.Value` and `[]wasm.Value` for calls whose types are only known at run time. `Value.from` wraps a Zig value and `Value.to` unwraps one.
 
 ## Host functions
 
 Bind imports before loading the modules that use them. Bound functions are ordinary Zig functions; the C callback and the Wasm signature are generated at compile time.
 
 ```zig
-fn log(caller: *wasm.Module, value: i32) void {
+fn log(caller: *wasm.Instance, value: i32) void {
     _ = caller;
     std.debug.print("guest: {d}\n", .{value});
 }
@@ -123,30 +171,63 @@ var counter: Counter = .{};
 try rt.bindFuncContext("env", "accumulate", &counter, accumulate);
 ```
 
-- **Parameters:** a function may take a leading `*wasm.Module`, which is the calling module, followed by Wasm-typed parameters.
+- **Parameters:** a function may take a leading `*wasm.Instance`, which is the calling instance, followed by Wasm-typed parameters.
 - **Context:** `bindFuncContext` passes its context pointer as the first parameter. The context must outlive every module that imports the function.
+- **Instance context:** `bindInstanceFunc` passes the calling instance's context, set by `Runtime.instantiateContext` before the start function runs, as the first parameter. A call from an instance without one traps.
 - **Results:** a function may return `void`, a Wasm-typed value, or a tuple of them, optionally as an error union.
 - **Errors:** a returned error traps the calling Wasm code, with the error's name as the runtime's error message. Members of `wasm.Error` keep their meaning, such as `error.OutOfBounds`, and `error.Yield` suspends the call until `resumeCall` supplies the results. Any other error becomes `error.Trap`.
 
-`bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
-
-## Memory, globals, and introspection
-
 ```zig
-const memory = mod.memory(0).?;
-try memory.write(1024, "hello");
-const bytes = memory.data(); // invalidated by growth unless the memory is shared
-const name = try memory.readString(1024, &buffer);
+const Tenant = struct { id: i32 };
 
-const count = try mod.getGlobal(i32, "count");
-try mod.setGlobal("count", count + 1);
+fn tenantId(tenant: *const Tenant) i32 {
+    return tenant.id;
+}
 
-var it = mod.exports();
-while (it.next()) |exp| std.debug.print("{s} {t}\n", .{ exp.name, exp.kind });
-const producers = mod.customSection("producers");
+try rt.bindInstanceFunc("env", "tenant_id", tenantId);
+const instance = try rt.instantiateContext(compiled, &tenant);
 ```
 
-`imports`, `customSections`, `funcType`, `typeKind`, and `tagType` cover the rest of the C introspection API.
+`bindAll` binds every public function of a namespace struct under one module name, and `bindAllContext` also passes a context to the functions whose first parameter has its type. `comptime wasm.checkHost(Imports, Host)` fails to compile unless `Host` has a function with the Wasm signature of each function type declared in `Imports`, ignoring leading context and `*wasm.Instance` parameters:
+
+```zig
+const Env = struct {
+    pub fn log(state: *State, value: i32) void { ... }
+    pub fn now() i64 { ... }
+};
+
+comptime wasm.checkHost(struct {
+    pub const log = fn (i32) void;
+    pub const now = fn () i64;
+}, Env);
+try rt.bindAllContext("env", Env, &state);
+```
+
+`Runtime.registerModule` makes an instance's exports importable by modules loaded afterwards. `bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
+
+## Memory, globals, tables, and introspection
+
+```zig
+const memory = instance.memory(0).?;
+try memory.write(1024, "hello");
+const bytes = memory.data(); // invalidated by growth unless the memory is shared
+const message = try memory.slice(ptr, len);
+try memory.store(u32, 2048, 7); // little-endian
+const name = try memory.readString(1024, &buffer);
+
+const count = try instance.global("count", i32);
+try count.set(try count.get() + 1);
+
+const table = instance.table(0).?;
+const ref = try table.get(wasm.FuncRef, 0);
+const callback = try rt.funcRef(ref, fn (i32) i32);
+
+var it = instance.info().exports();
+while (it.next()) |exp| std.debug.print("{s} {t}\n", .{ exp.name, exp.kind });
+const producers = instance.info().customSection("producers");
+```
+
+`getGlobal` and `setGlobal` read and write an exported global by name. `Runtime.callRef` calls a funcref with untyped values. `ModuleInfo`'s `imports`, `customSections`, `funcType`, `funcName`, `typeKind`, and `tagType` cover the rest of the C introspection API.
 
 The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and return `wasm.Value` references. A reference stays valid only while Wasm code can still reach it.
 
@@ -158,6 +239,8 @@ A runtime and its modules belong to one thread at a time. To run Wasm on several
 2. Create a `wasm.SharedMemory`. Its allocator, and any allocator the runtimes share, must be thread-safe.
 3. Bind it with `bindMemory` in every runtime before loading.
 
+A module compiled once can be instantiated by each thread's runtime, at the same time: `Runtime.instantiate` only reads the compiled module. Free it, and the runtime that compiled it, after the threads finish.
+
 ```zig
 const shared = try wasm.SharedMemory.init(std.heap.smp_allocator, .{ .pages = 1, .max_pages = 16 });
 defer shared.deinit();
@@ -166,6 +249,7 @@ defer shared.deinit();
 const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
 rt.enableFeatures(.{ .threads = true });
 try rt.bindMemory("env", "memory", shared.raw());
+const instance = try rt.instantiate(compiled);
 ```
 
 Free the shared memory only after every module that imports it. Shared memories never move, so `SharedMemory.data` stays valid while other threads grow it.

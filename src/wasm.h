@@ -578,9 +578,12 @@ wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
    running code. The result supports the introspection functions but cannot be called; pass it
    to wasm_instantiate, as often as needed, and free it with wasm_module_free. */
 wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len);
-/* Instantiates a compiled module in its runtime, resolving imports registered there and
-   running the start function, without validating function bodies again. */
-wasm_module_t* wasm_instantiate(const wasm_module_t* compiled);
+/* rt may be any runtime, on any thread, and userdata is the instance's before its start function
+   runs. Free compiled, and its runtime, after every concurrent instantiation of it finishes. */
+wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compiled, void* userdata);
+/* Returns WASM_OK, WASM_ERR_UNKNOWN_IMPORT, or WASM_ERR_TYPE_MISMATCH for rt's binding of an import
+   of a compiled module, with rt's error message describing a failure. */
+wasm_error_t wasm_import_check(wasm_runtime_t* rt, const wasm_module_t* compiled, uint32_t import_index);
 void wasm_module_free(wasm_module_t* mod);
 wasm_error_t wasm_call(wasm_module_t* mod, const char* func_name,
                        const wasm_value_t* args, uint32_t num_args,
@@ -594,6 +597,9 @@ wasm_error_t wasm_call_fmt(wasm_module_t* mod, const char* func_name, const char
 wasm_error_t wasm_call_ref(wasm_runtime_t* rt, wasm_value_t funcref,
                            const wasm_value_t* args, uint32_t num_args,
                            wasm_value_t* results, uint32_t num_results);
+/* The instance and function index a non-null funcref refers to. Outputs may be NULL. */
+wasm_error_t wasm_func_ref_target(const wasm_runtime_t* rt, wasm_value_t funcref, wasm_module_t** out_module,
+                                  uint32_t* out_func_idx);
 wasm_error_t wasm_bind_host_func(wasm_runtime_t* rt, const char* module_name,
                                  const char* func_name, const char* fmt,
                                  wasm_host_func_t callback, void* userdata);

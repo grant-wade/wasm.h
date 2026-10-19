@@ -246,7 +246,7 @@ static void wasm_fuzz_instance_open(wasm_fuzz_instance_t* inst, const uint8_t* d
     if (!inst->compiled) return;
     wasm_fuzz_stub_imports(inst->rt, inst->compiled, &inst->stubs);
     wasm_runtime_set_fuel(inst->rt, WASM_FUZZ_FUEL);
-    inst->instance = wasm_instantiate(inst->compiled);
+    inst->instance = wasm_instantiate(inst->rt, inst->compiled, NULL);
 }
 
 static void wasm_fuzz_instance_close(wasm_fuzz_instance_t* inst) {

@@ -15,8 +15,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
-   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
 /* Position of each known non-custom section in the order the binary format requires: tags follow
    memories and the data count precedes code. Custom and unknown ids rank 0. */
 static uint32_t wasm__section_rank(uint8_t sid) {
@@ -25,11 +23,14 @@ static uint32_t wasm__section_rank(uint8_t sid) {
     return sid < 14u ? ranks[sid] : 0u;
 }
 
+/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
+   instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
 static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const uint8_t* bytes,
                                         size_t len,
                                         int compile_only,
-                                        const wasm_module_t* compiled) {
+                                        const wasm_module_t* compiled,
+                                        void* userdata) {
     wasm__reader_t r;
     uint32_t version;
     uint32_t last_rank = 0;
@@ -68,6 +69,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
         return NULL;
     }
     mod->rt = rt;
+    mod->host_userdata = userdata;
     mod->identity = wasm__alloc_tag_identity(rt);
     mod->start_func = UINT32_MAX;
     mod->is_compiled = compile_only;
@@ -303,20 +305,20 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
 }
 
 wasm_module_t* wasm_load(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
-    return wasm__load_module(rt, bytes, len, 0, NULL);
+    return wasm__load_module(rt, bytes, len, 0, NULL, NULL);
 }
 
 wasm_module_t* wasm_compile(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
-    return wasm__load_module(rt, bytes, len, 1, NULL);
+    return wasm__load_module(rt, bytes, len, 1, NULL, NULL);
 }
 
-wasm_module_t* wasm_instantiate(const wasm_module_t* compiled) {
-    if (!compiled || !compiled->rt) return NULL;
-    if (!compiled->is_compiled) {
-        WASM__SET_ERR(compiled->rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
+wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compiled, void* userdata) {
+    if (!rt) return NULL;
+    if (!compiled || !compiled->is_compiled) {
+        WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "wasm_instantiate requires a module from wasm_compile");
         return NULL;
     }
-    return wasm__load_module(compiled->rt, compiled->module_bytes, compiled->module_size, 0, compiled);
+    return wasm__load_module(rt, compiled->module_bytes, compiled->module_size, 0, compiled, userdata);
 }
 
 void wasm_module_free(wasm_module_t* mod) {
