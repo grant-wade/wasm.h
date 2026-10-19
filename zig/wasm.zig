@@ -1,6 +1,7 @@
 //! A runtime and its modules belong to one thread at a time.
 
 const std = @import("std");
+const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const c = @import("wasm_c");
 
@@ -119,7 +120,19 @@ pub const ValType = enum(c.wasm_valtype_t) {
             V128 => .v128,
             FuncRef => .funcref,
             ExternRef => .externref,
-            else => if (comptime isExternPointer(T)) .externref else @compileError("no Wasm value type for " ++ @typeName(T)),
+            else => if (comptime isExternPointer(T))
+                .externref
+            else if (comptime ReprInt(T)) |Int|
+                (if (@bitSizeOf(Int) <= 32) .i32 else if (@bitSizeOf(Int) <= 64) .i64 else @compileError("no Wasm value type for " ++ @typeName(T)))
+            else
+                @compileError("no Wasm value type for " ++ @typeName(T)),
+        };
+    }
+
+    pub fn isRef(self: ValType) bool {
+        return switch (self) {
+            .i32, .i64, .f32, .f64, .v128, .void => false,
+            else => true,
         };
     }
 
@@ -159,6 +172,16 @@ pub const ExternRef = enum(usize) {
         return @ptrFromInt(@backingInt(self));
     }
 };
+
+/// The integer a `bool`, enum, or packed struct converts through, or null for other types.
+fn ReprInt(comptime T: type) ?type {
+    return switch (@typeInfo(T)) {
+        .bool => u1,
+        .@"enum" => |e| e.tag_type,
+        .@"struct" => |s| s.backing_integer,
+        else => null,
+    };
+}
 
 fn isExternPointer(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -207,9 +230,39 @@ pub const Value = extern struct {
             V128 => v.of.v128 = x,
             FuncRef => v.of.funcref = @backingInt(x),
             ExternRef => v.of.externref = @backingInt(x),
-            else => v.of.externref = @intFromPtr(x),
+            else => if (comptime ReprInt(T)) |Int| {
+                const raw: Int = switch (@typeInfo(T)) {
+                    .bool => @intFromBool(x),
+                    .@"enum" => @backingInt(x),
+                    else => @bitCast(x),
+                };
+                if (v.kind == .i32) v.of.i32 = widen(i32, raw) else v.of.i64 = widen(i64, raw);
+            } else {
+                v.of.externref = @intFromPtr(x);
+            },
         }
         return v;
+    }
+
+    fn widen(comptime Slot: type, raw: anytype) Slot {
+        if (@typeInfo(@TypeOf(raw)).int.signedness == .signed) return raw;
+        return @bitCast(@as(@Int(.unsigned, @bitSizeOf(Slot)), raw));
+    }
+
+    /// `slot` as `Int`, or null when it is out of range.
+    fn narrow(comptime Int: type, slot: anytype) ?Int {
+        const Slot = @TypeOf(slot);
+        if (@typeInfo(Int).int.signedness == .signed) return std.math.cast(Int, slot);
+        return std.math.cast(Int, @as(@Int(.unsigned, @bitSizeOf(Slot)), @bitCast(slot)));
+    }
+
+    fn toRepr(self: Value, comptime T: type, comptime Int: type) Error!T {
+        if (T == bool) return if (self.kind == .i32) self.of.i32 != 0 else self.of.i64 != 0;
+        const raw = (if (self.kind == .i32) narrow(Int, self.of.i32) else narrow(Int, self.of.i64)) orelse return error.InvalidConversion;
+        return switch (@typeInfo(T)) {
+            .@"enum" => |e| if (e.mode == .exhaustive) std.enums.fromInt(T, raw) orelse error.InvalidConversion else @fromBackingInt(raw),
+            else => @bitCast(raw),
+        };
     }
 
     /// Unwraps the value as `T`, failing when its Wasm type differs.
@@ -226,8 +279,27 @@ pub const Value = extern struct {
             V128 => self.of.v128,
             FuncRef => @fromBackingInt(self.of.funcref),
             ExternRef => @fromBackingInt(self.of.externref),
-            else => @ptrFromInt(self.of.externref),
+            else => if (comptime ReprInt(T)) |Int| self.toRepr(T, Int) else @ptrFromInt(self.of.externref),
         };
+    }
+
+    pub fn format(self: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self.kind) {
+            .i32 => try w.print("i32 {d}", .{self.of.i32}),
+            .i64 => try w.print("i64 {d}", .{self.of.i64}),
+            .f32 => try w.print("f32 {d}", .{self.of.f32}),
+            .f64 => try w.print("f64 {d}", .{self.of.f64}),
+            .v128 => try w.print("v128 0x{x}", .{&self.of.v128}),
+            .funcref, .nullfuncref => if (self.of.funcref == std.math.maxInt(u32))
+                try w.print("{t} null", .{self.kind})
+            else
+                try w.print("{t} {d}", .{ self.kind, self.of.funcref }),
+            .i31ref => try w.print("i31ref {d}", .{@as(i32, @bitCast(@as(u32, @truncate(self.of.gc_ref)))) >> 1}),
+            else => if (self.of.gc_ref == 0)
+                try w.print("{t} null", .{self.kind})
+            else
+                try w.print("{t} 0x{x}", .{ self.kind, self.of.gc_ref }),
+        }
     }
 
     pub fn @"null"(kind: ValType) Value {
@@ -255,17 +327,62 @@ pub const Value = extern struct {
     }
 };
 
+/// A reference type: a reference kind such as `.funcref` or `.anyref`, narrowed to a module's
+/// type when `type_index` is set.
+pub const RefType = struct {
+    kind: ValType,
+    type_index: ?u32 = null,
+    nullable: bool = true,
+
+    fn fromC(kind: ValType, ref: ?*const c.wasm_reftype_t) ?RefType {
+        if (!kind.isRef()) return null;
+        const r = ref orelse return .{ .kind = kind };
+        return .{
+            .kind = if (r.type == 0) kind else @fromBackingInt(r.type),
+            .type_index = if (r.has_type_index != 0) r.type_index else null,
+            .nullable = r.nullable != 0,
+        };
+    }
+};
+
 /// A function signature as the runtime reports it. Slices point into the module.
 pub const FuncType = struct {
     params: []const ValType,
     results: []const ValType,
+    c_type: *const c.wasm_functype_t,
 
     fn fromC(ft: ?*const c.wasm_functype_t) ?FuncType {
         const t = ft orelse return null;
         return .{
             .params = valTypes(t.params, t.num_params),
             .results = valTypes(t.results, t.num_results),
+            .c_type = t,
         };
+    }
+
+    /// Details of reference parameter `i`, or null when it is not a reference.
+    pub fn paramRefType(self: FuncType, i: usize) ?RefType {
+        return .fromC(self.params[i], if (self.c_type.param_reftypes == null) null else &self.c_type.param_reftypes[i]);
+    }
+
+    /// Details of reference result `i`, or null when it is not a reference.
+    pub fn resultRefType(self: FuncType, i: usize) ?RefType {
+        return .fromC(self.results[i], if (self.c_type.result_reftypes == null) null else &self.c_type.result_reftypes[i]);
+    }
+
+    pub fn format(self: FuncType, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writeValTypes(w, self.params);
+        try w.writeAll(" -> ");
+        try writeValTypes(w, self.results);
+    }
+
+    fn writeValTypes(w: *std.Io.Writer, types: []const ValType) std.Io.Writer.Error!void {
+        try w.writeByte('(');
+        for (types, 0..) |t, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.print("{t}", .{t});
+        }
+        try w.writeByte(')');
     }
 
     fn valTypes(ptr: [*c]const c.wasm_valtype_t, len: u32) []const ValType {
@@ -447,7 +564,36 @@ pub const Import = struct {
     type_index: u32,
     /// The value or element type, for global and table imports.
     type: ValType,
+    /// Details when `type` is a reference type, for global and table imports.
+    ref_type: ?RefType,
     mutable: bool,
+};
+
+/// How a GC struct field or array element is stored.
+pub const StorageType = union(enum) {
+    value: ValType,
+    i8,
+    i16,
+};
+
+pub const FieldType = struct {
+    storage: StorageType,
+    mutable: bool,
+    /// Details when the field holds a reference.
+    ref_type: ?RefType,
+
+    fn fromC(field: ?*const c.wasm_fieldtype_t) ?FieldType {
+        const f = field orelse return null;
+        const storage: StorageType = if (f.storage.kind == c.WASM_STORAGE_PACKED)
+            (if (f.storage.of.packed_type == c.WASM_PACKED_I8) .i8 else .i16)
+        else
+            .{ .value = @fromBackingInt(f.storage.of.valtype) };
+        return .{
+            .storage = storage,
+            .mutable = f.is_mutable != 0,
+            .ref_type = if (storage == .value) RefType.fromC(storage.value, &f.storage.ref_type) else null,
+        };
+    }
 };
 
 pub const CustomSection = struct {
@@ -472,6 +618,19 @@ pub const CallFrame = struct {
     pub fn funcName(frame: CallFrame) ?[:0]const u8 {
         const instance = frame.instance orelse return null;
         return instance.info().funcName(frame.func_index);
+    }
+
+    /// Writes the frame as the C backtrace does, such as `app!parse (func[12]) at offset 0x002A`.
+    pub fn format(frame: CallFrame, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (frame.instance) |instance| {
+            if (instance.info().name()) |module_name| try w.print("{s}!", .{module_name});
+        }
+        if (frame.funcName()) |func_name| {
+            try w.print("{s} (func[{d}])", .{ func_name, frame.func_index });
+        } else {
+            try w.print("func[{d}]", .{frame.func_index});
+        }
+        try w.print(" at offset 0x{X:0>4}", .{frame.offset});
     }
 };
 
@@ -700,6 +859,28 @@ pub const Runtime = opaque {
         }
     }
 
+    /// `func` takes `context` (unless it is `{}`), the calling instance, the arguments, and a slice
+    /// for the results, and may return an error as for `bindFunc`.
+    pub fn bindFuncDynamic(
+        rt: *Runtime,
+        module_name: [:0]const u8,
+        name: [:0]const u8,
+        params: []const ValType,
+        results: []const ValType,
+        context: anytype,
+        comptime func: anytype,
+    ) Error!void {
+        const Context = @TypeOf(context);
+        if (Context != void) comptime requireSinglePointer(Context, "context");
+        var imp = std.mem.zeroes(c.wasm_import_t);
+        imp.module = module_name.ptr;
+        imp.name = name.ptr;
+        imp.type = cFuncType(params, results);
+        imp.func = DynamicFunc(Context, func).call;
+        imp.userdata = if (Context == void) null else @ptrCast(@constCast(context));
+        try check(c.wasm_register_import(rt.raw(), &imp));
+    }
+
     fn bindHost(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, userdata: ?*anyopaque, comptime Host: type) Error!void {
         var imp = std.mem.zeroes(c.wasm_import_t);
         imp.module = module_name.ptr;
@@ -727,18 +908,30 @@ pub const Runtime = opaque {
         try check(c.wasm_register_global_import(rt.raw(), &imp));
     }
 
-    pub fn bindMemory(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, memory: *c.wasm_memory_t) Error!void {
-        const imp: c.wasm_memory_import_t = .{ .module = module_name.ptr, .name = name.ptr, .memory = memory };
+    /// `memory` is a `*HostMemory`, `*SharedMemory`, an instance's `Memory`, or a `*c.wasm_memory_t`.
+    pub fn bindMemory(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, memory: anytype) Error!void {
+        const handle: *c.wasm_memory_t = if (@TypeOf(memory) == *c.wasm_memory_t) memory else memory.raw();
+        const imp: c.wasm_memory_import_t = .{ .module = module_name.ptr, .name = name.ptr, .memory = handle };
         try check(c.wasm_register_memory_import(rt.raw(), &imp));
     }
 
-    pub fn bindTable(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, table: *c.wasm_table_t) Error!void {
-        const imp: c.wasm_table_import_t = .{ .module = module_name.ptr, .name = name.ptr, .table = table };
+    /// `table` is a `*HostTable`, an instance's `Table`, or a `*c.wasm_table_t`.
+    pub fn bindTable(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, table: anytype) Error!void {
+        const handle: *c.wasm_table_t = if (@TypeOf(table) == *c.wasm_table_t) table else table.raw();
+        const imp: c.wasm_table_import_t = .{ .module = module_name.ptr, .name = name.ptr, .table = handle };
         try check(c.wasm_register_table_import(rt.raw(), &imp));
     }
 
-    pub fn bindTag(rt: *Runtime, imp: *const c.wasm_tag_import_t) Error!void {
-        try check(c.wasm_register_tag_import(rt.raw(), imp));
+    /// Binds a new tag whose payload has `Fn`'s parameter types, such as `fn (i32, f64) void`.
+    pub fn bindTag(rt: *Runtime, module_name: [:0]const u8, name: [:0]const u8, comptime Fn: type) Error!void {
+        const sig = Signature(Fn);
+        if (sig.results.len != 0) @compileError("tag types have no results");
+        const params = comptime valTypesOf(sig.params);
+        var imp = std.mem.zeroes(c.wasm_tag_import_t);
+        imp.module = module_name.ptr;
+        imp.name = name.ptr;
+        imp.type = cFuncType(&params, &.{});
+        try check(c.wasm_register_tag_import(rt.raw(), &imp));
     }
 
     /// Binds the partial `wasi_snapshot_preview1` imports. Needs the `platform` build option.
@@ -788,15 +981,10 @@ pub const Runtime = opaque {
         c.wasm_gc_collect(rt.raw());
     }
 
-    /// Keeps `value` alive across collections until `release`. Read it through the returned
-    /// pointer, which collections update when they move the object. Do not store a host anyref there.
-    pub fn hold(rt: *Runtime, value: Value) Error!*Value {
-        const held = c.wasm_ref_hold(rt.raw(), value.toC()) orelse return error.OutOfMemory;
-        return @ptrCast(held);
-    }
-
-    pub fn release(rt: *Runtime, held: *Value) void {
-        c.wasm_ref_release(rt.raw(), @ptrCast(held));
+    /// Keeps `value` alive across collections until `Held.release`.
+    pub fn hold(rt: *Runtime, value: Value) Error!Held {
+        const slot = c.wasm_ref_hold(rt.raw(), value.toC()) orelse return error.OutOfMemory;
+        return .{ .runtime = rt, .slot = @ptrCast(slot) };
     }
 
     /// Limits execution to `fuel` units; a call that runs out stops with `error.OutOfFuel`.
@@ -860,6 +1048,11 @@ pub const Runtime = opaque {
         return c.wasm_runtime_call_depth(rt.raw());
     }
 
+    /// Iterates the frames of the running or last trapped call, innermost first.
+    pub fn frames(rt: *Runtime) Frames {
+        return .{ .runtime = rt };
+    }
+
     pub fn callFrame(rt: *Runtime, depth: u32) ?CallFrame {
         var frame: CallFrame = undefined;
         var mod: ?*c.wasm_module_t = null;
@@ -868,6 +1061,54 @@ pub const Runtime = opaque {
         return frame;
     }
 };
+
+pub const Frames = struct {
+    runtime: *Runtime,
+    depth: u32 = 0,
+
+    pub fn next(self: *Frames) ?CallFrame {
+        const frame = self.runtime.callFrame(self.depth) orelse return null;
+        self.depth += 1;
+        return frame;
+    }
+};
+
+/// A reference kept alive across collections, which update it when they move the object.
+pub const Held = struct {
+    runtime: *Runtime,
+    /// Do not store a host anyref here.
+    slot: *Value,
+
+    pub fn get(self: Held) Value {
+        return self.slot.*;
+    }
+
+    pub fn release(self: Held) void {
+        c.wasm_ref_release(self.runtime.raw(), @ptrCast(self.slot));
+    }
+};
+
+const empty_valtypes = [1]c.wasm_valtype_t{0};
+
+/// A C signature over `params` and `results`, which must outlive it. Its arrays are never null.
+fn cFuncType(params: []const ValType, results: []const ValType) c.wasm_functype_t {
+    var ft = std.mem.zeroes(c.wasm_functype_t);
+    ft.num_params = @intCast(params.len);
+    ft.num_results = @intCast(results.len);
+    ft.params = @constCast(cValTypes(params));
+    ft.results = @constCast(cValTypes(results));
+    return ft;
+}
+
+fn cValTypes(types: []const ValType) [*]const c.wasm_valtype_t {
+    return if (types.len == 0) &empty_valtypes else @ptrCast(types.ptr);
+}
+
+fn valTypesOf(comptime types: []const type) [types.len]ValType {
+    var out: [types.len]ValType = undefined;
+    for (types, 0..) |T, i| out[i] = ValType.of(T) orelse @compileError("tags need concrete Wasm types, not Value");
+    return out;
+}
 
 /// An import of a compiled module that a runtime's bindings do not resolve.
 pub const ImportProblem = struct {
@@ -922,7 +1163,7 @@ pub fn checkHost(comptime Imports: type, comptime Host: type) void {
         const actual = Signature(Actual);
         var first: usize = 0;
         while (first < actual.params.len and @typeInfo(actual.params[first]) == .pointer) first += 1;
-        if (!sameWasmTypes(expected.params, actual.params[first..]) or !sameWasmTypes(expected.results, actual.results))
+        if (!sameWasmTypes(expected.params, guestExpanded(actual.params[first..])) or !sameWasmTypes(expected.results, actual.results))
             @compileError(@typeName(Host) ++ "." ++ name ++ " does not match import type " ++ @typeName(Expected));
     }
 }
@@ -935,6 +1176,23 @@ fn sameWasmTypes(comptime expected: []const type, comptime actual: []const type)
     return true;
 }
 
+fn isGuestParam(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "guest_params");
+}
+
+/// `params` with each guest parameter type replaced by the Wasm parameters it takes.
+fn guestExpanded(comptime params: []const type) []const type {
+    var out: []const type = &.{};
+    for (params) |T| out = out ++ if (isGuestParam(T)) &T.guest_params else &[_]type{T};
+    return out;
+}
+
+fn hostFail(mod: ?*c.wasm_module_t, err: anyerror) c.wasm_error_t {
+    const code = errorCode(err);
+    c.wasm_runtime_set_error(c.wasm_module_runtime(mod), code, @errorName(err));
+    return code;
+}
+
 const ContextSource = enum { none, binding, instance };
 
 /// The C callback for a bound Zig function. `Context` is `void` when `source` is `.none`.
@@ -944,9 +1202,11 @@ fn HostFunc(comptime source: ContextSource, comptime Context: type, comptime fun
     const context_count: usize = @intFromBool(source != .none);
     if (context_count == 1 and (sig.params.len == 0 or sig.params[0] != Context))
         @compileError("the first parameter of a bound function must be the context type " ++ @typeName(Context));
-    const has_caller = sig.params.len > context_count and sig.params[context_count] == *Instance;
+    const Caller = if (sig.params.len > context_count) sig.params[context_count] else void;
+    const has_caller = Caller == *Instance or Caller == *Runtime;
     const first = context_count + @intFromBool(has_caller);
-    const wasm_params = sig.params[first..];
+    const zig_params = sig.params[first..];
+    const wasm_params = guestExpanded(zig_params);
 
     return struct {
         const param_count = wasm_params.len;
@@ -963,6 +1223,7 @@ fn HostFunc(comptime source: ContextSource, comptime Context: type, comptime fun
             userdata: ?*anyopaque,
         ) callconv(.c) c.wasm_error_t {
             if (num_args != wasm_params.len or num_results != sig.results.len) return c.WASM_ERR_TYPE_MISMATCH;
+            const instance: *Instance = @ptrCast(mod.?);
             var call_args: std.meta.ArgsTuple(Fn) = undefined;
             switch (source) {
                 .none => {},
@@ -972,21 +1233,49 @@ fn HostFunc(comptime source: ContextSource, comptime Context: type, comptime fun
                     return c.WASM_ERR_TRAP;
                 })),
             }
-            if (has_caller) call_args[context_count] = @ptrCast(mod.?);
-            inline for (wasm_params, 0..) |T, i| {
-                const values: [*]const Value = @ptrCast(args);
-                call_args[first + i] = values[i].to(T) catch return c.WASM_ERR_TYPE_MISMATCH;
+            if (Caller == *Instance) call_args[context_count] = instance;
+            if (Caller == *Runtime) call_args[context_count] = instance.runtime();
+            const values: []const Value = if (num_args == 0) &.{} else @as([*]const Value, @ptrCast(args))[0..num_args];
+            comptime var arg: usize = 0;
+            inline for (zig_params, 0..) |T, i| {
+                if (comptime isGuestParam(T)) {
+                    call_args[first + i] = T.fromGuest(instance, values[arg..][0..T.guest_params.len]) catch |err| return hostFail(mod, err);
+                    arg += T.guest_params.len;
+                } else {
+                    call_args[first + i] = values[arg].to(T) catch |err| return hostFail(mod, err);
+                    arg += 1;
+                }
             }
             const returned = @call(.auto, func, call_args);
-            const result = if (sig.returns_error) returned catch |err| {
-                const code = errorCode(err);
-                c.wasm_runtime_set_error(c.wasm_module_runtime(mod), code, @errorName(err));
-                return code;
-            } else returned;
+            const result = if (sig.returns_error) returned catch |err| return hostFail(mod, err) else returned;
             if (sig.results.len > 0) {
                 const out_values: [*]Value = @ptrCast(out);
                 sig.packResults(result, out_values[0..sig.results.len]);
             }
+            return c.WASM_OK;
+        }
+    };
+}
+
+/// The C callback for `Runtime.bindFuncDynamic`.
+fn DynamicFunc(comptime Context: type, comptime func: anytype) type {
+    return struct {
+        fn call(
+            mod: ?*c.wasm_module_t,
+            args: [*c]const c.wasm_value_t,
+            num_args: u32,
+            out: [*c]c.wasm_value_t,
+            num_results: u32,
+            userdata: ?*anyopaque,
+        ) callconv(.c) c.wasm_error_t {
+            const instance: *Instance = @ptrCast(mod.?);
+            const in: []const Value = if (num_args == 0) &.{} else @as([*]const Value, @ptrCast(args))[0..num_args];
+            const results: []Value = if (num_results == 0) &.{} else @as([*]Value, @ptrCast(out))[0..num_results];
+            const returned = if (Context == void)
+                func(instance, in, results)
+            else
+                func(@as(Context, @ptrCast(@alignCast(userdata.?))), instance, in, results);
+            if (@typeInfo(@TypeOf(returned)) == .error_union) returned catch |err| return hostFail(mod, err);
             return c.WASM_OK;
         }
     };
@@ -1017,6 +1306,35 @@ pub fn TypedFunc(comptime Fn: type) type {
             var results: [sig.results.len]Value = undefined;
             try self.instance.runtime().resumeCall(host_results, &results);
             return sig.unpackResults(&results);
+        }
+
+        /// How a call that may suspend ended.
+        pub const Outcome = union(enum) {
+            done: sig.Result,
+            suspended: Runtime.Suspension,
+        };
+
+        /// Returns `.suspended` when the call suspends.
+        pub fn start(self: Self, args: std.meta.ArgsTuple(Fn)) Error!Outcome {
+            return self.outcome(self.call(args));
+        }
+
+        /// Continues the suspended call with a tuple of the yielding host function's results,
+        /// empty after a fuel or interrupt stop.
+        pub fn resumeWith(self: Self, host_results: anytype) Error!Outcome {
+            var values: [host_results.len]Value = undefined;
+            inline for (0..host_results.len) |i| values[i] = .from(host_results[i]);
+            return self.outcome(self.resumeCall(&values));
+        }
+
+        fn outcome(self: Self, result: Error!sig.Result) Error!Outcome {
+            if (result) |value| return .{ .done = value } else |err| switch (err) {
+                error.OutOfFuel, error.Interrupted, error.Yield => {
+                    const why = self.instance.runtime().suspended() orelse return err;
+                    return .{ .suspended = why };
+                },
+                else => return err,
+            }
         }
     };
 }
@@ -1075,6 +1393,7 @@ pub const ModuleInfo = opaque {
             .index = imp.index,
             .type_index = imp.type_index,
             .type = @fromBackingInt(imp.type),
+            .ref_type = if (imp.kind == c.WASM_IMPORT_GLOBAL or imp.kind == c.WASM_IMPORT_TABLE) RefType.fromC(@fromBackingInt(imp.type), &imp.ref_type) else null,
             .mutable = imp.is_mutable != 0,
         };
     }
@@ -1134,6 +1453,20 @@ pub const ModuleInfo = opaque {
         return .fromC(c.wasm_type_functype(info.raw(), type_index));
     }
 
+    pub fn structFieldCount(info: *const ModuleInfo, type_index: u32) u32 {
+        return c.wasm_struct_type_field_count(info.raw(), type_index);
+    }
+
+    /// Field `field_index` of struct type `type_index`, or null when there is none.
+    pub fn structField(info: *const ModuleInfo, type_index: u32, field_index: u32) ?FieldType {
+        return .fromC(c.wasm_struct_type_field(info.raw(), type_index, field_index));
+    }
+
+    /// The element type of array type `type_index`, or null when it is not an array type.
+    pub fn arrayField(info: *const ModuleInfo, type_index: u32) ?FieldType {
+        return .fromC(c.wasm_array_type_field(info.raw(), type_index));
+    }
+
     pub fn tagCount(info: *const ModuleInfo) u32 {
         return c.wasm_tag_count(info.raw());
     }
@@ -1154,6 +1487,11 @@ pub const ModuleInfo = opaque {
         return c.wasm_global_is_mutable(info.raw(), global_index) != 0;
     }
 
+    /// Details of a reference global's type, or null when it holds no reference.
+    pub fn globalRefType(info: *const ModuleInfo, global_index: u32) ?RefType {
+        return .fromC(info.globalType(global_index), c.wasm_global_reftype(info.raw(), global_index));
+    }
+
     pub fn memoryCount(info: *const ModuleInfo) u32 {
         return c.wasm_memory_count(info.raw());
     }
@@ -1164,6 +1502,10 @@ pub const ModuleInfo = opaque {
 
     pub fn tableType(info: *const ModuleInfo, table_index: u32) ValType {
         return @fromBackingInt(c.wasm_table_type(info.raw(), table_index));
+    }
+
+    pub fn tableRefType(info: *const ModuleInfo, table_index: u32) ?RefType {
+        return .fromC(info.tableType(table_index), c.wasm_table_reftype(info.raw(), table_index));
     }
 
     /// Looks up and type-checks the exports `Spec` names; see `Plan`.
@@ -1352,10 +1694,12 @@ pub const Instance = opaque {
         return .{ .instance = instance, .index = table_index };
     }
 
-    /// Allocates a GC struct of type `type_index`. GC references stay valid only while Wasm can reach them.
-    pub fn structNew(instance: *Instance, type_index: u32, fields: []const Value) Error!Value {
+    /// Allocates a GC struct of type `type_index` from `fields`, a tuple of values or a `[]const Value`.
+    /// GC references stay valid only while Wasm can reach them.
+    pub fn structNew(instance: *Instance, type_index: u32, fields: anytype) Error!Value {
+        const values = valueArray(fields);
         var ref: Value = undefined;
-        try check(c.wasm_struct_new(instance.raw(), type_index, Value.cPtr(fields), @intCast(fields.len), @ptrCast(&ref)));
+        try check(c.wasm_struct_new(instance.raw(), type_index, Value.cPtr(&values), @intCast(values.len), @ptrCast(&ref)));
         return ref;
     }
 
@@ -1369,9 +1713,11 @@ pub const Instance = opaque {
         try check(c.wasm_struct_set_field(instance.raw(), ref.toC(), field_index, value.toC()));
     }
 
-    pub fn arrayNew(instance: *Instance, type_index: u32, elems: []const Value) Error!Value {
+    /// `elems` is a tuple of values or a `[]const Value`.
+    pub fn arrayNew(instance: *Instance, type_index: u32, elems: anytype) Error!Value {
+        const values = valueArray(elems);
         var ref: Value = undefined;
-        try check(c.wasm_array_new(instance.raw(), type_index, Value.cPtr(elems), @intCast(elems.len), @ptrCast(&ref)));
+        try check(c.wasm_array_new(instance.raw(), type_index, Value.cPtr(&values), @intCast(values.len), @ptrCast(&ref)));
         return ref;
     }
 
@@ -1399,6 +1745,19 @@ pub const Instance = opaque {
         return @ptrCast(@alignCast(c.wasm_module_userdata(instance.raw())));
     }
 };
+
+fn ValueArray(comptime T: type) type {
+    const info = @typeInfo(T);
+    return if (info == .@"struct" and info.@"struct".is_tuple) [info.@"struct".field_types.len]Value else []const Value;
+}
+
+fn valueArray(items: anytype) ValueArray(@TypeOf(items)) {
+    const Result = ValueArray(@TypeOf(items));
+    if (Result == []const Value) return items;
+    var values: Result = undefined;
+    inline for (0..values.len) |i| values[i] = .from(items[i]);
+    return values;
+}
 
 pub fn Iterator(comptime T: type, comptime count: fn (*const ModuleInfo) u32, comptime at: fn (*const ModuleInfo, u32) T) type {
     return struct {
@@ -1472,18 +1831,24 @@ pub const Memory = struct {
         return bytes[@intCast(offset)..][0..@intCast(len)];
     }
 
-    /// Reads a little-endian integer or float at `offset`.
+    /// Reads a little-endian `T` at `offset`: an integer, float, packed struct, or an array or
+    /// extern struct of those.
     pub fn load(self: Memory, comptime T: type, offset: u64) Error!T {
-        const Bits = @Int(.unsigned, @bitSizeOf(T));
+        comptime requirePlainData(T);
         const bytes = try self.slice(offset, @sizeOf(T));
-        return @bitCast(std.mem.readInt(Bits, bytes[0..@sizeOf(T)], .little));
+        var value: T = undefined;
+        @memcpy(std.mem.asBytes(&value), bytes);
+        if (native_endian == .big) std.mem.byteSwap(T, &value);
+        return value;
     }
 
-    /// Writes a little-endian integer or float at `offset`.
+    /// Writes `value` little-endian at `offset`; `T` is as for `load`.
     pub fn store(self: Memory, comptime T: type, offset: u64, value: T) Error!void {
-        const Bits = @Int(.unsigned, @bitSizeOf(T));
+        comptime requirePlainData(T);
         const bytes = try self.slice(offset, @sizeOf(T));
-        std.mem.writeInt(Bits, bytes[0..@sizeOf(T)], @bitCast(value), .little);
+        var copy = value;
+        if (native_endian == .big) std.mem.byteSwap(T, &copy);
+        @memcpy(bytes, std.mem.asBytes(&copy));
     }
 
     pub fn read(self: Memory, offset: u64, dst: []u8) Error!void {
@@ -1501,9 +1866,96 @@ pub const Memory = struct {
     }
 
     pub fn raw(self: Memory) *c.wasm_memory_t {
-        return c.wasm_module_memory(self.instance.raw(), self.index);
+        return c.wasm_module_memory(self.instance.raw(), self.index).?;
     }
 };
+
+fn isPlainData(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float => @bitSizeOf(T) == 8 * @sizeOf(T),
+        .array => |a| isPlainData(a.child),
+        .@"struct" => |s| if (s.backing_integer != null) @bitSizeOf(T) == 8 * @sizeOf(T) else s.layout == .@"extern" and for (s.field_types) |F| {
+            if (!isPlainData(F)) break false;
+        } else true,
+        else => false,
+    };
+}
+
+fn requirePlainData(comptime T: type) void {
+    if (!isPlainData(T)) @compileError(@typeName(T) ++ " is not an integer, float, packed struct, or array or extern struct of them");
+}
+
+fn guestMemory(instance: *Instance) Error!Memory {
+    return instance.memory(0) orelse instance.fail(error.OutOfBounds, "the calling instance has no memory");
+}
+
+/// A host function parameter for `len` values of `T` at `offset` in the caller's memory 0, which
+/// the guest passes as two `i32` parameters. The range is checked before the function runs.
+pub fn GuestSlice(comptime T: type) type {
+    comptime requirePlainData(T);
+    return struct {
+        memory: Memory,
+        offset: u32,
+        len: u32,
+
+        pub const guest_params = [_]type{ u32, u32 };
+
+        const Self = @This();
+
+        pub fn fromGuest(instance: *Instance, args: []const Value) Error!Self {
+            const memory = try guestMemory(instance);
+            const self: Self = .{ .memory = memory, .offset = try args[0].to(u32), .len = try args[1].to(u32) };
+            _ = try memory.slice(self.offset, @as(u64, self.len) * @sizeOf(T));
+            return self;
+        }
+
+        /// The slice's bytes, invalidated as `Memory.data` is.
+        pub fn bytes(self: Self) []u8 {
+            return self.memory.slice(self.offset, @as(u64, self.len) * @sizeOf(T)) catch &.{};
+        }
+
+        pub fn get(self: Self, i: u32) Error!T {
+            if (i >= self.len) return error.OutOfBounds;
+            return self.memory.load(T, @as(u64, self.offset) + @as(u64, i) * @sizeOf(T));
+        }
+
+        pub fn set(self: Self, i: u32, value: T) Error!void {
+            if (i >= self.len) return error.OutOfBounds;
+            return self.memory.store(T, @as(u64, self.offset) + @as(u64, i) * @sizeOf(T), value);
+        }
+    };
+}
+
+pub const GuestBytes = GuestSlice(u8);
+
+/// A host function parameter for a `T` at `offset` in the caller's memory 0, which the guest
+/// passes as one `i32` parameter. The range is checked before the function runs.
+pub fn GuestPtr(comptime T: type) type {
+    comptime requirePlainData(T);
+    return struct {
+        memory: Memory,
+        offset: u32,
+
+        pub const guest_params = [_]type{u32};
+
+        const Self = @This();
+
+        pub fn fromGuest(instance: *Instance, args: []const Value) Error!Self {
+            const memory = try guestMemory(instance);
+            const self: Self = .{ .memory = memory, .offset = try args[0].to(u32) };
+            _ = try memory.slice(self.offset, @sizeOf(T));
+            return self;
+        }
+
+        pub fn load(self: Self) Error!T {
+            return self.memory.load(T, self.offset);
+        }
+
+        pub fn store(self: Self, value: T) Error!void {
+            return self.memory.store(T, self.offset, value);
+        }
+    };
+}
 
 /// One of an instance's tables, defined or imported.
 pub const Table = struct {
@@ -1539,7 +1991,7 @@ pub const Table = struct {
     }
 
     pub fn raw(self: Table) *c.wasm_table_t {
-        return c.wasm_module_table(self.instance.raw(), self.index);
+        return c.wasm_module_table(self.instance.raw(), self.index).?;
     }
 };
 
@@ -1588,6 +2040,75 @@ pub fn Pool(comptime Spec: type) type {
         }
     };
 }
+
+/// A memory the host creates for `Runtime.bindMemory`. It must outlive every module that imports it.
+pub const HostMemory = struct {
+    memory: *c.wasm_memory_t,
+    allocator: std.mem.Allocator,
+
+    pub const Options = SharedMemory.Options;
+
+    /// `allocator` must outlive the memory.
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!*HostMemory {
+        const host = allocator.create(HostMemory) catch return error.OutOfMemory;
+        host.allocator = allocator;
+        const bridged = AllocatorBridge.wrap(&host.allocator);
+        host.memory = c.wasm_memory_new(&bridged, options.pages, options.max_pages, @intFromBool(options.memory64)) orelse {
+            allocator.destroy(host);
+            return error.OutOfMemory;
+        };
+        return host;
+    }
+
+    pub fn deinit(host: *HostMemory) void {
+        c.wasm_memory_free(host.memory);
+        host.allocator.destroy(host);
+    }
+
+    pub fn raw(host: *HostMemory) *c.wasm_memory_t {
+        return host.memory;
+    }
+
+    /// The memory's bytes, invalidated when it grows.
+    pub fn data(host: *HostMemory) []u8 {
+        const base = c.wasm_memory_base(host.memory) orelse return &.{};
+        return base[0..@intCast(c.wasm_memory_length(host.memory))];
+    }
+};
+
+/// A table of null references the host creates for `Runtime.bindTable`. It must outlive every
+/// module that imports it.
+pub const HostTable = struct {
+    table: *c.wasm_table_t,
+    allocator: std.mem.Allocator,
+
+    pub const Options = struct {
+        elem_type: ValType = .funcref,
+        size: u32,
+        max_size: ?u32 = null,
+    };
+
+    /// `allocator` must outlive the table.
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!*HostTable {
+        const host = allocator.create(HostTable) catch return error.OutOfMemory;
+        host.allocator = allocator;
+        const bridged = AllocatorBridge.wrap(&host.allocator);
+        host.table = c.wasm_table_new(&bridged, @backingInt(options.elem_type), options.size, options.max_size orelse std.math.maxInt(u32)) orelse {
+            allocator.destroy(host);
+            return error.OutOfMemory;
+        };
+        return host;
+    }
+
+    pub fn deinit(host: *HostTable) void {
+        c.wasm_table_free(host.table);
+        host.allocator.destroy(host);
+    }
+
+    pub fn raw(host: *HostTable) *c.wasm_table_t {
+        return host.table;
+    }
+};
 
 /// A memory for the threads proposal, shared by runtimes on separate threads through `Runtime.bindMemory`.
 /// It never moves when it grows, and must outlive every module that imports it.

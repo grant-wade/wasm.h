@@ -458,7 +458,7 @@ test "gc structs and arrays" {
     try expectEqual(wasm.TypeKind.array, mod.info().typeKind(1));
     try expectEqual(@as(?wasm.FuncType, null), mod.info().typeFunc(0));
 
-    const point = try mod.structNew(0, &.{ .from(@as(i32, 3)), .from(@as(i64, 4)) });
+    const point = try mod.structNew(0, .{ @as(i32, 3), @as(i64, 4) });
     try expectEqual(@as(i64, 4), try (try mod.structGet(point, 1)).to(i64));
     try mod.structSet(point, 0, .from(@as(i32, 30)));
     const point_x = try mod.func("point_x", fn (wasm.Value) i32);
@@ -466,7 +466,7 @@ test "gc structs and arrays" {
     try expectError(error.Trap, point_x.call(.{.null(.nullref)}));
     try expectError(error.TypeMismatch, point_x.call(.{.from(@as(i32, 0))}));
 
-    const ints = try mod.arrayNew(1, &.{ .from(@as(i32, 1)), .from(@as(i32, 2)) });
+    const ints = try mod.arrayNew(1, .{ @as(i32, 1), @as(i32, 2) });
     try expectError(error.TypeMismatch, point_x.call(.{ints}));
     try expectEqual(@as(u32, 2), try mod.arrayLen(ints));
     try mod.arraySet(ints, 1, .from(@as(i32, 20)));
@@ -475,9 +475,9 @@ test "gc structs and arrays" {
 
     // Collection moves objects; only held references stay usable.
     const held = try rt.hold(point);
-    defer rt.release(held);
+    defer held.release();
     rt.collectGarbage();
-    try expectEqual(@as(i64, 4), try (try mod.structGet(held.*, 1)).to(i64));
+    try expectEqual(@as(i64, 4), try (try mod.structGet(held.get(), 1)).to(i64));
 }
 
 test "value conversions" {
@@ -894,4 +894,317 @@ const link_wasm = [_]u8{
     0x02, 0x0e, 0x01, 0x03, 0x6c, 0x69, 0x62, 0x06, 0x64, 0x6f, 0x75, 0x62, 0x6c, 0x65, 0x00, 0x00,
     0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x71, 0x75, 0x61, 0x64, 0x00, 0x01, 0x0a, 0x0a,
     0x01, 0x08, 0x00, 0x20, 0x00, 0x10, 0x00, 0x10, 0x00, 0x0b,
+};
+
+const Color = enum(u8) { red, green, blue };
+const Flags = packed struct(u32) { read: bool, write: bool, rest: u30 = 0 };
+const Pair = extern struct { lo: u32, hi: u32 };
+
+const GuestHost = struct {
+    pub fn sum(rt: *wasm.Runtime, values: wasm.GuestSlice(u32)) !u32 {
+        _ = rt.fuel();
+        var total: u32 = 0;
+        for (0..values.len) |i| total += try values.get(@intCast(i));
+        return total;
+    }
+
+    pub fn upper(text: wasm.GuestBytes) void {
+        for (text.bytes()) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    }
+
+    pub fn bump(pair: wasm.GuestPtr(Pair)) !void {
+        const value = try pair.load();
+        try pair.store(.{ .lo = value.lo + 1, .hi = value.hi + 10 });
+    }
+
+    pub fn flag(on: bool) bool {
+        return !on;
+    }
+
+    pub fn color(value: Color) Color {
+        return switch (value) {
+            .red => .green,
+            .green => .blue,
+            .blue => .red,
+        };
+    }
+
+    pub fn flags(value: Flags) Flags {
+        return .{ .read = value.write, .write = value.read };
+    }
+};
+
+const DynamicState = struct { calls: u32 = 0 };
+
+fn dynamicAdd(state: *DynamicState, caller: *wasm.Instance, args: []const wasm.Value, results: []wasm.Value) !void {
+    _ = caller;
+    state.calls += 1;
+    const a = try args[0].to(i64);
+    if (a < 0) return error.NegativeInput;
+    results[0] = .from(@as(f64, @floatFromInt(a)) + @as(f64, try args[1].to(f32)));
+}
+
+test "guest memory parameters, value conversions, and dynamic host functions" {
+    comptime wasm.checkHost(struct {
+        pub const sum = fn (i32, i32) i32;
+        pub const upper = fn (i32, i32) void;
+        pub const bump = fn (i32) void;
+        pub const flag = fn (i32) i32;
+    }, GuestHost);
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    var state: DynamicState = .{};
+    try rt.bindAll("env", GuestHost);
+    try rt.bindFuncDynamic("env", "dyn", &.{ .i64, .f32 }, &.{.f64}, &state, dynamicAdd);
+    const mod = try rt.load(&guest_params_wasm);
+    defer mod.deinit();
+    const memory = mod.memory(0).?;
+
+    const sum = try mod.func("sum", fn (u32, u32) u32);
+    try expectEqual(@as(u32, 6), try sum.call(.{ 0, 3 }));
+    try expectError(error.OutOfBounds, sum.call(.{ wasm.page_size - 4, 2 }));
+    try expectEqualStrings("OutOfBounds", rt.errorMessage());
+
+    try (try mod.func("upper", fn (u32, u32) void)).call(.{ 16, 5 });
+    try expectEqualStrings("HELLO", try memory.slice(16, 5));
+
+    try memory.store(Pair, 32, .{ .lo = 1, .hi = 2 });
+    try (try mod.func("bump", fn (u32) void)).call(.{32});
+    try expectEqual(Pair{ .lo = 2, .hi = 12 }, try memory.load(Pair, 32));
+    try expectEqual(@as(u32, 2), try memory.load(u32, 32));
+
+    const flag = try mod.func("flag", fn (bool) bool);
+    try expect(try flag.call(.{false}));
+    try expect(!try flag.call(.{true}));
+    try expect(!try (try mod.func("flag", fn (i32) bool)).call(.{7}));
+
+    const color = try mod.func("color", fn (Color) Color);
+    try expectEqual(Color.blue, try color.call(.{.green}));
+    try expectError(error.InvalidConversion, (try mod.func("color", fn (i32) i32)).call(.{7}));
+    try expectError(error.InvalidConversion, (try mod.func("color", fn (i32) i32)).call(.{256}));
+
+    const flags = try mod.func("flags", fn (Flags) Flags);
+    try expectEqual(Flags{ .read = false, .write = true }, try flags.call(.{.{ .read = true, .write = false }}));
+
+    const dyn = try mod.func("dyn", fn (i64, f32) f64);
+    try expectEqual(@as(f64, 42.5), try dyn.call(.{ 40, 2.5 }));
+    try expectError(error.Trap, dyn.call(.{ -1, 0 }));
+    try expectEqualStrings("NegativeInput", rt.errorMessage());
+    try expectEqual(@as(u32, 2), state.calls);
+
+    try expectEqual(wasm.ValType.i32, wasm.ValType.of(Flags).?);
+    try expectEqual(wasm.ValType.i32, wasm.ValType.of(bool).?);
+    try expectEqual(wasm.ValType.i64, wasm.ValType.of(enum(u64) { a, _ }).?);
+}
+
+fn ninetyNine(caller: *wasm.Instance, args: []const wasm.Value, results: []wasm.Value) void {
+    _ = caller;
+    _ = args;
+    results[0] = .from(@as(i32, 99));
+}
+
+test "dynamic host functions without a context" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindFuncDynamic("env", "ctx", &.{}, &.{.i32}, {}, ninetyNine);
+    const mod = try rt.load(&ctx_wasm);
+    defer mod.deinit();
+    try expectEqual(@as(i32, 99), try (try mod.func("seen", fn () i32)).call(.{}));
+}
+
+test "typed tags" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindTag("env", "oops", fn (i32) void);
+    const mod = try rt.load(&tag_wasm);
+    defer mod.deinit();
+    try expectEqual(@as(i32, 17), try (try mod.func("roundtrip", fn (i32) i32)).call(.{17}));
+
+    const wrong = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer wrong.deinit();
+    try wrong.bindTag("env", "oops", fn (i64) void);
+    try expectError(error.TypeMismatch, wrong.load(&tag_wasm));
+}
+
+test "host memories and tables" {
+    const memory = try wasm.HostMemory.init(std.testing.allocator, .{ .pages = 1, .max_pages = 2 });
+    defer memory.deinit();
+    const table = try wasm.HostTable.init(std.testing.allocator, .{ .size = 2 });
+    defer table.deinit();
+    memory.data()[3] = 7;
+
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindMemory("env", "memory", memory);
+    try rt.bindTable("env", "table", table);
+    const mod = try rt.load(&host_memory_wasm);
+    defer mod.deinit();
+    try expectEqual(@as(i32, 7), try (try mod.func("peek", fn () i32)).call(.{}));
+    try expectEqual(@as(i32, 9), try (try mod.func("call1", fn () i32)).call(.{}));
+    try expectEqual(@as(u64, 2), mod.table(0).?.size());
+    try expectEqual(@as(?u64, 1), mod.memory(0).?.grow(1));
+    try expectEqual(@as(usize, 2 * wasm.page_size), memory.data().len);
+
+    const other = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer other.deinit();
+    try other.bindMemory("env", "memory", mod.memory(0).?);
+    try other.bindTable("env", "table", mod.table(0).?);
+    const second = try other.load(&host_memory_wasm);
+    defer second.deinit();
+    try expectEqual(@as(i32, 7), try (try second.func("peek", fn () i32)).call(.{}));
+}
+
+test "suspendable calls report outcomes" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.bindFunc("env", "ask", hostAsk);
+    const mod = try rt.load(&resume_wasm);
+    defer mod.deinit();
+
+    const twice = try mod.func("twice", fn (i32) i32);
+    const asked = try twice.start(.{4});
+    try expectEqual(wasm.Runtime.Suspension.yield, asked.suspended);
+    try expectError(error.TypeMismatch, twice.resumeWith(.{@as(i64, 21)}));
+    try expectEqual(@as(i32, 42), (try twice.resumeWith(.{@as(i32, 21)})).done);
+
+    const count = try mod.func("count", fn (i32) i32);
+    rt.setFuel(10);
+    var outcome = try count.start(.{1000});
+    var steps: u32 = 0;
+    while (outcome == .suspended) : (steps += 1) {
+        try expectEqual(wasm.Runtime.Suspension.out_of_fuel, outcome.suspended);
+        rt.setFuel(10);
+        outcome = try count.resumeWith(.{});
+    }
+    rt.disableFuel();
+    try expectEqual(@as(i32, 1000), outcome.done);
+    try expect(steps > 100);
+
+    try expectEqual(@as(i32, 3), (try count.start(.{3})).done);
+}
+
+test "reference types and gc type introspection" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const mod = try rt.load(&gc_wasm);
+    defer mod.deinit();
+    const info = mod.info();
+
+    try expectEqual(@as(u32, 2), info.structFieldCount(0));
+    const x = info.structField(0, 0).?;
+    try expectEqual(wasm.StorageType{ .value = .i32 }, x.storage);
+    try expect(x.mutable);
+    try expectEqual(@as(?wasm.RefType, null), x.ref_type);
+    try expect(!info.structField(0, 1).?.mutable);
+    try expectEqual(@as(?wasm.FieldType, null), info.structField(0, 2));
+    try expectEqual(wasm.StorageType{ .value = .i32 }, info.arrayField(1).?.storage);
+    try expectEqual(@as(?wasm.FieldType, null), info.arrayField(0));
+
+    const point_x = info.funcType(info.findExport("point_x").?.index).?;
+    const param = point_x.paramRefType(0).?;
+    try expectEqual(@as(?u32, 0), param.type_index);
+    try expect(param.nullable);
+    try expectEqual(@as(?wasm.RefType, null), point_x.resultRefType(0));
+
+    const lib = try rt.load(&table_wasm);
+    defer lib.deinit();
+    try expectEqual(wasm.RefType{ .kind = .funcref }, lib.info().tableRefType(0).?);
+    const host_info = (try rt.compile(&host_wasm));
+    defer host_info.deinit();
+    try expectEqual(@as(?wasm.RefType, null), host_info.info().importAt(5).ref_type);
+}
+
+test "formatting values, signatures, and frames" {
+    var buffer: [128]u8 = undefined;
+    try expectEqualStrings("i32 -5", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.from(@as(i32, -5))}));
+    try expectEqualStrings("f64 2.5", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.from(@as(f64, 2.5))}));
+    try expectEqualStrings("funcref null", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.null(.funcref)}));
+    try expectEqualStrings("funcref 3", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.from(@as(wasm.FuncRef, @enumFromInt(3)))}));
+    try expectEqualStrings("externref null", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.null(.externref)}));
+    try expectEqualStrings("i31ref -7", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.i31ref(-7)}));
+
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const mod = try rt.load(&basic_wasm);
+    defer mod.deinit();
+    const swap = mod.info().funcType(mod.info().findExport("swap").?.index).?;
+    try expectEqualStrings("(i64, f64) -> (f64, i64)", try std.fmt.bufPrint(&buffer, "{f}", .{swap}));
+
+    try expectError(error.DivByZero, (try mod.func("div", fn (i32, i32) i32)).call(.{ 1, 0 }));
+    var frames = rt.frames();
+    const frame = frames.next().?;
+    try expectEqual(@as(?wasm.CallFrame, null), frames.next());
+    var trace: [128]u8 = undefined;
+    const printed = try std.fmt.bufPrint(&buffer, "#0 {f}", .{frame});
+    try expectEqualStrings(rt.backtrace(&trace), printed);
+}
+
+// (module
+//   (import "env" "sum" (func $sum (param i32 i32) (result i32)))
+//   (import "env" "upper" (func $upper (param i32 i32)))
+//   (import "env" "bump" (func $bump (param i32)))
+//   (import "env" "flag" (func $flag (param i32) (result i32)))
+//   (import "env" "color" (func $color (param i32) (result i32)))
+//   (import "env" "flags" (func $flags (param i32) (result i32)))
+//   (import "env" "dyn" (func $dyn (param i64 f32) (result f64)))
+//   (memory (export "memory") 1)
+//   (data (i32.const 0) "\01\00\00\00\02\00\00\00\03\00\00\00")
+//   (data (i32.const 16) "hello")
+//   (func (export "sum") (param i32 i32) (result i32) (call $sum (local.get 0) (local.get 1)))
+//   (func (export "upper") (param i32 i32) (call $upper (local.get 0) (local.get 1)))
+//   (func (export "bump") (param i32) (call $bump (local.get 0)))
+//   (func (export "flag") (param i32) (result i32) (call $flag (local.get 0)))
+//   (func (export "color") (param i32) (result i32) (call $color (local.get 0)))
+//   (func (export "flags") (param i32) (result i32) (call $flags (local.get 0)))
+//   (func (export "dyn") (param i64 f32) (result f64) (call $dyn (local.get 0) (local.get 1))))
+const guest_params_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x1b, 0x05, 0x60, 0x02, 0x7f, 0x7f, 0x01,
+    0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60,
+    0x02, 0x7e, 0x7d, 0x01, 0x7c, 0x02, 0x4f, 0x07, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x73, 0x75, 0x6d,
+    0x00, 0x00, 0x03, 0x65, 0x6e, 0x76, 0x05, 0x75, 0x70, 0x70, 0x65, 0x72, 0x00, 0x01, 0x03, 0x65,
+    0x6e, 0x76, 0x04, 0x62, 0x75, 0x6d, 0x70, 0x00, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x66, 0x6c,
+    0x61, 0x67, 0x00, 0x03, 0x03, 0x65, 0x6e, 0x76, 0x05, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x03,
+    0x03, 0x65, 0x6e, 0x76, 0x05, 0x66, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x03, 0x03, 0x65, 0x6e, 0x76,
+    0x03, 0x64, 0x79, 0x6e, 0x00, 0x04, 0x03, 0x08, 0x07, 0x00, 0x01, 0x02, 0x03, 0x03, 0x03, 0x04,
+    0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x3c, 0x08, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02,
+    0x00, 0x03, 0x73, 0x75, 0x6d, 0x00, 0x07, 0x05, 0x75, 0x70, 0x70, 0x65, 0x72, 0x00, 0x08, 0x04,
+    0x62, 0x75, 0x6d, 0x70, 0x00, 0x09, 0x04, 0x66, 0x6c, 0x61, 0x67, 0x00, 0x0a, 0x05, 0x63, 0x6f,
+    0x6c, 0x6f, 0x72, 0x00, 0x0b, 0x05, 0x66, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x0c, 0x03, 0x64, 0x79,
+    0x6e, 0x00, 0x0d, 0x0a, 0x38, 0x07, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x00, 0x0b, 0x08,
+    0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x01, 0x0b, 0x06, 0x00, 0x20, 0x00, 0x10, 0x02, 0x0b, 0x06,
+    0x00, 0x20, 0x00, 0x10, 0x03, 0x0b, 0x06, 0x00, 0x20, 0x00, 0x10, 0x04, 0x0b, 0x06, 0x00, 0x20,
+    0x00, 0x10, 0x05, 0x0b, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x06, 0x0b, 0x0b, 0x1c, 0x02,
+    0x00, 0x41, 0x00, 0x0b, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+    0x00, 0x00, 0x41, 0x10, 0x0b, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
+};
+
+// (module
+//   (import "env" "oops" (tag $oops (param i32)))
+//   (func (export "roundtrip") (param i32) (result i32)
+//     (block $h (result i32)
+//       (try_table (catch $oops $h) (throw $oops (local.get 0)))
+//       (i32.const -1))))
+const tag_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0a, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
+    0x01, 0x7f, 0x01, 0x7f, 0x02, 0x0d, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x04, 0x6f, 0x6f, 0x70, 0x73,
+    0x04, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0d, 0x01, 0x09, 0x72, 0x6f, 0x75, 0x6e, 0x64,
+    0x74, 0x72, 0x69, 0x70, 0x00, 0x00, 0x0a, 0x14, 0x01, 0x12, 0x00, 0x02, 0x7f, 0x1f, 0x40, 0x01,
+    0x00, 0x00, 0x00, 0x20, 0x00, 0x08, 0x00, 0x0b, 0x41, 0x7f, 0x0b, 0x0b,
+};
+
+// (module
+//   (import "env" "memory" (memory 1 2))
+//   (import "env" "table" (table 2 funcref))
+//   (func $nine (result i32) (i32.const 9))
+//   (elem (i32.const 1) func $nine)
+//   (func (export "peek") (result i32) (i32.load8_u (i32.const 3)))
+//   (func (export "call1") (result i32) (call_indirect (result i32) (i32.const 1))))
+const host_memory_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x02,
+    0x1e, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x01, 0x01,
+    0x02, 0x03, 0x65, 0x6e, 0x76, 0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x01, 0x70, 0x00, 0x02, 0x03,
+    0x04, 0x03, 0x00, 0x00, 0x00, 0x07, 0x10, 0x02, 0x04, 0x70, 0x65, 0x65, 0x6b, 0x00, 0x01, 0x05,
+    0x63, 0x61, 0x6c, 0x6c, 0x31, 0x00, 0x02, 0x09, 0x07, 0x01, 0x00, 0x41, 0x01, 0x0b, 0x01, 0x00,
+    0x0a, 0x16, 0x03, 0x04, 0x00, 0x41, 0x09, 0x0b, 0x07, 0x00, 0x41, 0x03, 0x2d, 0x00, 0x00, 0x0b,
+    0x07, 0x00, 0x41, 0x01, 0x11, 0x00, 0x00, 0x0b,
 };

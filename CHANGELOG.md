@@ -24,6 +24,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Generated `wasm2api` options have an `allocator` field, defaulting to `wasm_libc_allocator()`.
 - In Zig, `Runtime.init` and `SharedMemory.init` take a `std.mem.Allocator` first.
 - `wasm_instantiate` takes the runtime to instantiate in and the instance's userdata: `wasm_instantiate(rt, compiled, userdata)`.
+- In Zig, `Runtime.bindTag` takes a function type for the tag's payload, and `Instance.structNew` and `Instance.arrayNew` take a tuple of values or a `[]const wasm.Value`.
 - In Zig, `Module` is split into `CompiledModule`, which `Runtime.compile` returns, and `Instance`, which `Runtime.load` and `Runtime.instantiate` return. Introspection is on `ModuleInfo`, reached through `info()`, `Module.instantiate` is `Runtime.instantiate`, host functions take a `*wasm.Instance` caller, and `TypedFunc` and `Memory` have an `instance` field.
 - `max_stack_values` counts 8-byte operand stack slots, and a `v128` takes two. A call fails with `WASM_ERR_STACK_OVERFLOW` on entry when the operand stack cannot hold the most values its body can need.
 
@@ -36,7 +37,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - `wasm_runtime_allocator` returns a runtime's copy of its allocator.
 - `wasm_runtime_interrupt` stops a running call from any thread with `WASM_ERR_INTERRUPTED`, at the next loop iteration, function entry, `memory.atomic.wait`, or WASI sleep. In Zig, `Runtime.interrupt` and `error.Interrupted`.
-- `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold` and `release`.
+- `wasm_ref_hold` and `wasm_ref_release` keep a GC reference, converted `externref`, or `exnref` alive across collections in a slot the collector updates. Collections move objects, so references held only by the host went stale. In Zig, `Runtime.hold`, which returns a `Held`.
 - `wasm_register_module` makes an instance's exports importable by later modules in the same runtime. The spec test harness now links modules through it.
 - `wasm_table_size`, `wasm_table_get`, `wasm_table_set`, and `wasm_table_grow`; `wasm_global_get_index` and `wasm_global_set_index`, which check mutability and type; and `wasm_call_ref`, which calls a funcref.
 - `wasm_memory_new`, `wasm_table_new`, and `wasm_table_free` create and free host memories and tables to register as imports, and `wasm_memory_base` and `wasm_memory_length` read a memory handle's data and size.
@@ -46,6 +47,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Zig `ModuleInfo.resolve` returns a `Plan` that binds a struct of typed exports to each instance of a module, `Instance.exportsAs` binds one directly, and `Pool` keeps instances of a compiled module ready with their exports bound.
 - `wasm2zig`, installed by `zig build`, generates Zig `Exports` and `Imports` declarations from a Wasm module, and `addBindings` in `build.zig` runs it at build time.
 - Zig `Runtime.bindAll` and `Runtime.bindAllContext` bind every public function of a namespace, and `checkHost` checks a namespace against import signatures at compile time.
+- Zig host functions take `GuestSlice`, `GuestBytes`, and `GuestPtr` parameters for ranges of the caller's memory, and a leading `*Runtime` caller; `Runtime.bindFuncDynamic` binds functions with signatures known at run time.
+- Zig `bool`, enum, and packed struct values convert to and from `i32` and `i64`.
+- Zig `TypedFunc.start` and `TypedFunc.resumeWith` return an `Outcome` that reports a suspended call.
+- Zig `RefType`, `FuncType.paramRefType`, `FuncType.resultRefType`, `Import.ref_type`, `ModuleInfo.globalRefType`, `ModuleInfo.tableRefType`, `ModuleInfo.structField`, and `ModuleInfo.arrayField` describe reference and GC types.
+- Zig `Value`, `FuncType`, and `CallFrame` format with `{f}`, and `Runtime.frames` iterates call frames.
+- Zig `HostMemory` and `HostTable`, which `Runtime.bindMemory` and `Runtime.bindTable` accept along with `SharedMemory` and instance memories and tables.
 - Zig `Table`, `Global`, `Instance.global`, `Runtime.registerModule`, `Runtime.lastError`, `Memory.slice`, `Memory.load`, `Memory.store`, and `Config.features` and `Config.fuel`.
 - `wasm_config_t.max_total_memory_bytes` caps the linear memories of all of a runtime's instances together. In Zig, `Config.max_total_memory_bytes`.
 - `wasm_config_t.max_gc_heap_bytes` caps the GC heap. In Zig, `Config.max_gc_heap_bytes`.

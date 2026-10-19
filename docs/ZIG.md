@@ -135,16 +135,19 @@ start.call(.{}) catch |err| switch (err) {
 };
 ```
 
-A call that stops with `error.OutOfFuel`, `error.Interrupted`, or `error.Yield` stays suspended, following the C rules in [Resuming calls](EMBEDDING.md#resuming-calls). `Runtime.suspended` returns why, or null; `TypedFunc.resumeCall` and `Runtime.resumeCall` continue the call with the yielding host function's results, and `Runtime.cancel` discards it:
+A call that stops with `error.OutOfFuel`, `error.Interrupted`, or `error.Yield` stays suspended, following the C rules in [Resuming calls](EMBEDDING.md#resuming-calls). `TypedFunc.start` calls a function and returns an `Outcome`, `.done` with its result or `.suspended` with the reason, and `resumeWith` continues it with a tuple of the yielding host function's results:
 
 ```zig
 rt.setFuel(10_000);
-var result = run.call(.{});
-while (rt.suspended() == .out_of_fuel) {
+var outcome = try run.start(.{});
+while (outcome == .suspended) {
     rt.setFuel(10_000);
-    result = run.resumeCall(&.{});
+    outcome = try run.resumeWith(.{});
 }
+const result = outcome.done;
 ```
+
+`Runtime.suspended` returns why the last call is suspended, or null. `TypedFunc.resumeCall` and `Runtime.resumeCall` take the host results as `[]const wasm.Value` and fail with the stop's error, and `Runtime.cancel` discards the call.
 
 ## Typed functions
 
@@ -158,7 +161,10 @@ while (rt.suspended() == .out_of_fuel) {
 | `wasm.V128` (`@Vector(16, u8)`) | `v128` |
 | `wasm.FuncRef` | `funcref` |
 | `wasm.ExternRef`, or any optional single-item pointer | `externref` |
+| `bool`, enums, and packed structs | `i32`, or `i64` for those over 32 bits |
 | `wasm.Value` | any type, checked when used |
+
+A `bool` is true for any nonzero value. An integer outside an enum's tags or a packed struct's backing integer fails with `error.InvalidConversion`.
 
 A function with several results returns a tuple:
 
@@ -192,11 +198,31 @@ var counter: Counter = .{};
 try rt.bindFuncContext("env", "accumulate", &counter, accumulate);
 ```
 
-- **Parameters:** a function may take a leading `*wasm.Instance`, which is the calling instance, followed by Wasm-typed parameters.
+- **Parameters:** a function may take a leading `*wasm.Instance` or `*wasm.Runtime` for its caller, followed by Wasm-typed parameters and guest memory parameters.
 - **Context:** `bindFuncContext` passes its context pointer as the first parameter. The context must outlive every module that imports the function.
 - **Instance context:** `bindInstanceFunc` passes the calling instance's context, set by `Runtime.instantiateContext` before the start function runs, as the first parameter. A call from an instance without one traps.
 - **Results:** a function may return `void`, a Wasm-typed value, or a tuple of them, optionally as an error union.
 - **Errors:** a returned error traps the calling Wasm code, with the error's name as the runtime's error message. Members of `wasm.Error` keep their meaning, such as `error.OutOfBounds`, and `error.Yield` suspends the call until `resumeCall` supplies the results. Any other error becomes `error.Trap`.
+
+Guest memory parameters read the caller's memory 0 through 32-bit offsets. `wasm.GuestSlice(T)` takes an offset and an element count, `wasm.GuestBytes` is `GuestSlice(u8)`, and `wasm.GuestPtr(T)` takes an offset. Their ranges are checked before the function runs, and a range out of bounds traps with `error.OutOfBounds`. `T` is an integer, float, packed struct, or an array or extern struct of those, read and written little-endian:
+
+```zig
+fn print(text: wasm.GuestBytes) void {
+    std.debug.print("{s}", .{text.bytes()});
+}
+
+fn stat(path: wasm.GuestBytes, out: wasm.GuestPtr(Stat)) !void {
+    try out.store(try statPath(path.bytes()));
+}
+```
+
+`bindFuncDynamic` binds a function whose signature is known only at run time. It receives its context, unless that is `{}`, the calling instance, the arguments, and a slice for the results:
+
+```zig
+fn forward(proxy: *Proxy, caller: *wasm.Instance, args: []const wasm.Value, results: []wasm.Value) !void { ... }
+
+try rt.bindFuncDynamic("env", "forward", &.{ .i32, .i64 }, &.{.f64}, &proxy, forward);
+```
 
 ```zig
 const Tenant = struct { id: i32 };
@@ -224,7 +250,7 @@ comptime wasm.checkHost(struct {
 try rt.bindAllContext("env", Env, &state);
 ```
 
-`Runtime.registerModule` makes an instance's exports importable by modules loaded afterwards. `bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
+`Runtime.registerModule` makes an instance's exports importable by modules loaded afterwards. `bindGlobal`, `bindMemory`, and `bindTable` bind the other import kinds: `bindMemory` takes a `wasm.HostMemory`, a `wasm.SharedMemory`, or an instance's `Memory`, and `bindTable` a `wasm.HostTable` or an instance's `Table`. `bindTag` binds a new tag whose payload has a function type's parameters, such as `fn (i32, f64) void`. `bindWasi` and `bindEmscripten` bind the partial compatibility layers when the `platform` option is on; `setWasiArgs`, `setWasiEnv`, and `preopenDir` configure the guest's arguments, environment, and accessible directories. Bind Emscripten's layer only for trusted modules, because it reaches the host filesystem.
 
 ## Memory, globals, tables, and introspection
 
@@ -248,9 +274,23 @@ while (it.next()) |exp| std.debug.print("{s} {t}\n", .{ exp.name, exp.kind });
 const producers = instance.info().customSection("producers");
 ```
 
-`getGlobal` and `setGlobal` read and write an exported global by name. `Runtime.callRef` calls a funcref with untyped values. `ModuleInfo`'s `imports`, `customSections`, `funcType`, `funcName`, `typeKind`, and `tagType` cover the rest of the C introspection API.
+`Memory.load` and `store` take the same types as guest memory parameters. `getGlobal` and `setGlobal` read and write an exported global by name. `Runtime.callRef` calls a funcref with untyped values. `ModuleInfo`'s `imports`, `customSections`, `funcType`, `funcName`, `typeKind`, `tagType`, `structField`, and `arrayField` cover the rest of the C introspection API, and `FuncType.paramRefType`, `Import.ref_type`, `globalRefType`, and `tableRefType` describe reference types.
 
-The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and return `wasm.Value` references. A reference stays valid only while Wasm code can still reach it.
+`wasm.Value`, `wasm.FuncType`, and `wasm.CallFrame` format with `{f}`, and `Runtime.frames` iterates the frames of the running or last trapped call:
+
+```zig
+var frames = rt.frames();
+while (frames.next()) |frame| std.debug.print("  {f}\n", .{frame});
+```
+
+The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and return `wasm.Value` references; `structNew` and `arrayNew` take a tuple of values, such as `.{ @as(i32, 3), @as(i64, 4) }`. A reference stays valid only while Wasm code can still reach it, or until `release` on the `Held` that `Runtime.hold` returns:
+
+```zig
+const held = try rt.hold(point);
+defer held.release();
+rt.collectGarbage();
+const y = try instance.structGet(held.get(), 1);
+```
 
 ## Threads
 
@@ -269,7 +309,7 @@ defer shared.deinit();
 // On each thread:
 const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
 rt.enableFeatures(.{ .threads = true });
-try rt.bindMemory("env", "memory", shared.raw());
+try rt.bindMemory("env", "memory", shared);
 const instance = try rt.instantiate(compiled);
 ```
 
