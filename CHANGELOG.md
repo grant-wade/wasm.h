@@ -15,6 +15,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The host may pass a consumed continuation as any continuation type.
 - A runtime holds up to 134,217,728 unconsumed continuations, or 262,144 on 32-bit hosts.
 - A host table from `wasm_table_new` must outlive every runtime it is registered with.
+- SIMD instructions run from the interpreter loop with their immediates decoded once, and v128 locals copy without calls to `memcpy`.
 
 ### Fixed
 

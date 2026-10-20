@@ -59,7 +59,6 @@ static const char* const wasm_runtime_sources[] = {
     "src/simd/integer_small.c",
     "src/simd/integer_wide.c",
     "src/simd/lanes.c",
-    "src/simd/native.c",
     "src/support.c",
     "src/types/canonical.c",
     "src/types/cross_module.c",

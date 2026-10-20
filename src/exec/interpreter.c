@@ -223,7 +223,7 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm__slot_t* sp) {
 
 /* What the fuel meter needs to know about a fused op. */
 typedef struct wasm__fused_info_t {
-    uint8_t first; /* opcode of its first instruction */
+    uint16_t first; /* opcode of its first instruction */
     uint8_t units; /* instructions it runs */
     uint8_t last;  /* word offset of its last instruction */
 } wasm__fused_info_t;
@@ -862,15 +862,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [0xF3] = &&wasm__op_default, [0xF4] = &&wasm__op_default, [0xF5] = &&wasm__op_default,
         [0xF6] = &&wasm__op_default, [0xF7] = &&wasm__op_default, [0xF8] = &&wasm__op_default,
         [0xF9] = &&wasm__op_default, [0xFA] = &&wasm__op_default, [0xFB] = &&wasm__op_0xFB,
-        [0xFC] = &&wasm__op_0xFC, [0xFD] = &&wasm__op_0xFD, [0xFE] = &&wasm__op_0xFE, [0xFF] = &&wasm__op_default,
+        [0xFC] = &&wasm__op_0xFC, [0xFD] = &&wasm__op_default, [0xFE] = &&wasm__op_0xFE, [0xFF] = &&wasm__op_default,
         [WASM__OP_BR] = &&wasm__op_WASM__OP_BR, [WASM__OP_BR_LOOP] = &&wasm__op_WASM__OP_BR_LOOP,
         [WASM__OP_BR_X] = &&wasm__op_WASM__OP_BR_X, [WASM__OP_BR_IF] = &&wasm__op_WASM__OP_BR_IF,
         [WASM__OP_BR_IF_LOOP] = &&wasm__op_WASM__OP_BR_IF_LOOP, [WASM__OP_BR_IF_X] = &&wasm__op_WASM__OP_BR_IF_X,
         [WASM__OP_BR_TABLE] = &&wasm__op_WASM__OP_BR_TABLE,
-        [WASM__OP_LOCAL_GET_N] = &&wasm__op_WASM__OP_LOCAL_GET_N,
-        [WASM__OP_LOCAL_SET_N] = &&wasm__op_WASM__OP_LOCAL_SET_N,
-        [WASM__OP_LOCAL_TEE_N] = &&wasm__op_WASM__OP_LOCAL_TEE_N,
-        [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
+        [WASM__OP_LOCAL_GET_V128] = &&wasm__op_WASM__OP_LOCAL_GET_V128,
+        [WASM__OP_LOCAL_SET_V128] = &&wasm__op_WASM__OP_LOCAL_SET_V128,
+        [WASM__OP_LOCAL_TEE_V128] = &&wasm__op_WASM__OP_LOCAL_TEE_V128,
+        [WASM__OP_DROP_V128] = &&wasm__op_WASM__OP_DROP_V128, [WASM__OP_SELECT_V128] = &&wasm__op_WASM__OP_SELECT_V128,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
         [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_REF_TEST] = &&wasm__op_WASM__OP_REF_TEST,
@@ -882,6 +882,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [WASM__OP_ARRAY_LEN] = &&wasm__op_WASM__OP_ARRAY_LEN, [WASM__OP_REF_I31] = &&wasm__op_WASM__OP_REF_I31,
         [WASM__OP_I31_GET_S] = &&wasm__op_WASM__OP_I31_GET_S, [WASM__OP_I31_GET_U] = &&wasm__op_WASM__OP_I31_GET_U,
         [WASM__OP_TRUNC_SAT] = &&wasm__op_WASM__OP_TRUNC_SAT, [WASM__OP_GC_NEW] = &&wasm__op_WASM__OP_GC_NEW,
+        [WASM__OP_V128_CONST] = &&wasm__op_WASM__OP_V128_CONST, [WASM__OP_SIMD_UNARY] = &&wasm__op_WASM__OP_SIMD_UNARY,
+        [WASM__OP_SIMD_BINARY] = &&wasm__op_WASM__OP_SIMD_BINARY,
+        [WASM__OP_SIMD_TERNARY] = &&wasm__op_WASM__OP_SIMD_TERNARY,
+        [WASM__OP_SIMD_SHIFT] = &&wasm__op_WASM__OP_SIMD_SHIFT, [WASM__OP_SIMD_TEST] = &&wasm__op_WASM__OP_SIMD_TEST,
+        [WASM__OP_SIMD_SPLAT] = &&wasm__op_WASM__OP_SIMD_SPLAT,
+        [WASM__OP_SIMD_EXTRACT_LANE] = &&wasm__op_WASM__OP_SIMD_EXTRACT_LANE,
+        [WASM__OP_SIMD_REPLACE_LANE] = &&wasm__op_WASM__OP_SIMD_REPLACE_LANE,
+        [WASM__OP_I8X16_SHUFFLE] = &&wasm__op_WASM__OP_I8X16_SHUFFLE,
+        [WASM__OP_V128_LOAD] = &&wasm__op_WASM__OP_V128_LOAD, [WASM__OP_V128_STORE] = &&wasm__op_WASM__OP_V128_STORE,
+        [WASM__OP_SIMD_MEMORY] = &&wasm__op_WASM__OP_SIMD_MEMORY,
+        [WASM__OP_SIMD_MEMORY_X] = &&wasm__op_WASM__OP_SIMD_MEMORY_X,
         [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END,
         [WASM__OP_END] = &&wasm__op_WASM__OP_END,
 #define WASM__FUSED_LABEL(name, first, units, last) [WASM__OP_##name] = &&wasm__op_WASM__OP_##name,
@@ -1164,10 +1175,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__SET_READER(*pc++);
                 WASM__CALL_OUT(wasm__exec_bulk(mod, cf));
                 WASM__NEXT();
-            WASM__CASE(0xFD):
-                WASM__SET_READER(*pc++);
-                WASM__CALL_OUT(wasm__exec_simd(mod, cf));
-                WASM__NEXT();
             WASM__CASE(0xFE):
                 WASM__SET_READER(*pc++);
                 WASM__CALL_OUT(wasm__exec_atomic(mod, cf));
@@ -1329,16 +1336,13 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 sp -= 2;
                 if (!wasm__slot_u32(sp + 1)) sp[-1] = sp[0];
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_DROP_N):
-                sp -= *pc++;
+            WASM__CASE(WASM__OP_DROP_V128):
+                sp -= WASM__V128_SLOTS;
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_SELECT_N): {
-                uint32_t n = *pc++;
-
-                sp -= n + 1u;
-                if (!wasm__slot_u32(sp + n)) memcpy(sp - n, sp, n * sizeof(wasm__slot_t));
+            WASM__CASE(WASM__OP_SELECT_V128):
+                sp -= WASM__V128_SLOTS + 1u;
+                if (!wasm__slot_u32(sp + WASM__V128_SLOTS)) memcpy(sp - WASM__V128_SLOTS, sp, 16);
                 WASM__NEXT();
-            }
 
             /* Variables */
             WASM__CASE(0x20):
@@ -1350,16 +1354,16 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
             WASM__CASE(0x22):
                 locals[*pc++] = sp[-1];
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_LOCAL_GET_N):
-                memcpy(sp, locals + pc[0], pc[1] * sizeof(wasm__slot_t));
-                sp += pc[1];
-                pc += 2;
+            WASM__CASE(WASM__OP_LOCAL_GET_V128):
+                memcpy(sp, locals + *pc++, 16);
+                sp += WASM__V128_SLOTS;
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_LOCAL_SET_N):
-            WASM__CASE(WASM__OP_LOCAL_TEE_N):
-                memcpy(locals + pc[0], sp - pc[1], pc[1] * sizeof(wasm__slot_t));
-                if (op == WASM__OP_LOCAL_SET_N) sp -= pc[1];
-                pc += 2;
+            WASM__CASE(WASM__OP_LOCAL_SET_V128):
+                sp -= WASM__V128_SLOTS;
+                memcpy(locals + *pc++, sp, 16);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LOCAL_TEE_V128):
+                memcpy(locals + *pc++, sp - WASM__V128_SLOTS, 16);
                 WASM__NEXT();
             WASM__CASE(0x23): {
                 wasm_value_t value = wasm__global_get_value(&mod->globals[*pc++]);
@@ -2146,6 +2150,87 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__UNARY(uint64_t, u64, u64, (a & 0x80000000u) ? (a | UINT64_C(0xFFFFFFFF00000000)) : (a & 0xFFFFFFFFu));
                 WASM__NEXT();
 
+            WASM__CASE(WASM__OP_V128_CONST):
+                memcpy(sp, pc, 16);
+                sp += WASM__V128_SLOTS;
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_UNARY):
+                wasm__exec_simd_unary(*pc++, sp - WASM__V128_SLOTS);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_BINARY):
+                sp -= WASM__V128_SLOTS;
+                wasm__exec_simd_binary(*pc++, sp - WASM__V128_SLOTS, sp);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_TERNARY):
+                sp -= 2u * WASM__V128_SLOTS;
+                wasm__exec_simd_ternary(*pc++, sp - WASM__V128_SLOTS);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_SHIFT):
+                sp--;
+                wasm__exec_simd_shift(*pc++, sp - WASM__V128_SLOTS, wasm__slot_u32(sp));
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_TEST):
+                sp--;
+                wasm__slot_set_u32(sp - 1, wasm__exec_simd_test(*pc++, sp - 1));
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_SPLAT):
+                wasm__exec_simd_splat(*pc++, sp - 1);
+                sp++;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_EXTRACT_LANE):
+                sp--;
+                wasm__exec_simd_extract_lane(pc[0], pc[1], sp - 1);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_REPLACE_LANE):
+                sp--;
+                wasm__exec_simd_replace_lane(pc[0], pc[1], sp - WASM__V128_SLOTS, sp);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_I8X16_SHUFFLE):
+                sp -= WASM__V128_SLOTS;
+                wasm__exec_simd_shuffle(sp - WASM__V128_SLOTS, sp, pc);
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_V128_LOAD): {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp - 1, 16u);
+                memcpy(sp - 1, p, 16);
+                sp++;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_V128_STORE): {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp - 1 - WASM__V128_SLOTS, 16u);
+                memcpy(p, sp - WASM__V128_SLOTS, 16);
+                sp -= 1u + WASM__V128_SLOTS;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_SIMD_MEMORY): {
+                uint8_t* p;
+                uint32_t subop = pc[0];
+                uint32_t access = pc[1];
+
+                pc += 2;
+                WASM__MEMORY_PTR(p, sp - WASM__SIMD_ACCESS_DEPTH(access), WASM__SIMD_ACCESS_WIDTH(access));
+                sp = wasm__exec_simd_memory(subop, WASM__SIMD_ACCESS_LANE(access), sp, p);
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_SIMD_MEMORY_X): {
+                uint32_t access = pc[1];
+                uint8_t* p = wasm__memory_access_slow(mod, pc[2], sp - WASM__SIMD_ACCESS_DEPTH(access),
+                                                      (uint64_t)pc[3] | ((uint64_t)pc[4] << 32),
+                                                      WASM__SIMD_ACCESS_WIDTH(access), &mem0_data, &mem0_size);
+
+                if (!p) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                sp = wasm__exec_simd_memory(pc[0], WASM__SIMD_ACCESS_LANE(access), sp, p);
+                pc += 5;
+                WASM__NEXT();
+            }
+
             /* Fused instructions; pc[k] is word k + 1 of the run. */
             WASM__CASE(WASM__OP_LC_ADD):
                 wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) + pc[2]);
@@ -2507,6 +2592,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 pc += 3;
                 WASM__NEXT();
             }
+            WASM__CASE(WASM__OP_V_SIMD_BIN):
+                wasm__exec_simd_binary(pc[5], sp - WASM__V128_SLOTS, pc);
+                pc += 6;
+                WASM__NEXT();
 
             WASM__DEFAULT:
                 WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);

@@ -1340,238 +1340,6 @@ WASM_PRIVATE void wasm__handle_set_free(const wasm_allocator_t* a, wasm__handle_
 }
 /* END src/handles.c */
 
-/* BEGIN src/simd/native.c */
-
-/* BEGIN src/simd/native.h */
-#ifndef WASM_SIMD_NATIVE_H
-#define WASM_SIMD_NATIVE_H
-
-
-#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
-#define WASM__SIMD_USE_NEON 1
-#include <arm_neon.h>
-#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define WASM__SIMD_USE_SSE2 1
-#include <emmintrin.h>
-#include <xmmintrin.h>
-#endif
-
-#if defined(WASM__SIMD_USE_NEON)
-WASM_PRIVATE uint8x16_t wasm__neon_load_u8x16(const wasm_value_t* value);
-
-WASM_PRIVATE int8x16_t wasm__neon_load_i8x16(const wasm_value_t* value);
-
-WASM_PRIVATE uint16x8_t wasm__neon_load_u16x8(const wasm_value_t* value);
-
-WASM_PRIVATE int16x8_t wasm__neon_load_i16x8(const wasm_value_t* value);
-
-WASM_PRIVATE uint32x4_t wasm__neon_load_u32x4(const wasm_value_t* value);
-
-WASM_PRIVATE int32x4_t wasm__neon_load_i32x4(const wasm_value_t* value);
-
-WASM_PRIVATE uint64x2_t wasm__neon_load_u64x2(const wasm_value_t* value);
-
-WASM_PRIVATE int64x2_t wasm__neon_load_i64x2(const wasm_value_t* value);
-
-WASM_PRIVATE float32x4_t wasm__neon_load_f32x4(const wasm_value_t* value);
-
-WASM_PRIVATE float64x2_t wasm__neon_load_f64x2(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u8x16(uint8x16_t value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u16x8(uint16x8_t value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u32x4(uint32x4_t value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u64x2(uint64x2_t value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_f32x4(float32x4_t value);
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_f64x2(float64x2_t value);
-
-WASM_PRIVATE int wasm__neon_any_true_u8x16(uint8x16_t value);
-#endif
-
-#if defined(WASM__SIMD_USE_SSE2)
-WASM_PRIVATE __m128i wasm__sse_load_si128(const wasm_value_t* value);
-
-WASM_PRIVATE __m128 wasm__sse_load_ps128(const wasm_value_t* value);
-
-WASM_PRIVATE __m128d wasm__sse_load_pd128(const wasm_value_t* value);
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_si128(__m128i value);
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_ps128(__m128 value);
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_pd128(__m128d value);
-
-WASM_PRIVATE __m128i wasm__sse_select_si128(__m128i mask, __m128i if_true, __m128i if_false);
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu8(__m128i lhs, __m128i rhs);
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu16(__m128i lhs, __m128i rhs);
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu32(__m128i lhs, __m128i rhs);
-
-WASM_PRIVATE __m128i wasm__sse_cmpeq_epi64(__m128i lhs, __m128i rhs);
-
-WASM_PRIVATE __m128 wasm__sse_abs_ps(__m128 value);
-
-WASM_PRIVATE __m128 wasm__sse_neg_ps(__m128 value);
-
-WASM_PRIVATE __m128d wasm__sse_abs_pd(__m128d value);
-
-WASM_PRIVATE __m128d wasm__sse_neg_pd(__m128d value);
-#endif
-
-#endif /* WASM_SIMD_NATIVE_H */
-/* END src/simd/native.h */
-
-#if defined(WASM__SIMD_USE_NEON)
-WASM_PRIVATE uint8x16_t wasm__neon_load_u8x16(const wasm_value_t* value) {
-    return vld1q_u8(value->of.v128);
-}
-
-WASM_PRIVATE int8x16_t wasm__neon_load_i8x16(const wasm_value_t* value) {
-    return vreinterpretq_s8_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE uint16x8_t wasm__neon_load_u16x8(const wasm_value_t* value) {
-    return vreinterpretq_u16_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE int16x8_t wasm__neon_load_i16x8(const wasm_value_t* value) {
-    return vreinterpretq_s16_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE uint32x4_t wasm__neon_load_u32x4(const wasm_value_t* value) {
-    return vreinterpretq_u32_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE int32x4_t wasm__neon_load_i32x4(const wasm_value_t* value) {
-    return vreinterpretq_s32_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE uint64x2_t wasm__neon_load_u64x2(const wasm_value_t* value) {
-    return vreinterpretq_u64_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE int64x2_t wasm__neon_load_i64x2(const wasm_value_t* value) {
-    return vreinterpretq_s64_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE float32x4_t wasm__neon_load_f32x4(const wasm_value_t* value) {
-    return vreinterpretq_f32_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE float64x2_t wasm__neon_load_f64x2(const wasm_value_t* value) {
-    return vreinterpretq_f64_u8(wasm__neon_load_u8x16(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u8x16(uint8x16_t value) {
-    wasm_value_t result = wasm_v128_zero();
-    vst1q_u8(result.of.v128, value);
-    return result;
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u16x8(uint16x8_t value) {
-    return wasm__neon_store_u8x16(vreinterpretq_u8_u16(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u32x4(uint32x4_t value) {
-    return wasm__neon_store_u8x16(vreinterpretq_u8_u32(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_u64x2(uint64x2_t value) {
-    return wasm__neon_store_u8x16(vreinterpretq_u8_u64(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_f32x4(float32x4_t value) {
-    return wasm__neon_store_u8x16(vreinterpretq_u8_f32(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__neon_store_f64x2(float64x2_t value) {
-    return wasm__neon_store_u8x16(vreinterpretq_u8_f64(value));
-}
-
-WASM_PRIVATE int wasm__neon_any_true_u8x16(uint8x16_t value) {
-    uint64x2_t words = vreinterpretq_u64_u8(value);
-
-    return (vgetq_lane_u64(words, 0) | vgetq_lane_u64(words, 1)) != 0u;
-}
-
-#endif
-#if defined(WASM__SIMD_USE_SSE2)
-WASM_PRIVATE __m128i wasm__sse_load_si128(const wasm_value_t* value) {
-    return _mm_loadu_si128((const __m128i*)(const void*)value->of.v128);
-}
-
-WASM_PRIVATE __m128 wasm__sse_load_ps128(const wasm_value_t* value) {
-    return _mm_castsi128_ps(wasm__sse_load_si128(value));
-}
-
-WASM_PRIVATE __m128d wasm__sse_load_pd128(const wasm_value_t* value) {
-    return _mm_castsi128_pd(wasm__sse_load_si128(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_si128(__m128i value) {
-    wasm_value_t result = wasm_v128_zero();
-    _mm_storeu_si128((__m128i*)(void*)result.of.v128, value);
-    return result;
-}
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_ps128(__m128 value) {
-    return wasm__sse_store_si128(_mm_castps_si128(value));
-}
-
-WASM_PRIVATE wasm_value_t wasm__sse_store_pd128(__m128d value) {
-    return wasm__sse_store_si128(_mm_castpd_si128(value));
-}
-
-WASM_PRIVATE __m128i wasm__sse_select_si128(__m128i mask, __m128i if_true, __m128i if_false) {
-    return _mm_or_si128(_mm_and_si128(mask, if_true), _mm_andnot_si128(mask, if_false));
-}
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu8(__m128i lhs, __m128i rhs) {
-    __m128i bias = _mm_set1_epi8((char)-128);
-    return _mm_cmpgt_epi8(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
-}
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu16(__m128i lhs, __m128i rhs) {
-    __m128i bias = _mm_set1_epi16((short)INT16_MIN);
-    return _mm_cmpgt_epi16(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
-}
-
-WASM_PRIVATE __m128i wasm__sse_cmpgt_epu32(__m128i lhs, __m128i rhs) {
-    __m128i bias = _mm_set1_epi32(INT32_MIN);
-    return _mm_cmpgt_epi32(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
-}
-
-WASM_PRIVATE __m128i wasm__sse_cmpeq_epi64(__m128i lhs, __m128i rhs) {
-    __m128i eq32 = _mm_cmpeq_epi32(lhs, rhs);
-    __m128i swapped = _mm_shuffle_epi32(eq32, _MM_SHUFFLE(2, 3, 0, 1));
-    return _mm_and_si128(eq32, swapped);
-}
-
-WASM_PRIVATE __m128 wasm__sse_abs_ps(__m128 value) {
-    return _mm_andnot_ps(_mm_set1_ps(-0.0f), value);
-}
-
-WASM_PRIVATE __m128 wasm__sse_neg_ps(__m128 value) {
-    return _mm_xor_ps(value, _mm_set1_ps(-0.0f));
-}
-
-WASM_PRIVATE __m128d wasm__sse_abs_pd(__m128d value) {
-    return _mm_andnot_pd(_mm_set1_pd(-0.0), value);
-}
-
-WASM_PRIVATE __m128d wasm__sse_neg_pd(__m128d value) {
-    return _mm_xor_pd(value, _mm_set1_pd(-0.0));
-}
-
-#endif
-/* END src/simd/native.c */
-
 /* BEGIN src/platform/host.c */
 
 /* BEGIN src/platform/host.h */
@@ -4146,6 +3914,333 @@ WASM_PRIVATE char* wasm__strdup(const wasm_allocator_t* a, const char* text) {
 /* BEGIN src/values.c */
 
 
+/* BEGIN src/simd/native.h */
+#ifndef WASM_SIMD_NATIVE_H
+#define WASM_SIMD_NATIVE_H
+
+
+/* BEGIN src/simd/v128.h */
+#ifndef WASM_SIMD_V128_H
+#define WASM_SIMD_V128_H
+
+
+#include <string.h>
+
+/* A v128 value: lane i of n-byte lanes is bytes i * n to i * n + n - 1, little-endian. */
+typedef struct wasm__v128_t {
+    uint8_t bytes[16];
+} wasm__v128_t;
+
+WASM_INLINE wasm__v128_t wasm__v128_zero(void) {
+    wasm__v128_t value;
+
+    memset(&value, 0, sizeof(value));
+    return value;
+}
+
+WASM_INLINE uint16_t wasm__v128_bits16(const uint8_t* p) {
+    uint16_t bits;
+
+    memcpy(&bits, p, sizeof(bits));
+#if WASM__BIG_ENDIAN
+    bits = (uint16_t)((bits >> 8) | (bits << 8));
+#endif
+    return bits;
+}
+
+WASM_INLINE uint32_t wasm__v128_bits32(const uint8_t* p) {
+    uint32_t bits;
+
+    memcpy(&bits, p, sizeof(bits));
+#if WASM__BIG_ENDIAN
+    bits = (bits >> 24) | ((bits >> 8) & 0xFF00u) | ((bits & 0xFF00u) << 8) | (bits << 24);
+#endif
+    return bits;
+}
+
+WASM_INLINE uint64_t wasm__v128_bits64(const uint8_t* p) {
+#if WASM__BIG_ENDIAN
+    return (uint64_t)wasm__v128_bits32(p) | ((uint64_t)wasm__v128_bits32(p + 4) << 32);
+#else
+    uint64_t bits;
+
+    memcpy(&bits, p, sizeof(bits));
+    return bits;
+#endif
+}
+
+WASM_INLINE void wasm__v128_put16(uint8_t* p, uint16_t bits) {
+#if WASM__BIG_ENDIAN
+    bits = (uint16_t)((bits >> 8) | (bits << 8));
+#endif
+    memcpy(p, &bits, sizeof(bits));
+}
+
+WASM_INLINE void wasm__v128_put32(uint8_t* p, uint32_t bits) {
+#if WASM__BIG_ENDIAN
+    bits = (bits >> 24) | ((bits >> 8) & 0xFF00u) | ((bits & 0xFF00u) << 8) | (bits << 24);
+#endif
+    memcpy(p, &bits, sizeof(bits));
+}
+
+WASM_INLINE void wasm__v128_put64(uint8_t* p, uint64_t bits) {
+#if WASM__BIG_ENDIAN
+    wasm__v128_put32(p, (uint32_t)bits);
+    wasm__v128_put32(p + 4, (uint32_t)(bits >> 32));
+#else
+    memcpy(p, &bits, sizeof(bits));
+#endif
+}
+
+WASM_INLINE int8_t wasm__v128_get_i8(const wasm__v128_t* value, uint32_t lane) {
+    return (int8_t)value->bytes[lane];
+}
+
+WASM_INLINE uint8_t wasm__v128_get_u8(const wasm__v128_t* value, uint32_t lane) {
+    return value->bytes[lane];
+}
+
+WASM_INLINE int16_t wasm__v128_get_i16(const wasm__v128_t* value, uint32_t lane) {
+    return (int16_t)wasm__v128_bits16(value->bytes + lane * 2u);
+}
+
+WASM_INLINE uint16_t wasm__v128_get_u16(const wasm__v128_t* value, uint32_t lane) {
+    return wasm__v128_bits16(value->bytes + lane * 2u);
+}
+
+WASM_INLINE int32_t wasm__v128_get_i32(const wasm__v128_t* value, uint32_t lane) {
+    return (int32_t)wasm__v128_bits32(value->bytes + lane * 4u);
+}
+
+WASM_INLINE uint32_t wasm__v128_get_u32(const wasm__v128_t* value, uint32_t lane) {
+    return wasm__v128_bits32(value->bytes + lane * 4u);
+}
+
+WASM_INLINE int64_t wasm__v128_get_i64(const wasm__v128_t* value, uint32_t lane) {
+    return (int64_t)wasm__v128_bits64(value->bytes + lane * 8u);
+}
+
+WASM_INLINE uint64_t wasm__v128_get_u64(const wasm__v128_t* value, uint32_t lane) {
+    return wasm__v128_bits64(value->bytes + lane * 8u);
+}
+
+WASM_INLINE float wasm__v128_get_f32(const wasm__v128_t* value, uint32_t lane) {
+    uint32_t bits = wasm__v128_get_u32(value, lane);
+    float result;
+
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+WASM_INLINE double wasm__v128_get_f64(const wasm__v128_t* value, uint32_t lane) {
+    uint64_t bits = wasm__v128_get_u64(value, lane);
+    double result;
+
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+WASM_INLINE void wasm__v128_set_u8(wasm__v128_t* value, uint32_t lane, uint32_t lane_value) {
+    value->bytes[lane] = (uint8_t)lane_value;
+}
+
+WASM_INLINE void wasm__v128_set_i16(wasm__v128_t* value, uint32_t lane, int32_t lane_value) {
+    wasm__v128_put16(value->bytes + lane * 2u, (uint16_t)lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_u16(wasm__v128_t* value, uint32_t lane, uint32_t lane_value) {
+    wasm__v128_put16(value->bytes + lane * 2u, (uint16_t)lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_i32(wasm__v128_t* value, uint32_t lane, int32_t lane_value) {
+    wasm__v128_put32(value->bytes + lane * 4u, (uint32_t)lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_u32(wasm__v128_t* value, uint32_t lane, uint32_t lane_value) {
+    wasm__v128_put32(value->bytes + lane * 4u, lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_i64(wasm__v128_t* value, uint32_t lane, int64_t lane_value) {
+    wasm__v128_put64(value->bytes + lane * 8u, (uint64_t)lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_u64(wasm__v128_t* value, uint32_t lane, uint64_t lane_value) {
+    wasm__v128_put64(value->bytes + lane * 8u, lane_value);
+}
+
+WASM_INLINE void wasm__v128_set_f32(wasm__v128_t* value, uint32_t lane, float lane_value) {
+    uint32_t bits;
+
+    memcpy(&bits, &lane_value, sizeof(bits));
+    wasm__v128_set_u32(value, lane, bits);
+}
+
+WASM_INLINE void wasm__v128_set_f64(wasm__v128_t* value, uint32_t lane, double lane_value) {
+    uint64_t bits;
+
+    memcpy(&bits, &lane_value, sizeof(bits));
+    wasm__v128_set_u64(value, lane, bits);
+}
+
+#endif /* WASM_SIMD_V128_H */
+/* END src/simd/v128.h */
+
+#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define WASM__SIMD_USE_NEON 1
+#include <arm_neon.h>
+#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define WASM__SIMD_USE_SSE2 1
+#include <emmintrin.h>
+#include <xmmintrin.h>
+#endif
+
+#if defined(WASM__SIMD_USE_NEON)
+WASM_INLINE uint8x16_t wasm__neon_load_u8x16(const wasm__v128_t* value) {
+    return vld1q_u8(value->bytes);
+}
+
+WASM_INLINE int8x16_t wasm__neon_load_i8x16(const wasm__v128_t* value) {
+    return vreinterpretq_s8_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE uint16x8_t wasm__neon_load_u16x8(const wasm__v128_t* value) {
+    return vreinterpretq_u16_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE int16x8_t wasm__neon_load_i16x8(const wasm__v128_t* value) {
+    return vreinterpretq_s16_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE uint32x4_t wasm__neon_load_u32x4(const wasm__v128_t* value) {
+    return vreinterpretq_u32_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE int32x4_t wasm__neon_load_i32x4(const wasm__v128_t* value) {
+    return vreinterpretq_s32_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE uint64x2_t wasm__neon_load_u64x2(const wasm__v128_t* value) {
+    return vreinterpretq_u64_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE int64x2_t wasm__neon_load_i64x2(const wasm__v128_t* value) {
+    return vreinterpretq_s64_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE float32x4_t wasm__neon_load_f32x4(const wasm__v128_t* value) {
+    return vreinterpretq_f32_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE float64x2_t wasm__neon_load_f64x2(const wasm__v128_t* value) {
+    return vreinterpretq_f64_u8(wasm__neon_load_u8x16(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_u8x16(uint8x16_t value) {
+    wasm__v128_t result;
+
+    vst1q_u8(result.bytes, value);
+    return result;
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_u16x8(uint16x8_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u16(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_u32x4(uint32x4_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u32(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_u64x2(uint64x2_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_u64(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_f32x4(float32x4_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_f32(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__neon_store_f64x2(float64x2_t value) {
+    return wasm__neon_store_u8x16(vreinterpretq_u8_f64(value));
+}
+
+WASM_INLINE int wasm__neon_any_true_u8x16(uint8x16_t value) {
+    uint64x2_t words = vreinterpretq_u64_u8(value);
+
+    return (vgetq_lane_u64(words, 0) | vgetq_lane_u64(words, 1)) != 0u;
+}
+#endif
+
+#if defined(WASM__SIMD_USE_SSE2)
+WASM_INLINE __m128i wasm__sse_load_si128(const wasm__v128_t* value) {
+    return _mm_loadu_si128((const __m128i*)(const void*)value->bytes);
+}
+
+WASM_INLINE __m128 wasm__sse_load_ps128(const wasm__v128_t* value) {
+    return _mm_castsi128_ps(wasm__sse_load_si128(value));
+}
+
+WASM_INLINE __m128d wasm__sse_load_pd128(const wasm__v128_t* value) {
+    return _mm_castsi128_pd(wasm__sse_load_si128(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__sse_store_si128(__m128i value) {
+    wasm__v128_t result;
+
+    _mm_storeu_si128((__m128i*)(void*)result.bytes, value);
+    return result;
+}
+
+WASM_INLINE wasm__v128_t wasm__sse_store_ps128(__m128 value) {
+    return wasm__sse_store_si128(_mm_castps_si128(value));
+}
+
+WASM_INLINE wasm__v128_t wasm__sse_store_pd128(__m128d value) {
+    return wasm__sse_store_si128(_mm_castpd_si128(value));
+}
+
+WASM_INLINE __m128i wasm__sse_select_si128(__m128i mask, __m128i if_true, __m128i if_false) {
+    return _mm_or_si128(_mm_and_si128(mask, if_true), _mm_andnot_si128(mask, if_false));
+}
+
+WASM_INLINE __m128i wasm__sse_cmpgt_epu8(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi8((char)-128);
+    return _mm_cmpgt_epi8(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+WASM_INLINE __m128i wasm__sse_cmpgt_epu16(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi16((short)INT16_MIN);
+    return _mm_cmpgt_epi16(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+WASM_INLINE __m128i wasm__sse_cmpgt_epu32(__m128i lhs, __m128i rhs) {
+    __m128i bias = _mm_set1_epi32(INT32_MIN);
+    return _mm_cmpgt_epi32(_mm_xor_si128(lhs, bias), _mm_xor_si128(rhs, bias));
+}
+
+WASM_INLINE __m128i wasm__sse_cmpeq_epi64(__m128i lhs, __m128i rhs) {
+    __m128i eq32 = _mm_cmpeq_epi32(lhs, rhs);
+    __m128i swapped = _mm_shuffle_epi32(eq32, _MM_SHUFFLE(2, 3, 0, 1));
+    return _mm_and_si128(eq32, swapped);
+}
+
+WASM_INLINE __m128 wasm__sse_abs_ps(__m128 value) {
+    return _mm_andnot_ps(_mm_set1_ps(-0.0f), value);
+}
+
+WASM_INLINE __m128 wasm__sse_neg_ps(__m128 value) {
+    return _mm_xor_ps(value, _mm_set1_ps(-0.0f));
+}
+
+WASM_INLINE __m128d wasm__sse_abs_pd(__m128d value) {
+    return _mm_andnot_pd(_mm_set1_pd(-0.0), value);
+}
+
+WASM_INLINE __m128d wasm__sse_neg_pd(__m128d value) {
+    return _mm_xor_pd(value, _mm_set1_pd(-0.0));
+}
+#endif
+
+#endif /* WASM_SIMD_NATIVE_H */
+/* END src/simd/native.h */
 
 
 
@@ -8506,43 +8601,6 @@ WASM_PRIVATE wasm_error_t wasm__read_typed_select_immediate(wasm_module_t* mod,
 #define WASM_SIMD_LANES_H
 
 
-WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint8_t wasm__v128_get_u8(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int16_t wasm__v128_get_i16(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint16_t wasm__v128_get_u16(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int32_t wasm__v128_get_i32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint32_t wasm__v128_get_u32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE int64_t wasm__v128_get_i64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE uint64_t wasm__v128_get_u64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE float wasm__v128_get_f32(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE double wasm__v128_get_f64(const wasm_value_t* value, uint32_t lane);
-
-WASM_PRIVATE void wasm__v128_set_u8(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i16(wasm_value_t* value, uint32_t lane, int32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u16(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i32(wasm_value_t* value, uint32_t lane, int32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u32(wasm_value_t* value, uint32_t lane, uint32_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_i64(wasm_value_t* value, uint32_t lane, int64_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_u64(wasm_value_t* value, uint32_t lane, uint64_t lane_value);
-
-WASM_PRIVATE void wasm__v128_set_f32(wasm_value_t* value, uint32_t lane, float lane_value);
-
-WASM_PRIVATE void wasm__v128_set_f64(wasm_value_t* value, uint32_t lane, double lane_value);
 
 WASM_PRIVATE int8_t wasm__sat_i8(int32_t value);
 
@@ -8554,143 +8612,57 @@ WASM_PRIVATE uint16_t wasm__sat_u16(int32_t value);
 
 WASM_PRIVATE uint8_t wasm__popcount_u8(uint8_t value);
 
-WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value);
+WASM_PRIVATE int wasm__simd_any_true(const wasm__v128_t* value);
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value);
+WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm__v128_t* value);
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value);
+WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm__v128_t* value);
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value);
+WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm__v128_t* value);
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value);
+WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm__v128_t* value);
 
-WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value);
+WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm__v128_t* value);
 
-WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value);
+WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm__v128_t* value);
 
-WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value);
+WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm__v128_t* value);
 
-WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value);
+WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_not(const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
-                                              const wasm_value_t* lhs,
-                                              const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_binary(uint32_t subop,
+                                              const wasm__v128_t* lhs,
+                                              const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs,
-                                         const wasm_value_t* mask);
+WASM_PRIVATE wasm__v128_t wasm__simd_bitselect(const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs,
+                                         const wasm__v128_t* mask);
 
-WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
-                                       const wasm_value_t* rhs,
+WASM_PRIVATE wasm__v128_t wasm__simd_shuffle(const wasm__v128_t* lhs,
+                                       const wasm__v128_t* rhs,
                                        const uint8_t lanes[16]);
 
-WASM_PRIVATE wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_swizzle(const wasm__v128_t* lhs, const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs,
-                                            const wasm_value_t* acc);
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_madd(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs,
+                                            const wasm__v128_t* acc);
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
-                                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm__v128_t* lhs,
+                                                         const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
-                                                             const wasm_value_t* rhs,
-                                                             const wasm_value_t* acc);
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm__v128_t* lhs,
+                                                             const wasm__v128_t* rhs,
+                                                             const wasm__v128_t* acc);
 
 #endif /* WASM_SIMD_LANES_H */
 /* END src/simd/lanes.h */
 
 
 #include <string.h>
-
-WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane) {
-    return (int8_t)value->of.v128[lane];
-}
-
-WASM_PRIVATE uint8_t wasm__v128_get_u8(const wasm_value_t* value, uint32_t lane) {
-    return value->of.v128[lane];
-}
-
-WASM_PRIVATE int16_t wasm__v128_get_i16(const wasm_value_t* value, uint32_t lane) {
-    return (int16_t)wasm__load_le16(value->of.v128 + lane * 2u);
-}
-
-WASM_PRIVATE uint16_t wasm__v128_get_u16(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le16(value->of.v128 + lane * 2u);
-}
-
-WASM_PRIVATE int32_t wasm__v128_get_i32(const wasm_value_t* value, uint32_t lane) {
-    return (int32_t)wasm__load_le32(value->of.v128 + lane * 4u);
-}
-
-WASM_PRIVATE uint32_t wasm__v128_get_u32(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le32(value->of.v128 + lane * 4u);
-}
-
-WASM_PRIVATE int64_t wasm__v128_get_i64(const wasm_value_t* value, uint32_t lane) {
-    return (int64_t)wasm__load_le64(value->of.v128 + lane * 8u);
-}
-
-WASM_PRIVATE uint64_t wasm__v128_get_u64(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le64(value->of.v128 + lane * 8u);
-}
-
-WASM_PRIVATE float wasm__v128_get_f32(const wasm_value_t* value, uint32_t lane) {
-    uint32_t bits = wasm__v128_get_u32(value, lane);
-    float result;
-    memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-WASM_PRIVATE double wasm__v128_get_f64(const wasm_value_t* value, uint32_t lane) {
-    uint64_t bits = wasm__v128_get_u64(value, lane);
-    double result;
-    memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-WASM_PRIVATE void wasm__v128_set_u8(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    value->of.v128[lane] = (uint8_t)lane_value;
-}
-
-WASM_PRIVATE void wasm__v128_set_i16(wasm_value_t* value, uint32_t lane, int32_t lane_value) {
-    wasm__store_le16(value->of.v128 + lane * 2u, (uint16_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u16(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    wasm__store_le16(value->of.v128 + lane * 2u, (uint16_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_i32(wasm_value_t* value, uint32_t lane, int32_t lane_value) {
-    wasm__store_le32(value->of.v128 + lane * 4u, (uint32_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u32(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    wasm__store_le32(value->of.v128 + lane * 4u, lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_i64(wasm_value_t* value, uint32_t lane, int64_t lane_value) {
-    wasm__store_le64(value->of.v128 + lane * 8u, (uint64_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u64(wasm_value_t* value, uint32_t lane, uint64_t lane_value) {
-    wasm__store_le64(value->of.v128 + lane * 8u, lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_f32(wasm_value_t* value, uint32_t lane, float lane_value) {
-    uint32_t bits;
-    memcpy(&bits, &lane_value, sizeof(bits));
-    wasm__store_le32(value->of.v128 + lane * 4u, bits);
-}
-
-WASM_PRIVATE void wasm__v128_set_f64(wasm_value_t* value, uint32_t lane, double lane_value) {
-    uint64_t bits;
-    memcpy(&bits, &lane_value, sizeof(bits));
-    wasm__store_le64(value->of.v128 + lane * 8u, bits);
-}
 
 WASM_PRIVATE int8_t wasm__sat_i8(int32_t value) {
     if (value < -128) return (int8_t)-128;
@@ -8727,7 +8699,7 @@ WASM_PRIVATE uint8_t wasm__popcount_u8(uint8_t value) {
     return count;
 }
 
-WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_any_true(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_any_true_u8x16(wasm__neon_load_u8x16(value));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -8737,13 +8709,13 @@ WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value) {
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        if (value->of.v128[lane] != 0) return 1;
+        if (value->bytes[lane] != 0) return 1;
     }
 
     return 0;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_SSE2)
     return _mm_movemask_epi8(wasm__sse_load_si128(value));
 #endif
@@ -8751,13 +8723,13 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value) {
     int32_t mask = 0;
 
     for (lane = 0; lane < 16; lane++) {
-        if ((value->of.v128[lane] & 0x80u) != 0) mask |= (int32_t)(1u << lane);
+        if ((value->bytes[lane] & 0x80u) != 0) mask |= (int32_t)(1u << lane);
     }
 
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm__v128_t* value) {
     uint32_t lane;
     int32_t mask = 0;
 
@@ -8768,7 +8740,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     uint32x4_t sign = vshrq_n_u32(wasm__neon_load_u32x4(value), 31);
     return (int32_t)(vgetq_lane_u32(sign, 0) | (vgetq_lane_u32(sign, 1) << 1) |
@@ -8786,7 +8758,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     uint64x2_t sign = vshrq_n_u64(wasm__neon_load_u64x2(value), 63);
     return (int32_t)(vgetq_lane_u64(sign, 0) | (vgetq_lane_u64(sign, 1) << 1));
@@ -8803,7 +8775,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vceqq_u8(wasm__neon_load_u8x16(value), vdupq_n_u8(0u)));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -8817,7 +8789,7 @@ WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u16(vceqq_u16(wasm__neon_load_u16x8(value), vdupq_n_u16(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -8831,7 +8803,7 @@ WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u32(vceqq_u32(wasm__neon_load_u32x4(value), vdupq_n_u32(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -8845,7 +8817,7 @@ WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u64(vceqq_u64(wasm__neon_load_u64x2(value), vdupq_n_u64(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -8859,22 +8831,22 @@ WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_not(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vmvnq_u8(wasm__neon_load_u8x16(value)));
 #elif defined(WASM__SIMD_USE_SSE2)
     return wasm__sse_store_si128(_mm_xor_si128(wasm__sse_load_si128(value), _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
-    for (lane = 0; lane < 16; lane++) result.of.v128[lane] = (uint8_t)~value->of.v128[lane];
+    for (lane = 0; lane < 16; lane++) result.bytes[lane] = (uint8_t)~value->bytes[lane];
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
-                                              const wasm_value_t* lhs,
-                                              const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_binary(uint32_t subop,
+                                              const wasm__v128_t* lhs,
+                                              const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         uint8x16_t a = wasm__neon_load_u8x16(lhs);
@@ -8908,22 +8880,22 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
         switch (subop) {
             case 0x4E:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] & rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] & rhs->bytes[lane]);
                 break;
             case 0x4F:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] & (uint8_t)~rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] & (uint8_t)~rhs->bytes[lane]);
                 break;
             case 0x50:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] | rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] | rhs->bytes[lane]);
                 break;
             default:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] ^ rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] ^ rhs->bytes[lane]);
                 break;
         }
     }
@@ -8931,9 +8903,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs,
-                                         const wasm_value_t* mask) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitselect(const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs,
+                                         const wasm__v128_t* mask) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vbslq_u8(wasm__neon_load_u8x16(mask),
                                            wasm__neon_load_u8x16(lhs),
@@ -8943,20 +8915,20 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
                                                         wasm__sse_load_si128(lhs),
                                                         wasm__sse_load_si128(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        result.of.v128[lane] =
-            (uint8_t)((lhs->of.v128[lane] & mask->of.v128[lane]) |
-                      (rhs->of.v128[lane] & (uint8_t)~mask->of.v128[lane]));
+        result.bytes[lane] =
+            (uint8_t)((lhs->bytes[lane] & mask->bytes[lane]) |
+                      (rhs->bytes[lane] & (uint8_t)~mask->bytes[lane]));
     }
 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
-                                       const wasm_value_t* rhs,
+WASM_PRIVATE wasm__v128_t wasm__simd_shuffle(const wasm__v128_t* lhs,
+                                       const wasm__v128_t* rhs,
                                        const uint8_t lanes[16]) {
 #if defined(WASM__SIMD_USE_NEON)
     uint8x16x2_t table;
@@ -8965,36 +8937,36 @@ WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
     table.val[1] = wasm__neon_load_u8x16(rhs);
     return wasm__neon_store_u8x16(vqtbl2q_u8(table, vld1q_u8(lanes)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint8_t combined[32];
     uint32_t lane;
 
-    memcpy(combined, lhs->of.v128, 16);
-    memcpy(combined + 16, rhs->of.v128, 16);
-    for (lane = 0; lane < 16; lane++) result.of.v128[lane] = combined[lanes[lane]];
+    memcpy(combined, lhs->bytes, 16);
+    memcpy(combined + 16, rhs->bytes, 16);
+    for (lane = 0; lane < 16; lane++) result.bytes[lane] = combined[lanes[lane]];
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_swizzle(const wasm__v128_t* lhs, const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vqtbl1q_u8(wasm__neon_load_u8x16(lhs), wasm__neon_load_u8x16(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        uint8_t index = rhs->of.v128[lane];
-        result.of.v128[lane] = (index < 16u) ? lhs->of.v128[index] : 0;
+        uint8_t index = rhs->bytes[lane];
+        result.bytes[lane] = (index < 16u) ? lhs->bytes[index] : 0;
     }
 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs,
-                                            const wasm_value_t* acc) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_madd(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs,
+                                            const wasm__v128_t* acc) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     if (subop == 0x105 || subop == 0x106) {
@@ -9016,9 +8988,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
-                                                         const wasm_value_t* rhs) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm__v128_t* lhs,
+                                                         const wasm__v128_t* rhs) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 8; lane++) {
@@ -9031,10 +9003,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
-                                                             const wasm_value_t* rhs,
-                                                             const wasm_value_t* acc) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm__v128_t* lhs,
+                                                             const wasm__v128_t* rhs,
+                                                             const wasm__v128_t* acc) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -9057,38 +9029,39 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_va
 #define WASM_SIMD_COMPARE_H
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i8x16(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i16x8(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i32x4(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i64x2(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_f32x4(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
+
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_f64x2(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs);
 
 #endif /* WASM_SIMD_COMPARE_H */
 /* END src/simd/compare.h */
 
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i8x16(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int8x16_t a = wasm__neon_load_i8x16(lhs);
@@ -9149,7 +9122,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
@@ -9192,15 +9165,15 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i8x16(uint32_t subop,
                 break;
         }
 
-        result.of.v128[lane] = truth ? 0xFFu : 0u;
+        result.bytes[lane] = truth ? 0xFFu : 0u;
     }
 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i16x8(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int16x8_t a = wasm__neon_load_i16x8(lhs);
@@ -9261,7 +9234,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 8; lane++) {
@@ -9310,9 +9283,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i16x8(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i32x4(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int32x4_t a = wasm__neon_load_i32x4(lhs);
@@ -9373,7 +9346,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -9422,9 +9395,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i32x4(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_i64x2(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int64x2_t a = wasm__neon_load_i64x2(lhs);
@@ -9446,7 +9419,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) {
@@ -9481,9 +9454,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_i64x2(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_f32x4(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         float32x4_t a = wasm__neon_load_f32x4(lhs);
@@ -9525,7 +9498,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -9560,9 +9533,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f32x4(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
-                                         const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_cmp_f64x2(uint32_t subop,
+                                         const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         float64x2_t a = wasm__neon_load_f64x2(lhs);
@@ -9604,7 +9577,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) {
@@ -9647,25 +9620,26 @@ WASM_PRIVATE wasm_value_t wasm__simd_cmp_f64x2(uint32_t subop,
 #define WASM_SIMD_INTEGER_SMALL_H
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_unary(uint32_t subop, const wasm__v128_t* value);
+
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_unary(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
 #endif /* WASM_SIMD_INTEGER_SMALL_H */
 /* END src/simd/integer_small.h */
@@ -9675,7 +9649,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
 /* Use unsigned NEON arithmetic for Wasm wrapping operations: GCC exposes
  * some signed intrinsics as C vector operations instrumented by UBSan. */
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int8x16_t s = wasm__neon_load_i8x16(value);
@@ -9694,7 +9668,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_valu
 #elif defined(WASM__SIMD_USE_SSE2)
     if (subop == 0x61) return wasm__sse_store_si128(_mm_sub_epi8(_mm_setzero_si128(), wasm__sse_load_si128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
@@ -9718,8 +9692,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -9737,7 +9711,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
         return wasm__neon_store_u8x16(vshlq_u8(wasm__neon_load_u8x16(value), counts));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 7u;
@@ -9761,9 +9735,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i8x16_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         int8x16_t a_s8 = wasm__neon_load_i8x16(lhs);
@@ -9847,7 +9821,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     if (subop == 0x65 || subop == 0x66) {
@@ -9912,7 +9886,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i8x16_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0x87:
@@ -9941,7 +9915,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_valu
 #elif defined(WASM__SIMD_USE_SSE2)
     if (subop == 0x81) return wasm__sse_store_si128(_mm_sub_epi16(_mm_setzero_si128(), wasm__sse_load_si128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -9979,8 +9953,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -10003,7 +9977,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
         return wasm__sse_store_si128(_mm_srl_epi16(vec, count));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 15u;
@@ -10027,9 +10001,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i16x8_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0x82:
@@ -10146,7 +10120,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
             break;
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -10251,32 +10225,33 @@ WASM_PRIVATE wasm_value_t wasm__simd_i16x8_binary(uint32_t subop,
 #define WASM_SIMD_INTEGER_WIDE_H
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_unary(uint32_t subop, const wasm__v128_t* value);
+
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_unary(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount);
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
 #endif /* WASM_SIMD_INTEGER_WIDE_H */
 /* END src/simd/integer_wide.h */
 
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xA7:
@@ -10309,7 +10284,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_valu
         return wasm__sse_store_si128(wasm__sse_select_si128(_mm_cmpgt_epi32(_mm_setzero_si128(), vec), neg, vec));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -10347,8 +10322,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -10371,7 +10346,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
         return wasm__sse_store_si128(_mm_srl_epi32(vec, count));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 31u;
@@ -10395,9 +10370,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xBA: {
@@ -10475,7 +10450,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
             break;
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -10545,7 +10520,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xC7:
@@ -10572,7 +10547,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_valu
 #elif defined(WASM__SIMD_USE_SSE2)
     if (subop == 0xC1) return wasm__sse_store_si128(_mm_sub_epi64(_mm_setzero_si128(), wasm__sse_load_si128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -10613,8 +10588,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -10636,7 +10611,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
         return wasm__sse_store_si128(_mm_srl_epi64(vec, count));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 63u;
@@ -10660,9 +10635,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xDC:
@@ -10684,7 +10659,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
     if (subop == 0xCE) return wasm__sse_store_si128(_mm_add_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
     if (subop == 0xD1) return wasm__sse_store_si128(_mm_sub_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -10738,31 +10713,32 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
 #define WASM_SIMD_FLOAT_H
 
 
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_f32x4_unary(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_f32x4_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs);
+WASM_PRIVATE wasm__v128_t wasm__simd_f64x2_unary(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_demote_f64x2_zero(const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_f64x2_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs);
 
-WASM_PRIVATE wasm_value_t wasm__simd_promote_low_f32x4(const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_demote_f64x2_zero(const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_promote_low_f32x4(const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_convert_i32x4(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_convert_i32x4(uint32_t subop, const wasm__v128_t* value);
 
-WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm_value_t* value);
+WASM_PRIVATE wasm__v128_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm__v128_t* value);
+
+WASM_PRIVATE wasm__v128_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm__v128_t* value);
 
 #endif /* WASM_SIMD_FLOAT_H */
 /* END src/simd/float.h */
@@ -10771,7 +10747,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, 
 
 #include <math.h>
 
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_f32x4_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     if (subop == 0xE0) return wasm__neon_store_f32x4(vabsq_f32(wasm__neon_load_f32x4(value)));
     if (subop == 0xE1) return wasm__neon_store_f32x4(vnegq_f32(wasm__neon_load_f32x4(value)));
@@ -10781,7 +10757,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_valu
     if (subop == 0xE1) return wasm__sse_store_ps128(wasm__sse_neg_ps(wasm__sse_load_ps128(value)));
     if (subop == 0xE3) return wasm__sse_store_ps128(_mm_sqrt_ps(wasm__sse_load_ps128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     /* abs and neg manipulate the representation, including signaling NaNs. */
@@ -10828,9 +10804,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_f32x4_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         float32x4_t a = wasm__neon_load_f32x4(lhs);
@@ -10868,7 +10844,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -10904,7 +10880,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
         }
 
         if (subop == 0xEA || subop == 0xEB) {
-            const wasm_value_t* selected = (subop == 0xEA ? b < a : a < b) ? rhs : lhs;
+            const wasm__v128_t* selected = (subop == 0xEA ? b < a : a < b) ? rhs : lhs;
             wasm__v128_set_u32(&result, lane, wasm__v128_get_u32(selected, lane));
         } else {
             wasm__v128_set_f32(&result, lane, out);
@@ -10914,7 +10890,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f32x4_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_f64x2_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     if (subop == 0xEC) return wasm__neon_store_f64x2(vabsq_f64(wasm__neon_load_f64x2(value)));
     if (subop == 0xED) return wasm__neon_store_f64x2(vnegq_f64(wasm__neon_load_f64x2(value)));
@@ -10924,7 +10900,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_valu
     if (subop == 0xED) return wasm__sse_store_pd128(wasm__sse_neg_pd(wasm__sse_load_pd128(value)));
     if (subop == 0xEF) return wasm__sse_store_pd128(_mm_sqrt_pd(wasm__sse_load_pd128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     /* abs and neg manipulate the representation, including signaling NaNs. */
@@ -10971,9 +10947,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_f64x2_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         float64x2_t a = wasm__neon_load_f64x2(lhs);
@@ -11011,7 +10987,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) {
@@ -11047,7 +11023,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
         }
 
         if (subop == 0xF6 || subop == 0xF7) {
-            const wasm_value_t* selected = (subop == 0xF6 ? b < a : a < b) ? rhs : lhs;
+            const wasm__v128_t* selected = (subop == 0xF6 ? b < a : a < b) ? rhs : lhs;
             wasm__v128_set_u64(&result, lane, wasm__v128_get_u64(selected, lane));
         } else {
             wasm__v128_set_f64(&result, lane, out);
@@ -11057,8 +11033,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_f64x2_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_demote_f64x2_zero(const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_demote_f64x2_zero(const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
 
     wasm__v128_set_f32(&result, 0, (float)wasm__v128_get_f64(value, 0));
     wasm__v128_set_f32(&result, 1, (float)wasm__v128_get_f64(value, 1));
@@ -11067,16 +11043,16 @@ WASM_PRIVATE wasm_value_t wasm__simd_demote_f64x2_zero(const wasm_value_t* value
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_promote_low_f32x4(const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_promote_low_f32x4(const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
 
     wasm__v128_set_f64(&result, 0, (double)wasm__v128_get_f32(value, 0));
     wasm__v128_set_f64(&result, 1, (double)wasm__v128_get_f32(value, 1));
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -11112,8 +11088,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_extadd_pairwise(uint32_t subop, const wasm_
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -11126,8 +11102,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f32x4(uint32_t subop, const wasm_
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_convert_i32x4(uint32_t subop, const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_convert_i32x4(uint32_t subop, const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {
@@ -11140,8 +11116,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_convert_i32x4(uint32_t subop, const wasm_va
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) {
@@ -11155,8 +11131,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_trunc_sat_f64x2_zero(uint32_t subop, const 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm_value_t* value) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_convert_low_i32x4_to_f64x2(uint32_t subop, const wasm__v128_t* value) {
+    wasm__v128_t result = wasm__v128_zero();
 
     if (subop == 0xFE) {
         wasm__v128_set_f64(&result, 0, (double)wasm__v128_get_i32(value, 0));
@@ -17915,12 +17891,13 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
 
 /* Ops that each run a straight-line sequence of instructions left in place after their first
  * opcode word: name, first instruction's opcode, instructions run, and word offset of the last.
- * L is local.get, C i32.const, J i64.const, D f64.const, S local.set, T local.tee, BIN and
- * I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison, F64BIN an
- * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
- * load, STORE32 a 4-byte store, and STORE64 an 8-byte store; LC_LOADn runs an i32.add between
- * the constant and the load. ADD, AND, XOR, SHL, SHR_U, ROTL, and MUL are those instructions on
- * i64 after J and on i32 otherwise, and STRUCT_GET is struct.get, struct.get_s, or struct.get_u. */
+ * L is local.get, C i32.const, J i64.const, D f64.const, V v128.const, S local.set, T local.tee,
+ * BIN and I64BIN an i32 or i64 binary or comparison that cannot trap, CMP an i32 comparison,
+ * F64BIN an f64 add, sub, mul, or div, SIMD_BIN a WASM__OP_SIMD_BINARY instruction, BRIF br_if,
+ * LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte load, STORE32 a 4-byte store, and STORE64
+ * an 8-byte store; LC_LOADn runs an i32.add between the constant and the load. ADD, AND, XOR,
+ * SHL, SHR_U, ROTL, and MUL are those instructions on i64 after J and on i32 otherwise, and
+ * STRUCT_GET is struct.get, struct.get_s, or struct.get_u. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_AND, 0x20, 3, 4)           \
@@ -17982,7 +17959,8 @@ WASM_PRIVATE wasm_error_t wasm__prepare_function(wasm_module_t* mod, uint32_t fu
     X(C_S, 0x41, 2, 2)              \
     X(T_S, 0x22, 2, 2)              \
     X(L_T, 0x20, 2, 2)              \
-    X(L_STRUCT_GET, 0x20, 2, 2)
+    X(L_STRUCT_GET, 0x20, 2, 2)     \
+    X(V_SIMD_BIN, WASM__OP_V128_CONST, 2, 5)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
@@ -17994,11 +17972,11 @@ enum {
     WASM__OP_BR_IF_LOOP,          /* target */
     WASM__OP_BR_IF_X,             /* branch descriptor */
     WASM__OP_BR_TABLE,            /* count, then count + 1 branch descriptors */
-    WASM__OP_LOCAL_GET_N,         /* slot offset, slot count; a local of vector type */
-    WASM__OP_LOCAL_SET_N,         /* slot offset, slot count */
-    WASM__OP_LOCAL_TEE_N,         /* slot offset, slot count */
-    WASM__OP_DROP_N,              /* slot count */
-    WASM__OP_SELECT_N,            /* slot count of each operand */
+    WASM__OP_LOCAL_GET_V128,      /* slot offset */
+    WASM__OP_LOCAL_SET_V128,      /* slot offset */
+    WASM__OP_LOCAL_TEE_V128,      /* slot offset */
+    WASM__OP_DROP_V128,
+    WASM__OP_SELECT_V128,
     WASM__OP_MEMORY_X,            /* Wasm opcode, memory index, offset low and high words */
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
@@ -18018,6 +17996,20 @@ enum {
     WASM__OP_I31_GET_U,
     WASM__OP_TRUNC_SAT,           /* 0xFC subopcode */
     WASM__OP_GC_NEW,              /* 0xFB subopcode, type index, element count of array.new_fixed */
+    WASM__OP_V128_CONST,          /* the 16 bytes of the value */
+    WASM__OP_SIMD_UNARY,          /* 0xFD subopcode */
+    WASM__OP_SIMD_BINARY,         /* 0xFD subopcode */
+    WASM__OP_SIMD_TERNARY,        /* 0xFD subopcode */
+    WASM__OP_SIMD_SHIFT,          /* 0xFD subopcode */
+    WASM__OP_SIMD_TEST,           /* 0xFD subopcode */
+    WASM__OP_SIMD_SPLAT,          /* 0xFD subopcode */
+    WASM__OP_SIMD_EXTRACT_LANE,   /* 0xFD subopcode, lane */
+    WASM__OP_SIMD_REPLACE_LANE,   /* 0xFD subopcode, lane */
+    WASM__OP_I8X16_SHUFFLE,       /* the 16 lane index bytes */
+    WASM__OP_V128_LOAD,           /* offset; memory 0, 32-bit */
+    WASM__OP_V128_STORE,          /* offset; memory 0, 32-bit */
+    WASM__OP_SIMD_MEMORY,         /* 0xFD subopcode, WASM__SIMD_ACCESS word, offset; memory 0, 32-bit */
+    WASM__OP_SIMD_MEMORY_X,       /* 0xFD subopcode, WASM__SIMD_ACCESS word, memory index, offset low and high words */
     WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_END,                 /* ends the function body */
 #define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
@@ -18028,6 +18020,13 @@ enum {
 /* Ops from WASM__OP_FREE up to WASM__OP_FUSED cost no fuel. */
 #define WASM__OP_FREE WASM__OP_TRY_END
 #define WASM__OP_FUSED WASM__OP_LC_ADD
+
+/* What a SIMD memory instruction accesses: its lane, the slots from its address operand to the top of the
+ * stack, and the bytes it reads or writes. */
+#define WASM__SIMD_ACCESS(lane, depth, width) ((lane) | ((depth) << 8) | ((width) << 16))
+#define WASM__SIMD_ACCESS_LANE(word) ((word) & 0xFFu)
+#define WASM__SIMD_ACCESS_DEPTH(word) (((word) >> 8) & 0xFFu)
+#define WASM__SIMD_ACCESS_WIDTH(word) ((word) >> 16)
 
 #define WASM__BRANCH_LOOP 0x1u
 #define WASM__BRANCH_RETURN 0x2u
@@ -22515,6 +22514,7 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x22 && o[1] == 0x20) return WASM__OP_T_L;
         if (o[0] == 0x22 && loop) return WASM__OP_T_BRIF_LOOP;
         if (o[0] == 0x20 && o[1] == WASM__OP_STRUCT_GET) return WASM__OP_L_STRUCT_GET;
+        if (o[0] == WASM__OP_V128_CONST && o[1] == WASM__OP_SIMD_BINARY) return WASM__OP_V_SIMD_BIN;
         return 0;
     }
     if (len == 3) {
@@ -22857,6 +22857,280 @@ static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t 
     }
 }
 
+/* Returns the translated op that runs SIMD instruction subop, or 0 if subop is unknown. */
+static uint32_t wasm__x_simd_op(uint32_t subop) {
+    switch (subop) {
+        case 0x00:
+            return WASM__OP_V128_LOAD;
+        case 0x0B:
+            return WASM__OP_V128_STORE;
+        case 0x0C:
+            return WASM__OP_V128_CONST;
+        case 0x0D:
+            return WASM__OP_I8X16_SHUFFLE;
+        case 0x0F:
+        case 0x10:
+        case 0x11:
+        case 0x12:
+        case 0x13:
+        case 0x14:
+            return WASM__OP_SIMD_SPLAT;
+        case 0x15:
+        case 0x16:
+        case 0x18:
+        case 0x19:
+        case 0x1B:
+        case 0x1D:
+        case 0x1F:
+        case 0x21:
+            return WASM__OP_SIMD_EXTRACT_LANE;
+        case 0x17:
+        case 0x1A:
+        case 0x1C:
+        case 0x1E:
+        case 0x20:
+        case 0x22:
+            return WASM__OP_SIMD_REPLACE_LANE;
+        case 0x52:
+        case 0x105:
+        case 0x106:
+        case 0x107:
+        case 0x108:
+        case 0x109:
+        case 0x10A:
+        case 0x10B:
+        case 0x10C:
+        case 0x113:
+            return WASM__OP_SIMD_TERNARY;
+        case 0x53:
+        case 0x63:
+        case 0x64:
+        case 0x83:
+        case 0x84:
+        case 0xA3:
+        case 0xA4:
+        case 0xC3:
+        case 0xC4:
+            return WASM__OP_SIMD_TEST;
+        case 0x6B:
+        case 0x6C:
+        case 0x6D:
+        case 0x8B:
+        case 0x8C:
+        case 0x8D:
+        case 0xAB:
+        case 0xAC:
+        case 0xAD:
+        case 0xCB:
+        case 0xCC:
+        case 0xCD:
+            return WASM__OP_SIMD_SHIFT;
+        case 0x4D:
+        case 0x5E:
+        case 0x5F:
+        case 0x60:
+        case 0x61:
+        case 0x62:
+        case 0x67:
+        case 0x68:
+        case 0x69:
+        case 0x6A:
+        case 0x74:
+        case 0x75:
+        case 0x7A:
+        case 0x7C:
+        case 0x7D:
+        case 0x7E:
+        case 0x7F:
+        case 0x80:
+        case 0x81:
+        case 0x87:
+        case 0x88:
+        case 0x89:
+        case 0x8A:
+        case 0x94:
+        case 0xA0:
+        case 0xA1:
+        case 0xA7:
+        case 0xA8:
+        case 0xA9:
+        case 0xAA:
+        case 0xC0:
+        case 0xC1:
+        case 0xC7:
+        case 0xC8:
+        case 0xC9:
+        case 0xCA:
+        case 0xE0:
+        case 0xE1:
+        case 0xE3:
+        case 0xEC:
+        case 0xED:
+        case 0xEF:
+        case 0xF8:
+        case 0xF9:
+        case 0xFA:
+        case 0xFB:
+        case 0xFC:
+        case 0xFD:
+        case 0xFE:
+        case 0xFF:
+        case 0x101:
+        case 0x102:
+        case 0x103:
+        case 0x104:
+            return WASM__OP_SIMD_UNARY;
+        case 0x0E:
+        case 0x100:
+        case 0x65:
+        case 0x66:
+        case 0x6E:
+        case 0x6F:
+        case 0x70:
+        case 0x71:
+        case 0x72:
+        case 0x73:
+        case 0x76:
+        case 0x77:
+        case 0x78:
+        case 0x79:
+        case 0x7B:
+        case 0x82:
+        case 0x85:
+        case 0x86:
+        case 0x8E:
+        case 0x8F:
+        case 0x90:
+        case 0x91:
+        case 0x92:
+        case 0x93:
+        case 0x95:
+        case 0x96:
+        case 0x97:
+        case 0x98:
+        case 0x99:
+        case 0x9B:
+        case 0x9C:
+        case 0x9D:
+        case 0x9E:
+        case 0x9F:
+        case 0xAE:
+        case 0xB1:
+        case 0xB5:
+        case 0xB6:
+        case 0xB7:
+        case 0xB8:
+        case 0xB9:
+        case 0xBA:
+        case 0xBC:
+        case 0xBD:
+        case 0xBE:
+        case 0xBF:
+        case 0xCE:
+        case 0xD1:
+        case 0xD5:
+        case 0xD6:
+        case 0xD7:
+        case 0xD8:
+        case 0xD9:
+        case 0xDA:
+        case 0xDB:
+        case 0xDC:
+        case 0xDD:
+        case 0xDE:
+        case 0xDF:
+        case 0xE4:
+        case 0xE5:
+        case 0xE6:
+        case 0xE7:
+        case 0xE8:
+        case 0xE9:
+        case 0xEA:
+        case 0xEB:
+        case 0xF0:
+        case 0xF1:
+        case 0xF2:
+        case 0xF3:
+        case 0xF4:
+        case 0xF5:
+        case 0xF6:
+        case 0xF7:
+        case 0x10D:
+        case 0x10E:
+        case 0x10F:
+        case 0x110:
+        case 0x111:
+        case 0x112:
+            return WASM__OP_SIMD_BINARY;
+        default:
+            if (subop <= 0x0A || (subop >= 0x54 && subop <= 0x5D)) return WASM__OP_SIMD_MEMORY;
+            if (subop >= 0x23 && subop <= 0x51) return WASM__OP_SIMD_BINARY;
+            return 0;
+    }
+}
+
+/* Emits the translated op of SIMD instruction subop, whose immediates follow at r; returns 1, or -1 if
+ * subop is unknown or its immediates are malformed. */
+static int wasm__x_simd(wasm__translator_t* t, uint32_t subop, wasm__reader_t* r, int mem0_is_32) {
+    uint32_t op = wasm__x_simd_op(subop);
+
+    switch (op) {
+        case 0:
+            return -1;
+        case WASM__OP_V128_CONST:
+        case WASM__OP_I8X16_SHUFFLE: {
+            uint32_t words[4];
+            uint32_t i;
+
+            if (!wasm__has(r, 16)) return -1;
+            memcpy(words, r->ptr, sizeof(words));
+            r->ptr += 16;
+            wasm__x_emit(t, op);
+            for (i = 0; i < 4; i++) wasm__x_emit(t, words[i]);
+            return 1;
+        }
+        case WASM__OP_SIMD_EXTRACT_LANE:
+        case WASM__OP_SIMD_REPLACE_LANE:
+            wasm__x_emit(t, op);
+            wasm__x_emit(t, subop);
+            wasm__x_emit(t, wasm__read_u8(r));
+            return r->malformed ? -1 : 1;
+        case WASM__OP_V128_LOAD:
+        case WASM__OP_V128_STORE:
+        case WASM__OP_SIMD_MEMORY: {
+            int lanes = subop >= 0x54 && subop <= 0x5B;
+            uint32_t depth = lanes || subop == 0x0B ? 1u + WASM__V128_SLOTS : 1u;
+            wasm__memarg_t memarg;
+            uint32_t access;
+
+            if (wasm__read_memarg(r, &memarg) != WASM_OK) return -1;
+            access = WASM__SIMD_ACCESS(lanes ? wasm__read_u8(r) : 0u, depth,
+                                       1u << wasm__simd_memory_align_log2(subop));
+            if (r->malformed) return -1;
+            if (memarg.memory_index != 0 || memarg.offset > UINT32_MAX || !mem0_is_32) {
+                wasm__x_emit(t, WASM__OP_SIMD_MEMORY_X);
+                wasm__x_emit(t, subop);
+                wasm__x_emit(t, access);
+                wasm__x_emit(t, memarg.memory_index);
+                wasm__x_emit(t, (uint32_t)memarg.offset);
+                wasm__x_emit(t, (uint32_t)(memarg.offset >> 32));
+                return 1;
+            }
+            wasm__x_emit(t, op);
+            if (op == WASM__OP_SIMD_MEMORY) {
+                wasm__x_emit(t, subop);
+                wasm__x_emit(t, access);
+            }
+            wasm__x_emit(t, (uint32_t)memarg.offset);
+            return 1;
+        }
+        default:
+            wasm__x_emit(t, op);
+            wasm__x_emit(t, subop);
+            return 1;
+    }
+}
+
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
                                  const wasm__body_info_t* info) {
     const uint32_t* heights = info->heights;
@@ -22976,12 +23250,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0x1A:
             case 0x1B:
             case 0x1C: {
-                uint32_t width = wasm__valtype_slots((wasm_valtype_t)info->operand_types[at - func->code]);
-
                 if (op == 0x1C) wasm__skip_immediates(op, &r);
                 if (info->operand_types[at - func->code] == WASM_TYPE_V128) {
-                    wasm__x_emit(t, op == 0x1A ? WASM__OP_DROP_N : WASM__OP_SELECT_N);
-                    wasm__x_emit(t, width);
+                    wasm__x_emit(t, op == 0x1A ? WASM__OP_DROP_V128 : WASM__OP_SELECT_V128);
                 } else {
                     wasm__x_emit(t, op == 0x1A ? 0x1A : 0x1B);
                 }
@@ -23093,9 +23364,8 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
 
                 if (index >= func->num_locals) return WASM_ERR_MALFORMED;
                 if (func->locals[index] == WASM_TYPE_V128) {
-                    wasm__x_emit(t, WASM__OP_LOCAL_GET_N + (uint32_t)(op - 0x20));
+                    wasm__x_emit(t, WASM__OP_LOCAL_GET_V128 + (uint32_t)(op - 0x20));
                     wasm__x_emit(t, t->local_slots[index]);
-                    wasm__x_emit(t, wasm__valtype_slots(WASM_TYPE_V128));
                 } else {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, t->local_slots[index]);
@@ -23161,7 +23431,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0xFE: {
                 const uint8_t* immediates = r.ptr;
                 uint32_t subop = wasm__read_leb128_u32(&r);
-                int handled = op == 0xFB ? wasm__x_gc(t, mod, subop, &r) : 0;
+                int handled = op == 0xFB   ? wasm__x_gc(t, mod, subop, &r)
+                              : op == 0xFD ? wasm__x_simd(t, subop, &r, mem0_is_32)
+                                           : 0;
 
                 if (handled < 0) return WASM_ERR_MALFORMED;
                 if (op == 0xFC && subop <= 0x07) {
@@ -24441,18 +24713,40 @@ cleanup:
 #define WASM_SRC_EXEC_SIMD_H
 
 
-WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf);
+
+/* Each v128 operand spans WASM__V128_SLOTS slots, and a result overwrites the slots of the first operand.
+ * subop is the instruction's 0xFD subopcode, which must belong to the helper's shape. */
+
+WASM_PRIVATE void wasm__exec_simd_unary(uint32_t subop, wasm__slot_t* operand);
+
+/* rhs points at the second operand's 16 bytes, in slots or in a v128.const immediate. */
+WASM_PRIVATE void wasm__exec_simd_binary(uint32_t subop, wasm__slot_t* lhs, const void* rhs);
+
+/* operands holds the three v128 operands in order. */
+WASM_PRIVATE void wasm__exec_simd_ternary(uint32_t subop, wasm__slot_t* operands);
+
+WASM_PRIVATE void wasm__exec_simd_shift(uint32_t subop, wasm__slot_t* operand, uint32_t amount);
+
+/* Returns the i32 result of an any_true, all_true, or bitmask instruction. */
+WASM_PRIVATE uint32_t wasm__exec_simd_test(uint32_t subop, const wasm__slot_t* operand);
+
+/* slot holds the scalar operand; the result spans it and the slot above it. */
+WASM_PRIVATE void wasm__exec_simd_splat(uint32_t subop, wasm__slot_t* slot);
+
+/* The scalar result overwrites the first slot of operand. */
+WASM_PRIVATE void wasm__exec_simd_extract_lane(uint32_t subop, uint32_t lane, wasm__slot_t* operand);
+
+WASM_PRIVATE void wasm__exec_simd_replace_lane(uint32_t subop, uint32_t lane, wasm__slot_t* vector,
+                                               const wasm__slot_t* scalar);
+
+/* mask points at the 16 lane index bytes. */
+WASM_PRIVATE void wasm__exec_simd_shuffle(wasm__slot_t* lhs, const wasm__slot_t* rhs, const void* mask);
+
+/* Runs a load, store, lane load, or lane store at p, whose operands end at sp; returns the new sp. */
+WASM_PRIVATE wasm__slot_t* wasm__exec_simd_memory(uint32_t subop, uint32_t lane, wasm__slot_t* sp, uint8_t* p);
 
 #endif /* WASM_SRC_EXEC_SIMD_H */
 /* END src/exec/simd.h */
-
-
-
-#include <stdio.h>
-
-
-
-
 
 
 
@@ -24461,297 +24755,114 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
 
 #include <string.h>
 
-static wasm_value_t wasm__simd_pop(wasm_runtime_t* rt) {
-    wasm__exec_stack_t* exec = rt->exec;
-    wasm_value_t value;
-
-    exec->sp -= WASM__V128_SLOTS;
-    value.type = WASM_TYPE_V128;
-    wasm__slot_v128(&exec->stack[exec->sp], value.of.v128);
-    return value;
+WASM_INLINE const wasm__v128_t* wasm__simd_operand(const wasm__slot_t* slots) {
+    return (const wasm__v128_t*)(const void*)slots;
 }
 
-static void wasm__simd_push(wasm_runtime_t* rt, wasm_value_t value) {
-    wasm__exec_stack_t* exec = rt->exec;
-
-    wasm__slot_set_v128(&exec->stack[exec->sp], value.of.v128);
-    exec->sp += WASM__V128_SLOTS;
-}
-
-WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf) {
-    wasm_runtime_t* rt = mod->rt;
-    wasm_error_t err = WASM_OK;
-    uint32_t subop = wasm__read_leb128_u32(&cf->r);
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_unary(uint32_t subop, wasm__slot_t* operand) {
+    const wasm__v128_t* value = wasm__simd_operand(operand);
+    wasm__v128_t result;
 
     switch (subop) {
-        case 0x00:
-        case 0x01:
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x06:
-        case 0x07:
-        case 0x08:
-        case 0x09:
-        case 0x0A:
-        case 0x5C:
-        case 0x5D: {
-            wasm__memarg_t memarg;
-            const wasm__slot_t* base;
-            wasm_value_t vector = wasm_v128_zero();
-            wasm_memory_t* memory;
-            uint64_t addr;
-            uint64_t msz;
-            uint32_t lane;
-
-            err = wasm__read_memarg(&cf->r, &memarg);
-            if (err != WASM_OK) goto cleanup;
-            base = WASM__POP(rt);
-            memory = wasm__memory_at(mod, memarg.memory_index);
-            if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-            if (!wasm__memory_effective_addr(memory, wasm__slot_index(base, memory->is_64), memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-            msz = wasm__memory_byte_size(memory);
-
-            switch (subop) {
-                case 0x00:
-                    if (!wasm__memory_access_in_bounds(addr, 16u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    memcpy(vector.of.v128, memory->data + addr, 16);
-                    break;
-                case 0x01:
-                case 0x02:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    for (lane = 0; lane < 8; lane++) {
-                        if (subop == 0x01)
-                            wasm__v128_set_i16(&vector, lane, (int8_t)memory->data[addr + lane]);
-                        else
-                            wasm__v128_set_u16(&vector, lane, memory->data[addr + lane]);
-                    }
-                    break;
-                case 0x03:
-                case 0x04:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    for (lane = 0; lane < 4; lane++) {
-                        uint16_t loaded = wasm__load_le16(memory->data + addr + lane * 2u);
-                        if (subop == 0x03)
-                            wasm__v128_set_i32(&vector, lane, (int16_t)loaded);
-                        else
-                            wasm__v128_set_u32(&vector, lane, loaded);
-                    }
-                    break;
-                case 0x05:
-                case 0x06:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    for (lane = 0; lane < 2; lane++) {
-                        uint32_t loaded = wasm__load_le32(memory->data + addr + lane * 4u);
-                        if (subop == 0x05)
-                            wasm__v128_set_i64(&vector, lane, (int32_t)loaded);
-                        else
-                            wasm__v128_set_u64(&vector, lane, loaded);
-                    }
-                    break;
-                case 0x07:
-                    if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    for (lane = 0; lane < 16; lane++) vector.of.v128[lane] = memory->data[addr];
-                    break;
-                case 0x08: {
-                    uint16_t loaded;
-                    if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    loaded = wasm__load_le16(memory->data + addr);
-                    for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&vector, lane, loaded);
-                    break;
-                }
-                case 0x09: {
-                    uint32_t loaded;
-                    if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    loaded = wasm__load_le32(memory->data + addr);
-                    for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&vector, lane, loaded);
-                    break;
-                }
-                case 0x0A: {
-                    uint64_t loaded;
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    loaded = wasm__load_le64(memory->data + addr);
-                    for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&vector, lane, loaded);
-                    break;
-                }
-                case 0x5C:
-                    if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u32(&vector, 0, wasm__load_le32(memory->data + addr));
-                    break;
-                default:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u64(&vector, 0, wasm__load_le64(memory->data + addr));
-                    break;
-            }
-
-            wasm__simd_push(rt, vector);
+        case 0x4D:
+            result = wasm__simd_bitwise_not(value);
             break;
-        }
-        case 0x0B: {
-            wasm__memarg_t memarg;
-            wasm_value_t vector;
-            const wasm__slot_t* base;
-            wasm_memory_t* memory;
-            uint64_t addr;
-            uint64_t msz;
+        case 0x5E:
+            result = wasm__simd_demote_f64x2_zero(value);
+            break;
+        case 0x5F:
+            result = wasm__simd_promote_low_f32x4(value);
+            break;
+        case 0x60:
+        case 0x61:
+        case 0x62:
+            result = wasm__simd_i8x16_unary(subop, value);
+            break;
+        case 0x67:
+        case 0x68:
+        case 0x69:
+        case 0x6A:
+        case 0xE0:
+        case 0xE1:
+        case 0xE3:
+            result = wasm__simd_f32x4_unary(subop, value);
+            break;
+        case 0x74:
+        case 0x75:
+        case 0x7A:
+        case 0x94:
+        case 0xEC:
+        case 0xED:
+        case 0xEF:
+            result = wasm__simd_f64x2_unary(subop, value);
+            break;
+        case 0x7C:
+        case 0x7D:
+        case 0x7E:
+        case 0x7F:
+            result = wasm__simd_extadd_pairwise(subop, value);
+            break;
+        case 0x80:
+        case 0x81:
+        case 0x87:
+        case 0x88:
+        case 0x89:
+        case 0x8A:
+            result = wasm__simd_i16x8_unary(subop, value);
+            break;
+        case 0xA0:
+        case 0xA1:
+        case 0xA7:
+        case 0xA8:
+        case 0xA9:
+        case 0xAA:
+            result = wasm__simd_i32x4_unary(subop, value);
+            break;
+        case 0xC0:
+        case 0xC1:
+        case 0xC7:
+        case 0xC8:
+        case 0xC9:
+        case 0xCA:
+            result = wasm__simd_i64x2_unary(subop, value);
+            break;
+        case 0xF8:
+        case 0xF9:
+            result = wasm__simd_trunc_sat_f32x4(subop, value);
+            break;
+        case 0x101:
+        case 0x102:
+            result = wasm__simd_trunc_sat_f32x4(subop - 0x101u + 0xF8u, value);
+            break;
+        case 0xFA:
+        case 0xFB:
+            result = wasm__simd_convert_i32x4(subop, value);
+            break;
+        case 0xFC:
+        case 0xFD:
+            result = wasm__simd_trunc_sat_f64x2_zero(subop, value);
+            break;
+        case 0x103:
+        case 0x104:
+            result = wasm__simd_trunc_sat_f64x2_zero(subop - 0x103u + 0xFCu, value);
+            break;
+        default:
+            result = wasm__simd_convert_low_i32x4_to_f64x2(subop, value);
+            break;
+    }
+    memcpy(operand, &result, sizeof(result));
+}
 
-            err = wasm__read_memarg(&cf->r, &memarg);
-            if (err != WASM_OK) goto cleanup;
-            vector = wasm__simd_pop(rt);
-            base = WASM__POP(rt);
-            memory = wasm__memory_at(mod, memarg.memory_index);
-            if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-            if (!wasm__memory_effective_addr(memory, wasm__slot_index(base, memory->is_64), memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-            msz = wasm__memory_byte_size(memory);
-            if (!wasm__memory_access_in_bounds(addr, 16u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-            memcpy(memory->data + addr, vector.of.v128, 16);
-            break;
-        }
-        case 0x0C: {
-            wasm_value_t vector = wasm_v128_zero();
-            if (!wasm__has(&cf->r, 16)) WASM__TRAP(WASM_ERR_MALFORMED);
-            memcpy(vector.of.v128, cf->r.ptr, 16);
-            cf->r.ptr += 16;
-            wasm__simd_push(rt, vector);
-            break;
-        }
-        case 0x0D: {
-            wasm_value_t rhs;
-            wasm_value_t lhs;
-            wasm_value_t vector;
-            uint8_t lanes[16];
-            uint32_t lane;
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_binary(uint32_t subop, wasm__slot_t* lhs, const void* rhs) {
+    const wasm__v128_t* a = wasm__simd_operand(lhs);
+    const wasm__v128_t* b = (const wasm__v128_t*)rhs;
+    wasm__v128_t result;
 
-            for (lane = 0; lane < 16; lane++) lanes[lane] = wasm__read_u8(&cf->r);
-            if (cf->r.malformed) WASM__TRAP(WASM_ERR_MALFORMED);
-            rhs = wasm__simd_pop(rt);
-            lhs = wasm__simd_pop(rt);
-            vector = wasm__simd_shuffle(&lhs, &rhs, lanes);
-            wasm__simd_push(rt, vector);
+    switch (subop) {
+        case 0x0E:
+        case 0x100:
+            result = wasm__simd_swizzle(a, b);
             break;
-        }
-        case 0x0E: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_swizzle(&lhs, &rhs));
-            break;
-        }
-        case 0x100: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_swizzle(&lhs, &rhs));
-            break;
-        }
-        case 0x0F:
-        case 0x10:
-        case 0x11:
-        case 0x12:
-        case 0x13:
-        case 0x14: {
-            const wasm__slot_t* scalar = WASM__POP(rt);
-            wasm_value_t vector = wasm_v128_zero();
-            uint32_t lane;
-
-            switch (subop) {
-                case 0x0F:
-                    for (lane = 0; lane < 16; lane++) wasm__v128_set_u8(&vector, lane, (uint8_t)wasm__slot_u32(scalar));
-                    break;
-                case 0x10:
-                    for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&vector, lane, (uint16_t)wasm__slot_u32(scalar));
-                    break;
-                case 0x11:
-                    for (lane = 0; lane < 4; lane++) wasm__v128_set_i32(&vector, lane, wasm__slot_i32(scalar));
-                    break;
-                case 0x12:
-                    for (lane = 0; lane < 2; lane++) wasm__v128_set_i64(&vector, lane, wasm__slot_i64(scalar));
-                    break;
-                case 0x13:
-                    for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&vector, lane, wasm__slot_f32_bits(scalar));
-                    break;
-                default:
-                    for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&vector, lane, wasm__slot_f64_bits(scalar));
-                    break;
-            }
-
-            wasm__simd_push(rt, vector);
-            break;
-        }
-        case 0x15:
-        case 0x16:
-        case 0x18:
-        case 0x19:
-        case 0x1B:
-        case 0x1D:
-        case 0x1F:
-        case 0x21: {
-            uint32_t lane = wasm__read_u8(&cf->r);
-            wasm_value_t vector = wasm__simd_pop(rt);
-            if (cf->r.malformed || lane >= wasm__simd_lane_limit(subop)) WASM__TRAP(WASM_ERR_MALFORMED);
-
-            switch (subop) {
-                case 0x15:
-                    wasm__slot_set_i32(WASM__PUSH(rt), wasm__v128_get_i8(&vector, lane));
-                    break;
-                case 0x16:
-                    wasm__slot_set_i32(WASM__PUSH(rt), wasm__v128_get_u8(&vector, lane));
-                    break;
-                case 0x18:
-                    wasm__slot_set_i32(WASM__PUSH(rt), wasm__v128_get_i16(&vector, lane));
-                    break;
-                case 0x19:
-                    wasm__slot_set_i32(WASM__PUSH(rt), wasm__v128_get_u16(&vector, lane));
-                    break;
-                case 0x1B:
-                    wasm__slot_set_i32(WASM__PUSH(rt), wasm__v128_get_i32(&vector, lane));
-                    break;
-                case 0x1D:
-                    wasm__slot_set_i64(WASM__PUSH(rt), wasm__v128_get_i64(&vector, lane));
-                    break;
-                case 0x1F:
-                    wasm__slot_set_f32_bits(WASM__PUSH(rt), wasm__v128_get_u32(&vector, lane));
-                    break;
-                default:
-                    wasm__slot_set_f64_bits(WASM__PUSH(rt), wasm__v128_get_u64(&vector, lane));
-                    break;
-            }
-            break;
-        }
-        case 0x17:
-        case 0x1A:
-        case 0x1C:
-        case 0x1E:
-        case 0x20:
-        case 0x22: {
-            uint32_t lane = wasm__read_u8(&cf->r);
-            const wasm__slot_t* scalar = WASM__POP(rt);
-            wasm_value_t vector = wasm__simd_pop(rt);
-            if (cf->r.malformed || lane >= wasm__simd_lane_limit(subop)) WASM__TRAP(WASM_ERR_MALFORMED);
-
-            switch (subop) {
-                case 0x17:
-                    wasm__v128_set_u8(&vector, lane, (uint8_t)wasm__slot_u32(scalar));
-                    break;
-                case 0x1A:
-                    wasm__v128_set_u16(&vector, lane, (uint16_t)wasm__slot_u32(scalar));
-                    break;
-                case 0x1C:
-                    wasm__v128_set_i32(&vector, lane, wasm__slot_i32(scalar));
-                    break;
-                case 0x1E:
-                    wasm__v128_set_i64(&vector, lane, wasm__slot_i64(scalar));
-                    break;
-                case 0x20:
-                    wasm__v128_set_u32(&vector, lane, wasm__slot_f32_bits(scalar));
-                    break;
-                default:
-                    wasm__v128_set_u64(&vector, lane, wasm__slot_f64_bits(scalar));
-                    break;
-            }
-
-            wasm__simd_push(rt, vector);
-            break;
-        }
         case 0x23:
         case 0x24:
         case 0x25:
@@ -24761,12 +24872,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0x29:
         case 0x2A:
         case 0x2B:
-        case 0x2C: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_cmp_i8x16(subop, &lhs, &rhs));
+        case 0x2C:
+            result = wasm__simd_cmp_i8x16(subop, a, b);
             break;
-        }
         case 0x2D:
         case 0x2E:
         case 0x2F:
@@ -24776,12 +24884,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0x33:
         case 0x34:
         case 0x35:
-        case 0x36: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_cmp_i16x8(subop, &lhs, &rhs));
+        case 0x36:
+            result = wasm__simd_cmp_i16x8(subop, a, b);
             break;
-        }
         case 0x37:
         case 0x38:
         case 0x39:
@@ -24791,252 +24896,31 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0x3D:
         case 0x3E:
         case 0x3F:
-        case 0x40: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_cmp_i32x4(subop, &lhs, &rhs));
+        case 0x40:
+            result = wasm__simd_cmp_i32x4(subop, a, b);
             break;
-        }
         case 0x41:
         case 0x42:
         case 0x43:
         case 0x44:
         case 0x45:
-        case 0x46: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_cmp_f32x4(subop, &lhs, &rhs));
+        case 0x46:
+            result = wasm__simd_cmp_f32x4(subop, a, b);
             break;
-        }
         case 0x47:
         case 0x48:
         case 0x49:
         case 0x4A:
         case 0x4B:
-        case 0x4C: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_cmp_f64x2(subop, &lhs, &rhs));
+        case 0x4C:
+            result = wasm__simd_cmp_f64x2(subop, a, b);
             break;
-        }
-        case 0x4D: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_bitwise_not(&value));
-            break;
-        }
         case 0x4E:
         case 0x4F:
         case 0x50:
-        case 0x51: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_bitwise_binary(subop, &lhs, &rhs));
+        case 0x51:
+            result = wasm__simd_bitwise_binary(subop, a, b);
             break;
-        }
-        case 0x52: {
-            wasm_value_t mask = wasm__simd_pop(rt);
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_bitselect(&lhs, &rhs, &mask));
-            break;
-        }
-        case 0x105:
-        case 0x106:
-        case 0x107:
-        case 0x108: {
-            wasm_value_t acc = wasm__simd_pop(rt);
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_relaxed_madd(subop, &lhs, &rhs, &acc));
-            break;
-        }
-        case 0x109:
-        case 0x10A:
-        case 0x10B:
-        case 0x10C: {
-            wasm_value_t mask = wasm__simd_pop(rt);
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_bitselect(&lhs, &rhs, &mask));
-            break;
-        }
-        case 0x53: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_any_true(&value) ? 1 : 0);
-            break;
-        }
-        case 0x54:
-        case 0x55:
-        case 0x56:
-        case 0x57: {
-            wasm__memarg_t memarg;
-            uint32_t lane = 0;
-            wasm_value_t vector;
-            const wasm__slot_t* base;
-            wasm_memory_t* memory;
-            uint64_t addr;
-            uint64_t msz;
-
-            err = wasm__read_memarg(&cf->r, &memarg);
-            if (err != WASM_OK) goto cleanup;
-            lane = wasm__read_u8(&cf->r);
-            vector = wasm__simd_pop(rt);
-            base = WASM__POP(rt);
-            if (cf->r.malformed || lane >= wasm__simd_lane_limit(subop)) WASM__TRAP(WASM_ERR_MALFORMED);
-            memory = wasm__memory_at(mod, memarg.memory_index);
-            if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-            if (!wasm__memory_effective_addr(memory, wasm__slot_index(base, memory->is_64), memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-            msz = wasm__memory_byte_size(memory);
-
-            switch (subop) {
-                case 0x54:
-                    if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u8(&vector, lane, memory->data[addr]);
-                    break;
-                case 0x55:
-                    if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u16(&vector, lane, wasm__load_le16(memory->data + addr));
-                    break;
-                case 0x56:
-                    if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u32(&vector, lane, wasm__load_le32(memory->data + addr));
-                    break;
-                default:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__v128_set_u64(&vector, lane, wasm__load_le64(memory->data + addr));
-                    break;
-            }
-
-            wasm__simd_push(rt, vector);
-            break;
-        }
-        case 0x58:
-        case 0x59:
-        case 0x5A:
-        case 0x5B: {
-            wasm__memarg_t memarg;
-            uint32_t lane = 0;
-            wasm_value_t vector;
-            const wasm__slot_t* base;
-            wasm_memory_t* memory;
-            uint64_t addr;
-            uint64_t msz;
-
-            err = wasm__read_memarg(&cf->r, &memarg);
-            if (err != WASM_OK) goto cleanup;
-            lane = wasm__read_u8(&cf->r);
-            vector = wasm__simd_pop(rt);
-            base = WASM__POP(rt);
-            if (cf->r.malformed || lane >= wasm__simd_lane_limit(subop)) WASM__TRAP(WASM_ERR_MALFORMED);
-            memory = wasm__memory_at(mod, memarg.memory_index);
-            if (!memory) WASM__TRAP(WASM_ERR_MALFORMED);
-            if (!wasm__memory_effective_addr(memory, wasm__slot_index(base, memory->is_64), memarg.offset, &addr)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-            msz = wasm__memory_byte_size(memory);
-
-            switch (subop) {
-                case 0x58:
-                    if (!wasm__memory_access_in_bounds(addr, 1u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    memory->data[addr] = wasm__v128_get_u8(&vector, lane);
-                    break;
-                case 0x59:
-                    if (!wasm__memory_access_in_bounds(addr, 2u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__store_le16(memory->data + addr, wasm__v128_get_u16(&vector, lane));
-                    break;
-                case 0x5A:
-                    if (!wasm__memory_access_in_bounds(addr, 4u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__store_le32(memory->data + addr, wasm__v128_get_u32(&vector, lane));
-                    break;
-                default:
-                    if (!wasm__memory_access_in_bounds(addr, 8u, msz)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                    wasm__store_le64(memory->data + addr, wasm__v128_get_u64(&vector, lane));
-                    break;
-            }
-
-            break;
-        }
-        case 0x5E:
-        case 0x5F:
-        case 0x7C:
-        case 0x7D:
-        case 0x7E:
-        case 0x7F:
-        case 0xF8:
-        case 0xF9:
-        case 0xFA:
-        case 0xFB:
-        case 0xFC:
-        case 0xFD:
-        case 0xFE:
-        case 0xFF:
-        case 0x101:
-        case 0x102:
-        case 0x103:
-        case 0x104: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm_value_t vector;
-
-            switch (subop) {
-                case 0x5E:
-                    vector = wasm__simd_demote_f64x2_zero(&value);
-                    break;
-                case 0x5F:
-                    vector = wasm__simd_promote_low_f32x4(&value);
-                    break;
-                case 0x7C:
-                case 0x7D:
-                case 0x7E:
-                case 0x7F:
-                    vector = wasm__simd_extadd_pairwise(subop, &value);
-                    break;
-                case 0xF8:
-                case 0xF9:
-                    vector = wasm__simd_trunc_sat_f32x4(subop, &value);
-                    break;
-                case 0xFA:
-                case 0xFB:
-                    vector = wasm__simd_convert_i32x4(subop, &value);
-                    break;
-                case 0xFC:
-                case 0xFD:
-                    vector = wasm__simd_trunc_sat_f64x2_zero(subop, &value);
-                    break;
-                case 0x101:
-                    vector = wasm__simd_trunc_sat_f32x4(0xF8, &value);
-                    break;
-                case 0x102:
-                    vector = wasm__simd_trunc_sat_f32x4(0xF9, &value);
-                    break;
-                case 0x103:
-                    vector = wasm__simd_trunc_sat_f64x2_zero(0xFC, &value);
-                    break;
-                case 0x104:
-                    vector = wasm__simd_trunc_sat_f64x2_zero(0xFD, &value);
-                    break;
-                default:
-                    vector = wasm__simd_convert_low_i32x4_to_f64x2(subop, &value);
-                    break;
-            }
-
-            wasm__simd_push(rt, vector);
-            break;
-        }
-        case 0x60:
-        case 0x61:
-        case 0x62: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i8x16_unary(subop, &value));
-            break;
-        }
-        case 0x63: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_all_true_i8x16(&value) ? 1 : 0);
-            break;
-        }
-        case 0x64: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_bitmask_i8x16(&value));
-            break;
-        }
         case 0x65:
         case 0x66:
         case 0x6E:
@@ -25049,52 +24933,9 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0x77:
         case 0x78:
         case 0x79:
-        case 0x7B: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i8x16_binary(subop, &lhs, &rhs));
+        case 0x7B:
+            result = wasm__simd_i8x16_binary(subop, a, b);
             break;
-        }
-        case 0x67:
-        case 0x68:
-        case 0x69:
-        case 0x6A:
-        case 0xE0:
-        case 0xE1:
-        case 0xE3: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_f32x4_unary(subop, &value));
-            break;
-        }
-        case 0x6B:
-        case 0x6C:
-        case 0x6D: {
-            uint32_t amount = wasm__slot_u32(WASM__POP(rt));
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i8x16_shift(subop, &value, amount));
-            break;
-        }
-        case 0x74:
-        case 0x75:
-        case 0x7A:
-        case 0x94:
-        case 0xEC:
-        case 0xED:
-        case 0xEF: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_f64x2_unary(subop, &value));
-            break;
-        }
-        case 0x80:
-        case 0x81:
-        case 0x87:
-        case 0x88:
-        case 0x89:
-        case 0x8A: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i16x8_unary(subop, &value));
-            break;
-        }
         case 0x82:
         case 0x85:
         case 0x86:
@@ -25113,58 +24954,12 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0x9C:
         case 0x9D:
         case 0x9E:
-        case 0x9F: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i16x8_binary(subop, &lhs, &rhs));
+        case 0x9F:
+            result = wasm__simd_i16x8_binary(subop, a, b);
             break;
-        }
-        case 0x83: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_all_true_i16x8(&value) ? 1 : 0);
+        case 0x111:
+            result = wasm__simd_i16x8_binary(0x82, a, b);
             break;
-        }
-        case 0x84: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_bitmask_i16x8(&value));
-            break;
-        }
-        case 0x8B:
-        case 0x8C:
-        case 0x8D: {
-            uint32_t amount = wasm__slot_u32(WASM__POP(rt));
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i16x8_shift(subop, &value, amount));
-            break;
-        }
-        case 0xA0:
-        case 0xA1:
-        case 0xA7:
-        case 0xA8:
-        case 0xA9:
-        case 0xAA: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i32x4_unary(subop, &value));
-            break;
-        }
-        case 0xA3: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_all_true_i32x4(&value) ? 1 : 0);
-            break;
-        }
-        case 0xA4: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_bitmask_i32x4(&value));
-            break;
-        }
-        case 0xAB:
-        case 0xAC:
-        case 0xAD: {
-            uint32_t amount = wasm__slot_u32(WASM__POP(rt));
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i32x4_shift(subop, &value, amount));
-            break;
-        }
         case 0xAE:
         case 0xB1:
         case 0xB5:
@@ -25176,61 +24971,26 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0xBC:
         case 0xBD:
         case 0xBE:
-        case 0xBF: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i32x4_binary(subop, &lhs, &rhs));
+        case 0xBF:
+            result = wasm__simd_i32x4_binary(subop, a, b);
             break;
-        }
-        case 0xC0:
-        case 0xC1:
-        case 0xC7:
-        case 0xC8:
-        case 0xC9:
-        case 0xCA: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i64x2_unary(subop, &value));
-            break;
-        }
-        case 0xC3: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_all_true_i64x2(&value) ? 1 : 0);
-            break;
-        }
-        case 0xC4: {
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__slot_set_i32(WASM__PUSH(rt), wasm__simd_bitmask_i64x2(&value));
-            break;
-        }
-        case 0xCB:
-        case 0xCC:
-        case 0xCD: {
-            uint32_t amount = wasm__slot_u32(WASM__POP(rt));
-            wasm_value_t value = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i64x2_shift(subop, &value, amount));
-            break;
-        }
         case 0xCE:
         case 0xD1:
         case 0xD5:
+        case 0xDC:
+        case 0xDD:
+        case 0xDE:
+        case 0xDF:
+            result = wasm__simd_i64x2_binary(subop, a, b);
+            break;
         case 0xD6:
         case 0xD7:
         case 0xD8:
         case 0xD9:
         case 0xDA:
         case 0xDB:
-        case 0xDC:
-        case 0xDD:
-        case 0xDE:
-        case 0xDF: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            if (subop >= 0xD6 && subop <= 0xDB)
-                wasm__simd_push(rt, wasm__simd_cmp_i64x2(subop, &lhs, &rhs));
-            else
-                wasm__simd_push(rt, wasm__simd_i64x2_binary(subop, &lhs, &rhs));
+            result = wasm__simd_cmp_i64x2(subop, a, b);
             break;
-        }
         case 0xE4:
         case 0xE5:
         case 0xE6:
@@ -25238,73 +24998,246 @@ WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t
         case 0xE8:
         case 0xE9:
         case 0xEA:
-        case 0xEB: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_f32x4_binary(subop, &lhs, &rhs));
+        case 0xEB:
+            result = wasm__simd_f32x4_binary(subop, a, b);
             break;
-        }
-        case 0xF0:
-        case 0xF1:
-        case 0xF2:
-        case 0xF3:
-        case 0xF4:
-        case 0xF5:
-        case 0xF6:
-        case 0xF7:
         case 0x10D:
         case 0x10E:
+            result = wasm__simd_f32x4_binary(subop - 0x10Du + 0xE8u, a, b);
+            break;
         case 0x10F:
-        case 0x110: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            if (subop >= 0x10D) {
-                switch (subop) {
-                    case 0x10D:
-                        wasm__simd_push(rt, wasm__simd_f32x4_binary(0xE8, &lhs, &rhs));
-                        break;
-                    case 0x10E:
-                        wasm__simd_push(rt, wasm__simd_f32x4_binary(0xE9, &lhs, &rhs));
-                        break;
-                    case 0x10F:
-                        wasm__simd_push(rt, wasm__simd_f64x2_binary(0xF4, &lhs, &rhs));
-                        break;
-                    default:
-                        wasm__simd_push(rt, wasm__simd_f64x2_binary(0xF5, &lhs, &rhs));
-                        break;
-                }
-            } else {
-                wasm__simd_push(rt, wasm__simd_f64x2_binary(subop, &lhs, &rhs));
-            }
+        case 0x110:
+            result = wasm__simd_f64x2_binary(subop - 0x10Fu + 0xF4u, a, b);
             break;
-        }
-        case 0x111: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_i16x8_binary(0x82, &lhs, &rhs));
+        case 0x112:
+            result = wasm__simd_relaxed_dot_i8x16_i7x16_s(a, b);
             break;
-        }
-        case 0x112: {
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_relaxed_dot_i8x16_i7x16_s(&lhs, &rhs));
-            break;
-        }
-        case 0x113: {
-            wasm_value_t acc = wasm__simd_pop(rt);
-            wasm_value_t rhs = wasm__simd_pop(rt);
-            wasm_value_t lhs = wasm__simd_pop(rt);
-            wasm__simd_push(rt, wasm__simd_relaxed_dot_i8x16_i7x16_add_s(&lhs, &rhs, &acc));
-            break;
-        }
         default:
-            WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown prefixed opcode 0xFD 0x%X", (unsigned)subop);
-            err = WASM_ERR_MALFORMED;
-            goto cleanup;
+            result = wasm__simd_f64x2_binary(subop, a, b);
+            break;
     }
+    memcpy(lhs, &result, sizeof(result));
+}
 
-cleanup:
-    return err;
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_ternary(uint32_t subop, wasm__slot_t* operands) {
+    const wasm__v128_t* a = wasm__simd_operand(operands);
+    const wasm__v128_t* b = wasm__simd_operand(operands + WASM__V128_SLOTS);
+    const wasm__v128_t* c = wasm__simd_operand(operands + 2u * WASM__V128_SLOTS);
+    wasm__v128_t result;
+
+    switch (subop) {
+        case 0x105:
+        case 0x106:
+        case 0x107:
+        case 0x108:
+            result = wasm__simd_relaxed_madd(subop, a, b, c);
+            break;
+        case 0x113:
+            result = wasm__simd_relaxed_dot_i8x16_i7x16_add_s(a, b, c);
+            break;
+        default:
+            result = wasm__simd_bitselect(a, b, c);
+            break;
+    }
+    memcpy(operands, &result, sizeof(result));
+}
+
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_shift(uint32_t subop, wasm__slot_t* operand, uint32_t amount) {
+    const wasm__v128_t* value = wasm__simd_operand(operand);
+    wasm__v128_t result;
+
+    if (subop <= 0x6D)
+        result = wasm__simd_i8x16_shift(subop, value, amount);
+    else if (subop <= 0x8D)
+        result = wasm__simd_i16x8_shift(subop, value, amount);
+    else if (subop <= 0xAD)
+        result = wasm__simd_i32x4_shift(subop, value, amount);
+    else
+        result = wasm__simd_i64x2_shift(subop, value, amount);
+    memcpy(operand, &result, sizeof(result));
+}
+
+WASM_PRIVATE WASM__NOINLINE uint32_t wasm__exec_simd_test(uint32_t subop, const wasm__slot_t* operand) {
+    const wasm__v128_t* value = wasm__simd_operand(operand);
+
+    switch (subop) {
+        case 0x53:
+            return (uint32_t)wasm__simd_any_true(value);
+        case 0x63:
+            return (uint32_t)wasm__simd_all_true_i8x16(value);
+        case 0x64:
+            return (uint32_t)wasm__simd_bitmask_i8x16(value);
+        case 0x83:
+            return (uint32_t)wasm__simd_all_true_i16x8(value);
+        case 0x84:
+            return (uint32_t)wasm__simd_bitmask_i16x8(value);
+        case 0xA3:
+            return (uint32_t)wasm__simd_all_true_i32x4(value);
+        case 0xA4:
+            return (uint32_t)wasm__simd_bitmask_i32x4(value);
+        case 0xC3:
+            return (uint32_t)wasm__simd_all_true_i64x2(value);
+        default:
+            return (uint32_t)wasm__simd_bitmask_i64x2(value);
+    }
+}
+
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_splat(uint32_t subop, wasm__slot_t* slot) {
+    uint64_t scalar = wasm__slot_u64(slot);
+    wasm__v128_t result;
+    uint32_t lane;
+
+    switch (subop) {
+        case 0x0F:
+            memset(result.bytes, (int)(uint8_t)scalar, sizeof(result.bytes));
+            break;
+        case 0x10:
+            for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&result, lane, (uint32_t)scalar);
+            break;
+        case 0x11:
+        case 0x13:
+            for (lane = 0; lane < 4; lane++) wasm__v128_set_u32(&result, lane, (uint32_t)scalar);
+            break;
+        default:
+            for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&result, lane, scalar);
+            break;
+    }
+    memcpy(slot, &result, sizeof(result));
+}
+
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_extract_lane(uint32_t subop, uint32_t lane, wasm__slot_t* operand) {
+    const wasm__v128_t* value = wasm__simd_operand(operand);
+    uint64_t bits;
+
+    switch (subop) {
+        case 0x15:
+            bits = (uint32_t)(int32_t)wasm__v128_get_i8(value, lane);
+            break;
+        case 0x16:
+            bits = wasm__v128_get_u8(value, lane);
+            break;
+        case 0x18:
+            bits = (uint32_t)(int32_t)wasm__v128_get_i16(value, lane);
+            break;
+        case 0x19:
+            bits = wasm__v128_get_u16(value, lane);
+            break;
+        case 0x1B:
+        case 0x1F:
+            bits = wasm__v128_get_u32(value, lane);
+            break;
+        default:
+            bits = wasm__v128_get_u64(value, lane);
+            break;
+    }
+    wasm__slot_set_u64(operand, bits);
+}
+
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_replace_lane(uint32_t subop, uint32_t lane, wasm__slot_t* vector,
+                                                              const wasm__slot_t* scalar) {
+    wasm__v128_t* value = (wasm__v128_t*)(void*)vector;
+    uint64_t bits = wasm__slot_u64(scalar);
+
+    switch (subop) {
+        case 0x17:
+            wasm__v128_set_u8(value, lane, (uint32_t)bits);
+            break;
+        case 0x1A:
+            wasm__v128_set_u16(value, lane, (uint32_t)bits);
+            break;
+        case 0x1C:
+        case 0x20:
+            wasm__v128_set_u32(value, lane, (uint32_t)bits);
+            break;
+        default:
+            wasm__v128_set_u64(value, lane, bits);
+            break;
+    }
+}
+
+WASM_PRIVATE WASM__NOINLINE void wasm__exec_simd_shuffle(wasm__slot_t* lhs, const wasm__slot_t* rhs, const void* mask) {
+    wasm__v128_t result = wasm__simd_shuffle(wasm__simd_operand(lhs), wasm__simd_operand(rhs), (const uint8_t*)mask);
+
+    memcpy(lhs, &result, sizeof(result));
+}
+
+WASM_PRIVATE WASM__NOINLINE wasm__slot_t* wasm__exec_simd_memory(uint32_t subop, uint32_t lane, wasm__slot_t* sp,
+                                                                 uint8_t* p) {
+    wasm__v128_t result = wasm__v128_zero();
+    uint32_t i;
+
+    switch (subop) {
+        case 0x00:
+            memcpy(result.bytes, p, sizeof(result.bytes));
+            break;
+        case 0x01:
+            for (i = 0; i < 8; i++) wasm__v128_set_i16(&result, i, (int8_t)p[i]);
+            break;
+        case 0x02:
+            for (i = 0; i < 8; i++) wasm__v128_set_u16(&result, i, p[i]);
+            break;
+        case 0x03:
+            for (i = 0; i < 4; i++) wasm__v128_set_i32(&result, i, (int16_t)wasm__v128_bits16(p + i * 2u));
+            break;
+        case 0x04:
+            for (i = 0; i < 4; i++) wasm__v128_set_u32(&result, i, wasm__v128_bits16(p + i * 2u));
+            break;
+        case 0x05:
+            for (i = 0; i < 2; i++) wasm__v128_set_i64(&result, i, (int32_t)wasm__v128_bits32(p + i * 4u));
+            break;
+        case 0x06:
+            for (i = 0; i < 2; i++) wasm__v128_set_u64(&result, i, wasm__v128_bits32(p + i * 4u));
+            break;
+        case 0x07:
+            memset(result.bytes, *p, sizeof(result.bytes));
+            break;
+        case 0x08:
+            for (i = 0; i < 8; i++) wasm__v128_set_u16(&result, i, wasm__v128_bits16(p));
+            break;
+        case 0x09:
+            for (i = 0; i < 4; i++) wasm__v128_set_u32(&result, i, wasm__v128_bits32(p));
+            break;
+        case 0x0A:
+            for (i = 0; i < 2; i++) wasm__v128_set_u64(&result, i, wasm__v128_bits64(p));
+            break;
+        case 0x5C:
+            wasm__v128_set_u32(&result, 0, wasm__v128_bits32(p));
+            break;
+        case 0x5D:
+            wasm__v128_set_u64(&result, 0, wasm__v128_bits64(p));
+            break;
+        case 0x0B:
+            memcpy(p, sp - WASM__V128_SLOTS, sizeof(result.bytes));
+            return sp - WASM__V128_SLOTS - 1u;
+        case 0x54:
+        case 0x55:
+        case 0x56:
+        case 0x57:
+            memcpy(&result, sp - WASM__V128_SLOTS, sizeof(result));
+            if (subop == 0x54)
+                wasm__v128_set_u8(&result, lane, *p);
+            else if (subop == 0x55)
+                wasm__v128_set_u16(&result, lane, wasm__v128_bits16(p));
+            else if (subop == 0x56)
+                wasm__v128_set_u32(&result, lane, wasm__v128_bits32(p));
+            else
+                wasm__v128_set_u64(&result, lane, wasm__v128_bits64(p));
+            memcpy(sp - WASM__V128_SLOTS - 1u, &result, sizeof(result));
+            return sp - 1;
+        default:
+            memcpy(&result, sp - WASM__V128_SLOTS, sizeof(result));
+            if (subop == 0x58)
+                *p = wasm__v128_get_u8(&result, lane);
+            else if (subop == 0x59)
+                wasm__v128_put16(p, wasm__v128_get_u16(&result, lane));
+            else if (subop == 0x5A)
+                wasm__v128_put32(p, wasm__v128_get_u32(&result, lane));
+            else
+                wasm__v128_put64(p, wasm__v128_get_u64(&result, lane));
+            return sp - WASM__V128_SLOTS - 1u;
+    }
+    memcpy(sp - 1, &result, sizeof(result));
+    return sp + 1;
 }
 /* END src/exec/simd.c */
 
@@ -25681,7 +25614,7 @@ static void wasm__memory_transfer(uint32_t op, uint8_t* p, wasm__slot_t* sp) {
 
 /* What the fuel meter needs to know about a fused op. */
 typedef struct wasm__fused_info_t {
-    uint8_t first; /* opcode of its first instruction */
+    uint16_t first; /* opcode of its first instruction */
     uint8_t units; /* instructions it runs */
     uint8_t last;  /* word offset of its last instruction */
 } wasm__fused_info_t;
@@ -26320,15 +26253,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [0xF3] = &&wasm__op_default, [0xF4] = &&wasm__op_default, [0xF5] = &&wasm__op_default,
         [0xF6] = &&wasm__op_default, [0xF7] = &&wasm__op_default, [0xF8] = &&wasm__op_default,
         [0xF9] = &&wasm__op_default, [0xFA] = &&wasm__op_default, [0xFB] = &&wasm__op_0xFB,
-        [0xFC] = &&wasm__op_0xFC, [0xFD] = &&wasm__op_0xFD, [0xFE] = &&wasm__op_0xFE, [0xFF] = &&wasm__op_default,
+        [0xFC] = &&wasm__op_0xFC, [0xFD] = &&wasm__op_default, [0xFE] = &&wasm__op_0xFE, [0xFF] = &&wasm__op_default,
         [WASM__OP_BR] = &&wasm__op_WASM__OP_BR, [WASM__OP_BR_LOOP] = &&wasm__op_WASM__OP_BR_LOOP,
         [WASM__OP_BR_X] = &&wasm__op_WASM__OP_BR_X, [WASM__OP_BR_IF] = &&wasm__op_WASM__OP_BR_IF,
         [WASM__OP_BR_IF_LOOP] = &&wasm__op_WASM__OP_BR_IF_LOOP, [WASM__OP_BR_IF_X] = &&wasm__op_WASM__OP_BR_IF_X,
         [WASM__OP_BR_TABLE] = &&wasm__op_WASM__OP_BR_TABLE,
-        [WASM__OP_LOCAL_GET_N] = &&wasm__op_WASM__OP_LOCAL_GET_N,
-        [WASM__OP_LOCAL_SET_N] = &&wasm__op_WASM__OP_LOCAL_SET_N,
-        [WASM__OP_LOCAL_TEE_N] = &&wasm__op_WASM__OP_LOCAL_TEE_N,
-        [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
+        [WASM__OP_LOCAL_GET_V128] = &&wasm__op_WASM__OP_LOCAL_GET_V128,
+        [WASM__OP_LOCAL_SET_V128] = &&wasm__op_WASM__OP_LOCAL_SET_V128,
+        [WASM__OP_LOCAL_TEE_V128] = &&wasm__op_WASM__OP_LOCAL_TEE_V128,
+        [WASM__OP_DROP_V128] = &&wasm__op_WASM__OP_DROP_V128, [WASM__OP_SELECT_V128] = &&wasm__op_WASM__OP_SELECT_V128,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
         [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_REF_TEST] = &&wasm__op_WASM__OP_REF_TEST,
@@ -26340,6 +26273,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [WASM__OP_ARRAY_LEN] = &&wasm__op_WASM__OP_ARRAY_LEN, [WASM__OP_REF_I31] = &&wasm__op_WASM__OP_REF_I31,
         [WASM__OP_I31_GET_S] = &&wasm__op_WASM__OP_I31_GET_S, [WASM__OP_I31_GET_U] = &&wasm__op_WASM__OP_I31_GET_U,
         [WASM__OP_TRUNC_SAT] = &&wasm__op_WASM__OP_TRUNC_SAT, [WASM__OP_GC_NEW] = &&wasm__op_WASM__OP_GC_NEW,
+        [WASM__OP_V128_CONST] = &&wasm__op_WASM__OP_V128_CONST, [WASM__OP_SIMD_UNARY] = &&wasm__op_WASM__OP_SIMD_UNARY,
+        [WASM__OP_SIMD_BINARY] = &&wasm__op_WASM__OP_SIMD_BINARY,
+        [WASM__OP_SIMD_TERNARY] = &&wasm__op_WASM__OP_SIMD_TERNARY,
+        [WASM__OP_SIMD_SHIFT] = &&wasm__op_WASM__OP_SIMD_SHIFT, [WASM__OP_SIMD_TEST] = &&wasm__op_WASM__OP_SIMD_TEST,
+        [WASM__OP_SIMD_SPLAT] = &&wasm__op_WASM__OP_SIMD_SPLAT,
+        [WASM__OP_SIMD_EXTRACT_LANE] = &&wasm__op_WASM__OP_SIMD_EXTRACT_LANE,
+        [WASM__OP_SIMD_REPLACE_LANE] = &&wasm__op_WASM__OP_SIMD_REPLACE_LANE,
+        [WASM__OP_I8X16_SHUFFLE] = &&wasm__op_WASM__OP_I8X16_SHUFFLE,
+        [WASM__OP_V128_LOAD] = &&wasm__op_WASM__OP_V128_LOAD, [WASM__OP_V128_STORE] = &&wasm__op_WASM__OP_V128_STORE,
+        [WASM__OP_SIMD_MEMORY] = &&wasm__op_WASM__OP_SIMD_MEMORY,
+        [WASM__OP_SIMD_MEMORY_X] = &&wasm__op_WASM__OP_SIMD_MEMORY_X,
         [WASM__OP_TRY_END] = &&wasm__op_WASM__OP_TRY_END,
         [WASM__OP_END] = &&wasm__op_WASM__OP_END,
 #define WASM__FUSED_LABEL(name, first, units, last) [WASM__OP_##name] = &&wasm__op_WASM__OP_##name,
@@ -26622,10 +26566,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__SET_READER(*pc++);
                 WASM__CALL_OUT(wasm__exec_bulk(mod, cf));
                 WASM__NEXT();
-            WASM__CASE(0xFD):
-                WASM__SET_READER(*pc++);
-                WASM__CALL_OUT(wasm__exec_simd(mod, cf));
-                WASM__NEXT();
             WASM__CASE(0xFE):
                 WASM__SET_READER(*pc++);
                 WASM__CALL_OUT(wasm__exec_atomic(mod, cf));
@@ -26787,16 +26727,13 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 sp -= 2;
                 if (!wasm__slot_u32(sp + 1)) sp[-1] = sp[0];
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_DROP_N):
-                sp -= *pc++;
+            WASM__CASE(WASM__OP_DROP_V128):
+                sp -= WASM__V128_SLOTS;
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_SELECT_N): {
-                uint32_t n = *pc++;
-
-                sp -= n + 1u;
-                if (!wasm__slot_u32(sp + n)) memcpy(sp - n, sp, n * sizeof(wasm__slot_t));
+            WASM__CASE(WASM__OP_SELECT_V128):
+                sp -= WASM__V128_SLOTS + 1u;
+                if (!wasm__slot_u32(sp + WASM__V128_SLOTS)) memcpy(sp - WASM__V128_SLOTS, sp, 16);
                 WASM__NEXT();
-            }
 
             /* Variables */
             WASM__CASE(0x20):
@@ -26808,16 +26745,16 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
             WASM__CASE(0x22):
                 locals[*pc++] = sp[-1];
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_LOCAL_GET_N):
-                memcpy(sp, locals + pc[0], pc[1] * sizeof(wasm__slot_t));
-                sp += pc[1];
-                pc += 2;
+            WASM__CASE(WASM__OP_LOCAL_GET_V128):
+                memcpy(sp, locals + *pc++, 16);
+                sp += WASM__V128_SLOTS;
                 WASM__NEXT();
-            WASM__CASE(WASM__OP_LOCAL_SET_N):
-            WASM__CASE(WASM__OP_LOCAL_TEE_N):
-                memcpy(locals + pc[0], sp - pc[1], pc[1] * sizeof(wasm__slot_t));
-                if (op == WASM__OP_LOCAL_SET_N) sp -= pc[1];
-                pc += 2;
+            WASM__CASE(WASM__OP_LOCAL_SET_V128):
+                sp -= WASM__V128_SLOTS;
+                memcpy(locals + *pc++, sp, 16);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_LOCAL_TEE_V128):
+                memcpy(locals + *pc++, sp - WASM__V128_SLOTS, 16);
                 WASM__NEXT();
             WASM__CASE(0x23): {
                 wasm_value_t value = wasm__global_get_value(&mod->globals[*pc++]);
@@ -27604,6 +27541,87 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__UNARY(uint64_t, u64, u64, (a & 0x80000000u) ? (a | UINT64_C(0xFFFFFFFF00000000)) : (a & 0xFFFFFFFFu));
                 WASM__NEXT();
 
+            WASM__CASE(WASM__OP_V128_CONST):
+                memcpy(sp, pc, 16);
+                sp += WASM__V128_SLOTS;
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_UNARY):
+                wasm__exec_simd_unary(*pc++, sp - WASM__V128_SLOTS);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_BINARY):
+                sp -= WASM__V128_SLOTS;
+                wasm__exec_simd_binary(*pc++, sp - WASM__V128_SLOTS, sp);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_TERNARY):
+                sp -= 2u * WASM__V128_SLOTS;
+                wasm__exec_simd_ternary(*pc++, sp - WASM__V128_SLOTS);
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_SHIFT):
+                sp--;
+                wasm__exec_simd_shift(*pc++, sp - WASM__V128_SLOTS, wasm__slot_u32(sp));
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_TEST):
+                sp--;
+                wasm__slot_set_u32(sp - 1, wasm__exec_simd_test(*pc++, sp - 1));
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_SPLAT):
+                wasm__exec_simd_splat(*pc++, sp - 1);
+                sp++;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_EXTRACT_LANE):
+                sp--;
+                wasm__exec_simd_extract_lane(pc[0], pc[1], sp - 1);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_SIMD_REPLACE_LANE):
+                sp--;
+                wasm__exec_simd_replace_lane(pc[0], pc[1], sp - WASM__V128_SLOTS, sp);
+                pc += 2;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_I8X16_SHUFFLE):
+                sp -= WASM__V128_SLOTS;
+                wasm__exec_simd_shuffle(sp - WASM__V128_SLOTS, sp, pc);
+                pc += 4;
+                WASM__NEXT();
+            WASM__CASE(WASM__OP_V128_LOAD): {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp - 1, 16u);
+                memcpy(sp - 1, p, 16);
+                sp++;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_V128_STORE): {
+                uint8_t* p;
+
+                WASM__MEMORY_PTR(p, sp - 1 - WASM__V128_SLOTS, 16u);
+                memcpy(p, sp - WASM__V128_SLOTS, 16);
+                sp -= 1u + WASM__V128_SLOTS;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_SIMD_MEMORY): {
+                uint8_t* p;
+                uint32_t subop = pc[0];
+                uint32_t access = pc[1];
+
+                pc += 2;
+                WASM__MEMORY_PTR(p, sp - WASM__SIMD_ACCESS_DEPTH(access), WASM__SIMD_ACCESS_WIDTH(access));
+                sp = wasm__exec_simd_memory(subop, WASM__SIMD_ACCESS_LANE(access), sp, p);
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_SIMD_MEMORY_X): {
+                uint32_t access = pc[1];
+                uint8_t* p = wasm__memory_access_slow(mod, pc[2], sp - WASM__SIMD_ACCESS_DEPTH(access),
+                                                      (uint64_t)pc[3] | ((uint64_t)pc[4] << 32),
+                                                      WASM__SIMD_ACCESS_WIDTH(access), &mem0_data, &mem0_size);
+
+                if (!p) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
+                sp = wasm__exec_simd_memory(pc[0], WASM__SIMD_ACCESS_LANE(access), sp, p);
+                pc += 5;
+                WASM__NEXT();
+            }
+
             /* Fused instructions; pc[k] is word k + 1 of the run. */
             WASM__CASE(WASM__OP_LC_ADD):
                 wasm__slot_set_u32(sp++, wasm__slot_u32(locals + pc[0]) + pc[2]);
@@ -27965,6 +27983,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 pc += 3;
                 WASM__NEXT();
             }
+            WASM__CASE(WASM__OP_V_SIMD_BIN):
+                wasm__exec_simd_binary(pc[5], sp - WASM__V128_SLOTS, pc);
+                pc += 6;
+                WASM__NEXT();
 
             WASM__DEFAULT:
                 WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown opcode 0x%02X", op);

@@ -3,92 +3,6 @@
 #include "../portable.h"
 #include <string.h>
 
-WASM_PRIVATE int8_t wasm__v128_get_i8(const wasm_value_t* value, uint32_t lane) {
-    return (int8_t)value->of.v128[lane];
-}
-
-WASM_PRIVATE uint8_t wasm__v128_get_u8(const wasm_value_t* value, uint32_t lane) {
-    return value->of.v128[lane];
-}
-
-WASM_PRIVATE int16_t wasm__v128_get_i16(const wasm_value_t* value, uint32_t lane) {
-    return (int16_t)wasm__load_le16(value->of.v128 + lane * 2u);
-}
-
-WASM_PRIVATE uint16_t wasm__v128_get_u16(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le16(value->of.v128 + lane * 2u);
-}
-
-WASM_PRIVATE int32_t wasm__v128_get_i32(const wasm_value_t* value, uint32_t lane) {
-    return (int32_t)wasm__load_le32(value->of.v128 + lane * 4u);
-}
-
-WASM_PRIVATE uint32_t wasm__v128_get_u32(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le32(value->of.v128 + lane * 4u);
-}
-
-WASM_PRIVATE int64_t wasm__v128_get_i64(const wasm_value_t* value, uint32_t lane) {
-    return (int64_t)wasm__load_le64(value->of.v128 + lane * 8u);
-}
-
-WASM_PRIVATE uint64_t wasm__v128_get_u64(const wasm_value_t* value, uint32_t lane) {
-    return wasm__load_le64(value->of.v128 + lane * 8u);
-}
-
-WASM_PRIVATE float wasm__v128_get_f32(const wasm_value_t* value, uint32_t lane) {
-    uint32_t bits = wasm__v128_get_u32(value, lane);
-    float result;
-    memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-WASM_PRIVATE double wasm__v128_get_f64(const wasm_value_t* value, uint32_t lane) {
-    uint64_t bits = wasm__v128_get_u64(value, lane);
-    double result;
-    memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-WASM_PRIVATE void wasm__v128_set_u8(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    value->of.v128[lane] = (uint8_t)lane_value;
-}
-
-WASM_PRIVATE void wasm__v128_set_i16(wasm_value_t* value, uint32_t lane, int32_t lane_value) {
-    wasm__store_le16(value->of.v128 + lane * 2u, (uint16_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u16(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    wasm__store_le16(value->of.v128 + lane * 2u, (uint16_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_i32(wasm_value_t* value, uint32_t lane, int32_t lane_value) {
-    wasm__store_le32(value->of.v128 + lane * 4u, (uint32_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u32(wasm_value_t* value, uint32_t lane, uint32_t lane_value) {
-    wasm__store_le32(value->of.v128 + lane * 4u, lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_i64(wasm_value_t* value, uint32_t lane, int64_t lane_value) {
-    wasm__store_le64(value->of.v128 + lane * 8u, (uint64_t)lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_u64(wasm_value_t* value, uint32_t lane, uint64_t lane_value) {
-    wasm__store_le64(value->of.v128 + lane * 8u, lane_value);
-}
-
-WASM_PRIVATE void wasm__v128_set_f32(wasm_value_t* value, uint32_t lane, float lane_value) {
-    uint32_t bits;
-    memcpy(&bits, &lane_value, sizeof(bits));
-    wasm__store_le32(value->of.v128 + lane * 4u, bits);
-}
-
-WASM_PRIVATE void wasm__v128_set_f64(wasm_value_t* value, uint32_t lane, double lane_value) {
-    uint64_t bits;
-    memcpy(&bits, &lane_value, sizeof(bits));
-    wasm__store_le64(value->of.v128 + lane * 8u, bits);
-}
-
 WASM_PRIVATE int8_t wasm__sat_i8(int32_t value) {
     if (value < -128) return (int8_t)-128;
     if (value > 127) return (int8_t)127;
@@ -124,7 +38,7 @@ WASM_PRIVATE uint8_t wasm__popcount_u8(uint8_t value) {
     return count;
 }
 
-WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_any_true(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_any_true_u8x16(wasm__neon_load_u8x16(value));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -134,13 +48,13 @@ WASM_PRIVATE int wasm__simd_any_true(const wasm_value_t* value) {
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        if (value->of.v128[lane] != 0) return 1;
+        if (value->bytes[lane] != 0) return 1;
     }
 
     return 0;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_SSE2)
     return _mm_movemask_epi8(wasm__sse_load_si128(value));
 #endif
@@ -148,13 +62,13 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i8x16(const wasm_value_t* value) {
     int32_t mask = 0;
 
     for (lane = 0; lane < 16; lane++) {
-        if ((value->of.v128[lane] & 0x80u) != 0) mask |= (int32_t)(1u << lane);
+        if ((value->bytes[lane] & 0x80u) != 0) mask |= (int32_t)(1u << lane);
     }
 
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm__v128_t* value) {
     uint32_t lane;
     int32_t mask = 0;
 
@@ -165,7 +79,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i16x8(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     uint32x4_t sign = vshrq_n_u32(wasm__neon_load_u32x4(value), 31);
     return (int32_t)(vgetq_lane_u32(sign, 0) | (vgetq_lane_u32(sign, 1) << 1) |
@@ -183,7 +97,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i32x4(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
+WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     uint64x2_t sign = vshrq_n_u64(wasm__neon_load_u64x2(value), 63);
     return (int32_t)(vgetq_lane_u64(sign, 0) | (vgetq_lane_u64(sign, 1) << 1));
@@ -200,7 +114,7 @@ WASM_PRIVATE int32_t wasm__simd_bitmask_i64x2(const wasm_value_t* value) {
     return mask;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vceqq_u8(wasm__neon_load_u8x16(value), vdupq_n_u8(0u)));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -214,7 +128,7 @@ WASM_PRIVATE int wasm__simd_all_true_i8x16(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u16(vceqq_u16(wasm__neon_load_u16x8(value), vdupq_n_u16(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -228,7 +142,7 @@ WASM_PRIVATE int wasm__simd_all_true_i16x8(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u32(vceqq_u32(wasm__neon_load_u32x4(value), vdupq_n_u32(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -242,7 +156,7 @@ WASM_PRIVATE int wasm__simd_all_true_i32x4(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
+WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return !wasm__neon_any_true_u8x16(vreinterpretq_u8_u64(vceqq_u64(wasm__neon_load_u64x2(value), vdupq_n_u64(0u))));
 #elif defined(WASM__SIMD_USE_SSE2)
@@ -256,22 +170,22 @@ WASM_PRIVATE int wasm__simd_all_true_i64x2(const wasm_value_t* value) {
     return 1;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_not(const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_not(const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vmvnq_u8(wasm__neon_load_u8x16(value)));
 #elif defined(WASM__SIMD_USE_SSE2)
     return wasm__sse_store_si128(_mm_xor_si128(wasm__sse_load_si128(value), _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128())));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
-    for (lane = 0; lane < 16; lane++) result.of.v128[lane] = (uint8_t)~value->of.v128[lane];
+    for (lane = 0; lane < 16; lane++) result.bytes[lane] = (uint8_t)~value->bytes[lane];
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
-                                              const wasm_value_t* lhs,
-                                              const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitwise_binary(uint32_t subop,
+                                              const wasm__v128_t* lhs,
+                                              const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     {
         uint8x16_t a = wasm__neon_load_u8x16(lhs);
@@ -305,22 +219,22 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
         }
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
         switch (subop) {
             case 0x4E:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] & rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] & rhs->bytes[lane]);
                 break;
             case 0x4F:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] & (uint8_t)~rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] & (uint8_t)~rhs->bytes[lane]);
                 break;
             case 0x50:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] | rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] | rhs->bytes[lane]);
                 break;
             default:
-                result.of.v128[lane] = (uint8_t)(lhs->of.v128[lane] ^ rhs->of.v128[lane]);
+                result.bytes[lane] = (uint8_t)(lhs->bytes[lane] ^ rhs->bytes[lane]);
                 break;
         }
     }
@@ -328,9 +242,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitwise_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
-                                         const wasm_value_t* rhs,
-                                         const wasm_value_t* mask) {
+WASM_PRIVATE wasm__v128_t wasm__simd_bitselect(const wasm__v128_t* lhs,
+                                         const wasm__v128_t* rhs,
+                                         const wasm__v128_t* mask) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vbslq_u8(wasm__neon_load_u8x16(mask),
                                            wasm__neon_load_u8x16(lhs),
@@ -340,20 +254,20 @@ WASM_PRIVATE wasm_value_t wasm__simd_bitselect(const wasm_value_t* lhs,
                                                         wasm__sse_load_si128(lhs),
                                                         wasm__sse_load_si128(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        result.of.v128[lane] =
-            (uint8_t)((lhs->of.v128[lane] & mask->of.v128[lane]) |
-                      (rhs->of.v128[lane] & (uint8_t)~mask->of.v128[lane]));
+        result.bytes[lane] =
+            (uint8_t)((lhs->bytes[lane] & mask->bytes[lane]) |
+                      (rhs->bytes[lane] & (uint8_t)~mask->bytes[lane]));
     }
 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
-                                       const wasm_value_t* rhs,
+WASM_PRIVATE wasm__v128_t wasm__simd_shuffle(const wasm__v128_t* lhs,
+                                       const wasm__v128_t* rhs,
                                        const uint8_t lanes[16]) {
 #if defined(WASM__SIMD_USE_NEON)
     uint8x16x2_t table;
@@ -362,36 +276,36 @@ WASM_PRIVATE wasm_value_t wasm__simd_shuffle(const wasm_value_t* lhs,
     table.val[1] = wasm__neon_load_u8x16(rhs);
     return wasm__neon_store_u8x16(vqtbl2q_u8(table, vld1q_u8(lanes)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint8_t combined[32];
     uint32_t lane;
 
-    memcpy(combined, lhs->of.v128, 16);
-    memcpy(combined + 16, rhs->of.v128, 16);
-    for (lane = 0; lane < 16; lane++) result.of.v128[lane] = combined[lanes[lane]];
+    memcpy(combined, lhs->bytes, 16);
+    memcpy(combined + 16, rhs->bytes, 16);
+    for (lane = 0; lane < 16; lane++) result.bytes[lane] = combined[lanes[lane]];
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_swizzle(const wasm_value_t* lhs, const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_swizzle(const wasm__v128_t* lhs, const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     return wasm__neon_store_u8x16(vqtbl1q_u8(wasm__neon_load_u8x16(lhs), wasm__neon_load_u8x16(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) {
-        uint8_t index = rhs->of.v128[lane];
-        result.of.v128[lane] = (index < 16u) ? lhs->of.v128[index] : 0;
+        uint8_t index = rhs->bytes[lane];
+        result.bytes[lane] = (index < 16u) ? lhs->bytes[index] : 0;
     }
 
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs,
-                                            const wasm_value_t* acc) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_madd(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs,
+                                            const wasm__v128_t* acc) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     if (subop == 0x105 || subop == 0x106) {
@@ -413,9 +327,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_madd(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_t* lhs,
-                                                         const wasm_value_t* rhs) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm__v128_t* lhs,
+                                                         const wasm__v128_t* rhs) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 8; lane++) {
@@ -428,10 +342,10 @@ WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_s(const wasm_value_
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm_value_t* lhs,
-                                                             const wasm_value_t* rhs,
-                                                             const wasm_value_t* acc) {
-    wasm_value_t result = wasm_v128_zero();
+WASM_PRIVATE wasm__v128_t wasm__simd_relaxed_dot_i8x16_i7x16_add_s(const wasm__v128_t* lhs,
+                                                             const wasm__v128_t* rhs,
+                                                             const wasm__v128_t* acc) {
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) {

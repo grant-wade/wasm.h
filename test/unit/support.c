@@ -412,12 +412,12 @@ void wasm_test_expect_u8x16(test_ctx* t,
 
     for (lane = 0; lane < 16; lane++) {
         CHECK_MSG(t,
-                  wasm__v128_get_u8(actual, lane) == expected[lane],
+                  actual->of.v128[lane] == expected[lane],
                   "%s lane %u: expected %u, got %u",
                   label,
                   (unsigned)lane,
                   (unsigned)expected[lane],
-                  (unsigned)wasm__v128_get_u8(actual, lane));
+                  (unsigned)actual->of.v128[lane]);
     }
 }
 

@@ -313,6 +313,7 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x22 && o[1] == 0x20) return WASM__OP_T_L;
         if (o[0] == 0x22 && loop) return WASM__OP_T_BRIF_LOOP;
         if (o[0] == 0x20 && o[1] == WASM__OP_STRUCT_GET) return WASM__OP_L_STRUCT_GET;
+        if (o[0] == WASM__OP_V128_CONST && o[1] == WASM__OP_SIMD_BINARY) return WASM__OP_V_SIMD_BIN;
         return 0;
     }
     if (len == 3) {
@@ -655,6 +656,280 @@ static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t 
     }
 }
 
+/* Returns the translated op that runs SIMD instruction subop, or 0 if subop is unknown. */
+static uint32_t wasm__x_simd_op(uint32_t subop) {
+    switch (subop) {
+        case 0x00:
+            return WASM__OP_V128_LOAD;
+        case 0x0B:
+            return WASM__OP_V128_STORE;
+        case 0x0C:
+            return WASM__OP_V128_CONST;
+        case 0x0D:
+            return WASM__OP_I8X16_SHUFFLE;
+        case 0x0F:
+        case 0x10:
+        case 0x11:
+        case 0x12:
+        case 0x13:
+        case 0x14:
+            return WASM__OP_SIMD_SPLAT;
+        case 0x15:
+        case 0x16:
+        case 0x18:
+        case 0x19:
+        case 0x1B:
+        case 0x1D:
+        case 0x1F:
+        case 0x21:
+            return WASM__OP_SIMD_EXTRACT_LANE;
+        case 0x17:
+        case 0x1A:
+        case 0x1C:
+        case 0x1E:
+        case 0x20:
+        case 0x22:
+            return WASM__OP_SIMD_REPLACE_LANE;
+        case 0x52:
+        case 0x105:
+        case 0x106:
+        case 0x107:
+        case 0x108:
+        case 0x109:
+        case 0x10A:
+        case 0x10B:
+        case 0x10C:
+        case 0x113:
+            return WASM__OP_SIMD_TERNARY;
+        case 0x53:
+        case 0x63:
+        case 0x64:
+        case 0x83:
+        case 0x84:
+        case 0xA3:
+        case 0xA4:
+        case 0xC3:
+        case 0xC4:
+            return WASM__OP_SIMD_TEST;
+        case 0x6B:
+        case 0x6C:
+        case 0x6D:
+        case 0x8B:
+        case 0x8C:
+        case 0x8D:
+        case 0xAB:
+        case 0xAC:
+        case 0xAD:
+        case 0xCB:
+        case 0xCC:
+        case 0xCD:
+            return WASM__OP_SIMD_SHIFT;
+        case 0x4D:
+        case 0x5E:
+        case 0x5F:
+        case 0x60:
+        case 0x61:
+        case 0x62:
+        case 0x67:
+        case 0x68:
+        case 0x69:
+        case 0x6A:
+        case 0x74:
+        case 0x75:
+        case 0x7A:
+        case 0x7C:
+        case 0x7D:
+        case 0x7E:
+        case 0x7F:
+        case 0x80:
+        case 0x81:
+        case 0x87:
+        case 0x88:
+        case 0x89:
+        case 0x8A:
+        case 0x94:
+        case 0xA0:
+        case 0xA1:
+        case 0xA7:
+        case 0xA8:
+        case 0xA9:
+        case 0xAA:
+        case 0xC0:
+        case 0xC1:
+        case 0xC7:
+        case 0xC8:
+        case 0xC9:
+        case 0xCA:
+        case 0xE0:
+        case 0xE1:
+        case 0xE3:
+        case 0xEC:
+        case 0xED:
+        case 0xEF:
+        case 0xF8:
+        case 0xF9:
+        case 0xFA:
+        case 0xFB:
+        case 0xFC:
+        case 0xFD:
+        case 0xFE:
+        case 0xFF:
+        case 0x101:
+        case 0x102:
+        case 0x103:
+        case 0x104:
+            return WASM__OP_SIMD_UNARY;
+        case 0x0E:
+        case 0x100:
+        case 0x65:
+        case 0x66:
+        case 0x6E:
+        case 0x6F:
+        case 0x70:
+        case 0x71:
+        case 0x72:
+        case 0x73:
+        case 0x76:
+        case 0x77:
+        case 0x78:
+        case 0x79:
+        case 0x7B:
+        case 0x82:
+        case 0x85:
+        case 0x86:
+        case 0x8E:
+        case 0x8F:
+        case 0x90:
+        case 0x91:
+        case 0x92:
+        case 0x93:
+        case 0x95:
+        case 0x96:
+        case 0x97:
+        case 0x98:
+        case 0x99:
+        case 0x9B:
+        case 0x9C:
+        case 0x9D:
+        case 0x9E:
+        case 0x9F:
+        case 0xAE:
+        case 0xB1:
+        case 0xB5:
+        case 0xB6:
+        case 0xB7:
+        case 0xB8:
+        case 0xB9:
+        case 0xBA:
+        case 0xBC:
+        case 0xBD:
+        case 0xBE:
+        case 0xBF:
+        case 0xCE:
+        case 0xD1:
+        case 0xD5:
+        case 0xD6:
+        case 0xD7:
+        case 0xD8:
+        case 0xD9:
+        case 0xDA:
+        case 0xDB:
+        case 0xDC:
+        case 0xDD:
+        case 0xDE:
+        case 0xDF:
+        case 0xE4:
+        case 0xE5:
+        case 0xE6:
+        case 0xE7:
+        case 0xE8:
+        case 0xE9:
+        case 0xEA:
+        case 0xEB:
+        case 0xF0:
+        case 0xF1:
+        case 0xF2:
+        case 0xF3:
+        case 0xF4:
+        case 0xF5:
+        case 0xF6:
+        case 0xF7:
+        case 0x10D:
+        case 0x10E:
+        case 0x10F:
+        case 0x110:
+        case 0x111:
+        case 0x112:
+            return WASM__OP_SIMD_BINARY;
+        default:
+            if (subop <= 0x0A || (subop >= 0x54 && subop <= 0x5D)) return WASM__OP_SIMD_MEMORY;
+            if (subop >= 0x23 && subop <= 0x51) return WASM__OP_SIMD_BINARY;
+            return 0;
+    }
+}
+
+/* Emits the translated op of SIMD instruction subop, whose immediates follow at r; returns 1, or -1 if
+ * subop is unknown or its immediates are malformed. */
+static int wasm__x_simd(wasm__translator_t* t, uint32_t subop, wasm__reader_t* r, int mem0_is_32) {
+    uint32_t op = wasm__x_simd_op(subop);
+
+    switch (op) {
+        case 0:
+            return -1;
+        case WASM__OP_V128_CONST:
+        case WASM__OP_I8X16_SHUFFLE: {
+            uint32_t words[4];
+            uint32_t i;
+
+            if (!wasm__has(r, 16)) return -1;
+            memcpy(words, r->ptr, sizeof(words));
+            r->ptr += 16;
+            wasm__x_emit(t, op);
+            for (i = 0; i < 4; i++) wasm__x_emit(t, words[i]);
+            return 1;
+        }
+        case WASM__OP_SIMD_EXTRACT_LANE:
+        case WASM__OP_SIMD_REPLACE_LANE:
+            wasm__x_emit(t, op);
+            wasm__x_emit(t, subop);
+            wasm__x_emit(t, wasm__read_u8(r));
+            return r->malformed ? -1 : 1;
+        case WASM__OP_V128_LOAD:
+        case WASM__OP_V128_STORE:
+        case WASM__OP_SIMD_MEMORY: {
+            int lanes = subop >= 0x54 && subop <= 0x5B;
+            uint32_t depth = lanes || subop == 0x0B ? 1u + WASM__V128_SLOTS : 1u;
+            wasm__memarg_t memarg;
+            uint32_t access;
+
+            if (wasm__read_memarg(r, &memarg) != WASM_OK) return -1;
+            access = WASM__SIMD_ACCESS(lanes ? wasm__read_u8(r) : 0u, depth,
+                                       1u << wasm__simd_memory_align_log2(subop));
+            if (r->malformed) return -1;
+            if (memarg.memory_index != 0 || memarg.offset > UINT32_MAX || !mem0_is_32) {
+                wasm__x_emit(t, WASM__OP_SIMD_MEMORY_X);
+                wasm__x_emit(t, subop);
+                wasm__x_emit(t, access);
+                wasm__x_emit(t, memarg.memory_index);
+                wasm__x_emit(t, (uint32_t)memarg.offset);
+                wasm__x_emit(t, (uint32_t)(memarg.offset >> 32));
+                return 1;
+            }
+            wasm__x_emit(t, op);
+            if (op == WASM__OP_SIMD_MEMORY) {
+                wasm__x_emit(t, subop);
+                wasm__x_emit(t, access);
+            }
+            wasm__x_emit(t, (uint32_t)memarg.offset);
+            return 1;
+        }
+        default:
+            wasm__x_emit(t, op);
+            wasm__x_emit(t, subop);
+            return 1;
+    }
+}
+
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
                                  const wasm__body_info_t* info) {
     const uint32_t* heights = info->heights;
@@ -774,12 +1049,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0x1A:
             case 0x1B:
             case 0x1C: {
-                uint32_t width = wasm__valtype_slots((wasm_valtype_t)info->operand_types[at - func->code]);
-
                 if (op == 0x1C) wasm__skip_immediates(op, &r);
                 if (info->operand_types[at - func->code] == WASM_TYPE_V128) {
-                    wasm__x_emit(t, op == 0x1A ? WASM__OP_DROP_N : WASM__OP_SELECT_N);
-                    wasm__x_emit(t, width);
+                    wasm__x_emit(t, op == 0x1A ? WASM__OP_DROP_V128 : WASM__OP_SELECT_V128);
                 } else {
                     wasm__x_emit(t, op == 0x1A ? 0x1A : 0x1B);
                 }
@@ -891,9 +1163,8 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
 
                 if (index >= func->num_locals) return WASM_ERR_MALFORMED;
                 if (func->locals[index] == WASM_TYPE_V128) {
-                    wasm__x_emit(t, WASM__OP_LOCAL_GET_N + (uint32_t)(op - 0x20));
+                    wasm__x_emit(t, WASM__OP_LOCAL_GET_V128 + (uint32_t)(op - 0x20));
                     wasm__x_emit(t, t->local_slots[index]);
-                    wasm__x_emit(t, wasm__valtype_slots(WASM_TYPE_V128));
                 } else {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, t->local_slots[index]);
@@ -959,7 +1230,9 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0xFE: {
                 const uint8_t* immediates = r.ptr;
                 uint32_t subop = wasm__read_leb128_u32(&r);
-                int handled = op == 0xFB ? wasm__x_gc(t, mod, subop, &r) : 0;
+                int handled = op == 0xFB   ? wasm__x_gc(t, mod, subop, &r)
+                              : op == 0xFD ? wasm__x_simd(t, subop, &r, mem0_is_32)
+                                           : 0;
 
                 if (handled < 0) return WASM_ERR_MALFORMED;
                 if (op == 0xFC && subop <= 0x07) {

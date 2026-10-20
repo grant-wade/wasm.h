@@ -1412,6 +1412,10 @@ static uint64_t spec_f64_bits(const double* value) {
     return bits;
 }
 
+static const wasm__v128_t* spec_v128(const wasm_value_t* value) {
+    return (const wasm__v128_t*)(const void*)value->of.v128;
+}
+
 static int spec_f32_matches(uint32_t actual_bits, spec_float_expectation_t expectation, uint32_t expected_bits) {
     uint32_t magnitude = actual_bits & 0x7FFFFFFFu;
 
@@ -1962,9 +1966,9 @@ static int spec_values_match(const spec_value_t* expected,
             if (expected->v128_lane_type == SPEC_V128_LANE_F32) {
                 uint32_t lane;
                 for (lane = 0; lane < 4u; lane++) {
-                    if (!spec_f32_matches(wasm__v128_get_u32(actual, lane),
+                    if (!spec_f32_matches(wasm__v128_get_u32(spec_v128(actual), lane),
                                           expected->v128_lane_expectation[lane],
-                                          wasm__v128_get_u32(&expected->value, lane)))
+                                          wasm__v128_get_u32(spec_v128(&expected->value), lane)))
                         break;
                 }
                 if (lane == 4u) return 1;
@@ -1973,9 +1977,9 @@ static int spec_values_match(const spec_value_t* expected,
             if (expected->v128_lane_type == SPEC_V128_LANE_F64) {
                 uint32_t lane;
                 for (lane = 0; lane < 2u; lane++) {
-                    if (!spec_f64_matches(wasm__v128_get_u64(actual, lane),
+                    if (!spec_f64_matches(wasm__v128_get_u64(spec_v128(actual), lane),
                                           expected->v128_lane_expectation[lane],
-                                          wasm__v128_get_u64(&expected->value, lane)))
+                                          wasm__v128_get_u64(spec_v128(&expected->value), lane)))
                         break;
                 }
                 if (lane == 2u) return 1;

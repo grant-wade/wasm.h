@@ -12,7 +12,6 @@
 #endif
 #include "support.c"
 #include "handles.c"
-#include "simd/native.c"
 #include "platform/host.c"
 #include "portable.c"
 #include "atomics.c"

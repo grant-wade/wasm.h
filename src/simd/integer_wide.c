@@ -2,7 +2,7 @@
 #include "native.h"
 #include "lanes.h"
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xA7:
@@ -35,7 +35,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_valu
         return wasm__sse_store_si128(wasm__sse_select_si128(_mm_cmpgt_epi32(_mm_setzero_si128(), vec), neg, vec));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -73,8 +73,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -97,7 +97,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
         return wasm__sse_store_si128(_mm_srl_epi32(vec, count));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 31u;
@@ -121,9 +121,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i32x4_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xBA: {
@@ -201,7 +201,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
             break;
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -271,7 +271,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i32x4_binary(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_value_t* value) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_unary(uint32_t subop, const wasm__v128_t* value) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xC7:
@@ -298,7 +298,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_valu
 #elif defined(WASM__SIMD_USE_SSE2)
     if (subop == 0xC1) return wasm__sse_store_si128(_mm_sub_epi64(_mm_setzero_si128(), wasm__sse_load_si128(value)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {
@@ -339,8 +339,8 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_unary(uint32_t subop, const wasm_valu
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
-                                           const wasm_value_t* value,
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_shift(uint32_t subop,
+                                           const wasm__v128_t* value,
                                            uint32_t amount) {
 #if defined(WASM__SIMD_USE_NEON)
     {
@@ -362,7 +362,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
         return wasm__sse_store_si128(_mm_srl_epi64(vec, count));
     }
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     amount &= 63u;
@@ -386,9 +386,9 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_shift(uint32_t subop,
     return result;
 }
 
-WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
-                                            const wasm_value_t* lhs,
-                                            const wasm_value_t* rhs) {
+WASM_PRIVATE wasm__v128_t wasm__simd_i64x2_binary(uint32_t subop,
+                                            const wasm__v128_t* lhs,
+                                            const wasm__v128_t* rhs) {
 #if defined(WASM__SIMD_USE_NEON)
     switch (subop) {
         case 0xDC:
@@ -410,7 +410,7 @@ WASM_PRIVATE wasm_value_t wasm__simd_i64x2_binary(uint32_t subop,
     if (subop == 0xCE) return wasm__sse_store_si128(_mm_add_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
     if (subop == 0xD1) return wasm__sse_store_si128(_mm_sub_epi64(wasm__sse_load_si128(lhs), wasm__sse_load_si128(rhs)));
 #endif
-    wasm_value_t result = wasm_v128_zero();
+    wasm__v128_t result = wasm__v128_zero();
     uint32_t lane;
 
     switch (subop) {

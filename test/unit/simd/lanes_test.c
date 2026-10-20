@@ -8,56 +8,73 @@
 #include "../../../src/simd/lanes.h"
 #endif
 
-static wasm_value_t wasm_test_v128_from_i8x16(const int8_t lanes[16]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_i8x16(const int8_t lanes[16]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 16; lane++) wasm__v128_set_u8(&value, lane, (uint8_t)lanes[lane]);
     return value;
 }
 
-static wasm_value_t wasm_test_v128_from_i16x8(const int16_t lanes[8]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_i16x8(const int16_t lanes[8]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 8; lane++) wasm__v128_set_i16(&value, lane, lanes[lane]);
     return value;
 }
 
-static wasm_value_t wasm_test_v128_from_i32x4(const int32_t lanes[4]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_i32x4(const int32_t lanes[4]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) wasm__v128_set_i32(&value, lane, lanes[lane]);
     return value;
 }
 
-static wasm_value_t wasm_test_v128_from_i64x2(const int64_t lanes[2]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_i64x2(const int64_t lanes[2]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) wasm__v128_set_i64(&value, lane, lanes[lane]);
     return value;
 }
 
-static wasm_value_t wasm_test_v128_from_f32x4(const float lanes[4]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_f32x4(const float lanes[4]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 4; lane++) wasm__v128_set_f32(&value, lane, lanes[lane]);
     return value;
 }
 
-static wasm_value_t wasm_test_v128_from_f64x2(const double lanes[2]) {
-    wasm_value_t value = wasm_v128_zero();
+static wasm__v128_t wasm_test_v128_from_f64x2(const double lanes[2]) {
+    wasm__v128_t value = wasm__v128_zero();
     uint32_t lane;
 
     for (lane = 0; lane < 2; lane++) wasm__v128_set_f64(&value, lane, lanes[lane]);
     return value;
 }
 
+static void wasm_test_expect_v128_bytes(test_ctx* t,
+                                        const wasm__v128_t* actual,
+                                        const uint8_t expected[16],
+                                        const char* label) {
+    uint32_t lane;
+
+    for (lane = 0; lane < 16; lane++) {
+        CHECK_MSG(t,
+                  actual->bytes[lane] == expected[lane],
+                  "%s lane %u: expected %u, got %u",
+                  label,
+                  (unsigned)lane,
+                  (unsigned)expected[lane],
+                  (unsigned)actual->bytes[lane]);
+    }
+}
+
 static void wasm_test_expect_i16x8(test_ctx* t,
-                                   const wasm_value_t* actual,
+                                   const wasm__v128_t* actual,
                                    const int16_t expected[8],
                                    const char* label) {
     uint32_t lane;
@@ -74,7 +91,7 @@ static void wasm_test_expect_i16x8(test_ctx* t,
 }
 
 static void wasm_test_expect_i32x4(test_ctx* t,
-                                   const wasm_value_t* actual,
+                                   const wasm__v128_t* actual,
                                    const int32_t expected[4],
                                    const char* label) {
     uint32_t lane;
@@ -91,7 +108,7 @@ static void wasm_test_expect_i32x4(test_ctx* t,
 }
 
 static void wasm_test_expect_i64x2(test_ctx* t,
-                                   const wasm_value_t* actual,
+                                   const wasm__v128_t* actual,
                                    const int64_t expected[2],
                                    const char* label) {
     uint32_t lane;
@@ -108,7 +125,7 @@ static void wasm_test_expect_i64x2(test_ctx* t,
 }
 
 static void wasm_test_expect_f32x4(test_ctx* t,
-                                   const wasm_value_t* actual,
+                                   const wasm__v128_t* actual,
                                    const float expected[4],
                                    const char* label) {
     uint32_t lane;
@@ -126,7 +143,7 @@ static void wasm_test_expect_f32x4(test_ctx* t,
 }
 
 static void wasm_test_expect_f64x2(test_ctx* t,
-                                   const wasm_value_t* actual,
+                                   const wasm__v128_t* actual,
                                    const double expected[2],
                                    const char* label) {
     uint32_t lane;
@@ -166,72 +183,72 @@ TEST(test_simd_helper_ops) {
     static const uint32_t i16_binary_ops[] = { 0x82, 0x85, 0x86, 0x8E, 0x8F, 0x90, 0x91, 0x92, 0x93, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F };
     static const uint32_t i32_binary_ops[] = { 0xAE, 0xB1, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBC, 0xBD, 0xBE, 0xBF };
     static const uint32_t i64_binary_ops[] = { 0xCE, 0xD1, 0xD5, 0xDC, 0xDD, 0xDE, 0xDF };
-    wasm_value_t vi8_a = wasm_test_v128_from_i8x16(i8_a);
-    wasm_value_t vi8_b = wasm_test_v128_from_i8x16(i8_b);
-    wasm_value_t vi16_a = wasm_test_v128_from_i16x8(i16_a);
-    wasm_value_t vi16_b = wasm_test_v128_from_i16x8(i16_b);
-    wasm_value_t vi32_a = wasm_test_v128_from_i32x4(i32_a);
-    wasm_value_t vi32_b = wasm_test_v128_from_i32x4(i32_b);
-    wasm_value_t vi64_a = wasm_test_v128_from_i64x2(i64_a);
-    wasm_value_t vi64_b = wasm_test_v128_from_i64x2(i64_b);
-    wasm_value_t vf32_a = wasm_test_v128_from_f32x4(f32_a);
-    wasm_value_t vf32_b = wasm_test_v128_from_f32x4(f32_b);
-    wasm_value_t vf64_a = wasm_test_v128_from_f64x2(f64_a);
-    wasm_value_t vf64_b = wasm_test_v128_from_f64x2(f64_b);
+    wasm__v128_t vi8_a = wasm_test_v128_from_i8x16(i8_a);
+    wasm__v128_t vi8_b = wasm_test_v128_from_i8x16(i8_b);
+    wasm__v128_t vi16_a = wasm_test_v128_from_i16x8(i16_a);
+    wasm__v128_t vi16_b = wasm_test_v128_from_i16x8(i16_b);
+    wasm__v128_t vi32_a = wasm_test_v128_from_i32x4(i32_a);
+    wasm__v128_t vi32_b = wasm_test_v128_from_i32x4(i32_b);
+    wasm__v128_t vi64_a = wasm_test_v128_from_i64x2(i64_a);
+    wasm__v128_t vi64_b = wasm_test_v128_from_i64x2(i64_b);
+    wasm__v128_t vf32_a = wasm_test_v128_from_f32x4(f32_a);
+    wasm__v128_t vf32_b = wasm_test_v128_from_f32x4(f32_b);
+    wasm__v128_t vf64_a = wasm_test_v128_from_f64x2(f64_a);
+    wasm__v128_t vf64_b = wasm_test_v128_from_f64x2(f64_b);
     uint32_t index;
 
     /* abs/neg preserve the minimum signed lane modulo its width. The dot
      * products fit individually, but their pairwise sum wraps at 32 bits. */
     {
-        wasm_value_t input = wasm_v128_zero();
-        wasm_value_t actual;
+        wasm__v128_t input = wasm__v128_zero();
+        wasm__v128_t actual;
         uint32_t lane;
         for (lane = 0; lane < 16; lane++) wasm__v128_set_u8(&input, lane, 0x80u);
         actual = wasm__simd_i8x16_unary(0x60, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.abs minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i8x16.abs minimum");
         actual = wasm__simd_i8x16_unary(0x61, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i8x16.neg minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i8x16.neg minimum");
         for (lane = 0; lane < 8; lane++) wasm__v128_set_u16(&input, lane, 0x8000u);
         actual = wasm__simd_i16x8_unary(0x80, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.abs minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i16x8.abs minimum");
         actual = wasm__simd_i16x8_unary(0x81, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i16x8.neg minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i16x8.neg minimum");
         actual = wasm__simd_i32x4_binary(0xBA, &input, &input);
         for (lane = 0; lane < 4; lane++) {
             CHECK_MSG(t, wasm__v128_get_u32(&actual, lane) == 0x80000000u, "%s", "i32x4.dot_i16x8_s wraps sum");
             wasm__v128_set_u32(&input, lane, 0x80000000u);
         }
         actual = wasm__simd_i32x4_unary(0xA0, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.abs minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i32x4.abs minimum");
         actual = wasm__simd_i32x4_unary(0xA1, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i32x4.neg minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i32x4.neg minimum");
         for (lane = 0; lane < 2; lane++) wasm__v128_set_u64(&input, lane, UINT64_C(0x8000000000000000));
         actual = wasm__simd_i64x2_unary(0xC0, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.abs minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i64x2.abs minimum");
         actual = wasm__simd_i64x2_unary(0xC1, &input);
-        CHECK_MSG(t, memcmp(actual.of.v128, input.of.v128, 16) == 0, "%s", "i64x2.neg minimum");
+        CHECK_MSG(t, memcmp(actual.bytes, input.bytes, 16) == 0, "%s", "i64x2.neg minimum");
     }
 
     {
         uint8_t bytes[16];
         uint8_t expected[16];
-        wasm_value_t actual;
-        wasm_value_t input;
-        wasm_value_t zero = wasm_v128_zero();
+        wasm__v128_t actual;
+        wasm__v128_t input;
+        wasm__v128_t zero = wasm__v128_zero();
 
         for (index = 0; index < 16; index++) bytes[index] = (uint8_t)index;
-        input = wasm_v128(bytes);
+        memcpy(input.bytes, bytes, 16);
         actual = wasm__simd_bitwise_not(&input);
         for (index = 0; index < 16; index++) expected[index] = (uint8_t)~bytes[index];
-        wasm_test_expect_u8x16(t, &actual, expected, "v128.not");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "v128.not");
 
         actual = wasm__simd_bitwise_binary(0x4E, &vi8_a, &vi8_b);
         for (index = 0; index < 16; index++) expected[index] = (uint8_t)i8_a[index] & (uint8_t)i8_b[index];
-        wasm_test_expect_u8x16(t, &actual, expected, "v128.and");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "v128.and");
 
         actual = wasm__simd_bitwise_binary(0x50, &vi8_a, &vi8_b);
         for (index = 0; index < 16; index++) expected[index] = (uint8_t)i8_a[index] | (uint8_t)i8_b[index];
-        wasm_test_expect_u8x16(t, &actual, expected, "v128.or");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "v128.or");
 
         CHECK_MSG(t, wasm__simd_any_true(&vi8_a), "%s", "expected non-zero vector to be any_true");
         CHECK_MSG(t, !wasm__simd_any_true(&zero), "%s", "expected zero vector to be falsey");
@@ -239,7 +256,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(i8_cmp_ops) / sizeof(i8_cmp_ops[0])); index++) {
         uint8_t expected[16];
-        wasm_value_t actual = wasm__simd_cmp_i8x16(i8_cmp_ops[index], &vi8_a, &vi8_b);
+        wasm__v128_t actual = wasm__simd_cmp_i8x16(i8_cmp_ops[index], &vi8_a, &vi8_b);
         uint32_t lane;
 
         for (lane = 0; lane < 16; lane++) {
@@ -282,12 +299,12 @@ TEST(test_simd_helper_ops) {
             }
             expected[lane] = cond ? 0xFFu : 0u;
         }
-        wasm_test_expect_u8x16(t, &actual, expected, "i8x16 cmp");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "i8x16 cmp");
     }
 
     for (index = 0; index < (uint32_t)(sizeof(i16_cmp_ops) / sizeof(i16_cmp_ops[0])); index++) {
         int16_t expected[8];
-        wasm_value_t actual = wasm__simd_cmp_i16x8(i16_cmp_ops[index], &vi16_a, &vi16_b);
+        wasm__v128_t actual = wasm__simd_cmp_i16x8(i16_cmp_ops[index], &vi16_a, &vi16_b);
         uint32_t lane;
 
         for (lane = 0; lane < 8; lane++) {
@@ -333,7 +350,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(i32_cmp_ops) / sizeof(i32_cmp_ops[0])); index++) {
         int32_t expected[4];
-        wasm_value_t actual = wasm__simd_cmp_i32x4(i32_cmp_ops[index], &vi32_a, &vi32_b);
+        wasm__v128_t actual = wasm__simd_cmp_i32x4(i32_cmp_ops[index], &vi32_a, &vi32_b);
         uint32_t lane;
 
         for (lane = 0; lane < 4; lane++) {
@@ -379,7 +396,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(i64_cmp_ops) / sizeof(i64_cmp_ops[0])); index++) {
         int64_t expected[2];
-        wasm_value_t actual = wasm__simd_cmp_i64x2(i64_cmp_ops[index], &vi64_a, &vi64_b);
+        wasm__v128_t actual = wasm__simd_cmp_i64x2(i64_cmp_ops[index], &vi64_a, &vi64_b);
         uint32_t lane;
 
         for (lane = 0; lane < 2; lane++) {
@@ -410,7 +427,7 @@ TEST(test_simd_helper_ops) {
     }
 
     for (index = 0; index < (uint32_t)(sizeof(i8_binary_ops) / sizeof(i8_binary_ops[0])); index++) {
-        wasm_value_t actual = wasm__simd_i8x16_binary(i8_binary_ops[index], &vi16_a, &vi16_b);
+        wasm__v128_t actual = wasm__simd_i8x16_binary(i8_binary_ops[index], &vi16_a, &vi16_b);
         uint8_t expected[16];
         uint32_t lane;
 
@@ -466,39 +483,39 @@ TEST(test_simd_helper_ops) {
                 }
             }
         }
-        wasm_test_expect_u8x16(t, &actual, expected, "i8x16 binary");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "i8x16 binary");
     }
 
     {
         uint8_t expected[16];
-        wasm_value_t swizzle_indices =
+        wasm__v128_t swizzle_indices =
             wasm_test_v128_from_i8x16((const int8_t[]){ 15, 14, 13, 12, 11, 10, 9, 8,
                                                         7, 6, 5, 4, 3, 2, 1, 0 });
-        wasm_value_t actual = wasm__simd_shuffle(&vi8_a, &vi8_b,
+        wasm__v128_t actual = wasm__simd_shuffle(&vi8_a, &vi8_b,
                                                  (const uint8_t[]){ 0, 17, 2, 19, 4, 21, 6, 23,
                                                                     8, 25, 10, 27, 12, 29, 14, 31 });
         for (index = 0; index < 8; index++) {
             expected[index * 2u] = (uint8_t)i8_a[index * 2u];
             expected[index * 2u + 1u] = (uint8_t)i8_b[index * 2u + 1u];
         }
-        wasm_test_expect_u8x16(t, &actual, expected, "i8x16.shuffle");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "i8x16.shuffle");
 
         actual = wasm__simd_swizzle(&vi8_a, &swizzle_indices);
         for (index = 0; index < 16; index++) expected[index] = (uint8_t)i8_a[15u - index];
-        wasm_test_expect_u8x16(t, &actual, expected, "i8x16.swizzle");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "i8x16.swizzle");
     }
 
     {
         int16_t expected_i16[8] = { -15, -11, -7, -3, 1, 5, 9, 13 };
         int32_t expected_i32[4] = { -500, -101, 101, 500 };
-        wasm_value_t actual_i16 = wasm__simd_extadd_pairwise(0x7C, &vi8_a);
-        wasm_value_t actual_i32 = wasm__simd_extadd_pairwise(0x7E, &vi16_a);
+        wasm__v128_t actual_i16 = wasm__simd_extadd_pairwise(0x7C, &vi8_a);
+        wasm__v128_t actual_i32 = wasm__simd_extadd_pairwise(0x7E, &vi16_a);
         wasm_test_expect_i16x8(t, &actual_i16, expected_i16, "extadd pairwise i16x8");
         wasm_test_expect_i32x4(t, &actual_i32, expected_i32, "extadd pairwise i32x4");
     }
 
     for (index = 0; index < (uint32_t)(sizeof(i16_binary_ops) / sizeof(i16_binary_ops[0])); index++) {
-        wasm_value_t actual;
+        wasm__v128_t actual;
         uint32_t lane;
         if (i16_binary_ops[index] == 0x82 || i16_binary_ops[index] == 0x8E || i16_binary_ops[index] == 0x8F ||
             i16_binary_ops[index] == 0x90 || i16_binary_ops[index] == 0x91 || i16_binary_ops[index] == 0x92 ||
@@ -562,7 +579,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(i32_binary_ops) / sizeof(i32_binary_ops[0])); index++) {
         int32_t expected[4];
-        wasm_value_t actual = ((i32_binary_ops[index] == 0xBA) ||
+        wasm__v128_t actual = ((i32_binary_ops[index] == 0xBA) ||
                                (i32_binary_ops[index] >= 0xBC && i32_binary_ops[index] <= 0xBF))
                                   ? wasm__simd_i32x4_binary(i32_binary_ops[index], &vi16_a, &vi16_b)
                                   : wasm__simd_i32x4_binary(i32_binary_ops[index], &vi32_a, &vi32_b);
@@ -620,7 +637,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(i64_binary_ops) / sizeof(i64_binary_ops[0])); index++) {
         int64_t expected[2];
-        wasm_value_t actual = (i64_binary_ops[index] >= 0xDC)
+        wasm__v128_t actual = (i64_binary_ops[index] >= 0xDC)
                                   ? wasm__simd_i64x2_binary(i64_binary_ops[index], &vi32_a, &vi32_b)
                                   : wasm__simd_i64x2_binary(i64_binary_ops[index], &vi64_a, &vi64_b);
         uint32_t lane;
@@ -657,7 +674,7 @@ TEST(test_simd_helper_ops) {
 
     for (index = 0; index < (uint32_t)(sizeof(f32_cmp_ops) / sizeof(f32_cmp_ops[0])); index++) {
         uint8_t expected[16];
-        wasm_value_t actual = wasm__simd_cmp_f32x4(f32_cmp_ops[index], &vf32_a, &vf32_b);
+        wasm__v128_t actual = wasm__simd_cmp_f32x4(f32_cmp_ops[index], &vf32_a, &vf32_b);
         uint32_t lane;
         for (lane = 0; lane < 4; lane++) {
             int cond = 0;
@@ -683,12 +700,12 @@ TEST(test_simd_helper_ops) {
             }
             memset(expected + lane * 4u, cond ? 0xFF : 0x00, 4);
         }
-        wasm_test_expect_u8x16(t, &actual, expected, "f32x4 cmp");
+        wasm_test_expect_v128_bytes(t, &actual, expected, "f32x4 cmp");
     }
 
     for (index = 0; index < (uint32_t)(sizeof(f64_cmp_ops) / sizeof(f64_cmp_ops[0])); index++) {
         int64_t expected[2];
-        wasm_value_t actual = wasm__simd_cmp_f64x2(f64_cmp_ops[index], &vf64_a, &vf64_b);
+        wasm__v128_t actual = wasm__simd_cmp_f64x2(f64_cmp_ops[index], &vf64_a, &vf64_b);
         uint32_t lane;
         for (lane = 0; lane < 2; lane++) {
             int cond = 0;
@@ -720,20 +737,20 @@ TEST(test_simd_helper_ops) {
     {
         float expected_f32[4] = { 0.75f, 1.5f, 2.5f, 4.0f };
         double expected_f64[2] = { 1.75, -10.0 };
-        wasm_value_t actual_f32 = wasm__simd_f32x4_binary(0xE4, &vf32_a, &vf32_b);
-        wasm_value_t actual_f64 = wasm__simd_f64x2_binary(0xF1, &vf64_a, &vf64_b);
+        wasm__v128_t actual_f32 = wasm__simd_f32x4_binary(0xE4, &vf32_a, &vf32_b);
+        wasm__v128_t actual_f64 = wasm__simd_f64x2_binary(0xF1, &vf64_a, &vf64_b);
         wasm_test_expect_f32x4(t, &actual_f32, expected_f32, "f32x4.add");
         wasm_test_expect_f64x2(t, &actual_f64, expected_f64, "f64x2.sub");
     }
 
     {
-        wasm_value_t trunc_f32_input =
+        wasm__v128_t trunc_f32_input =
             wasm_test_v128_from_f32x4((const float[]){ 1.9f, -2.1f, 3.0f, -4.9f });
-        wasm_value_t trunc_f64_input = wasm_test_v128_from_f64x2((const double[]){ 5.75, -6.25 });
-        wasm_value_t trunc_f32 = wasm__simd_trunc_sat_f32x4(0xF8, &trunc_f32_input);
-        wasm_value_t convert_f32 = wasm__simd_convert_i32x4(0xFA, &vi32_b);
-        wasm_value_t trunc_f64 = wasm__simd_trunc_sat_f64x2_zero(0xFC, &trunc_f64_input);
-        wasm_value_t convert_f64 = wasm__simd_convert_low_i32x4_to_f64x2(0xFE, &vi32_a);
+        wasm__v128_t trunc_f64_input = wasm_test_v128_from_f64x2((const double[]){ 5.75, -6.25 });
+        wasm__v128_t trunc_f32 = wasm__simd_trunc_sat_f32x4(0xF8, &trunc_f32_input);
+        wasm__v128_t convert_f32 = wasm__simd_convert_i32x4(0xFA, &vi32_b);
+        wasm__v128_t trunc_f64 = wasm__simd_trunc_sat_f64x2_zero(0xFC, &trunc_f64_input);
+        wasm__v128_t convert_f64 = wasm__simd_convert_low_i32x4_to_f64x2(0xFE, &vi32_a);
         int32_t expected_trunc_f32[4] = { 1, -2, 3, -4 };
         float expected_convert_f32[4] = { 33333.0f, -2000.0f, 2000.0f, -33333.0f };
         int32_t expected_trunc_f64[4] = { 5, -6, 0, 0 };
