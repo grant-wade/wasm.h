@@ -26,14 +26,15 @@ WASM_PRIVATE void wasm__gc_struct_layout_free(const wasm_allocator_t* a, wasm_st
 WASM_PRIVATE void wasm__gc_array_layout_init(wasm_arraytype_t* type);
 
 
+/* Recomputes the reference kinds of type's layout from its resolved field types. */
+WASM_PRIVATE void wasm__gc_layout_resolve_ref_kinds(wasm_comptype_t* type);
+
 /* Returns the descriptor slot of a struct allocated with one, else NULL. */
 WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object);
 
 WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
                                      uint32_t length,
                                      size_t* out_size);
-
-WASM_PRIVATE wasm_value_t wasm__gc_field_default_value(const wasm_fieldtype_t* field);
 
 WASM_PRIVATE_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_t* object,
                                                    const wasm_structtype_t* type,
@@ -59,12 +60,6 @@ WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* objec
                                             int sign_extend,
                                             wasm_value_t* out_value);
 
-/* value must match the field's type. */
-WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
-                                       const wasm_arraytype_t* type,
-                                       uint32_t index,
-                                       wasm_value_t value);
-
 WASM_PRIVATE_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object);
 
 /* Fails with WASM_ERR_TYPE_MISMATCH unless value matches the field's type. */
@@ -78,10 +73,6 @@ WASM_PRIVATE wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,
                                             wasm_gc_header_t* object);
 
 WASM_PRIVATE int wasm__gc_array_data_element_size(const wasm_arraytype_t* type, size_t* out_size);
-
-WASM_PRIVATE wasm_error_t wasm__gc_array_read_data_value(const wasm_arraytype_t* type,
-                                                   const uint8_t* src,
-                                                   wasm_value_t* out_value);
 
 WASM_PRIVATE int wasm__is_gc_ref_type(wasm_valtype_t type);
 

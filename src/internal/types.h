@@ -18,8 +18,9 @@ typedef struct wasm_structtype_t {
     uint32_t num_fields;
     uint32_t num_ref_fields;
     wasm_fieldtype_t* fields;
-    uint32_t* field_offsets;    /* byte offset of each field in an object; ref_offsets points into the same block */
-    uint32_t* ref_offsets;      /* byte offsets of the fields that can hold references, ascending */
+    uint32_t* field_offsets;    /* byte offset of each field in an object; ref_offsets and ref_kinds point into the same block */
+    uint32_t* ref_offsets;      /* byte offsets of the fields the collector traces, ascending */
+    uint32_t* ref_kinds;        /* the WASM__SLOT_KIND_* of each field in ref_offsets */
     uint32_t object_size;       /* bytes of an object, with its descriptor slot; 0 if too large to allocate */
     uint32_t descriptor_offset; /* byte offset of the descriptor slot, or 0 for a type without a descriptor */
 } wasm_structtype_t;
@@ -29,7 +30,7 @@ typedef struct wasm_arraytype_t {
     uint32_t data_offset;    /* byte offset of the first element in an object */
     uint8_t elem_size;       /* bytes each element occupies in an object */
     uint8_t elem_align;
-    uint8_t elems_hold_refs; /* nonzero if elements can hold references */
+    uint8_t elem_ref_kind;   /* WASM__SLOT_KIND_* of the elements */
 } wasm_arraytype_t;
 
 typedef struct wasm_conttype_t {

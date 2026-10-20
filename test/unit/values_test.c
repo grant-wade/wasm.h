@@ -2,6 +2,7 @@
 
 #ifdef WASM_TEST_MODULAR
 #include "../../src/values.h"
+#include "../../src/internal/slot.h"
 #endif
 
 static uint32_t wasm_test_gc_i31_get_u(uintptr_t bits) {
@@ -754,10 +755,10 @@ TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
               "%s",
               "expected invalid struct field access to be rejected");
 
-    CHECK_MSG(t, wasm__gc_array_set(array_obj, &types[1].of.array, 0, wasm_i32(0x7F)) == WASM_OK,
+    CHECK_MSG(t, wasm__gc_array_store_element(array_obj, &types[1].of.array, 0, wasm_i32(0x7F)) == WASM_OK,
               "%s",
               "expected first packed array store to succeed");
-    CHECK_MSG(t, wasm__gc_array_set(array_obj, &types[1].of.array, 1, wasm_i32(0x80)) == WASM_OK,
+    CHECK_MSG(t, wasm__gc_array_store_element(array_obj, &types[1].of.array, 1, wasm_i32(0x80)) == WASM_OK,
               "%s",
               "expected second packed array store to succeed");
     CHECK_MSG(t, wasm__gc_array_len(array_obj) == 2,
@@ -780,7 +781,7 @@ TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
     CHECK_MSG(t, wasm__gc_array_get(array_obj, &types[1].of.array, 2, 0, &value) == WASM_ERR_OUT_OF_BOUNDS,
               "%s",
               "expected out-of-bounds array access to trap with bounds error");
-    CHECK_MSG(t, wasm__gc_array_set(NULL, &types[1].of.array, 0, wasm_i32(0)) == WASM_ERR_TRAP,
+    CHECK_MSG(t, wasm__gc_array_store_element(NULL, &types[1].of.array, 0, wasm_i32(0)) == WASM_ERR_TRAP,
               "%s",
               "expected null array store to trap");
 
@@ -799,13 +800,37 @@ static void wasm_test_layout_set_field(wasm_fieldtype_t* field, int packed, uint
 }
 
 static size_t wasm_test_layout_field_size(const wasm_fieldtype_t* field) {
-    if (field->storage.kind != WASM_STORAGE_PACKED) return sizeof(wasm_value_t);
-    return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
+    if (field->storage.kind == WASM_STORAGE_PACKED) return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
+    switch (field->storage.of.valtype) {
+        case WASM_TYPE_I32:
+        case WASM_TYPE_F32:
+            return 4u;
+        case WASM_TYPE_V128:
+            return 16u;
+        default:
+            return 8u;
+    }
 }
 
 static size_t wasm_test_layout_field_align(const wasm_fieldtype_t* field) {
-    if (field->storage.kind != WASM_STORAGE_PACKED) return (size_t)WASM__ALIGNOF(wasm_value_t);
-    return wasm_test_layout_field_size(field);
+    size_t size = wasm_test_layout_field_size(field);
+
+    return size < 8u ? size : 8u;
+}
+
+static uint32_t wasm_test_layout_ref_kind(int packed, uint32_t type) {
+    if (packed) return WASM__SLOT_KIND_NONE;
+    switch (type) {
+        case WASM_TYPE_EXTERNREF:
+            return WASM__SLOT_KIND_EXTERN;
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ANYREF:
+        case WASM_TYPE_EQREF:
+        case WASM_TYPE_ARRAYREF:
+            return WASM__SLOT_KIND_ANY;
+        default:
+            return WASM__SLOT_KIND_NONE;
+    }
 }
 
 static size_t wasm_test_layout_align(size_t value, size_t alignment) {
@@ -851,8 +876,9 @@ TEST(test_gc_layout_tables_place_every_field_kind) {
                 offset = wasm_test_layout_align(offset, wasm_test_layout_field_align(&fields[i]));
                 CHECK_MSG(t, st.field_offsets[i] == offset, "field %u of %u: expected offset %zu, got %u",
                           (unsigned)i, (unsigned)count, offset, (unsigned)st.field_offsets[i]);
-                if (!kinds[i].packed && wasm__is_ref_type((wasm_valtype_t)kinds[i].type)) {
-                    CHECK_MSG(t, refs < st.num_ref_fields && st.ref_offsets[refs] == offset,
+                if (wasm_test_layout_ref_kind(kinds[i].packed, kinds[i].type) != WASM__SLOT_KIND_NONE) {
+                    CHECK_MSG(t, refs < st.num_ref_fields && st.ref_offsets[refs] == offset &&
+                                     st.ref_kinds[refs] == wasm_test_layout_ref_kind(kinds[i].packed, kinds[i].type),
                               "field %u of %u: expected reference offset %zu", (unsigned)i, (unsigned)count, offset);
                     refs++;
                 }
@@ -879,7 +905,7 @@ TEST(test_gc_layout_tables_place_every_field_kind) {
         CHECK(t, at.elem_size == wasm_test_layout_field_size(&fields[i]));
         CHECK(t, at.elem_align == wasm_test_layout_field_align(&fields[i]));
         CHECK(t, at.data_offset == wasm_test_layout_align(WASM__GC_ARRAY_HEADER_SIZE, at.elem_align));
-        CHECK(t, at.elems_hold_refs == (!kinds[i].packed && wasm__is_ref_type((wasm_valtype_t)kinds[i].type)));
+        CHECK(t, at.elem_ref_kind == wasm_test_layout_ref_kind(kinds[i].packed, kinds[i].type));
         CHECK(t, wasm__gc_array_total_size(&at, 7, &array_size));
         CHECK(t, array_size == at.data_offset + 7u * at.elem_size);
     }

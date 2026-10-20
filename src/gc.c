@@ -140,25 +140,6 @@ static void wasm__gc_mark_descriptor(wasm__gc_mark_stack_t* stack, wasm_gc_heade
     wasm__gc_mark_value(stack, &value);
 }
 
-static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t* object) {
-    const wasm_module_t* mod = object->module;
-    const wasm_comptype_t* type;
-    uint32_t i;
-
-    if (object->kind == WASM_GC_OBJ_STRUCT) wasm__gc_mark_descriptor(stack, object);
-    if (!mod || object->type_index >= mod->num_types) return;
-    type = &mod->types[object->type_index];
-    if (object->kind == WASM_GC_OBJ_STRUCT && type->kind == WASM_COMP_STRUCT) {
-        const wasm_structtype_t* st = &type->of.struct_;
-
-        for (i = 0; i < st->num_ref_fields; i++)
-            wasm__gc_mark_value(stack, (const wasm_value_t*)((const uint8_t*)object + st->ref_offsets[i]));
-    } else if (object->kind == WASM_GC_OBJ_ARRAY && type->kind == WASM_COMP_ARRAY && type->of.array.elems_hold_refs) {
-        wasm__gc_mark_values(stack, (const wasm_value_t*)((const uint8_t*)object + type->of.array.data_offset),
-                             ((const wasm_gc_array_t*)object)->length);
-    }
-}
-
 static void wasm__gc_forward_value(wasm_runtime_t* rt, wasm_value_t* value);
 
 static void wasm__gc_forward_values(wasm_runtime_t* rt, wasm_value_t* values, uint32_t count);
@@ -179,6 +160,45 @@ static void wasm__gc_frame_slot(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt
         wasm__gc_forward_value(rt, &value);
         wasm__slot_set_ref(s, value.of.gc_ref);
     }
+}
+
+/* Marks the reference of kind in the 8-byte field at p if stack is not NULL, else forwards it. */
+static void wasm__gc_field_slot(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt, uint8_t* p, uint32_t kind) {
+    wasm__slot_t s;
+
+    memcpy(&s, p, sizeof(s));
+    if (wasm__slot_u64(&s) == 0) return;
+    wasm__gc_frame_slot(stack, rt, &s, kind);
+    if (!stack) memcpy(p, &s, sizeof(s));
+}
+
+/* Marks the references in object's fields if stack is not NULL, else forwards them. */
+static void wasm__gc_object_fields(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt, wasm_gc_header_t* object) {
+    const wasm_module_t* mod = object->module;
+    const wasm_comptype_t* type;
+    uint32_t i;
+
+    if (!mod || object->type_index >= mod->num_types) return;
+    type = &mod->types[object->type_index];
+    if (object->kind == WASM_GC_OBJ_STRUCT && type->kind == WASM_COMP_STRUCT) {
+        const wasm_structtype_t* st = &type->of.struct_;
+
+        for (i = 0; i < st->num_ref_fields; i++)
+            wasm__gc_field_slot(stack, rt, (uint8_t*)object + st->ref_offsets[i], st->ref_kinds[i]);
+    } else if (object->kind == WASM_GC_OBJ_ARRAY && type->kind == WASM_COMP_ARRAY &&
+               type->of.array.elem_ref_kind != WASM__SLOT_KIND_NONE) {
+        const wasm_arraytype_t* at = &type->of.array;
+        uint8_t* data = (uint8_t*)object + at->data_offset;
+        uint32_t length = ((wasm_gc_array_t*)object)->length;
+
+        for (i = 0; i < length; i++)
+            wasm__gc_field_slot(stack, rt, data + (size_t)i * at->elem_size, at->elem_ref_kind);
+    }
+}
+
+static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t* object) {
+    if (object->kind == WASM_GC_OBJ_STRUCT) wasm__gc_mark_descriptor(stack, object);
+    wasm__gc_object_fields(stack, stack->rt, object);
 }
 
 /* Marks the references in s's operand slots, frame locals, and caught exceptions if stack is not
@@ -334,26 +354,12 @@ static void wasm__gc_forward_root(wasm_runtime_t* rt, const wasm__gc_root_t* roo
 }
 
 static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
-    const wasm_module_t* mod = object->module;
-    const wasm_comptype_t* type;
-    uint32_t i;
-
     if (object->kind == WASM_GC_OBJ_STRUCT) {
         wasm_gc_header_t** slot = wasm__gc_descriptor_slot(object);
 
         if (slot && wasm__gc_ptr_in_heap(rt, *slot) && (*slot)->next_alloc) *slot = (*slot)->next_alloc;
     }
-    if (!mod || object->type_index >= mod->num_types) return;
-    type = &mod->types[object->type_index];
-    if (object->kind == WASM_GC_OBJ_STRUCT && type->kind == WASM_COMP_STRUCT) {
-        const wasm_structtype_t* st = &type->of.struct_;
-
-        for (i = 0; i < st->num_ref_fields; i++)
-            wasm__gc_forward_value(rt, (wasm_value_t*)((uint8_t*)object + st->ref_offsets[i]));
-    } else if (object->kind == WASM_GC_OBJ_ARRAY && type->kind == WASM_COMP_ARRAY && type->of.array.elems_hold_refs) {
-        wasm__gc_forward_values(rt, (wasm_value_t*)((uint8_t*)object + type->of.array.data_offset),
-                                ((wasm_gc_array_t*)object)->length);
-    }
+    wasm__gc_object_fields(NULL, rt, object);
 }
 
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {

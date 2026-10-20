@@ -10,6 +10,7 @@
 #include "../internal/field.h"
 #include "../internal/gc_types.h"
 #include "../memory_internal.h"
+#include "../portable.h"
 #include "../reader.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
@@ -25,6 +26,34 @@
 static wasm_error_t wasm__exec_gc_trap(wasm_runtime_t* rt, const char* message) {
     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", message);
     return WASM_ERR_TRAP;
+}
+
+/* Copies count elements of elem_size bytes from little-endian data at src into array elements at dst. */
+static void wasm__gc_copy_data_elems(uint8_t* dst, const uint8_t* src, size_t elem_size, uint32_t count) {
+#if WASM__BIG_ENDIAN
+    size_t i;
+    size_t b;
+
+    if (count == 0) return;
+    if (elem_size == 1u || elem_size == 16u) {
+        memcpy(dst, src, elem_size * (size_t)count);
+        return;
+    }
+    for (i = 0; i < (size_t)count; i++) {
+        for (b = 0; b < elem_size; b++) dst[i * elem_size + b] = src[i * elem_size + elem_size - 1u - b];
+    }
+#else
+    if (count > 0) memcpy(dst, src, elem_size * (size_t)count);
+#endif
+}
+
+/* Stores count values of an element segment at src into array elements at dst. */
+static void wasm__gc_copy_elem_values(uint8_t* dst, const wasm_arraytype_t* at, const wasm_value_t* src,
+                                      uint32_t count) {
+    uint32_t code = wasm__field_code(&at->field);
+    uint32_t i;
+
+    for (i = 0; i < count; i++) wasm__field_store_value(dst + (size_t)i * at->elem_size, code, src[i]);
 }
 
 WASM_PRIVATE wasm_gc_header_t* wasm__gc_slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
@@ -58,12 +87,8 @@ static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, 
             object = wasm__gc_alloc_struct_object(rt, mod, type_idx, st);
             if (!object) return WASM_ERR_OOM;
             *wasm__gc_descriptor_slot(&object->header) = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
-            for (i = st->num_fields; i > 0; i--) {
-                const wasm_fieldtype_t* field = &st->fields[i - 1];
-
-                err = wasm__gc_struct_set_field(object, st, i - 1,
-                                                subop == 0x20 ? wasm__pop_field_value(rt, field)
-                                                              : wasm__gc_field_default_value(field));
+            for (i = st->num_fields; subop == 0x20 && i > 0; i--) {
+                err = wasm__gc_struct_set_field(object, st, i - 1, wasm__pop_field_value(rt, &st->fields[i - 1]));
                 if (err != WASM_OK) return err;
             }
             WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
@@ -80,7 +105,6 @@ static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, 
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
     wasm_error_t err = WASM_OK;
-    uint32_t i;
     uint32_t subop = wasm__read_leb128_u32(&cf->r);
 
     switch (subop) {
@@ -117,17 +141,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
-                for (i = 0; i < count; i++) {
-                    wasm_value_t elem_value;
-
-                    err = wasm__gc_array_read_data_value(
-                        atype,
-                        segment->bytes + src_offset + ((uint64_t)i * (uint64_t)elem_size),
-                        &elem_value);
-                    if (err != WASM_OK) goto cleanup;
-                    err = wasm__gc_array_set(object, atype, i, elem_value);
-                    if (err != WASM_OK) goto cleanup;
-                }
+                wasm__gc_copy_data_elems((uint8_t*)object + atype->data_offset, segment->bytes + src_offset, elem_size,
+                                         count);
 
                 WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
@@ -152,10 +167,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
 
                 object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                 if (!object) WASM__TRAP(WASM_ERR_OOM);
-                for (i = 0; i < count; i++) {
-                    err = wasm__gc_array_set(object, atype, i, segment->elems[src_offset + i]);
-                    if (err != WASM_OK) goto cleanup;
-                }
+                wasm__gc_copy_elem_values((uint8_t*)object + atype->data_offset, atype, segment->elems + src_offset,
+                                          count);
 
                 WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
                 break;
@@ -177,12 +190,17 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
             if (err != WASM_OK) WASM__TRAP(WASM_ERR_MALFORMED);
 
             if (subop == 0x10) {
+                uint32_t code = wasm__field_code(&atype->field);
                 int32_t count_value = wasm__slot_i32(WASM__POP(rt));
-                wasm_value_t fill_value = wasm__pop_field_value(rt, &atype->field);
-                int32_t dst_value = wasm__slot_i32(WASM__POP(rt));
+                const wasm__slot_t* fill_value;
+                int32_t dst_value;
                 uint32_t count;
                 uint32_t dst_index;
+                uint8_t* dst;
 
+                rt->exec->sp -= wasm__field_slots(code);
+                fill_value = &rt->exec->stack[rt->exec->sp];
+                dst_value = wasm__slot_i32(WASM__POP(rt));
                 ref_value = wasm__pop_value(rt, WASM_TYPE_ANYREF, NULL);
                 if (count_value < 0 || dst_value < 0) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 if (!wasm__runtime_value_matches_type(mod, &ref_value, array_ref.type, &array_ref))
@@ -195,9 +213,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 if (!wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 WASM__CHARGE_ELEMS(rt, count);
-                for (i = 0; i < count; i++) {
-                    err = wasm__gc_array_set(object, atype, dst_index + i, fill_value);
-                    if (err != WASM_OK) goto cleanup;
+                if (count > 0) {
+                    dst = (uint8_t*)object + atype->data_offset + (size_t)dst_index * atype->elem_size;
+                    wasm__field_store(dst, code, fill_value);
+                    wasm__field_fill(dst, atype->elem_size, count);
                 }
                 break;
             }
@@ -240,26 +259,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 WASM__CHARGE_ELEMS(rt, count);
-
-                if (count > 0 && object == src_object && dst_index > src_index) {
-                    for (i = count; i > 0; i--) {
-                        wasm_value_t copied;
-
-                        err = wasm__gc_array_get(src_object, src_type, src_index + i - 1, 0, &copied);
-                        if (err != WASM_OK) goto cleanup;
-                        err = wasm__gc_array_set(object, atype, dst_index + i - 1, copied);
-                        if (err != WASM_OK) goto cleanup;
-                    }
-                } else {
-                    for (i = 0; i < count; i++) {
-                        wasm_value_t copied;
-
-                        err = wasm__gc_array_get(src_object, src_type, src_index + i, 0, &copied);
-                        if (err != WASM_OK) goto cleanup;
-                        err = wasm__gc_array_set(object, atype, dst_index + i, copied);
-                        if (err != WASM_OK) goto cleanup;
-                    }
-                }
+                if (count > 0)
+                    memmove((uint8_t*)object + atype->data_offset + (size_t)dst_index * atype->elem_size,
+                            (const uint8_t*)src_object + src_type->data_offset + (size_t)src_index * src_type->elem_size,
+                            (size_t)count * atype->elem_size);
                 break;
             }
 
@@ -297,18 +300,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 WASM__CHARGE_ELEMS(rt, count);
-
-                for (i = 0; i < count; i++) {
-                    wasm_value_t elem_value;
-
-                    err = wasm__gc_array_read_data_value(
-                        atype,
-                        segment->bytes + src_offset + ((uint64_t)i * (uint64_t)elem_size),
-                        &elem_value);
-                    if (err != WASM_OK) goto cleanup;
-                    err = wasm__gc_array_set(object, atype, dst_index + i, elem_value);
-                    if (err != WASM_OK) goto cleanup;
-                }
+                wasm__gc_copy_data_elems((uint8_t*)object + atype->data_offset + (size_t)dst_index * elem_size,
+                                         segment->bytes + src_offset, elem_size, count);
                 break;
             }
 
@@ -340,11 +333,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     !wasm__range_in_bounds_u64(dst_index, count, object->length))
                     WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
                 WASM__CHARGE_ELEMS(rt, count);
-
-                for (i = 0; i < count; i++) {
-                    err = wasm__gc_array_set(object, atype, dst_index + i, segment->elems[src_index + i]);
-                    if (err != WASM_OK) goto cleanup;
-                }
+                wasm__gc_copy_elem_values((uint8_t*)object + atype->data_offset + (size_t)dst_index * atype->elem_size,
+                                          atype, segment->elems + src_index, count);
                 break;
             }
         }
@@ -382,27 +372,12 @@ cleanup:
 
 #undef WASM__PUSH_REF
 
-/* Copies the first of count elements of elem_size bytes at data over the others. */
-static void wasm__gc_fill_elems(uint8_t* data, size_t elem_size, uint32_t count) {
-    size_t total = elem_size * (size_t)count;
-    size_t done = elem_size;
-
-    while (done < total) {
-        size_t chunk = done < total - done ? done : total - done;
-
-        memcpy(data + done, data, chunk);
-        done += chunk;
-    }
-}
-
 WASM_PRIVATE wasm_error_t wasm__exec_gc_new(wasm_module_t* mod, uint32_t subop, uint32_t type_idx, uint32_t count) {
     wasm_runtime_t* rt = mod->rt;
     wasm__exec_stack_t* exec = rt->exec;
-    wasm__slot_t zero[WASM__V128_SLOTS];
     wasm_error_t err = WASM_OK;
     uint32_t i;
 
-    memset(zero, 0, sizeof(zero));
     if (subop <= 0x01) {
         const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
         wasm_gc_struct_t* object;
@@ -410,15 +385,11 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc_new(wasm_module_t* mod, uint32_t subop, 
         if (!st) WASM__TRAP(WASM_ERR_MALFORMED);
         object = wasm__gc_alloc_struct_object(rt, mod, type_idx, st);
         if (!object) WASM__TRAP(WASM_ERR_OOM);
-        for (i = st->num_fields; i > 0; i--) {
+        for (i = st->num_fields; subop == 0x00 && i > 0; i--) {
             uint32_t code = wasm__field_code(&st->fields[i - 1u]);
-            const wasm__slot_t* value = zero;
 
-            if (subop == 0x00) {
-                exec->sp -= wasm__field_slots(code);
-                value = &exec->stack[exec->sp];
-            }
-            wasm__field_store((uint8_t*)object + st->field_offsets[i - 1u], code, value);
+            exec->sp -= wasm__field_slots(code);
+            wasm__field_store((uint8_t*)object + st->field_offsets[i - 1u], code, &exec->stack[exec->sp]);
         }
         wasm__slot_set_ref(&exec->stack[exec->sp++], (uintptr_t)object);
     } else {
@@ -445,16 +416,13 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc_new(wasm_module_t* mod, uint32_t subop, 
                 wasm__field_store(data + (size_t)(i - 1u) * at->elem_size, code, &exec->stack[exec->sp]);
             }
         } else {
-            const wasm__slot_t* value = zero;
-
             exec->sp--;
             if (subop == 0x06) {
                 exec->sp -= slots;
-                value = &exec->stack[exec->sp];
-            }
-            if (count > 0) {
-                wasm__field_store(data, code, value);
-                wasm__gc_fill_elems(data, at->elem_size, count);
+                if (count > 0) {
+                    wasm__field_store(data, code, &exec->stack[exec->sp]);
+                    wasm__field_fill(data, at->elem_size, count);
+                }
             }
         }
         wasm__slot_set_ref(&exec->stack[exec->sp++], (uintptr_t)object);

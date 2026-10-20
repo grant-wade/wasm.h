@@ -16,6 +16,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A runtime holds up to 134,217,728 unconsumed continuations, or 262,144 on 32-bit hosts.
 - A host table from `wasm_table_new` must outlive every runtime it is registered with.
 - SIMD instructions run from the interpreter loop with their immediates decoded once, and v128 locals copy without calls to `memcpy`.
+- GC struct fields and array elements are stored at their natural width, with references in 8 bytes.
+- `array.copy`, `array.fill`, `array.new_data`, and `array.init_data` copy element bytes in bulk.
 
 ### Fixed
 

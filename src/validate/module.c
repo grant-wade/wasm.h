@@ -321,10 +321,12 @@ WASM_PRIVATE wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod) {
                     err = wasm__resolve_storagetype_reftype(mod, &type->of.struct_.fields[j].storage);
                     if (err != WASM_OK) return err;
                 }
+                wasm__gc_layout_resolve_ref_kinds(type);
                 break;
             case WASM_COMP_ARRAY:
                 err = wasm__resolve_storagetype_reftype(mod, &type->of.array.field.storage);
                 if (err != WASM_OK) return err;
+                wasm__gc_layout_resolve_ref_kinds(type);
                 break;
             case WASM_COMP_CONT:
                 break;

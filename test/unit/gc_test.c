@@ -15,11 +15,13 @@ static uint32_t wasm_test_gc_allocation_count(const wasm_runtime_t* rt) {
     return count;
 }
 
+/* Loads the field into out; returns out, or NULL if there is no such field. */
 static wasm_value_t* wasm_test_gc_struct_field_value(wasm_gc_struct_t* object,
                                                      const wasm_structtype_t* type,
-                                                     uint32_t field_index) {
-    if (!object || !type || field_index >= type->num_fields) return NULL;
-    return (wasm_value_t*)(((uint8_t*)object) + type->field_offsets[field_index]);
+                                                     uint32_t field_index,
+                                                     wasm_value_t* out) {
+    if (!object || wasm__gc_struct_get_field(object, type, field_index, 0, out) != WASM_OK) return NULL;
+    return out;
 }
 
 TEST(test_gc_runtime_initializes_heap_arena) {
@@ -171,6 +173,7 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     wasm_value_t* table_field;
     wasm_value_t* local_field;
     wasm_value_t* stack_field;
+    wasm_value_t loaded[5];
     wasm__gc_root_t root;
     wasm_value_t held[6];
     wasm_value_t* held_values = held;
@@ -294,18 +297,21 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
               (unsigned)wasm_test_gc_allocation_count(&rt));
 
     moved_parent = (wasm_gc_struct_t*)globals[0].value.of.gc_obj;
-    parent_field = wasm_test_gc_struct_field_value(moved_parent, &types[1].of.struct_, 0);
+    parent_field = wasm_test_gc_struct_field_value(moved_parent, &types[1].of.struct_, 0, &loaded[0]);
     moved_child = parent_field ? (wasm_gc_struct_t*)parent_field->of.gc_obj : NULL;
-    child_field = wasm_test_gc_struct_field_value(moved_child, &types[0].of.struct_, 0);
+    child_field = wasm_test_gc_struct_field_value(moved_child, &types[0].of.struct_, 0, &loaded[1]);
     table_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)table_elems[0].of.gc_obj,
                                                   &types[0].of.struct_,
-                                                  0);
+                                                  0,
+                                                  &loaded[2]);
     local_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&frame_locals[0]),
                                                   &types[0].of.struct_,
-                                                  0);
+                                                  0,
+                                                  &loaded[3]);
     stack_field = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)wasm__slot_ref(&rt.exec->stack[0]),
                                                   &types[0].of.struct_,
-                                                  0);
+                                                  0,
+                                                  &loaded[4]);
 
     CHECK_MSG(t, moved_parent != NULL && moved_parent != parent,
               "%s",
@@ -398,7 +404,9 @@ TEST(test_gc_collect_marks_deep_object_chains_iteratively) {
 
     object = globals[0].value.of.gc_obj;
     while (object) {
-        wasm_value_t* next = wasm_test_gc_struct_field_value((wasm_gc_struct_t*)object, &types[0].of.struct_, 0);
+        wasm_value_t next_value;
+        wasm_value_t* next =
+            wasm_test_gc_struct_field_value((wasm_gc_struct_t*)object, &types[0].of.struct_, 0, &next_value);
 
         length++;
         object = next && wasm__is_heap_gc_ref_value(next) ? next->of.gc_obj : NULL;
@@ -1797,6 +1805,110 @@ TEST(test_gc_objects_of_every_field_kind_survive_their_module) {
     wasm_destroy(&rt);
 }
 
+/* (module (type $f (func (result i32)))
+     (type $s (struct (field (mut funcref)) (field (mut (ref null $f))) (field (mut f32)) (field (mut f64))
+       (field (mut i64)) (field (mut i32)) (field (mut externref)) (field (mut anyref)) (field (mut i16))))
+     (type $a (array (mut funcref)))
+     (func $seven (type $f) (i32.const 7)) (elem declare func $seven)
+     (func (export "seven") (result (ref $f)) (ref.func $seven))) */
+static const uint8_t wasm_test_gc_roundtrip_sections[] = {
+    0x01, 0x22, 0x04, 0x60, 0x00, 0x01, 0x7F, 0x5F, 0x09, 0x70, 0x01, 0x63, 0x00, 0x01, 0x7D, 0x01,
+    0x7C, 0x01, 0x7E, 0x01, 0x7F, 0x01, 0x6F, 0x01, 0x6E, 0x01, 0x77, 0x01, 0x5E, 0x70, 0x01, 0x60,
+    0x00, 0x01, 0x64, 0x00, 0x03, 0x03, 0x02, 0x00, 0x03, 0x07, 0x09, 0x01, 0x05, 0x73, 0x65, 0x76,
+    0x65, 0x6E, 0x00, 0x01, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x0B, 0x02, 0x04, 0x00,
+    0x41, 0x07, 0x0B, 0x04, 0x00, 0xD2, 0x00, 0x0B,
+};
+
+TEST(test_gc_host_field_accessors_round_trip_every_kind) {
+    static const wasm_valtype_t tags[] = { WASM_TYPE_FUNCREF, WASM_TYPE_FUNCREF, WASM_TYPE_F32,
+                                           WASM_TYPE_F64,     WASM_TYPE_I64,     WASM_TYPE_I32,
+                                           WASM_TYPE_EXTERNREF, WASM_TYPE_ANYREF, WASM_TYPE_I32 };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t values[9];
+    wasm_value_t elems[2];
+    wasm_value_t got;
+    wasm_value_t seven = wasm_ref_null(WASM_TYPE_FUNCREF);
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_NONE);
+    wasm_value_t* obj = NULL;
+    wasm_value_t* array = NULL;
+    uint32_t f32_bits = 0x7FA00001u;
+    uint64_t f64_bits = UINT64_C(0x7FF4000000000001);
+    uint32_t bits32;
+    uint64_t bits64;
+    uint32_t i;
+
+    wasm_init(&rt);
+    m = wasm_test_load_sections(&rt, wasm_test_gc_roundtrip_sections, sizeof(wasm_test_gc_roundtrip_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "seven", NULL, 0, &seven, 1));
+    values[0] = seven;
+    values[1] = seven;
+    values[2] = wasm_f32(0.0f);
+    memcpy(&values[2].of.f32, &f32_bits, sizeof(f32_bits));
+    values[3] = wasm_f64(0.0);
+    memcpy(&values[3].of.f64, &f64_bits, sizeof(f64_bits));
+    values[4] = wasm_i64(INT64_MIN + 1);
+    values[5] = wasm_i32(-2);
+    values[6] = wasm_externref((uintptr_t)0x1235u);
+    values[7] = wasm_ref_null(WASM_TYPE_ANYREF);
+    values[7].of.gc_ref = (uintptr_t)0x30000u;
+    values[8] = wasm_i32(0x18001);
+    WASM_CHECK_OK(t, wasm_struct_new(m, 1, values, 9, &ref));
+    obj = wasm_ref_hold(&rt, ref);
+    elems[0] = wasm_ref_null(WASM_TYPE_FUNCREF);
+    elems[1] = seven;
+    WASM_CHECK_OK(t, wasm_array_new(m, 2, elems, 2, &ref));
+    array = wasm_ref_hold(&rt, ref);
+    CHECK(t, obj != NULL && array != NULL);
+    if (obj != NULL && array != NULL) {
+        wasm_gc_collect(&rt);
+        for (i = 0; i < 9; i++) {
+            WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, i, &got));
+            CHECK_MSG(t, got.type == tags[i], "field %u: type 0x%X", (unsigned)i, (unsigned)got.type);
+        }
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 1, &got));
+        CHECK(t, got.of.funcref == seven.of.funcref && seven.of.funcref != UINT32_MAX);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 2, &got));
+        memcpy(&bits32, &got.of.f32, sizeof(bits32));
+        CHECK(t, bits32 == f32_bits);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 3, &got));
+        memcpy(&bits64, &got.of.f64, sizeof(bits64));
+        CHECK(t, bits64 == f64_bits);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 4, &got));
+        WASM_CHECK_I64(t, got.of.i64, INT64_MIN + 1);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 5, &got));
+        WASM_CHECK_I32(t, got.of.i32, -2);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 6, &got));
+        CHECK(t, got.of.externref == (uintptr_t)0x1235u);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 7, &got));
+        CHECK(t, got.of.gc_ref == (uintptr_t)0x30000u);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 8, &got));
+        WASM_CHECK_I32(t, got.of.i32, 0x8001);
+
+        WASM_CHECK_OK(t, wasm_struct_set_field(m, *obj, 0, wasm_ref_null(WASM_TYPE_NOFUNC)));
+        WASM_CHECK_OK(t, wasm_struct_set_field(m, *obj, 7, wasm_i31ref(-3)));
+        wasm_gc_collect(&rt);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 0, &got));
+        CHECK(t, got.type == WASM_TYPE_FUNCREF && got.of.funcref == UINT32_MAX);
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, *obj, 7, &got));
+        CHECK(t, got.type == WASM_TYPE_ANYREF && got.of.gc_ref == wasm_i31ref(-3).of.gc_ref);
+
+        WASM_CHECK_OK(t, wasm_array_get_elem(m, *array, 0, &got));
+        CHECK(t, got.type == WASM_TYPE_FUNCREF && got.of.funcref == UINT32_MAX);
+        WASM_CHECK_OK(t, wasm_array_get_elem(m, *array, 1, &got));
+        CHECK(t, got.type == WASM_TYPE_FUNCREF && got.of.funcref == seven.of.funcref);
+    }
+    wasm_ref_release(&rt, obj);
+    wasm_ref_release(&rt, array);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 /* (module
      (type $box (struct (field i32)))
      (type $f1 (func (param i32) (result i32))) (type $c1 (cont $f1))
@@ -2053,6 +2165,7 @@ static const test_case gc_cases[] = {
     { "gc: host values of bottom reference types must be null", test_gc_host_values_of_bottom_types_must_be_null },
     { "gc: fields and elements of every kind survive collections after their module is freed",
       test_gc_objects_of_every_field_kind_survive_their_module },
+    { "gc: host field accessors round-trip every field kind with its declared type", test_gc_host_field_accessors_round_trip_every_kind },
     { "gc: references only suspended continuation frames hold survive collections and move", test_gc_traces_references_only_suspended_frames_hold },
     { "gc: collections free abandoned continuations with their stacks and reuse their entries", test_gc_frees_abandoned_continuations_with_their_stacks },
     { "gc: registered host tables keep and move what they hold while no module imports them", test_gc_registered_host_tables_are_roots },

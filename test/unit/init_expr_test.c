@@ -1090,6 +1090,14 @@ TEST(test_reference_types_active_expr_element_segment) {
     wasm_destroy(&rt);
 }
 
+/* Returns the i32 at index of the 4-byte fields at p. */
+static int32_t wasm_test_i32_at(const uint8_t* p, uint32_t index) {
+    int32_t value;
+
+    memcpy(&value, p + (size_t)index * 4u, sizeof(value));
+    return value;
+}
+
 TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     wasm_builder_t mod = { 0 };
     wasm_runtime_t rt;
@@ -1099,11 +1107,11 @@ TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     wasm_gc_array_t* array_init;
     wasm_gc_array_t* array_default;
     wasm_gc_array_t* array_fixed;
-    wasm_value_t* struct_init_field;
-    wasm_value_t* struct_default_field;
-    wasm_value_t* array_init_data;
-    wasm_value_t* array_default_data;
-    wasm_value_t* array_fixed_data;
+    const uint8_t* struct_init_field;
+    const uint8_t* struct_default_field;
+    const uint8_t* array_init_data;
+    const uint8_t* array_default_data;
+    const uint8_t* array_fixed_data;
     size_t struct_field_offset;
     size_t array_data_offset;
 
@@ -1238,25 +1246,27 @@ TEST(test_gc_const_expr_supports_gc_alloc_ops) {
 
     struct_field_offset = m->types[0].of.struct_.field_offsets[0];
     array_data_offset = m->types[1].of.array.data_offset;
-    struct_init_field = (wasm_value_t*)((uint8_t*)struct_init + struct_field_offset);
-    struct_default_field = (wasm_value_t*)((uint8_t*)struct_default + struct_field_offset);
-    array_init_data = (wasm_value_t*)((uint8_t*)array_init + array_data_offset);
-    array_default_data = (wasm_value_t*)((uint8_t*)array_default + array_data_offset);
-    array_fixed_data = (wasm_value_t*)((uint8_t*)array_fixed + array_data_offset);
+    struct_init_field = (const uint8_t*)struct_init + struct_field_offset;
+    struct_default_field = (const uint8_t*)struct_default + struct_field_offset;
+    array_init_data = (const uint8_t*)array_init + array_data_offset;
+    array_default_data = (const uint8_t*)array_default + array_data_offset;
+    array_fixed_data = (const uint8_t*)array_fixed + array_data_offset;
+    CHECK(t, m->types[1].of.array.elem_size == 4u);
 
-    CHECK_MSG(t, struct_init_field->type == WASM_TYPE_I32 && struct_init_field->of.i32 == 7,
+    CHECK_MSG(t, wasm_test_i32_at(struct_init_field, 0) == 7,
               "%s", "expected struct.new const expr to preserve field values");
-    CHECK_MSG(t, struct_default_field->type == WASM_TYPE_I32 && struct_default_field->of.i32 == 0,
+    CHECK_MSG(t, wasm_test_i32_at(struct_default_field, 0) == 0,
               "%s", "expected struct.new_default const expr to zero-initialize fields");
 
     CHECK_MSG(t, array_init->length == 3, "expected array.new length 3, got %u", (unsigned)array_init->length);
     CHECK_MSG(t, array_default->length == 4, "expected array.new_default length 4, got %u", (unsigned)array_default->length);
     CHECK_MSG(t, array_fixed->length == 2, "expected array.new_fixed length 2, got %u", (unsigned)array_fixed->length);
-    CHECK_MSG(t, array_init_data[0].of.i32 == 9 && array_init_data[1].of.i32 == 9 && array_init_data[2].of.i32 == 9,
+    CHECK_MSG(t, wasm_test_i32_at(array_init_data, 0) == 9 && wasm_test_i32_at(array_init_data, 1) == 9 &&
+                     wasm_test_i32_at(array_init_data, 2) == 9,
               "%s", "expected array.new const expr to fill with the initializer value");
-    CHECK_MSG(t, array_default_data[0].of.i32 == 0 && array_default_data[3].of.i32 == 0,
+    CHECK_MSG(t, wasm_test_i32_at(array_default_data, 0) == 0 && wasm_test_i32_at(array_default_data, 3) == 0,
               "%s", "expected array.new_default const expr to zero-initialize elements");
-    CHECK_MSG(t, array_fixed_data[0].of.i32 == 1 && array_fixed_data[1].of.i32 == 2,
+    CHECK_MSG(t, wasm_test_i32_at(array_fixed_data, 0) == 1 && wasm_test_i32_at(array_fixed_data, 1) == 2,
               "%s", "expected array.new_fixed const expr to preserve element order");
 
     CHECK_MSG(t, wasm_test_value_is_i31ref(&m->globals[5].value), "%s", "expected ref.i31 const expr to use the tagged i31 representation");

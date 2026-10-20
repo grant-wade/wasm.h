@@ -2,6 +2,7 @@
 #include "module.h"
 #include "runtime.h"
 #include "values.h"
+#include "internal/field.h"
 #include "reader.h"
 #include "memory_internal.h"
 #include "types/references.h"
@@ -452,13 +453,9 @@ static wasm_error_t wasm__init_expr_struct_new(wasm_module_t* mod, wasm__reader_
         if (err != WASM_OK) return err;
         *wasm__gc_descriptor_slot(&object->header) = value.of.gc_obj;
     }
-    for (i = st->num_fields; i > 0; i--) {
-        if (is_default) {
-            value = wasm__gc_field_default_value(&st->fields[i - 1u]);
-        } else {
-            err = wasm__init_expr_stack_pop(stack, &value);
-            if (err != WASM_OK) return err;
-        }
+    for (i = st->num_fields; !is_default && i > 0; i--) {
+        err = wasm__init_expr_stack_pop(stack, &value);
+        if (err != WASM_OK) return err;
         err = wasm__gc_struct_store_field(object, st, i - 1u, value);
         if (err != WASM_OK) return err;
     }
@@ -494,16 +491,13 @@ static wasm_error_t wasm__init_expr_array_new(wasm_module_t* mod, wasm__reader_t
             err = wasm__gc_array_store_element(object, atype, i - 1u, value);
             if (err != WASM_OK) return err;
         }
-    } else {
-        if (subop == 0x06) {
-            err = wasm__init_expr_stack_pop(stack, &value);
+    } else if (subop == 0x06) {
+        err = wasm__init_expr_stack_pop(stack, &value);
+        if (err != WASM_OK) return err;
+        if (count > 0) {
+            err = wasm__gc_array_store_element(object, atype, 0, value);
             if (err != WASM_OK) return err;
-        } else {
-            value = wasm__gc_field_default_value(&atype->field);
-        }
-        for (i = 0; i < count; i++) {
-            err = wasm__gc_array_store_element(object, atype, i, value);
-            if (err != WASM_OK) return err;
+            wasm__field_fill((uint8_t*)object + atype->data_offset, atype->elem_size, count);
         }
     }
     return wasm__init_expr_stack_push(stack, wasm__gc_type_ref_value(mod, type_idx, &object->header));
