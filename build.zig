@@ -43,21 +43,6 @@ pub fn build(b: *std.Build) !void {
     }, true);
     b.installArtifact(runtime.library);
 
-    const options = b.addOptions();
-    options.addOption([]const u8, "package_version", @import("build.zig.zon").version);
-    const wrapper_tests = b.addTest(.{
-        .name = "wasm_zig_test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("zig/wasm_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "wasm", .module = runtime.module },
-                .{ .name = "build_options", .module = options.createModule() },
-            },
-        }),
-    });
-
     const host_runtime = addRuntime(b, .{
         .target = b.graph.host,
         .optimize = optimize,
@@ -75,6 +60,23 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     b.installArtifact(wasm2zig);
+
+    if (!b.isRoot()) return;
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "package_version", @import("build.zig.zon").version);
+    const wrapper_tests = b.addTest(.{
+        .name = "wasm_zig_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/wasm_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "wasm", .module = runtime.module },
+                .{ .name = "build_options", .module = options.createModule() },
+            },
+        }),
+    });
 
     const bindings_tests = b.addTest(.{
         .name = "wasm2zig_test",
