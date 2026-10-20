@@ -1,0 +1,3 @@
+examples/session_math.c text eol=lf
+examples/session_math.h text eol=lf
+examples/session_math.wasm binary
