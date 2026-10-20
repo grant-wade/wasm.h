@@ -945,6 +945,8 @@ struct wasm_memory_t {
 
 typedef struct wasm_tag_t {
     uint32_t type_idx;
+    uint32_t payload_slots; /* 1 + the slots its payload spans once it has been thrown, else 0 */
+    uint32_t payload_kinds; /* WASM__SLOT_KIND_BITS-bit kinds of the first 16 of those slots */
     uint64_t identity;
 } wasm_tag_t;
 
@@ -954,11 +956,16 @@ typedef struct wasm_custom_section_t {
     uint32_t size;
 } wasm_custom_section_t;
 
+/* The exception being thrown: its tag and the payload slots its handler receives. */
 typedef struct wasm__exception_state_t {
-    uint32_t tag_index;
     uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
+    const union wasm__slot_t* slots;
+    const uint32_t* kinds;                    /* WASM__SLOT_KIND_BITS-bit kind of each payload slot */
+    struct wasm__exception_object_t* source;  /* the exception object it is thrown from, or NULL */
+    union wasm__slot_t* buffer;               /* payload of an exception thrown from slots, then its kinds */
+    uint32_t buffer_cap;                      /* payload slots buffer has room for */
+    uint32_t tag_index;
+    uint32_t num_slots;
     int is_pending;
 } wasm__exception_state_t;
 
@@ -1975,24 +1982,7 @@ WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t
 
 WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex);
-
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
-                                              wasm__exception_state_t* ex,
-                                              uint32_t tag_index,
-                                              uint64_t tag_identity,
-                                              const wasm_value_t* values,
-                                              uint32_t count);
-
 WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
-                                            const wasm__exception_state_t* ex,
-                                            wasm_value_t* out_value);
-
-/* Returns NULL unless value refers to a live exception object of rt. */
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
-                                                                       const wasm_value_t* value);
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
@@ -2059,18 +2049,46 @@ typedef struct wasm_gc_array_t {
 #define WASM__GC_STRUCT_HEADER_SIZE offsetof(wasm_gc_struct_t, payload)
 #define WASM__GC_ARRAY_HEADER_SIZE offsetof(wasm_gc_array_t, payload)
 
+/* An entry of an exception table. In use, it is a caught exception: the tag and payload slots of the exception
+ * an exnref or a legacy catch clause holds. */
 struct wasm__exception_object_t {
-    uint32_t tag_index;
     uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
-    int marked;
+    union wasm__slot_t* slots; /* payload, with room for cap_slots slots */
+    uint32_t* kinds;           /* WASM__SLOT_KIND_BITS-bit kind of each payload slot, after slots */
+    uint32_t tag_index;
+    uint32_t num_slots;
+    uint32_t cap_slots;
+    uint32_t index;     /* its index in its table */
+    uint32_t gen;       /* generation of its reference in use or next */
+    uint32_t next_free; /* 1 + the next free entry while this one is free, or 0 */
+    uint8_t in_use;
+    uint8_t held;       /* in the table of exceptions legacy catch clauses hold, which no reference names */
+    uint8_t marked;
 };
+
+#define WASM__EXN_BLOCK_ENTRIES 256u
+
+/* A runtime's exception objects, in blocks of WASM__EXN_BLOCK_ENTRIES entries that never move. */
+typedef struct wasm__exn_table_t {
+    struct wasm__exception_object_t** blocks;
+    uint32_t num_blocks;
+    uint32_t cap_blocks;
+    uint32_t count;      /* entries ever used, the first count of the blocks */
+    uint32_t free_head;  /* 1 + the first free entry, or 0 */
+    uint32_t live;       /* entries in use */
+    uint32_t swept_live; /* live when the last collection finished */
+    size_t new_bytes;    /* bytes of the entries references were made to since the last collection */
+} wasm__exn_table_t;
+
+WASM_INLINE struct wasm__exception_object_t* wasm__exn_at(const wasm__exn_table_t* table, uint32_t index) {
+    return &table->blocks[index / WASM__EXN_BLOCK_ENTRIES][index % WASM__EXN_BLOCK_ENTRIES];
+}
 
 /* A continuation reference has bit 0 set, the index of its entry in the runtime's continuation table in the next
  * WASM__CONT_INDEX_BITS bits, the entry's generation in the next WASM__CONT_GEN_BITS, and the runtime's tag in
  * the rest. Runtimes alive at once have distinct tags, except that runtimes with tag WASM__CONT_TAG_MAX each own
- * a distinct slice of its indices. */
+ * a distinct slice of its indices. An exception reference has the same layout with bit 0 clear, naming an entry
+ * of the runtime's exception table. */
 #if UINTPTR_MAX > 0xFFFFFFFFu
 #define WASM__CONT_INDEX_BITS 27u
 #define WASM__CONT_GEN_BITS 24u
@@ -2476,7 +2494,8 @@ struct wasm_runtime_t {
     char error_msg[256];
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
-    wasm__handle_set_t exception_objects;
+    wasm__exn_table_t exns;      /* exceptions exnrefs name */
+    wasm__exn_table_t held_exns; /* exceptions legacy catch clauses hold */
     wasm__cont_table_t conts;
     wasm__exec_stack_t* cont_stacks;     /* continuation stacks in use */
     wasm__exec_stack_t* cont_stack_pool; /* released continuation stacks kept for reuse */
@@ -2504,7 +2523,7 @@ struct wasm_runtime_t {
     wasm__held_block_t* held_values;
     wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
-    uint32_t handle_gc_threshold; /* boxes, exception objects, and continuations in use that trigger a collection */
+    uint32_t handle_gc_threshold; /* boxes and continuations in use that trigger a collection */
     wasm__exec_stack_t main_stack;
     wasm__arena_chunk_t* frame_arena_spare; /* last dropped block, kept for reuse */
     wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
@@ -2577,8 +2596,8 @@ WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, 
 
 WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
-/* Collects garbage once enough externref boxes, exception objects, and continuations in use have accumulated, or
- * when the continuation table needs one. Call it only where every live reference is reachable from the runtime's
+/* Collects garbage once enough externref boxes and continuations in use have accumulated, or when the exception
+ * or continuation table needs one. Call it only where every live reference is reachable from the runtime's
  * roots. */
 WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
 
@@ -5323,6 +5342,9 @@ WASM_PRIVATE double wasm__sqrt_f64(double value) {
 
 
 
+/* Gives rt the tag its continuation and exception references hold if it has none; returns 0 if none is left. */
+WASM_PRIVATE int wasm__cont_claim_tag(wasm_runtime_t* rt);
+
 /* Returns the reference that names k while it is in use. */
 WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k);
 
@@ -5412,6 +5434,123 @@ WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt);
 
 #endif /* WASM_SRC_EXEC_CONT_H */
 /* END src/exec/cont.h */
+
+/* BEGIN src/exec/exceptions.h */
+#ifndef WASM_SRC_EXEC_EXCEPTIONS_H
+#define WASM_SRC_EXEC_EXCEPTIONS_H
+
+
+/* BEGIN src/exec/state.h */
+#ifndef WASM_EXEC_STATE_H
+#define WASM_EXEC_STATE_H
+
+
+
+/* A try or try_table block that is running: the only blocks that keep a label at run time. */
+typedef struct wasm__label_t {
+    const uint32_t* handler;                 /* its clause table in the translated body */
+    struct wasm__exception_object_t* caught; /* the exception a legacy catch clause of it is handling, or NULL */
+    uint32_t sp_base;
+    uint8_t opcode;
+    uint8_t active_catch;
+} wasm__label_t;
+struct wasm__call_frame_t {
+    wasm_module_t* module;
+    uint32_t func_idx;
+    uint32_t sp_base;
+    wasm__slot_t* locals;
+    wasm__label_t* labels;
+    uint32_t lsp;
+    const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
+    const uint32_t* op_at; /* the instruction it is running, for backtraces */
+    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates, set before each one */
+    wasm_func_t* func;
+    wasm_value_t* results_dst; /* where a root frame's results go */
+    wasm__arena_mark_t arena_saved;
+};
+#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
+#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
+#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
+#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
+#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
+#define WASM__PUSH(rt) (&(rt)->exec->stack[(rt)->exec->sp++])
+#define WASM__POP(rt) (&(rt)->exec->stack[--(rt)->exec->sp])
+#define WASM__PEEK(rt) (&(rt)->exec->stack[(rt)->exec->sp - 1])
+#define WASM__TRAP(code) \
+    do {                 \
+        err = (code);    \
+        goto cleanup;    \
+    } while (0)
+
+/* Bulk instructions pay for their size on top of the unit every instruction costs: one more
+ * unit per WASM__FUEL_BYTES_PER_UNIT bytes or WASM__FUEL_ELEMS_PER_UNIT elements they touch. */
+#define WASM__FUEL_BYTES_PER_UNIT 64u
+#define WASM__FUEL_ELEMS_PER_UNIT 8u
+#define WASM__CHARGE_FUEL(rt, units)                    \
+    do {                                                \
+        if ((rt)->fuel_enabled) {                       \
+            uint64_t wasm__units = (uint64_t)(units);   \
+            if ((rt)->fuel < wasm__units) {             \
+                (rt)->fuel = 0;                         \
+                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);       \
+            }                                           \
+            (rt)->fuel -= wasm__units;                  \
+        }                                               \
+    } while (0)
+#define WASM__CHARGE_BYTES(rt, bytes) WASM__CHARGE_FUEL(rt, (uint64_t)(bytes) / WASM__FUEL_BYTES_PER_UNIT)
+#define WASM__CHARGE_ELEMS(rt, count) WASM__CHARGE_FUEL(rt, (uint64_t)(count) / WASM__FUEL_ELEMS_PER_UNIT)
+
+#endif /* WASM_EXEC_STATE_H */
+/* END src/exec/state.h */
+
+WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
+
+/* Takes branch descriptor desc from cf, the top frame of its runtime's current stack; a branch that
+ * returns leaves cf's pc NULL. */
+WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc);
+
+/* Returns WASM_OK with cf at the handler, or clears its labels and returns WASM__ERR_EXCEPTION. */
+WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf);
+
+/* Makes an exception of tag tag_index of mod, whose payload is the slots just below top, rt's pending exception.
+ * Returns in *out_slots how many slots the payload spans. */
+WASM_PRIVATE wasm_error_t wasm__exn_throw_slots(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t tag_index,
+                                                const wasm__slot_t* top, uint32_t* out_slots);
+
+/* Makes the exception ref names rt's pending exception; returns 0 if ref is null or names no exception of rt. */
+WASM_PRIVATE int wasm__exn_throw_ref(wasm_runtime_t* rt, uintptr_t ref);
+
+/* Makes exception, which a legacy catch clause holds, rt's pending exception. */
+WASM_PRIVATE wasm_error_t wasm__exn_rethrow(wasm_runtime_t* rt, wasm__exception_object_t* exception);
+
+WASM_PRIVATE void wasm__exn_clear_pending(wasm_runtime_t* rt);
+
+/* exception is one a legacy catch clause held. */
+WASM_PRIVATE void wasm__exn_release(wasm_runtime_t* rt, wasm__exception_object_t* exception);
+
+/* Returns the exception ref names if it is one of rt's, else NULL. */
+WASM_PRIVATE const wasm__exception_object_t* wasm__exn_live(const wasm_runtime_t* rt, uintptr_t ref);
+
+#ifndef NDEBUG
+/* Returns nonzero if ref has the form of a reference rt hands out to its exceptions. */
+WASM_PRIVATE int wasm__exn_issued(const wasm_runtime_t* rt, uintptr_t ref);
+#endif
+
+/* Marks the exception ref names and returns it, or returns NULL if it names none or is already marked. */
+WASM_PRIVATE wasm__exception_object_t* wasm__exn_mark(wasm_runtime_t* rt, uintptr_t ref);
+
+WASM_PRIVATE void wasm__exn_clear_marks(wasm_runtime_t* rt);
+
+/* Every live reference must be marked. */
+WASM_PRIVATE void wasm__exn_sweep(wasm_runtime_t* rt);
+
+/* Returns nonzero when the exceptions references were made to since the last collection call for one. */
+WASM_PRIVATE int wasm__exn_collection_due(const wasm_runtime_t* rt);
+
+WASM_PRIVATE void wasm__exn_free_all(wasm_runtime_t* rt);
+
+#endif /* WASM_SRC_EXEC_EXCEPTIONS_H */
+/* END src/exec/exceptions.h */
 
 #include <stdio.h>
 
@@ -5892,7 +6031,8 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
         wasm__clear_reftype(out_reftype);
         return 0;
     }
-    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) return 1;
+    if (wasm__uses_externref_storage(value->type)) return 1;
+    if (wasm__uses_exnref_storage(value->type)) return mod && mod->rt && wasm__exn_live(mod->rt, value->of.externref);
     if (wasm__uses_contref_storage(value->type)) {
         const wasm__cont_object_t* k = mod && mod->rt ? wasm__cont_live(mod->rt, value->of.externref) : NULL;
 
@@ -7241,7 +7381,6 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 
 
 
-
 #include <string.h>
 #include <stdio.h>
 
@@ -7383,34 +7522,6 @@ WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex) {
-    wasm__free(a, ex->values);
-    memset(ex, 0, sizeof(*ex));
-}
-
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
-                                              wasm__exception_state_t* ex,
-                                              uint32_t tag_index,
-                                              uint64_t tag_identity,
-                                              const wasm_value_t* values,
-                                              uint32_t count) {
-    wasm_value_t* copy = NULL;
-
-    wasm__free_exception_state(a, ex);
-    if (count > 0) {
-        copy = (wasm_value_t*)wasm__malloc_array(a, count, sizeof(wasm_value_t));
-        if (!copy) return WASM_ERR_OOM;
-        memcpy(copy, values, count * sizeof(wasm_value_t));
-    }
-
-    ex->tag_index = tag_index;
-    ex->tag_identity = tag_identity;
-    ex->values = copy;
-    ex->num_values = count;
-    ex->is_pending = 1;
-    return WASM_OK;
-}
-
 WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt) {
     uint64_t identity;
 
@@ -7420,50 +7531,6 @@ WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt) {
     rt->next_tag_identity = identity + 1;
     if (rt->next_tag_identity == 0) rt->next_tag_identity = 1;
     return identity;
-}
-
-WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
-                                            const wasm__exception_state_t* ex,
-                                            wasm_value_t* out_value) {
-    wasm__exception_object_t* object;
-    wasm_value_t value;
-
-    if (!rt || !ex || !out_value) return WASM_ERR_MALFORMED;
-
-    object = (wasm__exception_object_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*object));
-    if (!object) return WASM_ERR_OOM;
-    object->tag_index = ex->tag_index;
-    object->tag_identity = ex->tag_identity;
-    object->num_values = ex->num_values;
-    if (ex->num_values > 0) {
-        object->values = (wasm_value_t*)wasm__malloc_array(&rt->allocator, ex->num_values, sizeof(wasm_value_t));
-        if (!object->values) {
-            wasm__free(&rt->allocator, object);
-            return WASM_ERR_OOM;
-        }
-        memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
-    }
-
-    if (wasm__handle_set_insert(&rt->allocator, &rt->exception_objects, object) != WASM_OK) {
-        wasm__free(&rt->allocator, object->values);
-        wasm__free(&rt->allocator, object);
-        return WASM_ERR_OOM;
-    }
-
-    value = wasm_ref_null(WASM_TYPE_EXNREF);
-    value.of.externref = (uintptr_t)object;
-    *out_value = value;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
-                                                                       const wasm_value_t* value) {
-    void* handle;
-
-    if (!rt || !value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
-    handle = (void*)value->of.externref;
-    if (!wasm__handle_set_contains(&rt->exception_objects, handle)) return NULL;
-    return (wasm__exception_object_t*)handle;
 }
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {
@@ -11844,72 +11911,6 @@ WASM_PRIVATE wasm_error_t wasm__eval_init_expr(wasm_module_t* mod, wasm__reader_
 /* BEGIN src/exec/stack.c */
 
 
-/* BEGIN src/exec/state.h */
-#ifndef WASM_EXEC_STATE_H
-#define WASM_EXEC_STATE_H
-
-
-
-/* A try or try_table block that is running: the only blocks that keep a label at run time. */
-typedef struct wasm__label_t {
-    const uint32_t* handler; /* its clause table in the translated body */
-    uint32_t sp_base;
-    uint32_t caught_tag;
-    uint64_t caught_tag_identity;
-    uint32_t caught_count;
-    wasm_value_t* caught_values;
-    const wasm_allocator_t* caught_allocator; /* source of caught_values */
-    uint8_t opcode;
-    uint8_t active_catch;
-} wasm__label_t;
-struct wasm__call_frame_t {
-    wasm_module_t* module;
-    uint32_t func_idx;
-    uint32_t sp_base;
-    wasm__slot_t* locals;
-    wasm__label_t* labels;
-    uint32_t lsp;
-    const uint32_t* pc;    /* where the frame resumes, or NULL once it has branched to its end */
-    const uint32_t* op_at; /* the instruction it is running, for backtraces */
-    wasm__reader_t r;      /* bytecode for handlers that decode their own immediates, set before each one */
-    wasm_func_t* func;
-    wasm_value_t* results_dst; /* where a root frame's results go */
-    wasm__arena_mark_t arena_saved;
-};
-#define WASM__ERR_EXCEPTION ((wasm_error_t) - 1)
-#define WASM__ERR_CALL_FRAME ((wasm_error_t) - 2)
-#define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
-#define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
-#define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt) (&(rt)->exec->stack[(rt)->exec->sp++])
-#define WASM__POP(rt) (&(rt)->exec->stack[--(rt)->exec->sp])
-#define WASM__PEEK(rt) (&(rt)->exec->stack[(rt)->exec->sp - 1])
-#define WASM__TRAP(code) \
-    do {                 \
-        err = (code);    \
-        goto cleanup;    \
-    } while (0)
-
-/* Bulk instructions pay for their size on top of the unit every instruction costs: one more
- * unit per WASM__FUEL_BYTES_PER_UNIT bytes or WASM__FUEL_ELEMS_PER_UNIT elements they touch. */
-#define WASM__FUEL_BYTES_PER_UNIT 64u
-#define WASM__FUEL_ELEMS_PER_UNIT 8u
-#define WASM__CHARGE_FUEL(rt, units)                    \
-    do {                                                \
-        if ((rt)->fuel_enabled) {                       \
-            uint64_t wasm__units = (uint64_t)(units);   \
-            if ((rt)->fuel < wasm__units) {             \
-                (rt)->fuel = 0;                         \
-                WASM__TRAP(WASM_ERR_OUT_OF_FUEL);       \
-            }                                           \
-            (rt)->fuel -= wasm__units;                  \
-        }                                               \
-    } while (0)
-#define WASM__CHARGE_BYTES(rt, bytes) WASM__CHARGE_FUEL(rt, (uint64_t)(bytes) / WASM__FUEL_BYTES_PER_UNIT)
-#define WASM__CHARGE_ELEMS(rt, count) WASM__CHARGE_FUEL(rt, (uint64_t)(count) / WASM__FUEL_ELEMS_PER_UNIT)
-
-#endif /* WASM_EXEC_STATE_H */
-/* END src/exec/state.h */
 
 
 #include <string.h>
@@ -12027,6 +12028,7 @@ WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__exec_stack_t*
 /* END src/exec/stack.c */
 
 /* BEGIN src/runtime.c */
+
 
 
 
@@ -12483,12 +12485,12 @@ static void wasm__gc_collect_handles_when_due(wasm_runtime_t* rt, int creating_c
 
     if (!rt) return;
     threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
-    if (rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live < threshold &&
-        !wasm__cont_collection_due(rt, creating_cont))
+    if (rt->externref_boxes.count + rt->conts.live < threshold && !wasm__cont_collection_due(rt, creating_cont) &&
+        !wasm__exn_collection_due(rt))
         return;
 
     wasm_gc_collect(rt);
-    live = rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live;
+    live = rt->externref_boxes.count + rt->conts.live;
     rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
     if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
         rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
@@ -12789,13 +12791,6 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     wasm__free(&rt->allocator, rt->memory_imports);
     wasm__free(&rt->allocator, rt->tag_imports);
     for (i = 0; i < rt->externref_boxes.capacity; i++) wasm__free(&rt->allocator, rt->externref_boxes.slots[i]);
-    for (i = 0; i < rt->exception_objects.capacity; i++) {
-        wasm__exception_object_t* exception_object = (wasm__exception_object_t*)rt->exception_objects.slots[i];
-
-        if (!exception_object) continue;
-        wasm__free(&rt->allocator, exception_object->values);
-        wasm__free(&rt->allocator, exception_object);
-    }
     while (rt->linked_funcs) {
         wasm__linked_func_t* next = rt->linked_funcs->next;
 
@@ -12809,9 +12804,9 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
         rt->held_values = next;
     }
     wasm__cont_free_all(rt);
+    wasm__exn_free_all(rt);
     wasm__gc_free_retired_types(rt);
     wasm__free_type_groups(rt);
-    wasm__handle_set_free(&rt->allocator, &rt->exception_objects);
     wasm__handle_set_free(&rt->allocator, &rt->externref_boxes);
     rt->handle_gc_threshold = 0;
     wasm__free(&rt->allocator, rt->validator_stack);
@@ -12825,7 +12820,6 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     wasm__free(&rt->allocator, rt->validator_operand_types);
     wasm__free(&rt->allocator, rt->validator_maps);
     wasm__free(&rt->allocator, rt->validator_map_bits);
-    wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
     wasm__backtrace_destroy(rt);
     wasm__exec_stack_destroy(rt, &rt->main_stack);
     wasm__arena_free_spare(rt);
@@ -20146,6 +20140,7 @@ WASM_PRIVATE int wasm__visible_call_frame_info(const wasm_runtime_t* rt,
 
 
 
+
 #include <stdio.h>
 
 
@@ -20226,7 +20221,7 @@ static void wasm__check_ref_slot(const wasm_runtime_t* rt, const wasm__call_fram
         valid = (bits & WASM__GC_I31_TAG) != 0 || wasm__gc_ptr_in_heap(rt, (const void*)bits) ||
                 wasm__handle_set_contains(&rt->externref_boxes, (const void*)bits);
     else if (kind == WASM__SLOT_KIND_HANDLE)
-        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) || wasm__cont_issued(rt, bits);
+        valid = wasm__exn_issued(rt, bits) || wasm__cont_issued(rt, bits);
     if (valid) return;
     if (cf)
         fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u of kind %u holds %p\n",
@@ -20347,8 +20342,6 @@ WASM_PRIVATE wasm_value_t wasm__value_from_slot(const wasm_runtime_t* rt,
 
 /* Stores count values in the slots starting at dst; returns how many slots they fill. */
 WASM_PRIVATE uint32_t wasm__slots_from_values(wasm__slot_t* dst, const wasm_value_t* values, uint32_t count);
-
-WASM_PRIVATE uint32_t wasm__values_slots(const wasm_value_t* values, uint32_t count);
 
 /* Reads count values of types, refined by reftypes if not NULL, from the slots starting at src;
  * returns how many slots they span. */
@@ -20486,14 +20479,6 @@ WASM_PRIVATE uint32_t wasm__slots_from_values(wasm__slot_t* dst, const wasm_valu
     return slots;
 }
 
-WASM_PRIVATE uint32_t wasm__values_slots(const wasm_value_t* values, uint32_t count) {
-    uint32_t slots = 0;
-    uint32_t i;
-
-    for (i = 0; i < count; i++) slots += wasm__valtype_slots(values[i].type);
-    return slots;
-}
-
 WASM_PRIVATE uint32_t wasm__values_from_slots(const wasm_runtime_t* rt,
                                               const wasm_valtype_t* types,
                                               const wasm_reftype_t* reftypes,
@@ -20554,6 +20539,7 @@ WASM_PRIVATE wasm_valtype_t wasm__ref_top_type(wasm_valtype_t type) {
 
 
 
+
 #include <string.h>
 
 /* Objects marked but not yet scanned; explicit stacks keep deep object graphs off the C stack. */
@@ -20585,6 +20571,18 @@ static void* wasm__gc_grow(wasm__gc_mark_stack_t* stack, void* items, size_t* ca
 }
 
 static void wasm__gc_mark_value(wasm__gc_mark_stack_t* stack, const wasm_value_t* value);
+
+/* exception must be marked already. */
+static void wasm__gc_push_exception(wasm__gc_mark_stack_t* stack, wasm__exception_object_t* exception) {
+    if (stack->exception_count == stack->exception_capacity) {
+        wasm__exception_object_t** exceptions =
+            (wasm__exception_object_t**)wasm__gc_grow(stack, stack->exceptions, &stack->exception_capacity);
+
+        if (!exceptions) return;
+        stack->exceptions = exceptions;
+    }
+    stack->exceptions[stack->exception_count++] = exception;
+}
 
 static void wasm__gc_mark_box(wasm__gc_mark_stack_t* stack, uintptr_t handle) {
     while (handle && wasm__handle_set_contains(&stack->rt->externref_boxes, (const void*)handle)) {
@@ -20619,20 +20617,9 @@ static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_
         }
         stack->conts[stack->cont_count++] = k;
     } else {
-        wasm__exception_object_t* exception;
+        wasm__exception_object_t* exception = wasm__exn_mark(stack->rt, value->of.externref);
 
-        if (!wasm__handle_set_contains(&stack->rt->exception_objects, handle)) return;
-        exception = (wasm__exception_object_t*)handle;
-        if (exception->marked) return;
-        if (stack->exception_count == stack->exception_capacity) {
-            wasm__exception_object_t** exceptions = (wasm__exception_object_t**)wasm__gc_grow(
-                stack, stack->exceptions, &stack->exception_capacity);
-
-            if (!exceptions) return;
-            stack->exceptions = exceptions;
-        }
-        exception->marked = 1;
-        stack->exceptions[stack->exception_count++] = exception;
+        if (exception) wasm__gc_push_exception(stack, exception);
     }
 }
 
@@ -20741,8 +20728,16 @@ static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t*
     wasm__gc_object_fields(stack, stack->rt, object);
 }
 
+/* Marks the references among the count slots of an exception payload if stack is not NULL, else forwards them. */
+static void wasm__gc_payload(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt, wasm__slot_t* slots,
+                             const uint32_t* kinds, uint32_t count) {
+    uint32_t i;
+
+    for (i = 0; i < count; i++) wasm__gc_frame_slot(stack, rt, &slots[i], wasm__stack_map_kind(kinds, i));
+}
+
 /* Marks the references in s's operand slots, frame locals, and caught exceptions if stack is not
- * NULL, else forwards them. */
+ * NULL, else forwards those in its operand slots and frame locals. */
 static void wasm__gc_stack_slots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt, wasm__exec_stack_t* s) {
     const wasm_functype_t* start_type = wasm__stack_start_type(s);
     uint32_t i;
@@ -20760,11 +20755,13 @@ static void wasm__gc_stack_slots(wasm__gc_mark_stack_t* stack, wasm_runtime_t* r
         const uint32_t* map;
         uint32_t j;
 
-        for (j = 0; j < cf->lsp; j++) {
-            if (stack)
-                wasm__gc_mark_values(stack, cf->labels[j].caught_values, cf->labels[j].caught_count);
-            else
-                wasm__gc_forward_values(rt, cf->labels[j].caught_values, cf->labels[j].caught_count);
+        for (j = 0; stack && j < cf->lsp; j++) {
+            wasm__exception_object_t* caught = cf->labels[j].caught;
+
+            if (caught && !caught->marked) {
+                caught->marked = 1;
+                wasm__gc_push_exception(stack, caught);
+            }
         }
         if (!cf->func || !cf->func->ops) continue;
         map = wasm__frame_stack_map(s, i, &map_slots);
@@ -20796,7 +20793,7 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
         } else if (stack->exception_count > 0u) {
             wasm__exception_object_t* exception = stack->exceptions[--stack->exception_count];
 
-            wasm__gc_mark_values(stack, exception->values, exception->num_values);
+            wasm__gc_payload(stack, stack->rt, exception->slots, exception->kinds, exception->num_slots);
         } else if (stack->cont_count > 0u) {
             wasm__cont_object_t* k = stack->conts[--stack->cont_count];
             wasm__exec_stack_t* s;
@@ -20806,6 +20803,18 @@ static void wasm__gc_drain_mark_stack(wasm__gc_mark_stack_t* stack) {
         } else {
             break;
         }
+    }
+}
+
+static void wasm__gc_mark_pending_exception(wasm__gc_mark_stack_t* stack, wasm_runtime_t* rt) {
+    wasm__exception_state_t* ex = &rt->pending_exception;
+
+    if (!ex->is_pending) return;
+    if (!ex->source) {
+        wasm__gc_payload(stack, rt, ex->buffer, ex->kinds, ex->num_slots);
+    } else if (!ex->source->marked) {
+        ex->source->marked = 1;
+        wasm__gc_push_exception(stack, ex->source);
     }
 }
 
@@ -20820,7 +20829,7 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
 
     for (s = rt->exec; s; s = s->parent) wasm__gc_stack_slots(stack, rt, s);
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_mark_values(stack, *root->values, *root->count);
-    wasm__gc_mark_values(stack, rt->pending_exception.values, rt->pending_exception.num_values);
+    wasm__gc_mark_pending_exception(stack, rt);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
     }
@@ -20902,6 +20911,16 @@ static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* o
     wasm__gc_object_fields(NULL, rt, object);
 }
 
+static void wasm__gc_forward_exceptions(wasm_runtime_t* rt, const wasm__exn_table_t* table) {
+    uint32_t i;
+
+    for (i = 0; i < table->count; i++) {
+        wasm__exception_object_t* exception = wasm__exn_at(table, i);
+
+        if (exception->in_use) wasm__gc_payload(NULL, rt, exception->slots, exception->kinds, exception->num_slots);
+    }
+}
+
 static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm__exec_stack_t* s;
     wasm_module_t* mod;
@@ -20918,7 +20937,9 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
         if (k->in_use) wasm__gc_cont_args(NULL, rt, k);
     }
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_root(rt, root);
-    wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
+    if (rt->pending_exception.is_pending && !rt->pending_exception.source)
+        wasm__gc_payload(NULL, rt, rt->pending_exception.buffer, rt->pending_exception.kinds,
+                         rt->pending_exception.num_slots);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
     }
@@ -20939,11 +20960,8 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
             if (held->slots[i].in_use) wasm__gc_forward_value(rt, &held->slots[i].value);
         }
     }
-    for (i = 0; i < rt->exception_objects.capacity; i++) {
-        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
-
-        if (exception) wasm__gc_forward_values(rt, exception->values, exception->num_values);
-    }
+    wasm__gc_forward_exceptions(rt, &rt->exns);
+    wasm__gc_forward_exceptions(rt, &rt->held_exns);
     for (mod = rt->gc_modules; mod; mod = mod->gc_next) {
         for (i = 0; i < mod->num_globals; i++) {
             if (mod->globals[i].is_import && mod->globals[i].import_value)
@@ -20971,19 +20989,8 @@ static int wasm__gc_box_is_marked(void* handle) {
     return ((wasm__externref_box_t*)handle)->marked;
 }
 
-static int wasm__gc_exception_is_marked(void* handle) {
-    return ((wasm__exception_object_t*)handle)->marked;
-}
-
 static void wasm__gc_free_box(const wasm_allocator_t* a, void* handle) {
     wasm__free(a, handle);
-}
-
-static void wasm__gc_free_exception(const wasm_allocator_t* a, void* handle) {
-    wasm__exception_object_t* exception = (wasm__exception_object_t*)handle;
-
-    wasm__free(a, exception->values);
-    wasm__free(a, exception);
 }
 
 static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
@@ -20994,11 +21001,7 @@ static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
 
         if (box) box->marked = 0;
     }
-    for (i = 0; i < rt->exception_objects.capacity; i++) {
-        wasm__exception_object_t* exception = (wasm__exception_object_t*)rt->exception_objects.slots[i];
-
-        if (exception) exception->marked = 0;
-    }
+    wasm__exn_clear_marks(rt);
     wasm__cont_clear_marks(rt);
 }
 
@@ -21086,7 +21089,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     }
 
     wasm__handle_set_filter(&rt->allocator, &rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
-    wasm__handle_set_filter(&rt->allocator, &rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
+    wasm__exn_sweep(rt);
     wasm__cont_sweep(rt);
 
     if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
@@ -21255,9 +21258,9 @@ void wasm_ref_release(wasm_runtime_t* rt, wasm_value_t* held) {
 
 
 
-WASM_PRIVATE void wasm__clear_label(wasm__label_t* label);
+WASM_PRIVATE void wasm__clear_label(wasm_runtime_t* rt, wasm__label_t* label);
 
-WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf);
+WASM_PRIVATE void wasm__clear_call_frame(wasm_runtime_t* rt, wasm__call_frame_t* cf);
 
 WASM_INLINE const wasm_functype_t* wasm__frame_functype(const wasm__call_frame_t* cf) {
     return wasm__module_functype(cf->module, cf->func->type_idx);
@@ -21287,23 +21290,6 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_runtime_t* rt, uint
 /* END src/exec/calls.h */
 
 #include <stdio.h>
-/* BEGIN src/exec/exceptions.h */
-#ifndef WASM_SRC_EXEC_EXCEPTIONS_H
-#define WASM_SRC_EXEC_EXCEPTIONS_H
-
-
-
-WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
-
-/* Takes branch descriptor desc from cf, the top frame of its runtime's current stack; a branch that
- * returns leaves cf's pc NULL. */
-WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc);
-
-/* Returns WASM_OK with cf at the handler, or clears its labels and returns WASM__ERR_EXCEPTION. */
-WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf);
-
-#endif /* WASM_SRC_EXEC_EXCEPTIONS_H */
-/* END src/exec/exceptions.h */
 
 
 
@@ -21317,22 +21303,17 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
 
 #include <string.h>
 
-WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
-    if (label->caught_values) {
-        wasm__free(label->caught_allocator, label->caught_values);
-        label->caught_values = NULL;
+WASM_PRIVATE void wasm__clear_label(wasm_runtime_t* rt, wasm__label_t* label) {
+    if (label->caught) {
+        wasm__exn_release(rt, label->caught);
+        label->caught = NULL;
     }
-    label->caught_tag = UINT32_MAX;
-    label->caught_tag_identity = 0;
-    label->caught_count = 0;
     label->active_catch = 0;
 }
 
-WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf) {
-    if (!cf) return;
-
+WASM_PRIVATE void wasm__clear_call_frame(wasm_runtime_t* rt, wasm__call_frame_t* cf) {
     while (cf->lsp > 0) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        wasm__clear_label(rt, &cf->labels[cf->lsp - 1]);
         cf->lsp--;
     }
 }
@@ -21499,16 +21480,15 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_runtime_t* rt, uint
 
     while (exec->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1];
-        wasm_error_t err;
 
-        err = wasm__handle_exception_in_frame(cf);
-        if (err == WASM_OK) return WASM_OK;
-        if (err != WASM__ERR_EXCEPTION) return err;
+        if (cf->lsp > 0) {
+            wasm_error_t err = wasm__handle_exception_in_frame(cf);
 
-        wasm__clear_call_frame(cf);
+            if (err == WASM_OK) return WASM_OK;
+            if (err != WASM__ERR_EXCEPTION) return err;
+        }
         exec->sp = cf->sp_base;
         wasm__arena_reset(rt, exec, cf->arena_saved);
-        memset(cf, 0, sizeof(*cf));
         exec->call_frame_sp--;
     }
 
@@ -21552,7 +21532,7 @@ static void wasm__cont_stack_clear(wasm_runtime_t* rt, wasm__exec_stack_t* s) {
     while (s->call_frame_sp > 0) {
         wasm__call_frame_t* cf = &s->call_frames[--s->call_frame_sp];
 
-        wasm__clear_call_frame(cf);
+        wasm__clear_call_frame(rt, cf);
         wasm__arena_reset(rt, s, cf->arena_saved);
     }
     s->sp = 0;
@@ -21689,6 +21669,10 @@ static void wasm__cont_give_back_tag(const wasm__cont_table_t* table) {
     else
         wasm__cont_clear_bit(wasm__cont_tag_bits, (uint32_t)table->tag - 1u);
     wasm__platform_cont_tags_unlock();
+}
+
+WASM_PRIVATE int wasm__cont_claim_tag(wasm_runtime_t* rt) {
+    return rt->conts.tag != 0 || wasm__cont_take_tag(&rt->conts);
 }
 
 WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k) {
@@ -23660,32 +23644,344 @@ WASM_PRIVATE uint32_t wasm__translated_offset(const wasm_func_t* func, const uin
 
 
 
+
+
 #include <string.h>
 
-static wasm_error_t wasm__copy_exception_to_label(const wasm_allocator_t* a,
-                                                  wasm__label_t* label,
-                                                  const wasm__exception_state_t* ex) {
-    wasm_value_t* copy = NULL;
+/* Bytes of the entries references are made to since the last collection below which the exception table never
+ * asks for one. */
+#define WASM__EXN_GC_MIN_BYTES ((size_t)256u * 1024u)
 
-    wasm__clear_label(label);
-    if (ex->num_values > 0) {
-        copy = (wasm_value_t*)wasm__malloc_array(a, ex->num_values, sizeof(wasm_value_t));
-        if (!copy) return WASM_ERR_OOM;
-        memcpy(copy, ex->values, ex->num_values * sizeof(wasm_value_t));
+#define WASM__EXN_KINDS_PER_WORD (32u / WASM__SLOT_KIND_BITS)
+#define WASM__EXN_KIND_WORDS(slots) (((slots) + WASM__EXN_KINDS_PER_WORD - 1u) / WASM__EXN_KINDS_PER_WORD)
+
+/* Makes *slots, with room for *cap slots and then their kind words, hold count slots; returns 0 if out of memory.
+ * The storage keeps its contents only if it already had room. */
+static int wasm__exn_reserve(wasm_runtime_t* rt, wasm__slot_t** slots, uint32_t* cap, uint32_t count) {
+    uint32_t new_cap = count < 4u ? 4u : count;
+    size_t words = WASM__EXN_KIND_WORDS((size_t)new_cap);
+    wasm__slot_t* storage;
+
+    if (count <= *cap) return 1;
+    if ((size_t)new_cap > (SIZE_MAX - words * sizeof(uint32_t)) / sizeof(wasm__slot_t)) return 0;
+    storage = (wasm__slot_t*)wasm__malloc(&rt->allocator,
+                                          (size_t)new_cap * sizeof(wasm__slot_t) + words * sizeof(uint32_t));
+    if (!storage) return 0;
+    wasm__free(&rt->allocator, *slots);
+    *slots = storage;
+    *cap = new_cap;
+    return 1;
+}
+
+static void wasm__exn_set_pending_object(wasm__exception_state_t* ex, wasm__exception_object_t* exception) {
+    ex->tag_identity = exception->tag_identity;
+    ex->tag_index = exception->tag_index;
+    ex->slots = exception->slots;
+    ex->kinds = exception->kinds;
+    ex->source = exception;
+    ex->num_slots = exception->num_slots;
+    ex->is_pending = 1;
+}
+
+/* kinds receives the kind of each of the first slots slots of a payload of type type. */
+static void wasm__exn_payload_kinds(const wasm_functype_t* type, uint32_t* kinds, uint32_t slots) {
+    uint32_t slot = 0;
+    uint32_t i;
+
+    memset(kinds, 0, WASM__EXN_KIND_WORDS(slots) * sizeof(*kinds));
+    for (i = 0; i < type->num_params && slot < slots; i++) {
+        uint32_t kind = wasm__slot_kind(type->params[i]);
+
+        if (kind != WASM__SLOT_KIND_NONE)
+            kinds[slot / WASM__EXN_KINDS_PER_WORD] |= kind << (slot % WASM__EXN_KINDS_PER_WORD * WASM__SLOT_KIND_BITS);
+        slot += wasm__valtype_slots(type->params[i]);
     }
+}
 
-    label->caught_tag = ex->tag_index;
-    label->caught_tag_identity = ex->tag_identity;
-    label->caught_values = copy;
-    label->caught_allocator = a;
-    label->caught_count = ex->num_values;
-    label->active_catch = 1;
+/* Sets tag's payload_slots and payload_kinds; returns 0 if its type is malformed. */
+static int wasm__exn_describe_tag(const wasm_module_t* mod, wasm_tag_t* tag) {
+    const wasm_functype_t* type = wasm__module_functype(mod, tag->type_idx);
+    uint32_t slots;
+    uint32_t kinds = 0;
+
+    if (!type) return 0;
+    slots = wasm__valtypes_slots(type->params, type->num_params);
+    wasm__exn_payload_kinds(type, &kinds, slots < WASM__EXN_KINDS_PER_WORD ? slots : WASM__EXN_KINDS_PER_WORD);
+    tag->payload_kinds = kinds;
+    tag->payload_slots = slots + 1u;
+    return 1;
+}
+
+WASM_PRIVATE wasm_error_t wasm__exn_throw_slots(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t tag_index,
+                                                const wasm__slot_t* top, uint32_t* out_slots) {
+    wasm__exception_state_t* ex = &rt->pending_exception;
+    wasm_tag_t* tag = &mod->tags[tag_index];
+    uint32_t* kinds = NULL;
+    uint32_t slots;
+
+    if (tag->payload_slots == 0 && !wasm__exn_describe_tag(mod, tag)) return WASM_ERR_MALFORMED;
+    slots = tag->payload_slots - 1u;
+    if (slots > 0) {
+        const wasm__slot_t* src = top - slots;
+        uint32_t i;
+
+        if (slots > ex->buffer_cap && !wasm__exn_reserve(rt, &ex->buffer, &ex->buffer_cap, slots)) return WASM_ERR_OOM;
+        kinds = (uint32_t*)(ex->buffer + ex->buffer_cap);
+        for (i = 0; i < slots; i++) ex->buffer[i] = src[i];
+        if (slots <= WASM__EXN_KINDS_PER_WORD)
+            kinds[0] = tag->payload_kinds;
+        else
+            wasm__exn_payload_kinds(wasm__module_functype(mod, tag->type_idx), kinds, slots);
+    }
+    ex->tag_identity = tag->identity;
+    ex->tag_index = tag_index;
+    ex->slots = ex->buffer;
+    ex->kinds = kinds;
+    ex->source = NULL;
+    ex->num_slots = slots;
+    ex->is_pending = 1;
+    *out_slots = slots;
     return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__exn_clear_pending(wasm_runtime_t* rt) {
+    wasm__exception_state_t* ex = &rt->pending_exception;
+
+    ex->slots = NULL;
+    ex->kinds = NULL;
+    ex->source = NULL;
+    ex->num_slots = 0;
+    ex->is_pending = 0;
+}
+
+/* Returns the entry of rt's exception table ref names, with ref's generation in *out_gen, or NULL if ref is no
+ * exception reference of rt. */
+static wasm__exception_object_t* wasm__exn_decode(const wasm_runtime_t* rt, uintptr_t ref, uint32_t* out_gen) {
+    uint32_t index = ((uint32_t)(ref >> 1) & (WASM__CONT_MAX_ENTRIES - 1u)) - rt->conts.base;
+
+    if ((ref & 1u) != 0 || (ref >> WASM__CONT_TAG_SHIFT) != rt->conts.tag || index >= rt->exns.count) return NULL;
+    *out_gen = (uint32_t)(ref >> WASM__CONT_GEN_SHIFT) & WASM__CONT_GEN_MAX;
+    return wasm__exn_at(&rt->exns, index);
+}
+
+static wasm__exception_object_t* wasm__exn_get(const wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+    wasm__exception_object_t* exception = wasm__exn_decode(rt, ref, &gen);
+
+    return exception && exception->in_use && exception->gen == gen ? exception : NULL;
+}
+
+static uintptr_t wasm__exn_ref(const wasm_runtime_t* rt, const wasm__exception_object_t* exception) {
+    return (rt->conts.tag << WASM__CONT_TAG_SHIFT) | ((uintptr_t)exception->gen << WASM__CONT_GEN_SHIFT) |
+           ((uintptr_t)(rt->conts.base + exception->index) << 1);
+}
+
+WASM_PRIVATE const wasm__exception_object_t* wasm__exn_live(const wasm_runtime_t* rt, uintptr_t ref) {
+    return wasm__exn_get(rt, ref);
+}
+
+#ifndef NDEBUG
+WASM_PRIVATE int wasm__exn_issued(const wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+
+    return wasm__exn_decode(rt, ref, &gen) != NULL;
+}
+#endif
+
+WASM_PRIVATE WASM__COLD int wasm__exn_throw_ref(wasm_runtime_t* rt, uintptr_t ref) {
+    wasm__exception_object_t* exception = wasm__exn_get(rt, ref);
+
+    if (!exception) return 0;
+    wasm__exn_set_pending_object(&rt->pending_exception, exception);
+    return 1;
+}
+
+WASM_PRIVATE WASM__COLD wasm_error_t wasm__exn_rethrow(wasm_runtime_t* rt, wasm__exception_object_t* exception) {
+    wasm__exception_state_t* ex = &rt->pending_exception;
+    uint32_t* kinds = NULL;
+
+    if (!exception->held) {
+        wasm__exn_set_pending_object(ex, exception);
+        return WASM_OK;
+    }
+    if (exception->num_slots > 0) {
+        if (!wasm__exn_reserve(rt, &ex->buffer, &ex->buffer_cap, exception->num_slots)) return WASM_ERR_OOM;
+        kinds = (uint32_t*)(ex->buffer + ex->buffer_cap);
+        memcpy(ex->buffer, exception->slots, exception->num_slots * sizeof(wasm__slot_t));
+        memcpy(kinds, exception->kinds, WASM__EXN_KIND_WORDS(exception->num_slots) * sizeof(*kinds));
+    }
+    ex->tag_identity = exception->tag_identity;
+    ex->tag_index = exception->tag_index;
+    ex->slots = ex->buffer;
+    ex->kinds = kinds;
+    ex->source = NULL;
+    ex->num_slots = exception->num_slots;
+    ex->is_pending = 1;
+    return WASM_OK;
+}
+
+/* Returns a free entry of table, which may grow to limit entries, now in use, or NULL. */
+static wasm__exception_object_t* wasm__exn_new_entry(wasm_runtime_t* rt, wasm__exn_table_t* table, uint32_t limit,
+                                                     uint8_t held) {
+    wasm__exception_object_t* exception;
+
+    if (table->free_head) {
+        exception = wasm__exn_at(table, table->free_head - 1u);
+        table->free_head = exception->next_free;
+    } else {
+        if (table->count >= limit) return NULL;
+        if (table->count == table->num_blocks * WASM__EXN_BLOCK_ENTRIES) {
+            if (table->num_blocks == table->cap_blocks) {
+                uint32_t cap = table->cap_blocks ? table->cap_blocks * 2u : 4u;
+                wasm__exception_object_t** blocks = (wasm__exception_object_t**)wasm__realloc_array(
+                    &rt->allocator, table->blocks, cap, sizeof(*blocks));
+
+                if (!blocks) return NULL;
+                table->blocks = blocks;
+                table->cap_blocks = cap;
+            }
+            table->blocks[table->num_blocks] = (wasm__exception_object_t*)wasm__malloc_array(
+                &rt->allocator, WASM__EXN_BLOCK_ENTRIES, sizeof(wasm__exception_object_t));
+            if (!table->blocks[table->num_blocks]) return NULL;
+            table->num_blocks++;
+        }
+        exception = wasm__exn_at(table, table->count);
+        memset(exception, 0, sizeof(*exception));
+        exception->index = table->count++;
+        exception->held = held;
+    }
+    exception->next_free = 0;
+    exception->in_use = 1;
+    table->live++;
+    return exception;
+}
+
+static void wasm__exn_free_entry(wasm__exn_table_t* table, wasm__exception_object_t* exception) {
+    exception->in_use = 0;
+    exception->num_slots = 0;
+    exception->gen = (exception->gen + 1u) & WASM__CONT_GEN_MAX;
+    exception->next_free = table->free_head;
+    table->free_head = exception->index + 1u;
+    table->live--;
+}
+
+/* Copies rt's pending exception into exception; returns 0 if out of memory. */
+static int wasm__exn_fill(wasm_runtime_t* rt, wasm__exception_object_t* exception) {
+    const wasm__exception_state_t* ex = &rt->pending_exception;
+    uint32_t i;
+
+    if (ex->num_slots > 0) {
+        if (ex->num_slots > exception->cap_slots) {
+            if (!wasm__exn_reserve(rt, &exception->slots, &exception->cap_slots, ex->num_slots)) return 0;
+            exception->kinds = (uint32_t*)(exception->slots + exception->cap_slots);
+        }
+        for (i = 0; i < ex->num_slots; i++) exception->slots[i] = ex->slots[i];
+        for (i = 0; i < WASM__EXN_KIND_WORDS(ex->num_slots); i++) exception->kinds[i] = ex->kinds[i];
+    }
+    exception->tag_identity = ex->tag_identity;
+    exception->tag_index = ex->tag_index;
+    exception->num_slots = ex->num_slots;
+    return 1;
+}
+
+/* Returns in *out_ref a reference to rt's pending exception. */
+static wasm_error_t wasm__exn_ref_pending(wasm_runtime_t* rt, uintptr_t* out_ref) {
+    wasm__exception_object_t* exception = rt->pending_exception.source;
+
+    if (!exception) {
+        if (!wasm__cont_claim_tag(rt)) {
+            WASM__SET_ERR(rt, WASM_ERR_OOM, "%s",
+                          "out of reference tags: too many runtimes hold exceptions or continuations");
+            return WASM_ERR_OOM;
+        }
+        exception = wasm__exn_new_entry(rt, &rt->exns, rt->conts.limit, 0);
+        if (!exception) {
+            if (rt->exns.count >= rt->conts.limit)
+                WASM__SET_ERR(rt, WASM_ERR_OOM, "exception limit %u reached", (unsigned)rt->conts.limit);
+            return WASM_ERR_OOM;
+        }
+        if (!wasm__exn_fill(rt, exception)) {
+            wasm__exn_free_entry(&rt->exns, exception);
+            return WASM_ERR_OOM;
+        }
+        rt->exns.new_bytes += sizeof(*exception) + (size_t)exception->num_slots * sizeof(wasm__slot_t);
+    }
+    *out_ref = wasm__exn_ref(rt, exception);
+    return WASM_OK;
+}
+
+/* Returns an exception object holding rt's pending exception for a legacy catch clause, or NULL. */
+static wasm__exception_object_t* wasm__exn_hold_pending(wasm_runtime_t* rt) {
+    wasm__exception_object_t* exception = rt->pending_exception.source;
+
+    if (exception) return exception;
+    exception = wasm__exn_new_entry(rt, &rt->held_exns, UINT32_MAX, 1);
+    if (exception && !wasm__exn_fill(rt, exception)) {
+        wasm__exn_free_entry(&rt->held_exns, exception);
+        return NULL;
+    }
+    return exception;
+}
+
+WASM_PRIVATE void wasm__exn_release(wasm_runtime_t* rt, wasm__exception_object_t* exception) {
+    if (exception->held) wasm__exn_free_entry(&rt->held_exns, exception);
+}
+
+WASM_PRIVATE wasm__exception_object_t* wasm__exn_mark(wasm_runtime_t* rt, uintptr_t ref) {
+    wasm__exception_object_t* exception = wasm__exn_get(rt, ref);
+
+    if (!exception || exception->marked) return NULL;
+    exception->marked = 1;
+    return exception;
+}
+
+WASM_PRIVATE void wasm__exn_clear_marks(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->exns.count; i++) wasm__exn_at(&rt->exns, i)->marked = 0;
+    for (i = 0; i < rt->held_exns.count; i++) wasm__exn_at(&rt->held_exns, i)->marked = 0;
+}
+
+WASM_PRIVATE void wasm__exn_sweep(wasm_runtime_t* rt) {
+    wasm__exn_table_t* table = &rt->exns;
+    uint32_t i;
+
+    for (i = 0; i < table->count; i++) {
+        wasm__exception_object_t* exception = wasm__exn_at(table, i);
+
+        if (exception->in_use && !exception->marked) wasm__exn_free_entry(table, exception);
+    }
+    table->new_bytes = 0;
+    table->swept_live = table->live;
+}
+
+WASM_PRIVATE int wasm__exn_collection_due(const wasm_runtime_t* rt) {
+    const wasm__exn_table_t* table = &rt->exns;
+
+    if (rt->conts.limit != 0 && !table->free_head && table->count >= rt->conts.limit) return 1;
+    return table->new_bytes >= WASM__EXN_GC_MIN_BYTES && table->new_bytes >= rt->gc_heap_offset &&
+           table->new_bytes / sizeof(wasm__exception_object_t) >= table->swept_live;
+}
+
+static void wasm__exn_free_table(wasm_runtime_t* rt, wasm__exn_table_t* table) {
+    uint32_t i;
+
+    for (i = 0; i < table->count; i++) wasm__free(&rt->allocator, wasm__exn_at(table, i)->slots);
+    for (i = 0; i < table->num_blocks; i++) wasm__free(&rt->allocator, table->blocks[i]);
+    wasm__free(&rt->allocator, table->blocks);
+    memset(table, 0, sizeof(*table));
+}
+
+WASM_PRIVATE void wasm__exn_free_all(wasm_runtime_t* rt) {
+    wasm__exn_free_table(rt, &rt->exns);
+    wasm__exn_free_table(rt, &rt->held_exns);
+    wasm__free(&rt->allocator, rt->pending_exception.buffer);
+    memset(&rt->pending_exception, 0, sizeof(rt->pending_exception));
 }
 
 WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     WASM__SET_ERR(rt, WASM_ERR_TRAP, "uncaught exception tag %u", (unsigned)rt->pending_exception.tag_index);
-    wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+    wasm__exn_clear_pending(rt);
     return WASM_ERR_TRAP;
 }
 
@@ -23704,7 +24000,7 @@ WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint3
         memmove(&exec->stack[dst], &exec->stack[exec->sp - arity], arity * sizeof(wasm__slot_t));
     exec->sp = dst + arity;
     while (pops-- > 0 && cf->lsp > 0) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        wasm__clear_label(rt, &cf->labels[cf->lsp - 1]);
         cf->lsp--;
     }
     cf->pc = cf->func->ops + desc[0];
@@ -23712,9 +24008,9 @@ WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint3
     return WASM_OK;
 }
 
-static void wasm__unwind_labels(wasm__call_frame_t* cf, uint32_t keep) {
+static void wasm__unwind_labels(wasm_runtime_t* rt, wasm__call_frame_t* cf, uint32_t keep) {
     while (cf->lsp > keep) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        wasm__clear_label(rt, &cf->labels[cf->lsp - 1]);
         cf->lsp--;
     }
 }
@@ -23729,6 +24025,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
     wasm_module_t* mod = cf->module;
     wasm_runtime_t* rt = mod->rt;
     wasm__exec_stack_t* exec = rt->exec;
+    const wasm__exception_state_t* ex = &rt->pending_exception;
     wasm__label_t* label = &cf->labels[idx - 1];
     const uint32_t* clause = label->handler + 1;
     uint32_t count = label->handler[0];
@@ -23738,10 +24035,10 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
         if (clause[0] == WASM__CLAUSE_DELEGATE) {
             uint32_t skip = clause[1];
 
-            wasm__clear_label(label);
+            wasm__clear_label(rt, label);
             idx--;
             while (skip > 0 && idx > 0) {
-                wasm__clear_label(&cf->labels[idx - 1]);
+                wasm__clear_label(rt, &cf->labels[idx - 1]);
                 idx--;
                 skip--;
             }
@@ -23749,20 +24046,27 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
             *next_idx = idx;
             return 0;
         }
-        if (clause[0] == WASM__CLAUSE_CATCH && !wasm__tag_matches(mod, clause[1], &rt->pending_exception)) continue;
+        if (clause[0] == WASM__CLAUSE_CATCH && !wasm__tag_matches(mod, clause[1], ex)) continue;
 
-        wasm__unwind_labels(cf, idx);
+        wasm__unwind_labels(rt, cf, idx);
         exec->sp = label->sp_base;
-        *out_err = wasm__copy_exception_to_label(&rt->allocator, label, &rt->pending_exception);
-        if (*out_err != WASM_OK) return 1;
+        label->caught = wasm__exn_hold_pending(rt);
+        if (!label->caught) {
+            wasm__exn_clear_pending(rt);
+            *out_err = WASM_ERR_OOM;
+            return 1;
+        }
+        label->active_catch = 1;
         if (clause[0] == WASM__CLAUSE_CATCH) {
-            if (exec->sp + wasm__values_slots(label->caught_values, label->caught_count) > exec->max_stack) {
+            if (ex->num_slots > exec->max_stack - exec->sp) {
+                wasm__exn_clear_pending(rt);
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
-            exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], label->caught_values, label->caught_count);
+            if (ex->num_slots > 0) memcpy(&exec->stack[exec->sp], ex->slots, ex->num_slots * sizeof(wasm__slot_t));
+            exec->sp += ex->num_slots;
         }
-        wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+        wasm__exn_clear_pending(rt);
         cf->pc = cf->func->ops + clause[2];
         *out_err = WASM_OK;
         return 1;
@@ -23774,47 +24078,53 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
     wasm_module_t* mod = cf->module;
     wasm_runtime_t* rt = mod->rt;
     wasm__exec_stack_t* exec = rt->exec;
+    const wasm__exception_state_t* ex = &rt->pending_exception;
     wasm__label_t* label = &cf->labels[idx - 1];
     const uint32_t* clause = label->handler + 1;
     uint32_t count = label->handler[0];
     uint32_t i;
 
     for (i = 0; i < count; i++, clause += 6) {
-        wasm_functype_t* tag_type = NULL;
-        wasm_value_t exnref_value;
+        uint32_t kind = clause[0];
+        uint32_t slots = 0;
+        uint32_t j;
 
-        if (clause[0] == 0x00 || clause[0] == 0x01) {
-            if (!wasm__tag_matches(mod, clause[1], &rt->pending_exception)) continue;
-            tag_type = wasm__module_functype(mod, mod->tags[clause[1]].type_idx);
-            if (!tag_type) {
-                *out_err = WASM_ERR_MALFORMED;
-                return 1;
-            }
-        } else if (clause[0] != 0x02 && clause[0] != 0x03) {
+        if (kind == 0x00 || kind == 0x01) {
+            if (!wasm__tag_matches(mod, clause[1], ex)) continue;
+            slots = ex->num_slots;
+        } else if (kind != 0x02 && kind != 0x03) {
             *out_err = WASM_ERR_MALFORMED;
             return 1;
         }
 
-        if (clause[0] == 0x01 || clause[0] == 0x03) wasm__gc_collect_handles_if_needed(rt);
-        wasm__unwind_labels(cf, idx - 1);
-        exec->sp = label->sp_base;
-        if (tag_type) {
-            if (exec->sp + wasm__valtypes_slots(tag_type->params, tag_type->num_params) + 1u > exec->max_stack) {
-                *out_err = WASM_ERR_STACK_OVERFLOW;
+        if (kind & 1u) {
+#ifdef WASM_GC_STRESS
+            (void)wasm__gc_collect(rt, 0);
+#else
+            wasm__gc_collect_handles_if_needed(rt);
+#endif
+        }
+        wasm__unwind_labels(rt, cf, idx - 1);
+        if (slots + 1u > exec->max_stack - label->sp_base) {
+            exec->sp = label->sp_base;
+            wasm__exn_clear_pending(rt);
+            *out_err = WASM_ERR_STACK_OVERFLOW;
+            return 1;
+        }
+        exec->sp = (clause[5] & WASM__BRANCH_RETURN) ? label->sp_base : cf->sp_base + clause[4];
+        for (j = 0; j < slots; j++) exec->stack[exec->sp + j] = ex->slots[j];
+        exec->sp += slots;
+        if (kind & 1u) {
+            uintptr_t ref = 0;
+
+            *out_err = wasm__exn_ref_pending(rt, &ref);
+            if (*out_err != WASM_OK) {
+                wasm__exn_clear_pending(rt);
                 return 1;
             }
-            exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], rt->pending_exception.values, tag_type->num_params);
+            wasm__slot_set_ref(&exec->stack[exec->sp++], ref);
         }
-        if (clause[0] == 0x01 || clause[0] == 0x03) {
-            *out_err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
-            if (*out_err != WASM_OK) return 1;
-            if (exec->sp >= exec->max_stack) {
-                *out_err = WASM_ERR_STACK_OVERFLOW;
-                return 1;
-            }
-            exec->sp += wasm__slot_from_value(&exec->stack[exec->sp], &exnref_value);
-        }
-        wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+        wasm__exn_clear_pending(rt);
         *out_err = wasm__branch_frame(cf, clause + 2);
         return 1;
     }
@@ -23822,7 +24132,8 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
 }
 
 WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf) {
-    wasm__exec_stack_t* exec = cf->module->rt->exec;
+    wasm_runtime_t* rt = cf->module->rt;
+    wasm__exec_stack_t* exec = rt->exec;
     wasm_error_t err = WASM_OK;
     uint32_t idx = cf->lsp;
 
@@ -23841,7 +24152,7 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
         } else if (label->opcode == 0x1F) {
             if (wasm__catch_try_table(cf, idx, &err)) return err;
         }
-        wasm__clear_label(label);
+        wasm__clear_label(rt, label);
         exec->sp = label->sp_base;
         idx--;
     }
@@ -25404,9 +25715,9 @@ cleanup:
 
 #include <string.h>
 
-WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t count) {
+WASM_INLINE void wasm__drop_labels(wasm_runtime_t* rt, wasm__label_t* labels, uint32_t lsp, uint32_t count) {
     while (count-- > 0) {
-        if (labels[lsp - 1].caught_values || labels[lsp - 1].active_catch) wasm__clear_label(&labels[lsp - 1]);
+        if (labels[lsp - 1].caught) wasm__clear_label(rt, &labels[lsp - 1]);
         lsp--;
     }
 }
@@ -25779,11 +26090,6 @@ static WASM__NOINLINE void wasm__store_table_elem(wasm_table_t* table, uint64_t 
     table->elems[index] = *value;
 }
 
-static WASM__NOINLINE wasm_error_t wasm__set_caught_exception(wasm_runtime_t* rt, const wasm__label_t* label) {
-    return wasm__set_exception_state(&rt->allocator, &rt->pending_exception, label->caught_tag,
-                                     label->caught_tag_identity, label->caught_values, label->caught_count);
-}
-
 /* Copies callee's parameter slots from args into locals and zeroes its other locals. */
 static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__slot_t* args, const wasm_func_t* callee) {
     uint32_t i;
@@ -25791,26 +26097,6 @@ static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__s
     for (i = 0; i < callee->param_slots; i++) locals[i] = args[i];
     if (i < callee->num_local_slots) memset(locals + i, 0, (callee->num_local_slots - i) * sizeof(*locals));
 }
-/* Makes an exception of tag tag_index of mod, whose payload is the slots at args, rt's pending exception. */
-static wasm_error_t wasm__set_pending_tag(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t tag_index,
-                                          const wasm__slot_t* args) {
-    const wasm_functype_t* tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
-    wasm_value_t payload_buf[8];
-    wasm_value_t* payload = payload_buf;
-    wasm_error_t err;
-
-    if (!tag_type) return WASM_ERR_MALFORMED;
-    if (tag_type->num_params > 8) {
-        payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
-        if (!payload) return WASM_ERR_OOM;
-    }
-    wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, args, payload);
-    err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, tag_index, mod->tags[tag_index].identity,
-                                    payload, tag_type->num_params);
-    if (payload != payload_buf) wasm__free(&rt->allocator, payload);
-    return err;
-}
-
 /* Returns the type index of the continuation a switch to continuation type ct of mod passes last, or
  * UINT32_MAX. */
 static uint32_t wasm__switch_cont_type(wasm_module_t* mod, uint32_t ct) {
@@ -25898,23 +26184,21 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
 
             wasm__gc_collect_handles_if_needed(rt);
             if (op == 0xE5) {
-                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, top - 2);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
-
-                if (!exn) {
+                if (!wasm__exn_live(rt, wasm__slot_ref(top - 2))) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null exception reference");
                     return WASM_ERR_TRAP;
                 }
                 k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
                 if (!k) return err;
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, exn->tag_index,
-                                                exn->tag_identity, exn->values, exn->num_values);
+                (void)wasm__exn_throw_ref(rt, wasm__slot_ref(top - 2));
             } else {
+                uint32_t payload_slots = 0;
+
                 k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
                 if (!k) return err;
-                err = wasm__set_pending_tag(rt, mod, imm[1], top - 1 - slots);
+                err = wasm__exn_throw_slots(rt, mod, imm[1], top - 1, &payload_slots);
+                if (err != WASM_OK) return err;
             }
-            if (err != WASM_OK) return err;
             exec->sp -= 1u + slots;
             cf->pc = handlers + 1 + handlers[0] * WASM__HANDLER_WORDS;
             if (!k->top || k->top->call_frame_sp == 0) {
@@ -25923,7 +26207,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             }
             err = wasm__cont_resume(rt, k, NULL, 0, handlers);
             if (err != WASM_OK) {
-                wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+                wasm__exn_clear_pending(rt);
                 exec->sp += 1u + slots;
                 cf->pc = imm;
                 return err;
@@ -25997,12 +26281,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
 static wasm_error_t wasm__unwind_host_exception(wasm_runtime_t* rt, wasm__call_frame_t* cf, int is_tail_call) {
     wasm_error_t err;
 
-    if (is_tail_call) {
-        while (cf->lsp > 0) {
-            wasm__clear_label(&cf->labels[cf->lsp - 1]);
-            cf->lsp--;
-        }
-    }
+    if (is_tail_call) wasm__clear_call_frame(rt, cf);
     err = wasm__throw_across_stacks(rt);
     return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
 }
@@ -26352,52 +26631,27 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__NEXT();
             WASM__CASE(0x08): { /* throw */
                 uint32_t tag_index = *pc++;
-                wasm_functype_t* tag_type;
-                wasm_value_t payload_buf[8];
-                wasm_value_t* payload = payload_buf;
+                uint32_t payload_slots = 0;
 
                 if (tag_index >= mod->num_tags) WASM__TRAP(WASM_ERR_MALFORMED);
-                tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
-                if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (tag_type->num_params > 8) {
-                    payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
-                    if (!payload) WASM__TRAP(WASM_ERR_OOM);
-                }
-                sp -= wasm__valtypes_slots(tag_type->params, tag_type->num_params);
-                wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, sp, payload);
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
-                                                tag_index,
-                                                mod->tags[tag_index].identity,
-                                                payload,
-                                                tag_type->num_params);
-                if (payload != payload_buf) wasm__free(&rt->allocator, payload);
+                err = wasm__exn_throw_slots(rt, mod, tag_index, sp, &payload_slots);
                 if (err != WASM_OK) goto cleanup;
+                sp -= payload_slots;
                 goto throw_pending;
             }
             WASM__CASE(0x09): /* rethrow */
-                err = wasm__set_caught_exception(rt, &labels[lsp - 1u - *pc++]);
+                err = wasm__exn_rethrow(rt, labels[lsp - 1u - *pc++].caught);
                 if (err != WASM_OK) goto cleanup;
                 goto throw_pending;
-            WASM__CASE(0x0A): { /* throw_ref */
-                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, --sp);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
-
-                if (!exn) WASM__TRAP(WASM_ERR_TRAP);
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
-                                                exn->tag_index,
-                                                exn->tag_identity,
-                                                exn->values,
-                                                exn->num_values);
-                if (err != WASM_OK) goto cleanup;
+            WASM__CASE(0x0A): /* throw_ref */
+                if (!wasm__exn_throw_ref(rt, wasm__slot_ref(--sp))) WASM__TRAP(WASM_ERR_TRAP);
                 goto throw_pending;
-            }
             WASM__CASE(WASM__OP_TRY): {
                 wasm__label_t* label = &labels[lsp++];
 
                 label->handler = ops + pc[0];
+                label->caught = NULL;
                 label->sp_base = sp_base + pc[1];
-                label->caught_count = 0;
-                label->caught_values = NULL;
                 label->opcode = 0x06;
                 label->active_catch = 0;
                 pc += 2;
@@ -26407,21 +26661,20 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 wasm__label_t* label = &labels[lsp++];
 
                 label->handler = pc + 1;
+                label->caught = NULL;
                 label->sp_base = sp_base + pc[0];
-                label->caught_count = 0;
-                label->caught_values = NULL;
                 label->opcode = 0x1F;
                 label->active_catch = 0;
                 pc += 2u + pc[1] * 6u;
                 WASM__NEXT();
             }
             WASM__CASE(WASM__OP_TRY_LEAVE):
-                wasm__drop_labels(labels, lsp, 1);
+                wasm__drop_labels(rt, labels, lsp, 1);
                 lsp--;
                 pc = ops + *pc;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_TRY_END):
-                wasm__drop_labels(labels, lsp, 1);
+                wasm__drop_labels(rt, labels, lsp, 1);
                 lsp--;
                 WASM__NEXT();
 
@@ -27992,7 +28245,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         if (arity > 0 && sp - arity != dst) memmove(dst, sp - arity, arity * sizeof(wasm__slot_t));
         sp = dst + arity;
         if (pops > 0) {
-            wasm__drop_labels(labels, lsp, pops);
+            wasm__drop_labels(rt, labels, lsp, pops);
             lsp -= pops;
         }
         pc = ops + desc[0];
@@ -28086,7 +28339,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         if (call_slots > 0 && sp - call_slots != stack + sp_base)
             memmove(stack + sp_base, sp - call_slots, call_slots * sizeof(wasm__slot_t));
         sp = stack + sp_base;
-        wasm__drop_labels(labels, lsp, lsp);
+        wasm__drop_labels(rt, labels, lsp, lsp);
         lsp = 0;
         WASM__SAVE_STATE();
         wasm__arena_reset(rt, rt->exec, cf->arena_saved);
@@ -28116,7 +28369,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
 
             for (i = 0; i < func->result_slots; i++) dst[i] = src[i];
             sp = dst + func->result_slots;
-            if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
+            if (lsp > 0) wasm__drop_labels(rt, labels, lsp, lsp);
             wasm__arena_reset(rt, exec, cf->arena_saved);
             exec->call_frame_sp--;
             cf--;
@@ -28139,7 +28392,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         wasm__exec_stack_t* parent = exec->parent;
         uint32_t n = func->result_slots;
 
-        if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
+        if (lsp > 0) wasm__drop_labels(rt, labels, lsp, lsp);
         cf->lsp = lsp = 0;
         if (n > parent->max_stack - parent->sp) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
         if (n > 0) memcpy(&parent->stack[parent->sp], sp - n, n * sizeof(*sp));
@@ -28183,10 +28436,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
 
 cleanup:
     WASM__SAVE_STATE();
-    while (cf->lsp > 0) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
-        cf->lsp--;
-    }
+    wasm__clear_call_frame(rt, cf);
 
     return err;
 }
@@ -28219,7 +28469,7 @@ static void wasm__drop_call_frames(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     while (exec->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1];
 
-        wasm__clear_call_frame(cf);
+        wasm__clear_call_frame(rt, cf);
         wasm__arena_reset(rt, exec, cf->arena_saved);
         exec->sp = cf->sp_base;
         memset(cf, 0, sizeof(*cf));
@@ -28234,7 +28484,7 @@ static wasm_error_t wasm__return_after_yield(wasm_runtime_t* rt) {
     wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1u];
     uint32_t n = cf->func->result_slots;
 
-    wasm__clear_call_frame(cf);
+    wasm__clear_call_frame(rt, cf);
     if (!parent || exec->call_frame_sp > exec->frame_floor) return wasm__finish_call_frame(rt, 0);
     if (n > parent->max_stack - parent->sp) {
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)parent->max_stack);

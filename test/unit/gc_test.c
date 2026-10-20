@@ -1065,12 +1065,12 @@ TEST(test_gc_collects_unreachable_externref_boxes_and_exnrefs) {
               (unsigned)rt.externref_boxes.count);
 
     WASM_CHECK_OK(t, wasm_call(m, "exns", &arg, 1, &result, 1));
-    CHECK_MSG(t, rt.exception_objects.count < 4096u, "expected unreachable exnrefs to be freed, %u live",
-              (unsigned)rt.exception_objects.count);
+    CHECK_MSG(t, rt.exns.live < 8192u, "expected unreachable exnrefs to be freed, %u live",
+              (unsigned)rt.exns.live);
 
     wasm_gc_collect(&rt);
     CHECK(t, rt.externref_boxes.count == 0u);
-    CHECK(t, rt.exception_objects.count == 0u);
+    CHECK(t, rt.exns.live == 0u);
 
     wasm_module_free(m);
     wasm_destroy(&rt);

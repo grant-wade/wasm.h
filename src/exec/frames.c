@@ -1,5 +1,6 @@
 #include "frames.h"
 #include "cont.h"
+#include "exceptions.h"
 #include "../module.h"
 #include "state.h"
 #include "translate.h"
@@ -84,7 +85,7 @@ static void wasm__check_ref_slot(const wasm_runtime_t* rt, const wasm__call_fram
         valid = (bits & WASM__GC_I31_TAG) != 0 || wasm__gc_ptr_in_heap(rt, (const void*)bits) ||
                 wasm__handle_set_contains(&rt->externref_boxes, (const void*)bits);
     else if (kind == WASM__SLOT_KIND_HANDLE)
-        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) || wasm__cont_issued(rt, bits);
+        valid = wasm__exn_issued(rt, bits) || wasm__cont_issued(rt, bits);
     if (valid) return;
     if (cf)
         fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u of kind %u holds %p\n",

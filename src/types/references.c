@@ -1,5 +1,6 @@
 #include "references.h"
 #include "../exec/cont.h"
+#include "../exec/exceptions.h"
 #include "../handles.h"
 #include <stdio.h>
 #include "../internal/alloc.h"
@@ -346,7 +347,8 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
         wasm__clear_reftype(out_reftype);
         return 0;
     }
-    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) return 1;
+    if (wasm__uses_externref_storage(value->type)) return 1;
+    if (wasm__uses_exnref_storage(value->type)) return mod && mod->rt && wasm__exn_live(mod->rt, value->of.externref);
     if (wasm__uses_contref_storage(value->type)) {
         const wasm__cont_object_t* k = mod && mod->rt ? wasm__cont_live(mod->rt, value->of.externref) : NULL;
 

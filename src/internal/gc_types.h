@@ -36,18 +36,46 @@ typedef struct wasm_gc_array_t {
 #define WASM__GC_STRUCT_HEADER_SIZE offsetof(wasm_gc_struct_t, payload)
 #define WASM__GC_ARRAY_HEADER_SIZE offsetof(wasm_gc_array_t, payload)
 
+/* An entry of an exception table. In use, it is a caught exception: the tag and payload slots of the exception
+ * an exnref or a legacy catch clause holds. */
 struct wasm__exception_object_t {
-    uint32_t tag_index;
     uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
-    int marked;
+    union wasm__slot_t* slots; /* payload, with room for cap_slots slots */
+    uint32_t* kinds;           /* WASM__SLOT_KIND_BITS-bit kind of each payload slot, after slots */
+    uint32_t tag_index;
+    uint32_t num_slots;
+    uint32_t cap_slots;
+    uint32_t index;     /* its index in its table */
+    uint32_t gen;       /* generation of its reference in use or next */
+    uint32_t next_free; /* 1 + the next free entry while this one is free, or 0 */
+    uint8_t in_use;
+    uint8_t held;       /* in the table of exceptions legacy catch clauses hold, which no reference names */
+    uint8_t marked;
 };
+
+#define WASM__EXN_BLOCK_ENTRIES 256u
+
+/* A runtime's exception objects, in blocks of WASM__EXN_BLOCK_ENTRIES entries that never move. */
+typedef struct wasm__exn_table_t {
+    struct wasm__exception_object_t** blocks;
+    uint32_t num_blocks;
+    uint32_t cap_blocks;
+    uint32_t count;      /* entries ever used, the first count of the blocks */
+    uint32_t free_head;  /* 1 + the first free entry, or 0 */
+    uint32_t live;       /* entries in use */
+    uint32_t swept_live; /* live when the last collection finished */
+    size_t new_bytes;    /* bytes of the entries references were made to since the last collection */
+} wasm__exn_table_t;
+
+WASM_INLINE struct wasm__exception_object_t* wasm__exn_at(const wasm__exn_table_t* table, uint32_t index) {
+    return &table->blocks[index / WASM__EXN_BLOCK_ENTRIES][index % WASM__EXN_BLOCK_ENTRIES];
+}
 
 /* A continuation reference has bit 0 set, the index of its entry in the runtime's continuation table in the next
  * WASM__CONT_INDEX_BITS bits, the entry's generation in the next WASM__CONT_GEN_BITS, and the runtime's tag in
  * the rest. Runtimes alive at once have distinct tags, except that runtimes with tag WASM__CONT_TAG_MAX each own
- * a distinct slice of its indices. */
+ * a distinct slice of its indices. An exception reference has the same layout with bit 0 clear, naming an entry
+ * of the runtime's exception table. */
 #if UINTPTR_MAX > 0xFFFFFFFFu
 #define WASM__CONT_INDEX_BITS 27u
 #define WASM__CONT_GEN_BITS 24u

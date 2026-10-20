@@ -1113,7 +1113,7 @@ TEST(test_stack_switching_resume_throw) {
     wasm_test_check_cont_trap(t, m, "null-exn", WASM_ERR_TRAP, "null exception reference");
     wasm_test_check_cont_trap(t, m, "uncaught", WASM_ERR_TRAP, "uncaught exception");
     wasm_test_check_cont_trap(t, m, "consumed", WASM_ERR_TRAP, "continuation already consumed");
-    CHECK(t, rt.pending_exception.values == NULL);
+    CHECK(t, !rt.pending_exception.is_pending);
     wasm_gc_collect(&rt);
     CHECK_MSG(t, rt.num_cont_stacks == 0, "expected no live continuation stacks, got %u",
               (unsigned)rt.num_cont_stacks);
@@ -1334,7 +1334,7 @@ TEST(test_stack_switching_chain_traps) {
     CHECK_MSG(t, strstr(rt.error_msg, "uncaught exception") != NULL, "%s", rt.error_msg);
     CHECK(t, rt.exec == &rt.main_stack);
     CHECK(t, rt.num_cont_stacks == 0);
-    CHECK(t, rt.pending_exception.values == NULL);
+    CHECK(t, !rt.pending_exception.is_pending);
     wasm_module_free(m);
     wasm_destroy(&rt);
 

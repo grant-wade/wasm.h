@@ -18,6 +18,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - SIMD instructions run from the interpreter loop with their immediates decoded once, and v128 locals copy without calls to `memcpy`.
 - GC struct fields and array elements are stored at their natural width, with references in 8 bytes.
 - `array.copy`, `array.fill`, `array.new_data`, and `array.init_data` copy element bytes in bulk.
+- Throwing and catching exceptions, including `resume_throw`, run without allocating.
+- `catch_ref`, `catch_all_ref`, and `throw_ref` reuse pooled exception objects that the collector reclaims, and `exnref` values trigger collections by memory use.
 
 ### Fixed
 
@@ -29,6 +31,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Suspensions could each run a full collection, so generators slowed as the live GC heap grew.
 - Collections left GC references in a registered host table dangling while no module imported it.
 - Collections, and modules importing its exports, read freed memory after a module registered with `wasm_register_module` was freed.
+- Call arguments, host results, and global and table setters accepted forged, collected, and foreign `exnref` handles.
 
 ## [2.0.0] - 2026-10-19
 

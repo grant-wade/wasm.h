@@ -15,22 +15,17 @@
 #include "../values.h"
 #include <string.h>
 
-WASM_PRIVATE void wasm__clear_label(wasm__label_t* label) {
-    if (label->caught_values) {
-        wasm__free(label->caught_allocator, label->caught_values);
-        label->caught_values = NULL;
+WASM_PRIVATE void wasm__clear_label(wasm_runtime_t* rt, wasm__label_t* label) {
+    if (label->caught) {
+        wasm__exn_release(rt, label->caught);
+        label->caught = NULL;
     }
-    label->caught_tag = UINT32_MAX;
-    label->caught_tag_identity = 0;
-    label->caught_count = 0;
     label->active_catch = 0;
 }
 
-WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf) {
-    if (!cf) return;
-
+WASM_PRIVATE void wasm__clear_call_frame(wasm_runtime_t* rt, wasm__call_frame_t* cf) {
     while (cf->lsp > 0) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
+        wasm__clear_label(rt, &cf->labels[cf->lsp - 1]);
         cf->lsp--;
     }
 }
@@ -197,16 +192,15 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_runtime_t* rt, uint
 
     while (exec->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1];
-        wasm_error_t err;
 
-        err = wasm__handle_exception_in_frame(cf);
-        if (err == WASM_OK) return WASM_OK;
-        if (err != WASM__ERR_EXCEPTION) return err;
+        if (cf->lsp > 0) {
+            wasm_error_t err = wasm__handle_exception_in_frame(cf);
 
-        wasm__clear_call_frame(cf);
+            if (err == WASM_OK) return WASM_OK;
+            if (err != WASM__ERR_EXCEPTION) return err;
+        }
         exec->sp = cf->sp_base;
         wasm__arena_reset(rt, exec, cf->arena_saved);
-        memset(cf, 0, sizeof(*cf));
         exec->call_frame_sp--;
     }
 

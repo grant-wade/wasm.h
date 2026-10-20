@@ -10,6 +10,7 @@
 #include "memory_internal.h"
 #include "reader.h"
 #include "exec/cont.h"
+#include "exec/exceptions.h"
 #include "exec/interpreter.h"
 #include "gc.h"
 #include "platform/wasi_state.h"
@@ -203,12 +204,12 @@ static void wasm__gc_collect_handles_when_due(wasm_runtime_t* rt, int creating_c
 
     if (!rt) return;
     threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
-    if (rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live < threshold &&
-        !wasm__cont_collection_due(rt, creating_cont))
+    if (rt->externref_boxes.count + rt->conts.live < threshold && !wasm__cont_collection_due(rt, creating_cont) &&
+        !wasm__exn_collection_due(rt))
         return;
 
     wasm_gc_collect(rt);
-    live = rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live;
+    live = rt->externref_boxes.count + rt->conts.live;
     rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
     if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
         rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
@@ -509,13 +510,6 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     wasm__free(&rt->allocator, rt->memory_imports);
     wasm__free(&rt->allocator, rt->tag_imports);
     for (i = 0; i < rt->externref_boxes.capacity; i++) wasm__free(&rt->allocator, rt->externref_boxes.slots[i]);
-    for (i = 0; i < rt->exception_objects.capacity; i++) {
-        wasm__exception_object_t* exception_object = (wasm__exception_object_t*)rt->exception_objects.slots[i];
-
-        if (!exception_object) continue;
-        wasm__free(&rt->allocator, exception_object->values);
-        wasm__free(&rt->allocator, exception_object);
-    }
     while (rt->linked_funcs) {
         wasm__linked_func_t* next = rt->linked_funcs->next;
 
@@ -529,9 +523,9 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
         rt->held_values = next;
     }
     wasm__cont_free_all(rt);
+    wasm__exn_free_all(rt);
     wasm__gc_free_retired_types(rt);
     wasm__free_type_groups(rt);
-    wasm__handle_set_free(&rt->allocator, &rt->exception_objects);
     wasm__handle_set_free(&rt->allocator, &rt->externref_boxes);
     rt->handle_gc_threshold = 0;
     wasm__free(&rt->allocator, rt->validator_stack);
@@ -545,7 +539,6 @@ WASM_PRIVATE void wasm__runtime_destroy(wasm_runtime_t* rt) {
     wasm__free(&rt->allocator, rt->validator_operand_types);
     wasm__free(&rt->allocator, rt->validator_maps);
     wasm__free(&rt->allocator, rt->validator_map_bits);
-    wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
     wasm__backtrace_destroy(rt);
     wasm__exec_stack_destroy(rt, &rt->main_stack);
     wasm__arena_free_spare(rt);

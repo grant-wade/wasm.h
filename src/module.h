@@ -119,24 +119,7 @@ WASM_PRIVATE wasm_error_t wasm__append_import_infos(wasm_module_t* mod, uint32_t
 
 WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 
-WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex);
-
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
-                                              wasm__exception_state_t* ex,
-                                              uint32_t tag_index,
-                                              uint64_t tag_identity,
-                                              const wasm_value_t* values,
-                                              uint32_t count);
-
 WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
-                                            const wasm__exception_state_t* ex,
-                                            wasm_value_t* out_value);
-
-/* Returns NULL unless value refers to a live exception object of rt. */
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
-                                                                       const wasm_value_t* value);
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out);
 

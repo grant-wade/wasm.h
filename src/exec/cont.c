@@ -33,7 +33,7 @@ static void wasm__cont_stack_clear(wasm_runtime_t* rt, wasm__exec_stack_t* s) {
     while (s->call_frame_sp > 0) {
         wasm__call_frame_t* cf = &s->call_frames[--s->call_frame_sp];
 
-        wasm__clear_call_frame(cf);
+        wasm__clear_call_frame(rt, cf);
         wasm__arena_reset(rt, s, cf->arena_saved);
     }
     s->sp = 0;
@@ -170,6 +170,10 @@ static void wasm__cont_give_back_tag(const wasm__cont_table_t* table) {
     else
         wasm__cont_clear_bit(wasm__cont_tag_bits, (uint32_t)table->tag - 1u);
     wasm__platform_cont_tags_unlock();
+}
+
+WASM_PRIVATE int wasm__cont_claim_tag(wasm_runtime_t* rt) {
+    return rt->conts.tag != 0 || wasm__cont_take_tag(&rt->conts);
 }
 
 WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k) {

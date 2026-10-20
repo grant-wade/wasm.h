@@ -1,5 +1,4 @@
 #include "module.h"
-#include "handles.h"
 #include "values.h"
 #include "types/references.h"
 #include "runtime.h"
@@ -146,34 +145,6 @@ WASM_PRIVATE wasm_error_t wasm__append_global_slots(wasm_module_t* mod, uint32_t
     return WASM_OK;
 }
 
-WASM_PRIVATE void wasm__free_exception_state(const wasm_allocator_t* a, wasm__exception_state_t* ex) {
-    wasm__free(a, ex->values);
-    memset(ex, 0, sizeof(*ex));
-}
-
-WASM_PRIVATE wasm_error_t wasm__set_exception_state(const wasm_allocator_t* a,
-                                              wasm__exception_state_t* ex,
-                                              uint32_t tag_index,
-                                              uint64_t tag_identity,
-                                              const wasm_value_t* values,
-                                              uint32_t count) {
-    wasm_value_t* copy = NULL;
-
-    wasm__free_exception_state(a, ex);
-    if (count > 0) {
-        copy = (wasm_value_t*)wasm__malloc_array(a, count, sizeof(wasm_value_t));
-        if (!copy) return WASM_ERR_OOM;
-        memcpy(copy, values, count * sizeof(wasm_value_t));
-    }
-
-    ex->tag_index = tag_index;
-    ex->tag_identity = tag_identity;
-    ex->values = copy;
-    ex->num_values = count;
-    ex->is_pending = 1;
-    return WASM_OK;
-}
-
 WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt) {
     uint64_t identity;
 
@@ -183,50 +154,6 @@ WASM_PRIVATE uint64_t wasm__alloc_tag_identity(wasm_runtime_t* rt) {
     rt->next_tag_identity = identity + 1;
     if (rt->next_tag_identity == 0) rt->next_tag_identity = 1;
     return identity;
-}
-
-WASM_PRIVATE wasm_error_t wasm__new_exception_ref(wasm_runtime_t* rt,
-                                            const wasm__exception_state_t* ex,
-                                            wasm_value_t* out_value) {
-    wasm__exception_object_t* object;
-    wasm_value_t value;
-
-    if (!rt || !ex || !out_value) return WASM_ERR_MALFORMED;
-
-    object = (wasm__exception_object_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*object));
-    if (!object) return WASM_ERR_OOM;
-    object->tag_index = ex->tag_index;
-    object->tag_identity = ex->tag_identity;
-    object->num_values = ex->num_values;
-    if (ex->num_values > 0) {
-        object->values = (wasm_value_t*)wasm__malloc_array(&rt->allocator, ex->num_values, sizeof(wasm_value_t));
-        if (!object->values) {
-            wasm__free(&rt->allocator, object);
-            return WASM_ERR_OOM;
-        }
-        memcpy(object->values, ex->values, ex->num_values * sizeof(wasm_value_t));
-    }
-
-    if (wasm__handle_set_insert(&rt->allocator, &rt->exception_objects, object) != WASM_OK) {
-        wasm__free(&rt->allocator, object->values);
-        wasm__free(&rt->allocator, object);
-        return WASM_ERR_OOM;
-    }
-
-    value = wasm_ref_null(WASM_TYPE_EXNREF);
-    value.of.externref = (uintptr_t)object;
-    *out_value = value;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm__exception_object_t* wasm__exception_object_from_exnref(const wasm_runtime_t* rt,
-                                                                       const wasm_value_t* value) {
-    void* handle;
-
-    if (!rt || !value || value->type != WASM_TYPE_EXNREF || wasm__is_null_ref(value)) return NULL;
-    handle = (void*)value->of.externref;
-    if (!wasm__handle_set_contains(&rt->exception_objects, handle)) return NULL;
-    return (wasm__exception_object_t*)handle;
 }
 
 WASM_PRIVATE wasm_error_t wasm__append_tags(wasm_module_t* mod, uint32_t count, uint32_t* base_out) {

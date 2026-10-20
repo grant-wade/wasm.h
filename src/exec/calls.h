@@ -6,9 +6,9 @@
 #include "../types/canonical.h"
 #include "state.h"
 
-WASM_PRIVATE void wasm__clear_label(wasm__label_t* label);
+WASM_PRIVATE void wasm__clear_label(wasm_runtime_t* rt, wasm__label_t* label);
 
-WASM_PRIVATE void wasm__clear_call_frame(wasm__call_frame_t* cf);
+WASM_PRIVATE void wasm__clear_call_frame(wasm_runtime_t* rt, wasm__call_frame_t* cf);
 
 WASM_INLINE const wasm_functype_t* wasm__frame_functype(const wasm__call_frame_t* cf) {
     return wasm__module_functype(cf->module, cf->func->type_idx);

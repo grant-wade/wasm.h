@@ -28,9 +28,9 @@
 #include "../values.h"
 #include <string.h>
 
-WASM_INLINE void wasm__drop_labels(wasm__label_t* labels, uint32_t lsp, uint32_t count) {
+WASM_INLINE void wasm__drop_labels(wasm_runtime_t* rt, wasm__label_t* labels, uint32_t lsp, uint32_t count) {
     while (count-- > 0) {
-        if (labels[lsp - 1].caught_values || labels[lsp - 1].active_catch) wasm__clear_label(&labels[lsp - 1]);
+        if (labels[lsp - 1].caught) wasm__clear_label(rt, &labels[lsp - 1]);
         lsp--;
     }
 }
@@ -403,11 +403,6 @@ static WASM__NOINLINE void wasm__store_table_elem(wasm_table_t* table, uint64_t 
     table->elems[index] = *value;
 }
 
-static WASM__NOINLINE wasm_error_t wasm__set_caught_exception(wasm_runtime_t* rt, const wasm__label_t* label) {
-    return wasm__set_exception_state(&rt->allocator, &rt->pending_exception, label->caught_tag,
-                                     label->caught_tag_identity, label->caught_values, label->caught_count);
-}
-
 /* Copies callee's parameter slots from args into locals and zeroes its other locals. */
 static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__slot_t* args, const wasm_func_t* callee) {
     uint32_t i;
@@ -415,26 +410,6 @@ static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__s
     for (i = 0; i < callee->param_slots; i++) locals[i] = args[i];
     if (i < callee->num_local_slots) memset(locals + i, 0, (callee->num_local_slots - i) * sizeof(*locals));
 }
-/* Makes an exception of tag tag_index of mod, whose payload is the slots at args, rt's pending exception. */
-static wasm_error_t wasm__set_pending_tag(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t tag_index,
-                                          const wasm__slot_t* args) {
-    const wasm_functype_t* tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
-    wasm_value_t payload_buf[8];
-    wasm_value_t* payload = payload_buf;
-    wasm_error_t err;
-
-    if (!tag_type) return WASM_ERR_MALFORMED;
-    if (tag_type->num_params > 8) {
-        payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
-        if (!payload) return WASM_ERR_OOM;
-    }
-    wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, args, payload);
-    err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, tag_index, mod->tags[tag_index].identity,
-                                    payload, tag_type->num_params);
-    if (payload != payload_buf) wasm__free(&rt->allocator, payload);
-    return err;
-}
-
 /* Returns the type index of the continuation a switch to continuation type ct of mod passes last, or
  * UINT32_MAX. */
 static uint32_t wasm__switch_cont_type(wasm_module_t* mod, uint32_t ct) {
@@ -522,23 +497,21 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
 
             wasm__gc_collect_handles_if_needed(rt);
             if (op == 0xE5) {
-                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, top - 2);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
-
-                if (!exn) {
+                if (!wasm__exn_live(rt, wasm__slot_ref(top - 2))) {
                     WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null exception reference");
                     return WASM_ERR_TRAP;
                 }
                 k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
                 if (!k) return err;
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, exn->tag_index,
-                                                exn->tag_identity, exn->values, exn->num_values);
+                (void)wasm__exn_throw_ref(rt, wasm__slot_ref(top - 2));
             } else {
+                uint32_t payload_slots = 0;
+
                 k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
                 if (!k) return err;
-                err = wasm__set_pending_tag(rt, mod, imm[1], top - 1 - slots);
+                err = wasm__exn_throw_slots(rt, mod, imm[1], top - 1, &payload_slots);
+                if (err != WASM_OK) return err;
             }
-            if (err != WASM_OK) return err;
             exec->sp -= 1u + slots;
             cf->pc = handlers + 1 + handlers[0] * WASM__HANDLER_WORDS;
             if (!k->top || k->top->call_frame_sp == 0) {
@@ -547,7 +520,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             }
             err = wasm__cont_resume(rt, k, NULL, 0, handlers);
             if (err != WASM_OK) {
-                wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+                wasm__exn_clear_pending(rt);
                 exec->sp += 1u + slots;
                 cf->pc = imm;
                 return err;
@@ -621,12 +594,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
 static wasm_error_t wasm__unwind_host_exception(wasm_runtime_t* rt, wasm__call_frame_t* cf, int is_tail_call) {
     wasm_error_t err;
 
-    if (is_tail_call) {
-        while (cf->lsp > 0) {
-            wasm__clear_label(&cf->labels[cf->lsp - 1]);
-            cf->lsp--;
-        }
-    }
+    if (is_tail_call) wasm__clear_call_frame(rt, cf);
     err = wasm__throw_across_stacks(rt);
     return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
 }
@@ -976,52 +944,27 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 WASM__NEXT();
             WASM__CASE(0x08): { /* throw */
                 uint32_t tag_index = *pc++;
-                wasm_functype_t* tag_type;
-                wasm_value_t payload_buf[8];
-                wasm_value_t* payload = payload_buf;
+                uint32_t payload_slots = 0;
 
                 if (tag_index >= mod->num_tags) WASM__TRAP(WASM_ERR_MALFORMED);
-                tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
-                if (!tag_type) WASM__TRAP(WASM_ERR_MALFORMED);
-                if (tag_type->num_params > 8) {
-                    payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
-                    if (!payload) WASM__TRAP(WASM_ERR_OOM);
-                }
-                sp -= wasm__valtypes_slots(tag_type->params, tag_type->num_params);
-                wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, sp, payload);
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
-                                                tag_index,
-                                                mod->tags[tag_index].identity,
-                                                payload,
-                                                tag_type->num_params);
-                if (payload != payload_buf) wasm__free(&rt->allocator, payload);
+                err = wasm__exn_throw_slots(rt, mod, tag_index, sp, &payload_slots);
                 if (err != WASM_OK) goto cleanup;
+                sp -= payload_slots;
                 goto throw_pending;
             }
             WASM__CASE(0x09): /* rethrow */
-                err = wasm__set_caught_exception(rt, &labels[lsp - 1u - *pc++]);
+                err = wasm__exn_rethrow(rt, labels[lsp - 1u - *pc++].caught);
                 if (err != WASM_OK) goto cleanup;
                 goto throw_pending;
-            WASM__CASE(0x0A): { /* throw_ref */
-                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, --sp);
-                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
-
-                if (!exn) WASM__TRAP(WASM_ERR_TRAP);
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
-                                                exn->tag_index,
-                                                exn->tag_identity,
-                                                exn->values,
-                                                exn->num_values);
-                if (err != WASM_OK) goto cleanup;
+            WASM__CASE(0x0A): /* throw_ref */
+                if (!wasm__exn_throw_ref(rt, wasm__slot_ref(--sp))) WASM__TRAP(WASM_ERR_TRAP);
                 goto throw_pending;
-            }
             WASM__CASE(WASM__OP_TRY): {
                 wasm__label_t* label = &labels[lsp++];
 
                 label->handler = ops + pc[0];
+                label->caught = NULL;
                 label->sp_base = sp_base + pc[1];
-                label->caught_count = 0;
-                label->caught_values = NULL;
                 label->opcode = 0x06;
                 label->active_catch = 0;
                 pc += 2;
@@ -1031,21 +974,20 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                 wasm__label_t* label = &labels[lsp++];
 
                 label->handler = pc + 1;
+                label->caught = NULL;
                 label->sp_base = sp_base + pc[0];
-                label->caught_count = 0;
-                label->caught_values = NULL;
                 label->opcode = 0x1F;
                 label->active_catch = 0;
                 pc += 2u + pc[1] * 6u;
                 WASM__NEXT();
             }
             WASM__CASE(WASM__OP_TRY_LEAVE):
-                wasm__drop_labels(labels, lsp, 1);
+                wasm__drop_labels(rt, labels, lsp, 1);
                 lsp--;
                 pc = ops + *pc;
                 WASM__NEXT();
             WASM__CASE(WASM__OP_TRY_END):
-                wasm__drop_labels(labels, lsp, 1);
+                wasm__drop_labels(rt, labels, lsp, 1);
                 lsp--;
                 WASM__NEXT();
 
@@ -2616,7 +2558,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         if (arity > 0 && sp - arity != dst) memmove(dst, sp - arity, arity * sizeof(wasm__slot_t));
         sp = dst + arity;
         if (pops > 0) {
-            wasm__drop_labels(labels, lsp, pops);
+            wasm__drop_labels(rt, labels, lsp, pops);
             lsp -= pops;
         }
         pc = ops + desc[0];
@@ -2710,7 +2652,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         if (call_slots > 0 && sp - call_slots != stack + sp_base)
             memmove(stack + sp_base, sp - call_slots, call_slots * sizeof(wasm__slot_t));
         sp = stack + sp_base;
-        wasm__drop_labels(labels, lsp, lsp);
+        wasm__drop_labels(rt, labels, lsp, lsp);
         lsp = 0;
         WASM__SAVE_STATE();
         wasm__arena_reset(rt, rt->exec, cf->arena_saved);
@@ -2740,7 +2682,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
 
             for (i = 0; i < func->result_slots; i++) dst[i] = src[i];
             sp = dst + func->result_slots;
-            if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
+            if (lsp > 0) wasm__drop_labels(rt, labels, lsp, lsp);
             wasm__arena_reset(rt, exec, cf->arena_saved);
             exec->call_frame_sp--;
             cf--;
@@ -2763,7 +2705,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         wasm__exec_stack_t* parent = exec->parent;
         uint32_t n = func->result_slots;
 
-        if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
+        if (lsp > 0) wasm__drop_labels(rt, labels, lsp, lsp);
         cf->lsp = lsp = 0;
         if (n > parent->max_stack - parent->sp) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
         if (n > 0) memcpy(&parent->stack[parent->sp], sp - n, n * sizeof(*sp));
@@ -2807,10 +2749,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
 
 cleanup:
     WASM__SAVE_STATE();
-    while (cf->lsp > 0) {
-        wasm__clear_label(&cf->labels[cf->lsp - 1]);
-        cf->lsp--;
-    }
+    wasm__clear_call_frame(rt, cf);
 
     return err;
 }
@@ -2843,7 +2782,7 @@ static void wasm__drop_call_frames(wasm_runtime_t* rt, uint32_t base_frame_sp) {
     while (exec->call_frame_sp > base_frame_sp) {
         wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1];
 
-        wasm__clear_call_frame(cf);
+        wasm__clear_call_frame(rt, cf);
         wasm__arena_reset(rt, exec, cf->arena_saved);
         exec->sp = cf->sp_base;
         memset(cf, 0, sizeof(*cf));
@@ -2858,7 +2797,7 @@ static wasm_error_t wasm__return_after_yield(wasm_runtime_t* rt) {
     wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1u];
     uint32_t n = cf->func->result_slots;
 
-    wasm__clear_call_frame(cf);
+    wasm__clear_call_frame(rt, cf);
     if (!parent || exec->call_frame_sp > exec->frame_floor) return wasm__finish_call_frame(rt, 0);
     if (n > parent->max_stack - parent->sp) {
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)parent->max_stack);

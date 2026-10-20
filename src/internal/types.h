@@ -130,6 +130,8 @@ struct wasm_memory_t {
 
 typedef struct wasm_tag_t {
     uint32_t type_idx;
+    uint32_t payload_slots; /* 1 + the slots its payload spans once it has been thrown, else 0 */
+    uint32_t payload_kinds; /* WASM__SLOT_KIND_BITS-bit kinds of the first 16 of those slots */
     uint64_t identity;
 } wasm_tag_t;
 
@@ -139,11 +141,16 @@ typedef struct wasm_custom_section_t {
     uint32_t size;
 } wasm_custom_section_t;
 
+/* The exception being thrown: its tag and the payload slots its handler receives. */
 typedef struct wasm__exception_state_t {
-    uint32_t tag_index;
     uint64_t tag_identity;
-    wasm_value_t* values;
-    uint32_t num_values;
+    const union wasm__slot_t* slots;
+    const uint32_t* kinds;                    /* WASM__SLOT_KIND_BITS-bit kind of each payload slot */
+    struct wasm__exception_object_t* source;  /* the exception object it is thrown from, or NULL */
+    union wasm__slot_t* buffer;               /* payload of an exception thrown from slots, then its kinds */
+    uint32_t buffer_cap;                      /* payload slots buffer has room for */
+    uint32_t tag_index;
+    uint32_t num_slots;
     int is_pending;
 } wasm__exception_state_t;
 

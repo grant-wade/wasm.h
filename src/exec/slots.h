@@ -16,8 +16,6 @@ WASM_PRIVATE wasm_value_t wasm__value_from_slot(const wasm_runtime_t* rt,
 /* Stores count values in the slots starting at dst; returns how many slots they fill. */
 WASM_PRIVATE uint32_t wasm__slots_from_values(wasm__slot_t* dst, const wasm_value_t* values, uint32_t count);
 
-WASM_PRIVATE uint32_t wasm__values_slots(const wasm_value_t* values, uint32_t count);
-
 /* Reads count values of types, refined by reftypes if not NULL, from the slots starting at src;
  * returns how many slots they span. */
 WASM_PRIVATE uint32_t wasm__values_from_slots(const wasm_runtime_t* rt,

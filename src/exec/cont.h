@@ -5,6 +5,9 @@
 #include "../internal/slot.h"
 #include "stack.h"
 
+/* Gives rt the tag its continuation and exception references hold if it has none; returns 0 if none is left. */
+WASM_PRIVATE int wasm__cont_claim_tag(wasm_runtime_t* rt);
+
 /* Returns the reference that names k while it is in use. */
 WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k);
 

@@ -229,6 +229,46 @@
       (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
     (local.get $acc))
 
+  (func (export "rethrow") (param $n i32) (result i32) (local $i i32) (local $acc i32)
+    (loop $l
+      (local.set $acc (i32.add (local.get $acc)
+        (block $caught (result i32)
+          (try_table (catch $exn $caught)
+            (block $outer (result i32 exnref)
+              (try_table (catch_ref $exn $outer)
+                (block $inner (result i32 exnref)
+                  (try_table (catch_ref $exn $inner) (call $thrower (local.get $i)))
+                  (unreachable))
+                (throw_ref))
+              (unreachable))
+            (throw_ref))
+          (unreachable))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+    (local.get $acc))
+
+  (func $deep (param $depth i32) (param $v i32)
+    (if (i32.eqz (local.get $depth)) (then (throw $exn (local.get $v))))
+    (call $deep (i32.sub (local.get $depth) (i32.const 1)) (local.get $v)))
+  (func (export "throw_deep") (param $n i32) (result i32) (local $i i32) (local $acc i32)
+    (loop $l
+      (local.set $acc (i32.add (local.get $acc)
+        (block $caught (result i32)
+          (try_table (catch $exn $caught) (call $deep (i32.const 9) (local.get $i)))
+          (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+    (local.get $acc))
+
+  (func (export "try_table") (param $n i32) (result i32) (local $i i32) (local $acc i32)
+    (loop $l
+      (block $caught
+        (try_table (catch_all $caught)
+          (local.set $acc (i32.add (local.get $acc) (i32.xor (local.get $i) (i32.const 0x55))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+    (local.get $acc))
+
   (func $producer (param $n i32) (local $i i32)
     (loop $l
       (suspend $yield (local.get $i))

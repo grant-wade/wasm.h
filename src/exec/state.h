@@ -6,13 +6,9 @@
 
 /* A try or try_table block that is running: the only blocks that keep a label at run time. */
 typedef struct wasm__label_t {
-    const uint32_t* handler; /* its clause table in the translated body */
+    const uint32_t* handler;                 /* its clause table in the translated body */
+    struct wasm__exception_object_t* caught; /* the exception a legacy catch clause of it is handling, or NULL */
     uint32_t sp_base;
-    uint32_t caught_tag;
-    uint64_t caught_tag_identity;
-    uint32_t caught_count;
-    wasm_value_t* caught_values;
-    const wasm_allocator_t* caught_allocator; /* source of caught_values */
     uint8_t opcode;
     uint8_t active_catch;
 } wasm__label_t;
