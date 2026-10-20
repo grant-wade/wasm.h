@@ -1027,15 +1027,20 @@ WASM_PRIVATE int wasm__allocator_valid(const wasm_allocator_t* a);
 
 #define WASM__ALLOC_HEADER WASM__ALLOC_ALIGN
 
-/* Alignment malloc provides on the hosts the runtime targets. */
+/* Alignment malloc provides on the hosts the runtime targets, for blocks of at least this size. */
 #define WASM__LIBC_ALIGN (2u * sizeof(void*))
+
+/* Whether malloc alone aligns a block of size bytes to align. */
+static int wasm__libc_aligns(size_t size, size_t align) {
+    return align <= sizeof(void*) || (align <= WASM__LIBC_ALIGN && size >= align);
+}
 
 static void* wasm__libc_alloc(void* ctx, size_t size, size_t align) {
     uint8_t* raw;
     uintptr_t aligned;
 
     (void)ctx;
-    if (align <= WASM__LIBC_ALIGN) return malloc(size);
+    if (wasm__libc_aligns(size, align)) return malloc(size);
     if (size > SIZE_MAX - align - sizeof(void*)) return NULL;
     raw = (uint8_t*)malloc(size + align - 1u + sizeof(void*));
     if (!raw) return NULL;
@@ -1048,8 +1053,7 @@ static void wasm__libc_free(void* ctx, void* p, size_t size, size_t align) {
     void* raw;
 
     (void)ctx;
-    (void)size;
-    if (align <= WASM__LIBC_ALIGN) {
+    if (wasm__libc_aligns(size, align)) {
         free(p);
         return;
     }
@@ -1060,7 +1064,7 @@ static void wasm__libc_free(void* ctx, void* p, size_t size, size_t align) {
 static void* wasm__libc_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
     void* moved;
 
-    if (align <= WASM__LIBC_ALIGN) return realloc(p, new_size);
+    if (wasm__libc_aligns(old_size, align) && wasm__libc_aligns(new_size, align)) return realloc(p, new_size);
     moved = wasm__libc_alloc(ctx, new_size, align);
     if (!moved) return NULL;
     memcpy(moved, p, old_size < new_size ? old_size : new_size);
@@ -11379,7 +11383,8 @@ static wasm_error_t wasm__init_expr_binary(wasm__init_expr_stack_t* stack, uint8
     wasm_value_t lhs;
     wasm_error_t err = wasm__init_expr_stack_pop(stack, &rhs);
 
-    if (err == WASM_OK) err = wasm__init_expr_stack_pop(stack, &lhs);
+    if (err != WASM_OK) return err;
+    err = wasm__init_expr_stack_pop(stack, &lhs);
     if (err != WASM_OK) return err;
     switch (op) {
         case 0x6A:
@@ -17393,7 +17398,7 @@ static int wasm__cont_signature_matches(const wasm_module_t* mod,
 }
 
 static wasm_error_t wasm__cont_pop_ref(wasm__validator_t* v, const uint8_t* at, uint32_t type_idx) {
-    wasm_valtype_t type;
+    wasm_valtype_t type = WASM_TYPE_VOID;
     wasm_reftype_t ref;
     wasm_error_t err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 1, &type, &ref);
 
@@ -17402,7 +17407,7 @@ static wasm_error_t wasm__cont_pop_ref(wasm__validator_t* v, const uint8_t* at, 
 }
 
 static wasm_error_t wasm__cont_push_ref(wasm__validator_t* v, const uint8_t* at, uint32_t type_idx) {
-    wasm_valtype_t type;
+    wasm_valtype_t type = WASM_TYPE_VOID;
     wasm_reftype_t ref;
     wasm_error_t err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 0, &type, &ref);
 

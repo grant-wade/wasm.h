@@ -5,15 +5,20 @@
 
 #define WASM__ALLOC_HEADER WASM__ALLOC_ALIGN
 
-/* Alignment malloc provides on the hosts the runtime targets. */
+/* Alignment malloc provides on the hosts the runtime targets, for blocks of at least this size. */
 #define WASM__LIBC_ALIGN (2u * sizeof(void*))
+
+/* Whether malloc alone aligns a block of size bytes to align. */
+static int wasm__libc_aligns(size_t size, size_t align) {
+    return align <= sizeof(void*) || (align <= WASM__LIBC_ALIGN && size >= align);
+}
 
 static void* wasm__libc_alloc(void* ctx, size_t size, size_t align) {
     uint8_t* raw;
     uintptr_t aligned;
 
     (void)ctx;
-    if (align <= WASM__LIBC_ALIGN) return malloc(size);
+    if (wasm__libc_aligns(size, align)) return malloc(size);
     if (size > SIZE_MAX - align - sizeof(void*)) return NULL;
     raw = (uint8_t*)malloc(size + align - 1u + sizeof(void*));
     if (!raw) return NULL;
@@ -26,8 +31,7 @@ static void wasm__libc_free(void* ctx, void* p, size_t size, size_t align) {
     void* raw;
 
     (void)ctx;
-    (void)size;
-    if (align <= WASM__LIBC_ALIGN) {
+    if (wasm__libc_aligns(size, align)) {
         free(p);
         return;
     }
@@ -38,7 +42,7 @@ static void wasm__libc_free(void* ctx, void* p, size_t size, size_t align) {
 static void* wasm__libc_resize(void* ctx, void* p, size_t old_size, size_t new_size, size_t align) {
     void* moved;
 
-    if (align <= WASM__LIBC_ALIGN) return realloc(p, new_size);
+    if (wasm__libc_aligns(old_size, align) && wasm__libc_aligns(new_size, align)) return realloc(p, new_size);
     moved = wasm__libc_alloc(ctx, new_size, align);
     if (!moved) return NULL;
     memcpy(moved, p, old_size < new_size ? old_size : new_size);

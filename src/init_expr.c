@@ -513,7 +513,8 @@ static wasm_error_t wasm__init_expr_binary(wasm__init_expr_stack_t* stack, uint8
     wasm_value_t lhs;
     wasm_error_t err = wasm__init_expr_stack_pop(stack, &rhs);
 
-    if (err == WASM_OK) err = wasm__init_expr_stack_pop(stack, &lhs);
+    if (err != WASM_OK) return err;
+    err = wasm__init_expr_stack_pop(stack, &lhs);
     if (err != WASM_OK) return err;
     switch (op) {
         case 0x6A:

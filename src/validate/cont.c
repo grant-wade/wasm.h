@@ -61,7 +61,7 @@ static int wasm__cont_signature_matches(const wasm_module_t* mod,
 }
 
 static wasm_error_t wasm__cont_pop_ref(wasm__validator_t* v, const uint8_t* at, uint32_t type_idx) {
-    wasm_valtype_t type;
+    wasm_valtype_t type = WASM_TYPE_VOID;
     wasm_reftype_t ref;
     wasm_error_t err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 1, &type, &ref);
 
@@ -70,7 +70,7 @@ static wasm_error_t wasm__cont_pop_ref(wasm__validator_t* v, const uint8_t* at, 
 }
 
 static wasm_error_t wasm__cont_push_ref(wasm__validator_t* v, const uint8_t* at, uint32_t type_idx) {
-    wasm_valtype_t type;
+    wasm_valtype_t type = WASM_TYPE_VOID;
     wasm_reftype_t ref;
     wasm_error_t err = wasm__validator_make_typeidx_reftype(v, at, type_idx, 0, &type, &ref);
 
