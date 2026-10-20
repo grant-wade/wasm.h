@@ -1432,6 +1432,8 @@ static int wasm2api_write_header(FILE* out, const wasm2api_model_t* model, int e
     if (!model->singleton_mode) {
         fprintf(out, "    %s_ctx_t* ctx;\n", model->api_prefix);
         fputs("    int owns_ctx;\n", out);
+    } else {
+        fputs("    wasm_error_t init_error;\n", out);
     }
     fputs("};\n", out);
     fputs("\n", out);
@@ -2227,7 +2229,7 @@ static int wasm2api_write_source(FILE* out,
                 model->api_prefix, model->api_prefix, model->api_prefix);
         fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
         fputs("    memset(&api, 0, sizeof(api));\n", out);
-        fprintf(out, "    (void)%s_init(wasm_bytes, len, options);\n", model->api_prefix);
+        fprintf(out, "    api.init_error = %s_init(wasm_bytes, len, options);\n", model->api_prefix);
         fputs("    return api;\n", out);
         fputs("}\n\n", out);
 
@@ -2237,7 +2239,7 @@ static int wasm2api_write_source(FILE* out,
                     model->api_prefix, model->api_prefix, model->api_prefix);
             fprintf(out, "    %s_api_t api;\n\n", model->api_prefix);
             fputs("    memset(&api, 0, sizeof(api));\n", out);
-            fprintf(out, "    (void)%s_init_embedded(options);\n", model->api_prefix);
+            fprintf(out, "    api.init_error = %s_init_embedded(options);\n", model->api_prefix);
             fputs("    return api;\n", out);
             fputs("}\n\n", out);
         }

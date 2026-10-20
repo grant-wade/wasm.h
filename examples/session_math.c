@@ -635,7 +635,7 @@ session_math_api_t session_math_api_init(const uint8_t* wasm_bytes, size_t len, 
     session_math_api_t api;
 
     memset(&api, 0, sizeof(api));
-    (void)session_math_init(wasm_bytes, len, options);
+    api.init_error = session_math_init(wasm_bytes, len, options);
     return api;
 }
 
@@ -643,7 +643,7 @@ session_math_api_t session_math_api_init_embedded(const session_math_init_option
     session_math_api_t api;
 
     memset(&api, 0, sizeof(api));
-    (void)session_math_init_embedded(options);
+    api.init_error = session_math_init_embedded(options);
     return api;
 }
 

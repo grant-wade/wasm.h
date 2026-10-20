@@ -107,6 +107,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- `wasm2api --singleton` emitted an empty `*_api_t` struct, which MSVC rejects; it holds `init_error`, the result of `*_init`.
 - An exception thrown inside a legacy `catch` or `catch_all` body was caught by a later clause of the same `try`.
 - Valid modules using a legacy `delegate` failed validation.
 - Imports read freed memory after the `type_module` of a registered function import was freed.
