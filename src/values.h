@@ -16,14 +16,18 @@ WASM_PRIVATE uint32_t wasm__gc_i31_get_u(uintptr_t bits);
 
 WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment);
 
-WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index);
+/* type must have no layout yet. */
+WASM_PRIVATE wasm_error_t wasm__gc_struct_layout_init(const wasm_allocator_t* a,
+                                                     wasm_structtype_t* type,
+                                                     int has_descriptor);
 
-WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size);
+WASM_PRIVATE void wasm__gc_struct_layout_free(const wasm_allocator_t* a, wasm_structtype_t* type);
+
+WASM_PRIVATE void wasm__gc_array_layout_init(wasm_arraytype_t* type);
+
 
 /* Returns the descriptor slot of a struct allocated with one, else NULL. */
 WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object);
-
-WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type);
 
 WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
                                      uint32_t length,

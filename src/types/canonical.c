@@ -36,6 +36,7 @@ WASM_PRIVATE void wasm__functype_mark_unspecified(const wasm_allocator_t* a, was
 }
 
 static void wasm__free_structtype(const wasm_allocator_t* a, wasm_structtype_t* st) {
+    wasm__gc_struct_layout_free(a, st);
     wasm__free(a, st->fields);
     st->fields = NULL;
     st->num_fields = 0;

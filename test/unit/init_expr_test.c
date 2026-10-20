@@ -1236,8 +1236,8 @@ TEST(test_gc_const_expr_supports_gc_alloc_ops) {
     CHECK_MSG(t, array_fixed != NULL && array_fixed->header.kind == WASM_GC_OBJ_ARRAY,
               "%s", "expected array.new_fixed global to point at an array object");
 
-    struct_field_offset = wasm__gc_struct_field_offset(&m->types[0].of.struct_, 0);
-    array_data_offset = wasm__gc_array_data_offset(&m->types[1].of.array);
+    struct_field_offset = m->types[0].of.struct_.field_offsets[0];
+    array_data_offset = m->types[1].of.array.data_offset;
     struct_init_field = (wasm_value_t*)((uint8_t*)struct_init + struct_field_offset);
     struct_default_field = (wasm_value_t*)((uint8_t*)struct_default + struct_field_offset);
     array_init_data = (wasm_value_t*)((uint8_t*)array_init + array_data_offset);

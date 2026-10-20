@@ -5,6 +5,7 @@
 #include "../portable.h"
 #include "../reader.h"
 #include "references.h"
+#include "../values.h"
 #include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
@@ -183,6 +184,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
                                             uint8_t opcode,
                                             uint32_t rec_group_idx,
                                             wasm_comptype_t* type) {
+    wasm_error_t err;
+
     memset(type, 0, sizeof(*type));
     type->rec_group = rec_group_idx;
     type->is_final = 1;
@@ -191,7 +194,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 
     if (opcode == 0x50 || opcode == 0x4F) {
         uint32_t i;
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+
+        err = wasm__require_feature(mod, WASM_FEATURE_GC);
         if (err != WASM_OK) return err;
 
         type->is_final = (opcode == 0x4F);
@@ -205,15 +209,20 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
         opcode = wasm__read_u8(r);
     }
     if (opcode == 0x4C) {
-        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->describes);
+        err = wasm__read_descriptor_clause(mod, r, &type->describes);
         if (err != WASM_OK) return err;
         opcode = wasm__read_u8(r);
     }
     if (opcode == 0x4D) {
-        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->descriptor);
+        err = wasm__read_descriptor_clause(mod, r, &type->descriptor);
         if (err != WASM_OK) return err;
         opcode = wasm__read_u8(r);
     }
 
-    return wasm__decode_comptype_body(mod, r, opcode, type);
+    err = wasm__decode_comptype_body(mod, r, opcode, type);
+    if (err != WASM_OK) return err;
+    if (type->kind == WASM_COMP_STRUCT)
+        return wasm__gc_struct_layout_init(&mod->rt->allocator, &type->of.struct_, type->descriptor != UINT32_MAX);
+    if (type->kind == WASM_COMP_ARRAY) wasm__gc_array_layout_init(&type->of.array);
+    return WASM_OK;
 }

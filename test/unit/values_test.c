@@ -694,6 +694,8 @@ TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
     mod.rt = &rt;
     mod.types = types;
     mod.num_types = 2;
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &types[0].of.struct_, 0));
+    wasm__gc_array_layout_init(&types[1].of.array);
 
     struct_obj = wasm__gc_alloc_struct_object(&rt, &mod, 0, &types[0].of.struct_);
     held = wasm__gc_type_ref_value(&mod, 0, struct_obj ? &struct_obj->header : NULL);
@@ -705,6 +707,7 @@ TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
     CHECK_MSG(t, struct_obj != NULL, "%s", "expected struct allocation for accessor test to succeed");
     CHECK_MSG(t, array_obj != NULL, "%s", "expected array allocation for accessor test to succeed");
     if (!struct_obj || !array_obj) {
+        wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
         wasm_destroy(&rt);
         return;
     }
@@ -781,6 +784,105 @@ TEST(test_gc_accessors_handle_packed_fields_and_array_bounds) {
               "%s",
               "expected null array store to trap");
 
+    wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
+    wasm_destroy(&rt);
+}
+
+static void wasm_test_layout_set_field(wasm_fieldtype_t* field, int packed, uint32_t type) {
+    memset(field, 0, sizeof(*field));
+    field->is_mutable = 1;
+    field->storage.kind = packed ? WASM_STORAGE_PACKED : WASM_STORAGE_VALTYPE;
+    if (packed)
+        field->storage.of.packed_type = (wasm_packedtype_t)type;
+    else
+        field->storage.of.valtype = (wasm_valtype_t)type;
+}
+
+static size_t wasm_test_layout_field_size(const wasm_fieldtype_t* field) {
+    if (field->storage.kind != WASM_STORAGE_PACKED) return sizeof(wasm_value_t);
+    return field->storage.of.packed_type == WASM_PACKED_I8 ? 1u : 2u;
+}
+
+static size_t wasm_test_layout_field_align(const wasm_fieldtype_t* field) {
+    if (field->storage.kind != WASM_STORAGE_PACKED) return (size_t)WASM__ALIGNOF(wasm_value_t);
+    return wasm_test_layout_field_size(field);
+}
+
+static size_t wasm_test_layout_align(size_t value, size_t alignment) {
+    return (value + alignment - 1u) / alignment * alignment;
+}
+
+TEST(test_gc_layout_tables_place_every_field_kind) {
+    static const struct {
+        int packed;
+        uint32_t type;
+    } kinds[] = {
+        { 1, WASM_PACKED_I8 },        { 0, WASM_TYPE_I64 },       { 1, WASM_PACKED_I16 }, { 0, WASM_TYPE_F32 },
+        { 0, WASM_TYPE_STRUCTREF },   { 1, WASM_PACKED_I8 },      { 0, WASM_TYPE_V128 },  { 0, WASM_TYPE_F64 },
+        { 0, WASM_TYPE_I32 },         { 0, WASM_TYPE_ANYREF },    { 1, WASM_PACKED_I16 }, { 0, WASM_TYPE_EXTERNREF },
+        { 1, WASM_PACKED_I8 },        { 0, WASM_TYPE_FUNCREF },   { 0, WASM_TYPE_EQREF }, { 1, WASM_PACKED_I8 },
+        { 1, WASM_PACKED_I16 },       { 0, WASM_TYPE_ARRAYREF },
+    };
+    enum { NUM_KINDS = sizeof(kinds) / sizeof(kinds[0]) };
+    wasm_runtime_t rt;
+    wasm_fieldtype_t fields[NUM_KINDS];
+    wasm_structtype_t st;
+    wasm_arraytype_t at;
+    size_t value_align = (size_t)WASM__ALIGNOF(wasm_value_t);
+    size_t array_size = 0;
+    uint32_t has_descriptor;
+    uint32_t i;
+
+    wasm_init(&rt);
+    for (i = 0; i < NUM_KINDS; i++) wasm_test_layout_set_field(&fields[i], kinds[i].packed, kinds[i].type);
+
+    for (has_descriptor = 0; has_descriptor < 2; has_descriptor++) {
+        uint32_t count;
+
+        for (count = 0; count <= NUM_KINDS; count++) {
+            size_t offset = WASM__GC_STRUCT_HEADER_SIZE;
+            uint32_t refs = 0;
+
+            memset(&st, 0, sizeof(st));
+            st.num_fields = count;
+            st.fields = fields;
+            WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &st, (int)has_descriptor));
+            for (i = 0; i < count; i++) {
+                offset = wasm_test_layout_align(offset, wasm_test_layout_field_align(&fields[i]));
+                CHECK_MSG(t, st.field_offsets[i] == offset, "field %u of %u: expected offset %zu, got %u",
+                          (unsigned)i, (unsigned)count, offset, (unsigned)st.field_offsets[i]);
+                if (!kinds[i].packed && wasm__is_ref_type((wasm_valtype_t)kinds[i].type)) {
+                    CHECK_MSG(t, refs < st.num_ref_fields && st.ref_offsets[refs] == offset,
+                              "field %u of %u: expected reference offset %zu", (unsigned)i, (unsigned)count, offset);
+                    refs++;
+                }
+                offset += wasm_test_layout_field_size(&fields[i]);
+            }
+            WASM_CHECK_I32(t, (int32_t)st.num_ref_fields, (int32_t)refs);
+            offset = wasm_test_layout_align(offset, value_align);
+            if (has_descriptor) {
+                offset = wasm_test_layout_align(offset + sizeof(wasm_gc_header_t*), value_align);
+                CHECK(t, st.descriptor_offset == offset - sizeof(wasm_gc_header_t*));
+            } else {
+                CHECK(t, st.descriptor_offset == 0);
+            }
+            CHECK_MSG(t, st.object_size == offset, "%u fields: expected object size %zu, got %u", (unsigned)count,
+                      offset, (unsigned)st.object_size);
+            wasm__gc_struct_layout_free(&rt.allocator, &st);
+        }
+    }
+
+    for (i = 0; i < NUM_KINDS; i++) {
+        memset(&at, 0, sizeof(at));
+        at.field = fields[i];
+        wasm__gc_array_layout_init(&at);
+        CHECK(t, at.elem_size == wasm_test_layout_field_size(&fields[i]));
+        CHECK(t, at.elem_align == wasm_test_layout_field_align(&fields[i]));
+        CHECK(t, at.data_offset == wasm_test_layout_align(WASM__GC_ARRAY_HEADER_SIZE, at.elem_align));
+        CHECK(t, at.elems_hold_refs == (!kinds[i].packed && wasm__is_ref_type((wasm_valtype_t)kinds[i].type)));
+        CHECK(t, wasm__gc_array_total_size(&at, 7, &array_size));
+        CHECK(t, array_size == at.data_offset + 7u * at.elem_size);
+    }
     wasm_destroy(&rt);
 }
 
@@ -791,5 +893,6 @@ static const test_case values_cases[] = {
     { "trunc-sat ops: all 0xFC 0x00-0x07 cases", test_trunc_sat_ops },
     { "wasmgc: i31ref values use tagged non-null storage", test_gc_i31ref_uses_tagged_non_null_storage },
     { "wasmgc: GC accessors handle packed fields and array bounds", test_gc_accessors_handle_packed_fields_and_array_bounds },
+    { "wasmgc: layout tables place every field and element kind", test_gc_layout_tables_place_every_field_kind },
 };
 const test_suite values_suite = { "values", values_cases, COUNTOF(values_cases) };

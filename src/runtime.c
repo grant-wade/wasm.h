@@ -258,17 +258,11 @@ WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
                                                       const wasm_module_t* mod,
                                                       uint32_t type_index,
                                                       const wasm_structtype_t* type) {
-    int has_descriptor = mod && type_index < mod->num_types && mod->types[type_index].descriptor != UINT32_MAX;
     wasm_gc_struct_t* object;
-    size_t object_size;
 
-    if (!wasm__gc_struct_size(type, &object_size)) return NULL;
-    if (has_descriptor) {
-        object_size = wasm__align_up_size(object_size + sizeof(wasm_gc_header_t*), (size_t)WASM__ALIGNOF(wasm_value_t));
-        if (object_size == (size_t)-1) return NULL;
-    }
-    object = (wasm_gc_struct_t*)wasm__gc_alloc_object(rt, mod, type_index, WASM_GC_OBJ_STRUCT, object_size);
-    if (object) object->header.has_descriptor = (uint8_t)has_descriptor;
+    if (type->object_size == 0) return NULL;
+    object = (wasm_gc_struct_t*)wasm__gc_alloc_object(rt, mod, type_index, WASM_GC_OBJ_STRUCT, type->object_size);
+    if (object) object->header.has_descriptor = (uint8_t)(type->descriptor_offset != 0);
     return object;
 }
 

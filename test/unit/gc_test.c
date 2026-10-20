@@ -18,10 +18,8 @@ static uint32_t wasm_test_gc_allocation_count(const wasm_runtime_t* rt) {
 static wasm_value_t* wasm_test_gc_struct_field_value(wasm_gc_struct_t* object,
                                                      const wasm_structtype_t* type,
                                                      uint32_t field_index) {
-    size_t offset = wasm__gc_struct_field_offset(type, field_index);
-
-    if (!object || !type || offset == (size_t)-1) return NULL;
-    return (wasm_value_t*)(((uint8_t*)object) + offset);
+    if (!object || !type || field_index >= type->num_fields) return NULL;
+    return (wasm_value_t*)(((uint8_t*)object) + type->field_offsets[field_index]);
 }
 
 TEST(test_gc_runtime_initializes_heap_arena) {
@@ -77,12 +75,15 @@ TEST(test_gc_allocator_tracks_struct_and_array_objects) {
 
     array_type.field.storage.kind = WASM_STORAGE_PACKED;
     array_type.field.storage.of.packed_type = WASM_PACKED_I16;
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &struct_type, 0));
+    wasm__gc_array_layout_init(&array_type);
 
-    CHECK_MSG(t, wasm__gc_struct_size(&struct_type, &struct_size), "%s", "expected struct object size calculation to succeed");
+    struct_size = struct_type.object_size;
+    CHECK_MSG(t, struct_size != 0, "%s", "expected struct object size calculation to succeed");
     CHECK_MSG(t, wasm__gc_array_total_size(&array_type, 4, &array_size), "%s", "expected array object size calculation to succeed");
 
-    struct_field0_offset = wasm__gc_struct_field_offset(&struct_type, 0);
-    struct_field1_offset = wasm__gc_struct_field_offset(&struct_type, 1);
+    struct_field0_offset = struct_type.field_offsets[0];
+    struct_field1_offset = struct_type.field_offsets[1];
     CHECK_MSG(t, struct_field0_offset == wasm__align_up_size(WASM__GC_STRUCT_HEADER_SIZE, (size_t)WASM__ALIGNOF(wasm_value_t)),
               "unexpected first struct field offset %zu",
               struct_field0_offset);
@@ -94,6 +95,7 @@ TEST(test_gc_allocator_tracks_struct_and_array_objects) {
     struct_obj = wasm__gc_alloc_struct_object(&rt, NULL, 7, &struct_type);
     CHECK_MSG(t, struct_obj != NULL, "%s", "expected struct allocation from the GC heap to succeed");
     if (struct_obj == NULL) {
+        wasm__gc_struct_layout_free(&rt.allocator, &struct_type);
         wasm_destroy(&rt);
         return;
     }
@@ -114,6 +116,7 @@ TEST(test_gc_allocator_tracks_struct_and_array_objects) {
     struct_obj = (wasm_gc_struct_t*)held.of.gc_obj;
     CHECK_MSG(t, array_obj != NULL, "%s", "expected array allocation from the GC heap to succeed");
     if (array_obj == NULL) {
+        wasm__gc_struct_layout_free(&rt.allocator, &struct_type);
         wasm_destroy(&rt);
         return;
     }
@@ -134,6 +137,7 @@ TEST(test_gc_allocator_tracks_struct_and_array_objects) {
               "%s",
               "expected the second allocation to follow the first in the heap");
 
+    wasm__gc_struct_layout_free(&rt.allocator, &struct_type);
     wasm_destroy(&rt);
 }
 
@@ -197,6 +201,8 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     types[1].descriptor = UINT32_MAX;
     types[1].of.struct_.num_fields = 1;
     types[1].of.struct_.fields = parent_fields;
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &types[0].of.struct_, 0));
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &types[1].of.struct_, 0));
 
     mod.rt = &rt;
     mod.types = types;
@@ -249,6 +255,8 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
               "expected all GC test allocations to succeed");
     if (!(child && parent && table_root && local_root && stack_root && garbage)) {
         wasm__gc_unregister_module(&rt, &mod);
+        wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
+        wasm__gc_struct_layout_free(&rt.allocator, &types[1].of.struct_);
         wasm_destroy(&rt);
         return;
     }
@@ -318,6 +326,8 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
               "expected operand-stack roots to survive collection");
 
     wasm__gc_unregister_module(&rt, &mod);
+    wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
+    wasm__gc_struct_layout_free(&rt.allocator, &types[1].of.struct_);
     wasm_destroy(&rt);
 }
 
@@ -354,6 +364,7 @@ TEST(test_gc_collect_marks_deep_object_chains_iteratively) {
     types[0].descriptor = UINT32_MAX;
     types[0].of.struct_.num_fields = 1;
     types[0].of.struct_.fields = fields;
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &types[0].of.struct_, 0));
 
     mod.rt = &rt;
     mod.types = types;
@@ -364,8 +375,8 @@ TEST(test_gc_collect_marks_deep_object_chains_iteratively) {
     globals[0].value = wasm_ref_null(WASM_TYPE_STRUCTREF);
     wasm__gc_register_module(&rt, &mod);
 
-    CHECK_MSG(t, wasm__gc_struct_size(&types[0].of.struct_, &object_size), "%s",
-              "expected struct size calculation to succeed");
+    object_size = types[0].of.struct_.object_size;
+    CHECK_MSG(t, object_size != 0, "%s", "expected struct size calculation to succeed");
     CHECK_MSG(t, wasm__gc_heap_init(&rt, object_size * (CHAIN_LENGTH + 16u)) == WASM_OK, "%s",
               "expected GC heap resize to succeed");
 
@@ -396,6 +407,7 @@ TEST(test_gc_collect_marks_deep_object_chains_iteratively) {
               (unsigned)CHAIN_LENGTH, (unsigned)wasm_test_gc_allocation_count(&rt));
 
     wasm__gc_unregister_module(&rt, &mod);
+    wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
     wasm_destroy(&rt);
 }
 
@@ -423,15 +435,15 @@ TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
     types[0].descriptor = UINT32_MAX;
     types[0].of.struct_.num_fields = 1;
     types[0].of.struct_.fields = fields;
+    WASM_CHECK_OK(t, wasm__gc_struct_layout_init(&rt.allocator, &types[0].of.struct_, 0));
 
     mod.rt = &rt;
     mod.types = types;
     mod.num_types = 1;
     wasm__gc_register_module(&rt, &mod);
 
-    CHECK_MSG(t, wasm__gc_struct_size(&types[0].of.struct_, &object_size),
-              "%s",
-              "expected struct size calculation to succeed");
+    object_size = types[0].of.struct_.object_size;
+    CHECK_MSG(t, object_size != 0, "%s", "expected struct size calculation to succeed");
     heap_size = object_size * 2u + (object_size / 2u);
     CHECK_MSG(t, wasm__gc_heap_init(&rt, heap_size) == WASM_OK,
               "%s",
@@ -444,6 +456,7 @@ TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
               "expected initial allocations in the resized heap to succeed");
     if (!(root && garbage)) {
         wasm__gc_unregister_module(&rt, &mod);
+        wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
         wasm_destroy(&rt);
         return;
     }
@@ -463,6 +476,7 @@ TEST(test_gc_allocator_retries_after_collection_on_heap_exhaustion) {
 
     wasm_ref_release(&rt, held);
     wasm__gc_unregister_module(&rt, &mod);
+    wasm__gc_struct_layout_free(&rt.allocator, &types[0].of.struct_);
     wasm_destroy(&rt);
 }
 
@@ -980,7 +994,8 @@ TEST(test_gc_host_constructors_keep_their_inputs_alive) {
         wasm_destroy(&rt);
         return;
     }
-    CHECK(t, wasm__gc_struct_size(wasm__module_const_structtype(m, 1), &struct_size));
+    struct_size = wasm__module_const_structtype(m, 1)->object_size;
+    CHECK(t, struct_size != 0);
     CHECK(t, wasm__gc_array_total_size(wasm__module_const_arraytype(m, 2), 1, &pair_size));
     for (i = 0; i < 16; i++) elems[i] = wasm_i64((int64_t)i * 7);
 
@@ -1147,16 +1162,28 @@ TEST(test_gc_objects_outlive_their_type_module) {
     CHECK_MSG(t, types != NULL, "%s", rt.error_msg);
     if (types != NULL) {
         WASM_CHECK_OK(t, wasm_call(types, "make", NULL, 0, &args[0], 1));
+        held = wasm_ref_hold(&rt, args[0]);
         WASM_CHECK_OK(t, wasm_call(types, "make-array", NULL, 0, &args[1], 1));
+        if (held != NULL) args[0] = *held;
+        wasm_ref_release(&rt, held);
         WASM_CHECK_OK(t, wasm_call(holder, "store", args, 2, NULL, 0));
         g_wasm_test_alloc_fail_countdown = 1;
         wasm_module_free(types);
-        CHECK(t, g_wasm_test_alloc_fail_countdown == 0 && rt.type_owners == NULL);
+        CHECK(t, rt.type_owners != NULL);
         g_wasm_test_alloc_fail_countdown = 0;
         WASM_CHECK_OK(t, wasm_call(holder, "garbage", &garbage, 1, NULL, 0));
         wasm_gc_collect(&rt);
-        CHECK(t, wasm_call(holder, "read", NULL, 0, &result, 1) == WASM_ERR_TRAP);
-        CHECK(t, wasm_call(holder, "read-array", NULL, 0, &result, 1) == WASM_ERR_TRAP);
+        WASM_CHECK_OK(t, wasm_call(holder, "garbage", &garbage, 1, NULL, 0));
+        wasm_gc_collect(&rt);
+        WASM_CHECK_OK(t, wasm_call(holder, "read", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 42);
+        WASM_CHECK_OK(t, wasm_call(holder, "read-array", NULL, 0, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        args[0] = wasm_ref_null(WASM_TYPE_ANYREF);
+        args[1] = wasm_ref_null(WASM_TYPE_ANYREF);
+        WASM_CHECK_OK(t, wasm_call(holder, "store", args, 2, NULL, 0));
+        wasm_gc_collect(&rt);
+        CHECK(t, rt.type_owners == NULL);
     }
 
     types = wasm_test_load_sections(&rt, wasm_test_gc_owner_type_sections, sizeof(wasm_test_gc_owner_type_sections));
@@ -1352,6 +1379,423 @@ TEST(test_gc_host_values_of_bottom_types_must_be_null) {
     wasm_destroy(&rt);
 }
 
+/* Types 0 $leaf (struct (mut i32)); 1 $mixed with mutable fields i8 i64 i16 f32 (ref null $leaf) i8 v128 f64 i32
+   anyref i16 externref i8 (ref null $leaf); 2 $obj (mut i16) (mut (ref null $leaf)) with descriptor 3 $vt
+   (mut (ref null $leaf)); 4 to 13 mutable arrays of i8 i16 i32 i64 f32 f64 v128 (ref null $leaf) externref anyref. */
+static const uint8_t wasm_test_gc_kinds_sections[] = {
+    0x01, 0x56, 0x0D, 0x5F, 0x01, 0x7F, 0x01, 0x5F, 0x0E, 0x78, 0x01, 0x7E, 0x01, 0x77, 0x01, 0x7D,
+    0x01, 0x63, 0x00, 0x01, 0x78, 0x01, 0x7B, 0x01, 0x7C, 0x01, 0x7F, 0x01, 0x6E, 0x01, 0x77, 0x01,
+    0x6F, 0x01, 0x78, 0x01, 0x63, 0x00, 0x01, 0x4E, 0x02, 0x4D, 0x03, 0x5F, 0x02, 0x77, 0x01, 0x63,
+    0x00, 0x01, 0x4C, 0x02, 0x5F, 0x01, 0x63, 0x00, 0x01, 0x5E, 0x78, 0x01, 0x5E, 0x77, 0x01, 0x5E,
+    0x7F, 0x01, 0x5E, 0x7E, 0x01, 0x5E, 0x7D, 0x01, 0x5E, 0x7C, 0x01, 0x5E, 0x7B, 0x01, 0x5E, 0x63,
+    0x00, 0x01, 0x5E, 0x6F, 0x01, 0x5E, 0x6E, 0x01,
+};
+
+enum { WASM_TEST_KIND_FIELDS = 14, WASM_TEST_KIND_ARRAYS = 10, WASM_TEST_KIND_ELEMS = 5 };
+
+/* Returns a held $leaf whose field is value, or NULL. */
+static wasm_value_t* wasm_test_kinds_leaf(test_ctx* t, wasm_module_t* m, int32_t value) {
+    wasm_value_t field = wasm_i32(value);
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_NONE);
+
+    WASM_CHECK_OK(t, wasm_struct_new(m, 0, &field, 1, &ref));
+    return wasm_ref_hold(wasm_module_runtime(m), ref);
+}
+
+static int32_t wasm_test_kinds_leaf_value(test_ctx* t, const wasm_module_t* m, wasm_value_t ref) {
+    wasm_value_t field = wasm_i32(-1);
+
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, ref, 0, &field));
+    return field.of.i32;
+}
+
+static int32_t wasm_test_kinds_base(uint32_t gen) {
+    return gen ? 1000 : 200;
+}
+
+static int wasm_test_kinds_is_ref_field(uint32_t i) {
+    return i == 4 || i == 9 || i == 13;
+}
+
+/* The value $mixed field i holds in generation gen; a ref field holds leaf, a $leaf of base + i. */
+static wasm_value_t wasm_test_kinds_mixed_value(uint32_t gen, uint32_t i, const wasm_value_t* leaf) {
+    int32_t base = wasm_test_kinds_base(gen);
+    uint8_t bytes[16];
+    uint32_t j;
+
+    switch (i) {
+        case 1:
+            return wasm_i64((int64_t)base * INT64_C(0x100000001));
+        case 2:
+            return wasm_i32(base + 0xFF00);
+        case 3:
+            return wasm_f32((float)base + 0.25f);
+        case 6:
+            for (j = 0; j < 16; j++) bytes[j] = (uint8_t)(base + 6 + (int32_t)j);
+            return wasm_v128(bytes);
+        case 7:
+            return wasm_f64((double)base * 1.5);
+        case 8:
+            return wasm_i32(-(base + 8));
+        case 9:
+            return gen ? wasm_i31ref(base + 9) : *leaf;
+        case 11:
+            return wasm_externref((uintptr_t)0x7000u + (uintptr_t)base * 16u);
+        case 13:
+            return gen ? wasm_ref_null(WASM_TYPE_NONE) : *leaf;
+        case 4:
+            return *leaf;
+        default:
+            return wasm_i32(base + (int32_t)i);
+    }
+}
+
+static void wasm_test_kinds_check_mixed(test_ctx* t, const wasm_module_t* m, wasm_value_t obj, uint32_t gen) {
+    int32_t base = wasm_test_kinds_base(gen);
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_KIND_FIELDS; i++) {
+        wasm_value_t got = wasm_i32(0);
+        wasm_value_t want = wasm_test_kinds_mixed_value(gen, i, &got);
+
+        WASM_CHECK_OK(t, wasm_struct_get_field(m, obj, i, &got));
+        switch (i) {
+            case 0:
+            case 5:
+            case 12:
+                WASM_CHECK_I32(t, got.of.i32, (base + (int32_t)i) & 0xFF);
+                break;
+            case 2:
+            case 10:
+                WASM_CHECK_I32(t, got.of.i32, want.of.i32 & 0xFFFF);
+                break;
+            case 1:
+                WASM_CHECK_I64(t, got.of.i64, want.of.i64);
+                break;
+            case 3:
+                CHECK(t, got.type == WASM_TYPE_F32 && got.of.f32 == want.of.f32);
+                break;
+            case 6:
+                CHECK(t, got.type == WASM_TYPE_V128 && memcmp(got.of.v128, want.of.v128, 16) == 0);
+                break;
+            case 7:
+                CHECK(t, got.type == WASM_TYPE_F64 && got.of.f64 == want.of.f64);
+                break;
+            case 8:
+                WASM_CHECK_I32(t, got.of.i32, want.of.i32);
+                break;
+            case 9:
+                if (gen) {
+                    CHECK(t, (got.of.gc_ref & 1u) != 0 && wasm_test_gc_i31_get_s(got.of.gc_ref) == base + 9);
+                } else {
+                    WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), base + 9);
+                }
+                break;
+            case 11:
+                CHECK(t, got.type == WASM_TYPE_EXTERNREF && got.of.externref == want.of.externref);
+                break;
+            case 13:
+                if (gen) {
+                    CHECK(t, got.of.gc_ref == 0);
+                    break;
+                }
+                WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), base + 13);
+                break;
+            default:
+                WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), base + (int32_t)i);
+                break;
+        }
+    }
+}
+
+/* Returns a held $mixed of generation 0, or NULL. */
+static wasm_value_t* wasm_test_kinds_new_mixed(test_ctx* t, wasm_module_t* m) {
+    wasm_value_t* leaves[WASM_TEST_KIND_FIELDS];
+    wasm_value_t values[WASM_TEST_KIND_FIELDS];
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_NONE);
+    uint32_t i;
+
+    memset(leaves, 0, sizeof(leaves));
+    for (i = 0; i < WASM_TEST_KIND_FIELDS; i++) {
+        if (wasm_test_kinds_is_ref_field(i)) leaves[i] = wasm_test_kinds_leaf(t, m, wasm_test_kinds_base(0) + (int32_t)i);
+    }
+    for (i = 0; i < WASM_TEST_KIND_FIELDS; i++) {
+        wasm_value_t null_leaf = wasm_ref_null(WASM_TYPE_NONE);
+
+        values[i] = wasm_test_kinds_mixed_value(0, i, leaves[i] ? leaves[i] : &null_leaf);
+    }
+    WASM_CHECK_OK(t, wasm_struct_new(m, 1, values, WASM_TEST_KIND_FIELDS, &ref));
+    for (i = 0; i < WASM_TEST_KIND_FIELDS; i++) wasm_ref_release(wasm_module_runtime(m), leaves[i]);
+    return wasm_ref_hold(wasm_module_runtime(m), ref);
+}
+
+static void wasm_test_kinds_rewrite_mixed(test_ctx* t, wasm_module_t* m, const wasm_value_t* obj) {
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_KIND_FIELDS; i++) {
+        wasm_value_t* leaf = wasm_test_kinds_is_ref_field(i)
+                                 ? wasm_test_kinds_leaf(t, m, wasm_test_kinds_base(1) + (int32_t)i)
+                                 : NULL;
+        wasm_value_t null_leaf = wasm_ref_null(WASM_TYPE_NONE);
+
+        WASM_CHECK_OK(t, wasm_struct_set_field(m, *obj, i, wasm_test_kinds_mixed_value(1, i, leaf ? leaf : &null_leaf)));
+        wasm_ref_release(wasm_module_runtime(m), leaf);
+    }
+}
+
+static int wasm_test_kinds_is_ref_elem(uint32_t kind, uint32_t j, uint32_t gen) {
+    return (kind == 7 && !(gen && j == 2)) || (kind == 9 && j % 3u == 1u);
+}
+
+static int32_t wasm_test_kinds_leaf_elem(uint32_t kind, uint32_t j, uint32_t gen) {
+    return (kind == 7 ? 300 : 400) + (int32_t)j + (int32_t)gen * 50;
+}
+
+/* The value element j of array type 4 + kind holds in generation gen; a ref element holds leaf. */
+static wasm_value_t wasm_test_kinds_elem_value(uint32_t kind, uint32_t j, uint32_t gen, const wasm_value_t* leaf) {
+    int32_t n = (int32_t)j + (int32_t)gen * 3;
+    uint8_t bytes[16];
+    wasm_value_t value;
+    uint32_t b;
+
+    switch (kind) {
+        case 0:
+            return wasm_i32(250 + n);
+        case 1:
+            return wasm_i32(65530 + n);
+        case 2:
+            return wasm_i32(-7 * (n + 1));
+        case 3:
+            return wasm_i64((int64_t)(n + 1) * INT64_C(0x100000001));
+        case 4:
+            return wasm_f32((float)n + 0.5f);
+        case 5:
+            return wasm_f64((double)n * 1.25);
+        case 6:
+            for (b = 0; b < 16; b++) bytes[b] = (uint8_t)((int32_t)j * 16 + (int32_t)b + (int32_t)gen);
+            return wasm_v128(bytes);
+        case 7:
+            return gen && j == 2 ? wasm_ref_null(WASM_TYPE_NONE) : *leaf;
+        case 8:
+            return wasm_externref((uintptr_t)0x1000u + (uintptr_t)(n + 1) * 16u);
+        default:
+            if (j % 3u == 0u) return wasm_i31ref(n);
+            if (j % 3u == 1u) return *leaf;
+            value = wasm_ref_null(WASM_TYPE_ANYREF);
+            value.of.gc_ref = (uintptr_t)0x20000u + (uintptr_t)(n + 1) * 16u;
+            return value;
+    }
+}
+
+static void wasm_test_kinds_check_array(test_ctx* t, const wasm_module_t* m, wasm_value_t array, uint32_t kind,
+                                        uint32_t gen) {
+    uint32_t length = 0;
+    uint32_t j;
+
+    WASM_CHECK_OK(t, wasm_array_length(m, array, &length));
+    WASM_CHECK_I32(t, (int32_t)length, (int32_t)WASM_TEST_KIND_ELEMS);
+    for (j = 0; j < WASM_TEST_KIND_ELEMS; j++) {
+        wasm_value_t got = wasm_i32(0);
+        wasm_value_t want = wasm_test_kinds_elem_value(kind, j, gen, &got);
+
+        WASM_CHECK_OK(t, wasm_array_get_elem(m, array, j, &got));
+        if (wasm_test_kinds_is_ref_elem(kind, j, gen)) {
+            WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), wasm_test_kinds_leaf_elem(kind, j, gen));
+            continue;
+        }
+        switch (kind) {
+            case 0:
+                WASM_CHECK_I32(t, got.of.i32, want.of.i32 & 0xFF);
+                break;
+            case 1:
+                WASM_CHECK_I32(t, got.of.i32, want.of.i32 & 0xFFFF);
+                break;
+            case 2:
+                WASM_CHECK_I32(t, got.of.i32, want.of.i32);
+                break;
+            case 3:
+                WASM_CHECK_I64(t, got.of.i64, want.of.i64);
+                break;
+            case 4:
+                CHECK(t, got.type == WASM_TYPE_F32 && got.of.f32 == want.of.f32);
+                break;
+            case 5:
+                CHECK(t, got.type == WASM_TYPE_F64 && got.of.f64 == want.of.f64);
+                break;
+            case 6:
+                CHECK(t, got.type == WASM_TYPE_V128 && memcmp(got.of.v128, want.of.v128, 16) == 0);
+                break;
+            case 7:
+                CHECK(t, got.of.gc_ref == 0);
+                break;
+            case 8:
+                CHECK(t, got.type == WASM_TYPE_EXTERNREF && got.of.externref == want.of.externref);
+                break;
+            default:
+                CHECK(t, got.of.gc_ref == want.of.gc_ref);
+                break;
+        }
+    }
+}
+
+/* Returns a held array of type 4 + kind of generation 0, or NULL. */
+static wasm_value_t* wasm_test_kinds_new_array(test_ctx* t, wasm_module_t* m, uint32_t kind) {
+    wasm_value_t* leaves[WASM_TEST_KIND_ELEMS];
+    wasm_value_t values[WASM_TEST_KIND_ELEMS];
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_NONE);
+    uint32_t j;
+
+    memset(leaves, 0, sizeof(leaves));
+    for (j = 0; j < WASM_TEST_KIND_ELEMS; j++) {
+        if (wasm_test_kinds_is_ref_elem(kind, j, 0))
+            leaves[j] = wasm_test_kinds_leaf(t, m, wasm_test_kinds_leaf_elem(kind, j, 0));
+    }
+    for (j = 0; j < WASM_TEST_KIND_ELEMS; j++) {
+        wasm_value_t null_leaf = wasm_ref_null(WASM_TYPE_NONE);
+
+        values[j] = wasm_test_kinds_elem_value(kind, j, 0, leaves[j] ? leaves[j] : &null_leaf);
+    }
+    WASM_CHECK_OK(t, wasm_array_new(m, 4 + kind, values, WASM_TEST_KIND_ELEMS, &ref));
+    for (j = 0; j < WASM_TEST_KIND_ELEMS; j++) wasm_ref_release(wasm_module_runtime(m), leaves[j]);
+    return wasm_ref_hold(wasm_module_runtime(m), ref);
+}
+
+static void wasm_test_kinds_rewrite_array(test_ctx* t, wasm_module_t* m, const wasm_value_t* array, uint32_t kind) {
+    uint32_t j;
+
+    for (j = 0; j < WASM_TEST_KIND_ELEMS; j++) {
+        wasm_value_t* leaf =
+            wasm_test_kinds_is_ref_elem(kind, j, 1) ? wasm_test_kinds_leaf(t, m, wasm_test_kinds_leaf_elem(kind, j, 1)) : NULL;
+        wasm_value_t null_leaf = wasm_ref_null(WASM_TYPE_NONE);
+
+        WASM_CHECK_OK(t, wasm_array_set_elem(m, *array, j, wasm_test_kinds_elem_value(kind, j, 1, leaf ? leaf : &null_leaf)));
+        wasm_ref_release(wasm_module_runtime(m), leaf);
+    }
+}
+
+/* Returns a held $obj of generation 0, whose descriptor $vt holds a $leaf of 500. */
+static wasm_value_t* wasm_test_kinds_new_described(test_ctx* t, wasm_module_t* m) {
+    wasm_value_t* leaf = wasm_test_kinds_leaf(t, m, 500);
+    wasm_value_t* vt = NULL;
+    wasm_value_t values[2];
+    wasm_value_t ref = wasm_ref_null(WASM_TYPE_NONE);
+
+    if (leaf) {
+        WASM_CHECK_OK(t, wasm_struct_new(m, 3, leaf, 1, &ref));
+        vt = wasm_ref_hold(wasm_module_runtime(m), ref);
+    }
+    wasm_ref_release(wasm_module_runtime(m), leaf);
+    leaf = wasm_test_kinds_leaf(t, m, 501);
+    if (vt && leaf) {
+        values[0] = wasm_i32(0x1BEEF);
+        values[1] = *leaf;
+        WASM_CHECK_OK(t, wasm_struct_new_desc(m, 2, values, 2, *vt, &ref));
+    }
+    wasm_ref_release(wasm_module_runtime(m), leaf);
+    wasm_ref_release(wasm_module_runtime(m), vt);
+    return wasm_ref_hold(wasm_module_runtime(m), ref);
+}
+
+static void wasm_test_kinds_check_described(test_ctx* t, const wasm_module_t* m, wasm_value_t obj, uint32_t gen) {
+    wasm_value_t got = wasm_i32(0);
+    wasm_value_t desc = wasm_ref_null(WASM_TYPE_NONE);
+
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, obj, 0, &got));
+    WASM_CHECK_I32(t, got.of.i32, gen ? 0x1234 : 0xBEEF);
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, obj, 1, &got));
+    WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), gen ? 601 : 501);
+    WASM_CHECK_OK(t, wasm_struct_get_desc(m, obj, &desc));
+    WASM_CHECK_OK(t, wasm_struct_get_field(m, desc, 0, &got));
+    WASM_CHECK_I32(t, wasm_test_kinds_leaf_value(t, m, got), gen ? 600 : 500);
+}
+
+static void wasm_test_kinds_rewrite_described(test_ctx* t, wasm_module_t* m, const wasm_value_t* obj) {
+    wasm_value_t* leaf = wasm_test_kinds_leaf(t, m, 600);
+    wasm_value_t desc = wasm_ref_null(WASM_TYPE_NONE);
+
+    WASM_CHECK_OK(t, wasm_struct_get_desc(m, *obj, &desc));
+    if (leaf) WASM_CHECK_OK(t, wasm_struct_set_field(m, desc, 0, *leaf));
+    wasm_ref_release(wasm_module_runtime(m), leaf);
+    leaf = wasm_test_kinds_leaf(t, m, 601);
+    WASM_CHECK_OK(t, wasm_struct_set_field(m, *obj, 0, wasm_i32(0x1234)));
+    if (leaf) WASM_CHECK_OK(t, wasm_struct_set_field(m, *obj, 1, *leaf));
+    wasm_ref_release(wasm_module_runtime(m), leaf);
+}
+
+/* held[0] is the $mixed, held[1] the $obj, and held[2 + kind] the array of type 4 + kind. */
+static void wasm_test_kinds_check_all(test_ctx* t, const wasm_module_t* m, wasm_value_t* const* held, uint32_t gen) {
+    uint32_t kind;
+
+    wasm_test_kinds_check_mixed(t, m, *held[0], gen);
+    wasm_test_kinds_check_described(t, m, *held[1], gen);
+    for (kind = 0; kind < WASM_TEST_KIND_ARRAYS; kind++) wasm_test_kinds_check_array(t, m, *held[2 + kind], kind, gen);
+}
+
+static void wasm_test_kinds_garbage(test_ctx* t, wasm_module_t* m, uint32_t count) {
+    wasm_value_t elems[WASM_TEST_KIND_ELEMS];
+    wasm_value_t field = wasm_i32(-1);
+    wasm_value_t ref;
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_KIND_ELEMS; i++) elems[i] = wasm_i64((int64_t)i);
+    for (i = 0; i < count; i++) {
+        WASM_CHECK_OK(t, wasm_array_new(m, 7, elems, WASM_TEST_KIND_ELEMS, &ref));
+        WASM_CHECK_OK(t, wasm_struct_new(m, 0, &field, 1, &ref));
+    }
+}
+
+TEST(test_gc_objects_of_every_field_kind_survive_their_module) {
+    wasm_runtime_t rt;
+    wasm_module_t* types;
+    wasm_module_t* other;
+    wasm_value_t* held[2 + WASM_TEST_KIND_ARRAYS];
+    uint32_t kind;
+    uint32_t i;
+    int all_held = 1;
+
+    wasm_init(&rt);
+    types = wasm_test_load_sections(&rt, wasm_test_gc_kinds_sections, sizeof(wasm_test_gc_kinds_sections));
+    other = wasm_test_load_sections(&rt, wasm_test_gc_kinds_sections, sizeof(wasm_test_gc_kinds_sections));
+    CHECK_MSG(t, types != NULL && other != NULL, "%s", rt.error_msg);
+    if (types == NULL || other == NULL) {
+        wasm_module_free(types);
+        wasm_module_free(other);
+        wasm_destroy(&rt);
+        return;
+    }
+    held[0] = wasm_test_kinds_new_mixed(t, types);
+    held[1] = wasm_test_kinds_new_described(t, types);
+    for (kind = 0; kind < WASM_TEST_KIND_ARRAYS; kind++) held[2 + kind] = wasm_test_kinds_new_array(t, types, kind);
+    for (i = 0; i < 2 + WASM_TEST_KIND_ARRAYS; i++) all_held = all_held && held[i] != NULL;
+    CHECK(t, all_held);
+    if (all_held) {
+        wasm_test_kinds_check_all(t, types, held, 0);
+        g_wasm_test_alloc_fail_countdown = 1;
+        wasm_module_free(types);
+        g_wasm_test_alloc_fail_countdown = 0;
+        CHECK(t, rt.type_owners != NULL);
+        wasm_test_kinds_garbage(t, other, 64);
+        wasm_gc_collect(&rt);
+        wasm_test_kinds_check_all(t, other, held, 0);
+
+        wasm_test_kinds_rewrite_mixed(t, other, held[0]);
+        wasm_test_kinds_rewrite_described(t, other, held[1]);
+        for (kind = 0; kind < WASM_TEST_KIND_ARRAYS; kind++) wasm_test_kinds_rewrite_array(t, other, held[2 + kind], kind);
+        wasm_test_kinds_garbage(t, other, 64);
+        wasm_gc_collect(&rt);
+        wasm_test_kinds_check_all(t, other, held, 1);
+        wasm_gc_collect(&rt);
+        wasm_test_kinds_check_all(t, other, held, 1);
+    } else {
+        wasm_module_free(types);
+    }
+    for (i = 0; i < 2 + WASM_TEST_KIND_ARRAYS; i++) wasm_ref_release(&rt, held[i]);
+    wasm_gc_collect(&rt);
+    CHECK(t, rt.type_owners == NULL);
+    wasm_module_free(other);
+    wasm_destroy(&rt);
+}
+
 static const test_case gc_cases[] = {
     { "wasmgc: runtime init allocates a tracked GC heap arena", test_gc_runtime_initializes_heap_arena },
     { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
@@ -1369,5 +1813,7 @@ static const test_case gc_cases[] = {
     { "gc: descriptors move with their objects and stay reachable through them", test_gc_descriptors_move_with_their_objects },
     { "gc: wasm_struct_new_desc keeps its descriptor alive and wasm_struct_get_desc reads it", test_gc_host_api_allocates_and_reads_descriptors },
     { "gc: host values of bottom reference types must be null", test_gc_host_values_of_bottom_types_must_be_null },
+    { "gc: fields and elements of every kind survive collections after their module is freed",
+      test_gc_objects_of_every_field_kind_survive_their_module },
 };
 const test_suite gc_suite = { "gc", gc_cases, COUNTOF(gc_cases) };

@@ -2,6 +2,16 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Struct and array layouts are computed once per type, and collections trace only fields and elements that can hold references.
+
+### Fixed
+
+- Freeing a module after an allocation failure left its GC objects without types, and collections stopped tracing their fields.
+
 ## [2.0.0] - 2026-10-19
 
 ### Breaking

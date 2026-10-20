@@ -830,11 +830,20 @@ typedef struct wasm__type_group_t wasm__type_group_t;
 
 typedef struct wasm_structtype_t {
     uint32_t num_fields;
+    uint32_t num_ref_fields;
     wasm_fieldtype_t* fields;
+    uint32_t* field_offsets;    /* byte offset of each field in an object; ref_offsets points into the same block */
+    uint32_t* ref_offsets;      /* byte offsets of the fields that can hold references, ascending */
+    uint32_t object_size;       /* bytes of an object, with its descriptor slot; 0 if too large to allocate */
+    uint32_t descriptor_offset; /* byte offset of the descriptor slot, or 0 for a type without a descriptor */
 } wasm_structtype_t;
 
 typedef struct wasm_arraytype_t {
     wasm_fieldtype_t field;
+    uint32_t data_offset;    /* byte offset of the first element in an object */
+    uint8_t elem_size;       /* bytes each element occupies in an object */
+    uint8_t elem_align;
+    uint8_t elems_hold_refs; /* nonzero if elements can hold references */
 } wasm_arraytype_t;
 
 typedef struct wasm_conttype_t {
@@ -3609,14 +3618,18 @@ WASM_PRIVATE uint32_t wasm__gc_i31_get_u(uintptr_t bits);
 
 WASM_PRIVATE size_t wasm__align_up_size(size_t value, size_t alignment);
 
-WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index);
+/* type must have no layout yet. */
+WASM_PRIVATE wasm_error_t wasm__gc_struct_layout_init(const wasm_allocator_t* a,
+                                                     wasm_structtype_t* type,
+                                                     int has_descriptor);
 
-WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size);
+WASM_PRIVATE void wasm__gc_struct_layout_free(const wasm_allocator_t* a, wasm_structtype_t* type);
+
+WASM_PRIVATE void wasm__gc_array_layout_init(wasm_arraytype_t* type);
+
 
 /* Returns the descriptor slot of a struct allocated with one, else NULL. */
 WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object);
-
-WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type);
 
 WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
                                      uint32_t length,
@@ -4254,6 +4267,7 @@ WASM_PRIVATE_INLINE int wasm__is_subtype(const wasm_module_t* mod, uint32_t subt
 
 
 
+
 #include <string.h>
 #include <math.h>
 
@@ -4311,44 +4325,72 @@ static size_t wasm__gc_field_storage_size(const wasm_fieldtype_t* field) {
     return sizeof(wasm_value_t);
 }
 
-WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, uint32_t field_index) {
-    size_t offset = WASM__GC_STRUCT_HEADER_SIZE;
-    uint32_t i;
-
-    for (i = 0; i < type->num_fields && i < field_index; i++) {
-        size_t alignment = wasm__gc_field_storage_alignment(&type->fields[i]);
-        size_t size = wasm__gc_field_storage_size(&type->fields[i]);
-
-        offset = wasm__align_up_size(offset, alignment);
-        if (offset == (size_t)-1 || size > (size_t)-1 - offset) return (size_t)-1;
-        offset += size;
-    }
-
-    if (field_index < type->num_fields) {
-        size_t alignment = wasm__gc_field_storage_alignment(&type->fields[field_index]);
-        offset = wasm__align_up_size(offset, alignment);
-    }
-
-    return offset;
+static int wasm__gc_field_holds_refs(const wasm_fieldtype_t* field) {
+    return field->storage.kind != WASM_STORAGE_PACKED && wasm__is_ref_type(field->storage.of.valtype);
 }
 
-WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size) {
-    size_t offset = WASM__GC_STRUCT_HEADER_SIZE;
+static uint64_t wasm__align_up_u64(uint64_t value, size_t alignment) {
+    uint64_t remainder = value % (uint64_t)alignment;
+
+    return remainder == 0 ? value : value + ((uint64_t)alignment - remainder);
+}
+
+WASM_PRIVATE wasm_error_t wasm__gc_struct_layout_init(const wasm_allocator_t* a,
+                                                     wasm_structtype_t* type,
+                                                     int has_descriptor) {
+    size_t value_align = (size_t)WASM__ALIGNOF(wasm_value_t);
+    uint64_t offset = WASM__GC_STRUCT_HEADER_SIZE;
+    uint32_t num_refs = 0;
     uint32_t i;
 
-    for (i = 0; i < type->num_fields; i++) {
-        size_t alignment = wasm__gc_field_storage_alignment(&type->fields[i]);
-        size_t size = wasm__gc_field_storage_size(&type->fields[i]);
-
-        offset = wasm__align_up_size(offset, alignment);
-        if (offset == (size_t)-1 || size > (size_t)-1 - offset) return 0;
-        offset += size;
+    type->field_offsets = NULL;
+    type->ref_offsets = NULL;
+    type->num_ref_fields = 0;
+    type->object_size = 0;
+    type->descriptor_offset = 0;
+    for (i = 0; i < type->num_fields; i++) num_refs += (uint32_t)wasm__gc_field_holds_refs(&type->fields[i]);
+    if (type->num_fields > 0) {
+        type->field_offsets =
+            (uint32_t*)wasm__malloc_array(a, (size_t)type->num_fields + (size_t)num_refs, sizeof(uint32_t));
+        if (!type->field_offsets) return WASM_ERR_OOM;
+        type->ref_offsets = type->field_offsets + type->num_fields;
     }
 
-    offset = wasm__align_up_size(offset, (size_t)WASM__ALIGNOF(wasm_value_t));
-    if (offset == (size_t)-1) return 0;
-    *out_size = offset;
-    return 1;
+    for (i = 0; i < type->num_fields; i++) {
+        const wasm_fieldtype_t* field = &type->fields[i];
+
+        offset = wasm__align_up_u64(offset, wasm__gc_field_storage_alignment(field));
+        type->field_offsets[i] = (uint32_t)offset;
+        if (wasm__gc_field_holds_refs(field)) type->ref_offsets[type->num_ref_fields++] = (uint32_t)offset;
+        offset += wasm__gc_field_storage_size(field);
+    }
+    offset = wasm__align_up_u64(offset, value_align);
+    if (has_descriptor) offset = wasm__align_up_u64(offset + sizeof(wasm_gc_header_t*), value_align);
+    if (offset > UINT32_MAX) {
+        wasm__gc_struct_layout_free(a, type);
+        return WASM_OK;
+    }
+    type->object_size = (uint32_t)offset;
+    if (has_descriptor) type->descriptor_offset = (uint32_t)(offset - sizeof(wasm_gc_header_t*));
+    return WASM_OK;
+}
+
+WASM_PRIVATE void wasm__gc_struct_layout_free(const wasm_allocator_t* a, wasm_structtype_t* type) {
+    wasm__free(a, type->field_offsets);
+    type->field_offsets = NULL;
+    type->ref_offsets = NULL;
+    type->num_ref_fields = 0;
+    type->object_size = 0;
+    type->descriptor_offset = 0;
+}
+
+WASM_PRIVATE void wasm__gc_array_layout_init(wasm_arraytype_t* type) {
+    size_t alignment = wasm__gc_field_storage_alignment(&type->field);
+
+    type->data_offset = (uint32_t)wasm__align_up_size(WASM__GC_ARRAY_HEADER_SIZE, alignment);
+    type->elem_size = (uint8_t)wasm__gc_field_storage_size(&type->field);
+    type->elem_align = (uint8_t)alignment;
+    type->elems_hold_refs = (uint8_t)wasm__gc_field_holds_refs(&type->field);
 }
 
 WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object) {
@@ -4356,21 +4398,14 @@ WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* objec
     return (wasm_gc_header_t**)(((uint8_t*)object) + object->object_size - sizeof(wasm_gc_header_t*));
 }
 
-WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type) {
-    return wasm__align_up_size(WASM__GC_ARRAY_HEADER_SIZE, wasm__gc_field_storage_alignment(&type->field));
-}
-
 WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
                                      uint32_t length,
                                      size_t* out_size) {
-    size_t offset = wasm__gc_array_data_offset(type);
-    size_t elem_size = wasm__gc_field_storage_size(&type->field);
-    size_t payload_size;
+    size_t offset = (size_t)type->data_offset;
+    size_t elem_size = (size_t)type->elem_size;
 
-    if (offset == (size_t)-1) return 0;
     if (length != 0 && elem_size > ((size_t)-1 - offset) / (size_t)length) return 0;
-    payload_size = elem_size * (size_t)length;
-    *out_size = offset + payload_size;
+    *out_size = offset + elem_size * (size_t)length;
     return 1;
 }
 
@@ -4443,53 +4478,26 @@ static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
     return WASM_OK;
 }
 
-static void* wasm__gc_struct_field_ptr(wasm_gc_struct_t* object,
-                                       const wasm_structtype_t* type,
-                                       uint32_t field_index) {
-    size_t offset;
-
-    if (!object || !type || field_index >= type->num_fields) return NULL;
-    offset = wasm__gc_struct_field_offset(type, field_index);
-    if (offset == (size_t)-1) return NULL;
-    return ((uint8_t*)object) + offset;
-}
-
-static const void* wasm__gc_struct_field_const_ptr(const wasm_gc_struct_t* object,
-                                                   const wasm_structtype_t* type,
-                                                   uint32_t field_index) {
-    size_t offset;
-
-    if (!object || !type || field_index >= type->num_fields) return NULL;
-    offset = wasm__gc_struct_field_offset(type, field_index);
-    if (offset == (size_t)-1) return NULL;
-    return ((const uint8_t*)object) + offset;
-}
-
 WASM_PRIVATE_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_t* object,
                                                    const wasm_structtype_t* type,
                                                    uint32_t field_index,
                                                    int sign_extend,
                                                    wasm_value_t* out_value) {
-    const void* src;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
-    src = wasm__gc_struct_field_const_ptr(object, type, field_index);
-    if (!src) return WASM_ERR_OOM;
-    return wasm__gc_load_field_bytes(&type->fields[field_index], src, sign_extend, out_value);
+    return wasm__gc_load_field_bytes(&type->fields[field_index],
+                                     (const uint8_t*)object + type->field_offsets[field_index],
+                                     sign_extend,
+                                     out_value);
 }
 
 WASM_PRIVATE wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
                                               const wasm_structtype_t* type,
                                               uint32_t field_index,
                                               wasm_value_t value) {
-    void* dst;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
-    dst = wasm__gc_struct_field_ptr(object, type, field_index);
-    if (!dst) return WASM_ERR_OOM;
-    wasm__gc_write_field_bytes(&type->fields[field_index], dst, value);
+    wasm__gc_write_field_bytes(&type->fields[field_index], (uint8_t*)object + type->field_offsets[field_index], value);
     return WASM_OK;
 }
 
@@ -4497,33 +4505,16 @@ WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
                                                 const wasm_structtype_t* type,
                                                 uint32_t field_index,
                                                 wasm_value_t value) {
-    void* dst;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
-    dst = wasm__gc_struct_field_ptr(object, type, field_index);
-    if (!dst) return WASM_ERR_OOM;
-    return wasm__gc_store_field_bytes(object->header.module, &type->fields[field_index], dst, value);
+    return wasm__gc_store_field_bytes(object->header.module,
+                                      &type->fields[field_index],
+                                      (uint8_t*)object + type->field_offsets[field_index],
+                                      value);
 }
 
-static const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
-                                                    const wasm_arraytype_t* type,
-                                                    uint32_t index) {
-    size_t data_offset = wasm__gc_array_data_offset(type);
-    size_t elem_size = wasm__gc_field_storage_size(&type->field);
-
-    if (!object || !type || index >= object->length || data_offset == (size_t)-1) return NULL;
-    return ((const uint8_t*)object) + data_offset + ((size_t)index * elem_size);
-}
-
-static void* wasm__gc_array_element_ptr(wasm_gc_array_t* object,
-                                        const wasm_arraytype_t* type,
-                                        uint32_t index) {
-    size_t data_offset = wasm__gc_array_data_offset(type);
-    size_t elem_size = wasm__gc_field_storage_size(&type->field);
-
-    if (!object || !type || index >= object->length || data_offset == (size_t)-1) return NULL;
-    return ((uint8_t*)object) + data_offset + ((size_t)index * elem_size);
+static size_t wasm__gc_array_element_offset(const wasm_arraytype_t* type, uint32_t index) {
+    return (size_t)type->data_offset + (size_t)index * type->elem_size;
 }
 
 WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* object,
@@ -4531,28 +4522,23 @@ WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* objec
                                             uint32_t index,
                                             int sign_extend,
                                             wasm_value_t* out_value) {
-    const void* src;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type) return WASM_ERR_MALFORMED;
     if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
-    src = wasm__gc_array_element_const_ptr(object, type, index);
-    if (!src) return WASM_ERR_OOM;
-    return wasm__gc_load_field_bytes(&type->field, src, sign_extend, out_value);
+    return wasm__gc_load_field_bytes(&type->field,
+                                     (const uint8_t*)object + wasm__gc_array_element_offset(type, index),
+                                     sign_extend,
+                                     out_value);
 }
 
 WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
                                        const wasm_arraytype_t* type,
                                        uint32_t index,
                                        wasm_value_t value) {
-    void* dst;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type) return WASM_ERR_MALFORMED;
     if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
-    dst = wasm__gc_array_element_ptr(object, type, index);
-    if (!dst) return WASM_ERR_OOM;
-    wasm__gc_write_field_bytes(&type->field, dst, value);
+    wasm__gc_write_field_bytes(&type->field, (uint8_t*)object + wasm__gc_array_element_offset(type, index), value);
     return WASM_OK;
 }
 
@@ -4564,14 +4550,13 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
                                                  const wasm_arraytype_t* type,
                                                  uint32_t index,
                                                  wasm_value_t value) {
-    void* dst;
-
     if (!object) return WASM_ERR_TRAP;
     if (!type) return WASM_ERR_MALFORMED;
     if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
-    dst = wasm__gc_array_element_ptr(object, type, index);
-    if (!dst) return WASM_ERR_OOM;
-    return wasm__gc_store_field_bytes(object->header.module, &type->field, dst, value);
+    return wasm__gc_store_field_bytes(object->header.module,
+                                      &type->field,
+                                      (uint8_t*)object + wasm__gc_array_element_offset(type, index),
+                                      value);
 }
 
 WASM_PRIVATE wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,
@@ -6013,6 +5998,7 @@ WASM_PRIVATE void wasm__functype_mark_unspecified(const wasm_allocator_t* a, was
 }
 
 static void wasm__free_structtype(const wasm_allocator_t* a, wasm_structtype_t* st) {
+    wasm__gc_struct_layout_free(a, st);
     wasm__free(a, st->fields);
     st->fields = NULL;
     st->num_fields = 0;
@@ -6589,6 +6575,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 
 
 
+
 #include <string.h>
 
 WASM_PRIVATE wasm_error_t wasm__append_types(wasm_module_t* mod, uint32_t count, uint32_t* out_base) {
@@ -6767,6 +6754,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
                                             uint8_t opcode,
                                             uint32_t rec_group_idx,
                                             wasm_comptype_t* type) {
+    wasm_error_t err;
+
     memset(type, 0, sizeof(*type));
     type->rec_group = rec_group_idx;
     type->is_final = 1;
@@ -6775,7 +6764,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
 
     if (opcode == 0x50 || opcode == 0x4F) {
         uint32_t i;
-        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+
+        err = wasm__require_feature(mod, WASM_FEATURE_GC);
         if (err != WASM_OK) return err;
 
         type->is_final = (opcode == 0x4F);
@@ -6789,17 +6779,22 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
         opcode = wasm__read_u8(r);
     }
     if (opcode == 0x4C) {
-        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->describes);
+        err = wasm__read_descriptor_clause(mod, r, &type->describes);
         if (err != WASM_OK) return err;
         opcode = wasm__read_u8(r);
     }
     if (opcode == 0x4D) {
-        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->descriptor);
+        err = wasm__read_descriptor_clause(mod, r, &type->descriptor);
         if (err != WASM_OK) return err;
         opcode = wasm__read_u8(r);
     }
 
-    return wasm__decode_comptype_body(mod, r, opcode, type);
+    err = wasm__decode_comptype_body(mod, r, opcode, type);
+    if (err != WASM_OK) return err;
+    if (type->kind == WASM_COMP_STRUCT)
+        return wasm__gc_struct_layout_init(&mod->rt->allocator, &type->of.struct_, type->descriptor != UINT32_MAX);
+    if (type->kind == WASM_COMP_ARRAY) wasm__gc_array_layout_init(&type->of.array);
+    return WASM_OK;
 }
 /* END src/types/decode.c */
 
@@ -11835,7 +11830,11 @@ WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_modul
 /* Collects and resizes the heap to fit `request` more bytes; on failure the heap is unchanged. */
 WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request);
 
-/* mod is being freed; the GC objects and continuations that have its types keep them. */
+/* Returns nonzero if a GC object or continuation of rt has a type of mod. */
+WASM_PRIVATE int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module_t* mod);
+
+/* Keeps mod, being freed, as the owner of its types for the GC objects and continuations that have them. Every
+ * other part of mod must already be freed; mod is cleared but for its types and identity. */
 WASM_PRIVATE void wasm__gc_retire_types(wasm_runtime_t* rt, wasm_module_t* mod);
 
 WASM_PRIVATE void wasm__gc_free_retired_types(wasm_runtime_t* rt);
@@ -12297,17 +12296,11 @@ WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
                                                       const wasm_module_t* mod,
                                                       uint32_t type_index,
                                                       const wasm_structtype_t* type) {
-    int has_descriptor = mod && type_index < mod->num_types && mod->types[type_index].descriptor != UINT32_MAX;
     wasm_gc_struct_t* object;
-    size_t object_size;
 
-    if (!wasm__gc_struct_size(type, &object_size)) return NULL;
-    if (has_descriptor) {
-        object_size = wasm__align_up_size(object_size + sizeof(wasm_gc_header_t*), (size_t)WASM__ALIGNOF(wasm_value_t));
-        if (object_size == (size_t)-1) return NULL;
-    }
-    object = (wasm_gc_struct_t*)wasm__gc_alloc_object(rt, mod, type_index, WASM_GC_OBJ_STRUCT, object_size);
-    if (object) object->header.has_descriptor = (uint8_t)has_descriptor;
+    if (type->object_size == 0) return NULL;
+    object = (wasm_gc_struct_t*)wasm__gc_alloc_object(rt, mod, type_index, WASM_GC_OBJ_STRUCT, type->object_size);
+    if (object) object->header.has_descriptor = (uint8_t)(type->descriptor_offset != 0);
     return object;
 }
 
@@ -19718,12 +19711,13 @@ wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compile
 void wasm_module_free(wasm_module_t* mod) {
     wasm__linked_func_t* linked;
     const wasm_allocator_t* a;
+    int retire_types = 0;
     uint32_t i;
     if (!mod) return;
     a = &mod->rt->allocator;
     if (mod->rt) {
         wasm__interp_cancel_using(mod->rt, mod);
-        wasm__gc_retire_types(mod->rt, mod);
+        retire_types = wasm__gc_types_used(mod->rt, mod);
         for (i = 0; i < mod->rt->num_func_refs; i++) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
@@ -19741,10 +19735,12 @@ void wasm_module_free(wasm_module_t* mod) {
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }
-    if (mod->rt) wasm__release_type_groups(mod->rt, mod->rec_groups, mod->num_rec_groups);
-    for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
-    wasm__free(a, mod->types);
-    wasm__free(a, mod->rec_groups);
+    if (!retire_types) {
+        if (mod->rt) wasm__release_type_groups(mod->rt, mod->rec_groups, mod->num_rec_groups);
+        for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
+        wasm__free(a, mod->types);
+        wasm__free(a, mod->rec_groups);
+    }
     for (i = 0; i < mod->num_funcs; i++) {
         wasm__free(a, mod->funcs[i].locals);
         wasm__free(a, mod->funcs[i].local_reftypes);
@@ -19773,7 +19769,10 @@ void wasm_module_free(wasm_module_t* mod) {
     for (i = 0; i < mod->num_memories; i++) wasm__free_memory(&mod->memories[i]);
     wasm__free(a, mod->memories);
     wasm__free(a, mod->module_bytes);
-    wasm__free(a, mod);
+    if (retire_types)
+        wasm__gc_retire_types(mod->rt, mod);
+    else
+        wasm__free(a, mod);
 }
 /* END src/load.c */
 
@@ -20346,36 +20345,6 @@ static void wasm__gc_mark_values(wasm__gc_mark_stack_t* stack, const wasm_value_
     for (i = 0; i < count; i++) wasm__gc_mark_value(stack, &values[i]);
 }
 
-static void wasm__gc_mark_struct_fields(wasm__gc_mark_stack_t* stack,
-                                        wasm_gc_header_t* object,
-                                        const wasm_structtype_t* type) {
-    uint32_t i;
-
-    for (i = 0; i < type->num_fields; i++) {
-        size_t offset;
-
-        if (type->fields[i].storage.kind == WASM_STORAGE_PACKED) continue;
-        offset = wasm__gc_struct_field_offset(type, i);
-        if (offset == (size_t)-1) continue;
-        wasm__gc_mark_value(stack, (const wasm_value_t*)(((const uint8_t*)object) + offset));
-    }
-}
-
-static void wasm__gc_mark_array_elements(wasm__gc_mark_stack_t* stack,
-                                         wasm_gc_header_t* object,
-                                         const wasm_arraytype_t* type) {
-    wasm_gc_array_t* array_object;
-    size_t data_offset;
-
-    if (type->field.storage.kind == WASM_STORAGE_PACKED) return;
-    data_offset = wasm__gc_array_data_offset(type);
-    if (data_offset == (size_t)-1) return;
-
-    array_object = (wasm_gc_array_t*)object;
-    wasm__gc_mark_values(stack, (const wasm_value_t*)(((uint8_t*)array_object) + data_offset),
-                         array_object->length);
-}
-
 static void wasm__gc_mark_descriptor(wasm__gc_mark_stack_t* stack, wasm_gc_header_t* object) {
     wasm_gc_header_t** slot = wasm__gc_descriptor_slot(object);
     wasm_value_t value;
@@ -20389,25 +20358,20 @@ static void wasm__gc_mark_descriptor(wasm__gc_mark_stack_t* stack, wasm_gc_heade
 
 static void wasm__gc_scan_object(wasm__gc_mark_stack_t* stack, wasm_gc_header_t* object) {
     const wasm_module_t* mod = object->module;
+    const wasm_comptype_t* type;
+    uint32_t i;
 
     if (object->kind == WASM_GC_OBJ_STRUCT) wasm__gc_mark_descriptor(stack, object);
     if (!mod || object->type_index >= mod->num_types) return;
+    type = &mod->types[object->type_index];
+    if (object->kind == WASM_GC_OBJ_STRUCT && type->kind == WASM_COMP_STRUCT) {
+        const wasm_structtype_t* st = &type->of.struct_;
 
-    switch (object->kind) {
-        case WASM_GC_OBJ_STRUCT: {
-            const wasm_structtype_t* type = wasm__module_const_structtype(mod, object->type_index);
-
-            if (type) wasm__gc_mark_struct_fields(stack, object, type);
-            break;
-        }
-        case WASM_GC_OBJ_ARRAY: {
-            const wasm_arraytype_t* type = wasm__module_const_arraytype(mod, object->type_index);
-
-            if (type) wasm__gc_mark_array_elements(stack, object, type);
-            break;
-        }
-        default:
-            break;
+        for (i = 0; i < st->num_ref_fields; i++)
+            wasm__gc_mark_value(stack, (const wasm_value_t*)((const uint8_t*)object + st->ref_offsets[i]));
+    } else if (object->kind == WASM_GC_OBJ_ARRAY && type->kind == WASM_COMP_ARRAY && type->of.array.elems_hold_refs) {
+        wasm__gc_mark_values(stack, (const wasm_value_t*)((const uint8_t*)object + type->of.array.data_offset),
+                             ((const wasm_gc_array_t*)object)->length);
     }
 }
 
@@ -20579,47 +20543,25 @@ static void wasm__gc_forward_root(wasm_runtime_t* rt, const wasm__gc_root_t* roo
 }
 
 static void wasm__gc_forward_object_refs(wasm_runtime_t* rt, wasm_gc_header_t* object) {
-    const wasm_module_t* mod;
+    const wasm_module_t* mod = object->module;
+    const wasm_comptype_t* type;
+    uint32_t i;
 
-    if (!object) return;
     if (object->kind == WASM_GC_OBJ_STRUCT) {
         wasm_gc_header_t** slot = wasm__gc_descriptor_slot(object);
 
         if (slot && wasm__gc_ptr_in_heap(rt, *slot) && (*slot)->next_alloc) *slot = (*slot)->next_alloc;
     }
-    mod = object->module;
     if (!mod || object->type_index >= mod->num_types) return;
+    type = &mod->types[object->type_index];
+    if (object->kind == WASM_GC_OBJ_STRUCT && type->kind == WASM_COMP_STRUCT) {
+        const wasm_structtype_t* st = &type->of.struct_;
 
-    switch (object->kind) {
-        case WASM_GC_OBJ_STRUCT: {
-            const wasm_structtype_t* type = wasm__module_const_structtype(mod, object->type_index);
-            uint32_t i;
-
-            if (!type) return;
-            for (i = 0; i < type->num_fields; i++) {
-                size_t offset;
-
-                if (type->fields[i].storage.kind == WASM_STORAGE_PACKED) continue;
-                offset = wasm__gc_struct_field_offset(type, i);
-                if (offset == (size_t)-1) continue;
-                wasm__gc_forward_value(rt, (wasm_value_t*)(((uint8_t*)object) + offset));
-            }
-            break;
-        }
-        case WASM_GC_OBJ_ARRAY: {
-            const wasm_arraytype_t* type = wasm__module_const_arraytype(mod, object->type_index);
-            size_t data_offset;
-
-            if (!type || type->field.storage.kind == WASM_STORAGE_PACKED) return;
-            data_offset = wasm__gc_array_data_offset(type);
-            if (data_offset == (size_t)-1) return;
-            wasm__gc_forward_values(rt,
-                                    (wasm_value_t*)(((uint8_t*)object) + data_offset),
-                                    ((wasm_gc_array_t*)object)->length);
-            break;
-        }
-        default:
-            break;
+        for (i = 0; i < st->num_ref_fields; i++)
+            wasm__gc_forward_value(rt, (wasm_value_t*)((uint8_t*)object + st->ref_offsets[i]));
+    } else if (object->kind == WASM_GC_OBJ_ARRAY && type->kind == WASM_COMP_ARRAY && type->of.array.elems_hold_refs) {
+        wasm__gc_forward_values(rt, (wasm_value_t*)((uint8_t*)object + type->of.array.data_offset),
+                                ((wasm_gc_array_t*)object)->length);
     }
 }
 
@@ -20892,7 +20834,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     return WASM_OK;
 }
 
-static int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module_t* mod) {
+WASM_PRIVATE int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module_t* mod) {
     const wasm_gc_header_t* object;
     uint32_t i;
 
@@ -20908,35 +20850,19 @@ static int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module_t* mo
 }
 
 WASM_PRIVATE void wasm__gc_retire_types(wasm_runtime_t* rt, wasm_module_t* mod) {
-    wasm_module_t* owner;
-    wasm_gc_header_t* object;
-    uint32_t i;
+    wasm_module_t owner;
 
-    if (!wasm__gc_types_used(rt, mod)) return;
-    owner = (wasm_module_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*owner));
-    if (owner) {
-        owner->rt = rt;
-        owner->identity = mod->identity;
-        owner->types = mod->types;
-        owner->num_types = mod->num_types;
-        owner->rec_groups = mod->rec_groups;
-        owner->num_rec_groups = mod->num_rec_groups;
-        owner->retired_types = 1;
-        owner->gc_next = rt->type_owners;
-        rt->type_owners = owner;
-        mod->types = NULL;
-        mod->num_types = 0;
-        mod->rec_groups = NULL;
-        mod->num_rec_groups = 0;
-    }
-    for (object = rt->gc_allocations; object; object = object->next_alloc) {
-        if (object->module == mod) object->module = owner;
-    }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
-
-        if (k && k->module == mod) k->module = owner;
-    }
+    memset(&owner, 0, sizeof(owner));
+    owner.rt = rt;
+    owner.identity = mod->identity;
+    owner.types = mod->types;
+    owner.num_types = mod->num_types;
+    owner.rec_groups = mod->rec_groups;
+    owner.num_rec_groups = mod->num_rec_groups;
+    owner.retired_types = 1;
+    owner.gc_next = rt->type_owners;
+    *mod = owner;
+    rt->type_owners = mod;
 }
 
 WASM_PRIVATE void wasm__gc_free_retired_types(wasm_runtime_t* rt) {

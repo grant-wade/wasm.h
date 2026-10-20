@@ -337,12 +337,13 @@ wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compile
 void wasm_module_free(wasm_module_t* mod) {
     wasm__linked_func_t* linked;
     const wasm_allocator_t* a;
+    int retire_types = 0;
     uint32_t i;
     if (!mod) return;
     a = &mod->rt->allocator;
     if (mod->rt) {
         wasm__interp_cancel_using(mod->rt, mod);
-        wasm__gc_retire_types(mod->rt, mod);
+        retire_types = wasm__gc_types_used(mod->rt, mod);
         for (i = 0; i < mod->rt->num_func_refs; i++) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
@@ -360,10 +361,12 @@ void wasm_module_free(wasm_module_t* mod) {
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }
-    if (mod->rt) wasm__release_type_groups(mod->rt, mod->rec_groups, mod->num_rec_groups);
-    for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
-    wasm__free(a, mod->types);
-    wasm__free(a, mod->rec_groups);
+    if (!retire_types) {
+        if (mod->rt) wasm__release_type_groups(mod->rt, mod->rec_groups, mod->num_rec_groups);
+        for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
+        wasm__free(a, mod->types);
+        wasm__free(a, mod->rec_groups);
+    }
     for (i = 0; i < mod->num_funcs; i++) {
         wasm__free(a, mod->funcs[i].locals);
         wasm__free(a, mod->funcs[i].local_reftypes);
@@ -392,5 +395,8 @@ void wasm_module_free(wasm_module_t* mod) {
     for (i = 0; i < mod->num_memories; i++) wasm__free_memory(&mod->memories[i]);
     wasm__free(a, mod->memories);
     wasm__free(a, mod->module_bytes);
-    wasm__free(a, mod);
+    if (retire_types)
+        wasm__gc_retire_types(mod->rt, mod);
+    else
+        wasm__free(a, mod);
 }
