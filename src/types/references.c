@@ -3,11 +3,13 @@
 #include <stdio.h>
 #include "../internal/alloc.h"
 #include "../internal/gc_types.h"
+#include "../link.h"
 #include "../memory_internal.h"
 #include "../module.h"
 #include "../portable.h"
 #include "../reader.h"
 #include "../runtime.h"
+#include "cross_module.h"
 #include "../support.h"
 #include "canonical.h"
 #include "../values.h"
@@ -22,6 +24,7 @@ static wasm_error_t wasm__require_valtype_feature(wasm_module_t* mod, wasm_valty
         if (err != WASM_OK) return err;
         return wasm__require_feature(mod, WASM_FEATURE_REFERENCE_TYPES);
     }
+    if (wasm__uses_contref_storage(type)) return wasm__require_feature(mod, WASM_FEATURE_STACK_SWITCHING);
     if (wasm__is_gc_ref_type(type)) {
         wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
         if (err != WASM_OK) return err;
@@ -38,6 +41,7 @@ WASM_PRIVATE void wasm__clear_reftype(wasm_reftype_t* reftype) {
 
 static int wasm__is_absheaptype_byte(uint8_t byte) {
     switch (byte) {
+        case 0x68:
         case 0x69:
         case 0x6A:
         case 0x6B:
@@ -50,6 +54,7 @@ static int wasm__is_absheaptype_byte(uint8_t byte) {
         case 0x72:
         case 0x73:
         case 0x74:
+        case 0x75:
             return 1;
         default:
             return 0;
@@ -62,6 +67,8 @@ static int wasm__is_reftype_lead_byte(uint8_t byte) {
 
 static wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
     switch (byte) {
+        case 0x75:
+            return WASM_TYPE_NOCONT;
         case 0x74:
             return WASM_TYPE_NOEXN;
         case 0x73:
@@ -86,6 +93,8 @@ static wasm_valtype_t wasm__abstract_heap_byte_to_type(uint8_t byte) {
             return WASM_TYPE_ARRAYREF;
         case 0x69:
             return WASM_TYPE_EXNREF;
+        case 0x68:
+            return WASM_TYPE_CONTREF;
         default:
             return WASM_TYPE_VOID;
     }
@@ -109,6 +118,9 @@ WASM_PRIVATE wasm_error_t wasm__resolve_reftype(wasm_module_t* mod, wasm_reftype
             return WASM_OK;
         case WASM_COMP_ARRAY:
             reftype->type = WASM_TYPE_ARRAYREF;
+            return WASM_OK;
+        case WASM_COMP_CONT:
+            reftype->type = WASM_TYPE_CONTREF;
             return WASM_OK;
         default:
             return WASM_ERR_MALFORMED;
@@ -136,7 +148,8 @@ WASM_PRIVATE int wasm__has_reftype_info(const wasm_reftype_t* reftype) {
 WASM_PRIVATE int wasm__reftype_equal(const wasm_reftype_t* lhs, const wasm_reftype_t* rhs) {
     if (!wasm__has_reftype_info(lhs) || !wasm__has_reftype_info(rhs)) return 0;
     return lhs->type == rhs->type && lhs->type_index == rhs->type_index &&
-           lhs->has_type_index == rhs->has_type_index && lhs->nullable == rhs->nullable;
+           lhs->has_type_index == rhs->has_type_index && lhs->nullable == rhs->nullable &&
+           (lhs->exact != 0) == (rhs->exact != 0);
 }
 
 WASM_PRIVATE int wasm__reftype_is_subtype(const wasm_module_t* mod,
@@ -145,8 +158,11 @@ WASM_PRIVATE int wasm__reftype_is_subtype(const wasm_module_t* mod,
     if (!wasm__has_reftype_info(subtype) || !wasm__has_reftype_info(supertype)) return 0;
     if (subtype->nullable && !supertype->nullable) return 0;
 
-    if (subtype->has_type_index && supertype->has_type_index)
+    if (subtype->has_type_index && supertype->has_type_index) {
+        if (supertype->exact)
+            return subtype->exact && wasm__type_equal(mod, subtype->type_index, supertype->type_index);
         return wasm__is_subtype(mod, subtype->type_index, supertype->type_index);
+    }
 
     if (subtype->has_type_index)
         return wasm__is_heap_subtype(mod, subtype->type, supertype->type);
@@ -154,11 +170,11 @@ WASM_PRIVATE int wasm__reftype_is_subtype(const wasm_module_t* mod,
     if (supertype->has_type_index) {
         switch (subtype->type) {
             case WASM_TYPE_NOFUNC:
-                return supertype->type == WASM_TYPE_FUNCREF && supertype->nullable;
+                return supertype->type == WASM_TYPE_FUNCREF;
+            case WASM_TYPE_NOCONT:
+                return supertype->type == WASM_TYPE_CONTREF;
             case WASM_TYPE_NONE:
-                return (supertype->type == WASM_TYPE_STRUCTREF ||
-                        supertype->type == WASM_TYPE_ARRAYREF) &&
-                       supertype->nullable;
+                return supertype->type == WASM_TYPE_STRUCTREF || supertype->type == WASM_TYPE_ARRAYREF;
             default:
                 return 0;
         }
@@ -244,10 +260,11 @@ WASM_PRIVATE wasm_value_t wasm__anyref_to_host(const wasm_runtime_t* rt, wasm_va
     return value;
 }
 
-WASM_PRIVATE void wasm__values_to_host(const wasm_runtime_t* rt, wasm_value_t* values, uint32_t count) {
+WASM_PRIVATE void wasm__values_to_host(const wasm_runtime_t* rt, const wasm_value_t* values, wasm_value_t* out,
+                                       uint32_t count) {
     uint32_t i;
 
-    for (i = 0; i < count; i++) values[i] = wasm__anyref_to_host(rt, values[i]);
+    for (i = 0; i < count; i++) out[i] = wasm__anyref_to_host(rt, values[i]);
 }
 
 WASM_PRIVATE wasm_error_t wasm__externref_from_anyref_value(wasm_runtime_t* rt,
@@ -301,13 +318,20 @@ WASM_PRIVATE wasm_error_t wasm__anyref_from_externref_value(wasm_runtime_t* rt,
     return WASM_OK;
 }
 
+static int wasm__is_bottom_heap_type(wasm_valtype_t type) {
+    return type == WASM_TYPE_NONE || type == WASM_TYPE_NOFUNC || type == WASM_TYPE_NOEXTERN || type == WASM_TYPE_NOEXN ||
+           type == WASM_TYPE_NOCONT;
+}
+
 WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
                                        const wasm_value_t* value,
-                                       wasm_reftype_t* out_reftype) {
+                                       wasm_reftype_t* out_reftype,
+                                       const wasm_module_t** out_module) {
     const wasm_gc_header_t* object;
     wasm_module_t* func_mod;
     uint32_t func_idx;
 
+    *out_module = mod;
     if (!value || !out_reftype || !wasm__is_ref_type(value->type)) {
         wasm__clear_reftype(out_reftype);
         return 0;
@@ -316,19 +340,38 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
     wasm__clear_reftype(out_reftype);
     out_reftype->type = value->type;
     out_reftype->nullable = wasm__is_null_ref(value);
-    if (out_reftype->nullable || wasm__uses_externref_storage(value->type) ||
-        wasm__uses_exnref_storage(value->type))
+    if (out_reftype->nullable) return 1;
+    if (wasm__is_bottom_heap_type(value->type)) {
+        wasm__clear_reftype(out_reftype);
+        return 0;
+    }
+    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) return 1;
+    if (wasm__uses_contref_storage(value->type)) {
+        const wasm__cont_object_t* k = (const wasm__cont_object_t*)value->of.externref;
+
+        if (!mod || !mod->rt || !wasm__handle_set_contains(&mod->rt->cont_objects, k)) return 0;
+        if (k->module) {
+            out_reftype->has_type_index = 1;
+            out_reftype->exact = 1;
+            out_reftype->type_index = k->type_index;
+            *out_module = k->module;
+        }
         return 1;
+    }
 
     if (wasm__uses_funcref_storage(value->type)) {
         if (mod && mod->rt &&
             wasm__resolve_func_ref(mod->rt, value->of.funcref, &func_mod, &func_idx) &&
             func_mod && func_idx < func_mod->num_funcs) {
-            wasm_func_t* func = &func_mod->funcs[func_idx];
+            const wasm_module_t* type_mod;
+            uint32_t type_idx;
+            int exact = wasm__func_dynamic_type(func_mod, func_idx, &type_mod, &type_idx);
 
-            if (func->type_idx < func_mod->num_types) {
+            if (type_idx < type_mod->num_types) {
                 out_reftype->has_type_index = 1;
-                out_reftype->type_index = func->type_idx;
+                out_reftype->exact = exact;
+                out_reftype->type_index = type_idx;
+                *out_module = type_mod;
             }
         }
         return 1;
@@ -362,9 +405,11 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
             return 1;
     }
 
-    if (object->module == mod && mod && object->type_index < mod->num_types) {
+    if (object->module && object->type_index < object->module->num_types) {
         out_reftype->has_type_index = 1;
+        out_reftype->exact = 1;
         out_reftype->type_index = object->type_index;
+        *out_module = object->module;
     }
     return 1;
 }
@@ -376,11 +421,12 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
     wasm_reftype_t actual_ref;
     wasm_reftype_t effective_expected;
     wasm_valtype_t actual_null_type;
+    const wasm_module_t* actual_mod;
 
     if (!value) return 0;
     if (!wasm__is_ref_type(expected_type))
         return wasm__is_valtype_subtype(mod, value->type, expected_type);
-    if (!wasm__runtime_value_reftype(mod, value, &actual_ref)) return 0;
+    if (!wasm__runtime_value_reftype(mod, value, &actual_ref, &actual_mod)) return 0;
 
     if (expected_ref && wasm__has_reftype_info(expected_ref))
         effective_expected = *expected_ref;
@@ -399,34 +445,29 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
             actual_null_type = WASM_TYPE_NOEXTERN;
         else if (wasm__uses_exnref_storage(actual_ref.type))
             actual_null_type = WASM_TYPE_NOEXN;
+        else if (wasm__uses_contref_storage(actual_ref.type))
+            actual_null_type = WASM_TYPE_NOCONT;
         else
             actual_null_type = WASM_TYPE_NONE;
         return wasm__is_valtype_subtype(mod, actual_null_type, expected_type);
     }
 
     if (!wasm__is_valtype_subtype(mod, actual_ref.type, expected_type)) return 0;
-    return wasm__reftype_is_subtype(mod, &actual_ref, &effective_expected);
+    if (actual_mod != mod && actual_ref.has_type_index && effective_expected.has_type_index) {
+        if (effective_expected.exact)
+            return actual_ref.exact &&
+                   wasm__type_equal_across_modules(actual_mod, actual_ref.type_index, mod, effective_expected.type_index);
+        return wasm__type_is_subtype_across_modules(actual_mod, actual_ref.type_index, mod, effective_expected.type_index);
+    }
+    return wasm__reftype_is_subtype(actual_ref.has_type_index ? actual_mod : mod, &actual_ref, &effective_expected);
 }
 
-WASM_PRIVATE int wasm__elem_segment_values_match_type(const wasm_module_t* mod,
-                                                const wasm_elem_segment_t* segment,
-                                                wasm_valtype_t expected_type,
-                                                const wasm_reftype_t* expected_ref) {
-    uint32_t i;
-
-    if (!segment) return 0;
-    if (segment->uses_expr) {
-        return wasm__typed_valtype_is_subtype(mod,
-                                              segment->elem_type,
-                                              &segment->elem_ref_type,
-                                              expected_type,
-                                              expected_ref);
-    }
-    for (i = 0; i < segment->num_elems; i++) {
-        if (!wasm__runtime_value_matches_type(mod, &segment->elems[i], expected_type, expected_ref))
-            return 0;
-    }
-    return 1;
+WASM_PRIVATE int wasm__elem_segment_matches_type(const wasm_module_t* mod,
+                                                 const wasm_elem_segment_t* segment,
+                                                 wasm_valtype_t expected_type,
+                                                 const wasm_reftype_t* expected_ref) {
+    return segment && wasm__typed_valtype_is_subtype(mod, segment->elem_type, &segment->elem_ref_type, expected_type,
+                                                     expected_ref);
 }
 
 WASM_PRIVATE int wasm__get_effective_reftype(const wasm_module_t* mod,
@@ -473,15 +514,6 @@ WASM_PRIVATE int wasm__typed_valtype_is_subtype(const wasm_module_t* mod,
     return wasm__reftype_is_subtype(mod, &effective_subtype, &effective_supertype);
 }
 
-static int wasm__typed_valtype_equal(const wasm_module_t* mod,
-                                     wasm_valtype_t lhs,
-                                     const wasm_reftype_t* lhs_ref,
-                                     wasm_valtype_t rhs,
-                                     const wasm_reftype_t* rhs_ref) {
-    return wasm__typed_valtype_is_subtype(mod, lhs, lhs_ref, rhs, rhs_ref) &&
-           wasm__typed_valtype_is_subtype(mod, rhs, rhs_ref, lhs, lhs_ref);
-}
-
 WASM_PRIVATE int wasm__functype_is_subtype(const wasm_module_t* mod,
                                      const wasm_functype_t* subtype,
                                      const wasm_functype_t* supertype) {
@@ -518,17 +550,32 @@ WASM_PRIVATE int wasm__functype_is_subtype(const wasm_module_t* mod,
     return 1;
 }
 
-WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* mod,
+WASM_PRIVATE int wasm__host_functype_equal(const wasm_module_t* mod, const wasm_functype_t* host_type,
+                                           uint32_t type_idx) {
+    const wasm_comptype_t* type;
+
+    if (!mod || type_idx >= mod->num_types) return 0;
+    type = &mod->types[type_idx];
+    if (type->kind != WASM_COMP_FUNC || !type->is_final || type->num_supertypes != 0 ||
+        type->rec_group >= mod->num_rec_groups || mod->rec_groups[type->rec_group].num_types != 1)
+        return 0;
+    return wasm__functype_is_subtype(mod, host_type, &type->of.func) &&
+           wasm__functype_is_subtype(mod, &type->of.func, host_type);
+}
+
+WASM_PRIVATE int wasm__globaltype_matches_import(const wasm_module_t* actual_mod,
                                            wasm_valtype_t actual_type,
                                            const wasm_reftype_t* actual_ref,
                                            int actual_mutable,
+                                           const wasm_module_t* mod,
                                            wasm_valtype_t expected_type,
                                            const wasm_reftype_t* expected_ref,
                                            int expected_mutable) {
     if (actual_mutable != expected_mutable) return 0;
     if (expected_mutable)
-        return wasm__typed_valtype_equal(mod, actual_type, actual_ref, expected_type, expected_ref);
-    return wasm__typed_valtype_is_subtype(mod, actual_type, actual_ref, expected_type, expected_ref);
+        return wasm__valtype_equal_across_modules(actual_mod, actual_type, actual_ref, mod, expected_type, expected_ref);
+    return wasm__valtype_is_subtype_across_modules(actual_mod, actual_type, actual_ref, mod, expected_type,
+                                                   expected_ref);
 }
 
 static int wasm__limits_match_import(uint64_t actual_min,
@@ -550,11 +597,12 @@ WASM_PRIVATE int wasm__tabletype_matches_import(const wasm_module_t* mod,
     actual_table = wasm__table_actual_const(actual_table);
     if (!actual_table) return 0;
     if (actual_table->is_64 != expected_is_64) return 0;
-    if (!wasm__typed_valtype_equal(mod,
-                                   actual_table->reftype,
-                                   &actual_table->reftype_info,
-                                   expected_type,
-                                   expected_ref)) {
+    if (!wasm__valtype_equal_across_modules(actual_table->type_module,
+                                            actual_table->reftype,
+                                            &actual_table->reftype_info,
+                                            mod,
+                                            expected_type,
+                                            expected_ref)) {
         return 0;
     }
     return wasm__limits_match_import(actual_table->size,
@@ -591,8 +639,19 @@ WASM_PRIVATE wasm_error_t wasm__read_heaptype(wasm_module_t* mod,
         return wasm__require_valtype_feature(mod, out_reftype->type);
     }
 
-    type_index = wasm__read_leb128_i64(r);
-    if (type_index < 0 || type_index > (int64_t)UINT32_MAX) return WASM_ERR_MALFORMED;
+    if (*r->ptr == 0x62) {
+        r->ptr++;
+        if (mod) {
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_DESCRIPTORS);
+            if (err != WASM_OK) return err;
+        }
+        out_reftype->exact = 1;
+        type_index = wasm__read_leb128_u32(r);
+        if (r->malformed) return WASM_ERR_MALFORMED;
+    } else {
+        type_index = wasm__read_leb128_i64(r);
+        if (type_index < 0 || type_index > (int64_t)UINT32_MAX) return WASM_ERR_MALFORMED;
+    }
     out_reftype->has_type_index = 1;
     out_reftype->type_index = (uint32_t)type_index;
     if (mod && out_reftype->type_index >= mod->num_types) {
@@ -649,33 +708,8 @@ WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t*
     return value;
 }
 
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source,
-                                                        const wasm_reftype_t* target,
-                                                        wasm_value_t value) {
-    wasm_valtype_t diff_type = source && source->type ? source->type : WASM_TYPE_ANYREF;
-
-    if (source && target && source->nullable && !target->nullable &&
-        source->has_type_index == target->has_type_index &&
-        source->type_index == target->type_index &&
-        source->type == target->type) {
-        switch (source->type) {
-            case WASM_TYPE_FUNCREF:
-                diff_type = WASM_TYPE_NOFUNC;
-                break;
-            case WASM_TYPE_EXTERNREF:
-                diff_type = WASM_TYPE_NOEXTERN;
-                break;
-            case WASM_TYPE_EXNREF:
-                diff_type = WASM_TYPE_NOEXN;
-                break;
-            default:
-                diff_type = WASM_TYPE_NONE;
-                break;
-        }
-        return wasm_ref_null(diff_type);
-    }
-
-    value.type = diff_type;
+WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source, wasm_value_t value) {
+    value.type = source && source->type ? source->type : WASM_TYPE_ANYREF;
     return value;
 }
 
@@ -735,6 +769,7 @@ WASM_PRIVATE wasm_error_t wasm__read_unresolved_valtype(wasm_module_t* mod,
 
     err = wasm__read_reftype(NULL, r, out_type, out_reftype);
     if (err != WASM_OK) return err;
+    if (out_reftype && out_reftype->exact) return wasm__require_feature(mod, WASM_FEATURE_CUSTOM_DESCRIPTORS);
     if (out_reftype && out_reftype->has_type_index) return wasm__require_feature(mod, WASM_FEATURE_GC);
     return wasm__require_valtype_feature(mod, *out_type);
 }
@@ -743,6 +778,11 @@ WASM_PRIVATE void wasm__skip_heaptype(wasm__reader_t* r) {
     if (r->ptr >= r->end) return;
     if (wasm__is_absheaptype_byte(*r->ptr)) {
         r->ptr++;
+        return;
+    }
+    if (*r->ptr == 0x62) {
+        r->ptr++;
+        (void)wasm__read_leb128_u32(r);
         return;
     }
     (void)wasm__read_leb128_i64(r);
@@ -779,6 +819,7 @@ WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte) {
     switch (byte) {
         case 0x63:
         case 0x64:
+        case 0x68:
         case 0x69:
         case 0x6A:
         case 0x6B:
@@ -791,6 +832,7 @@ WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte) {
         case 0x72:
         case 0x73:
         case 0x74:
+        case 0x75:
         case 0x7B:
         case 0x7C:
         case 0x7D:

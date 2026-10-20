@@ -9,8 +9,10 @@ typedef struct wasm_func_t wasm_func_t;
 typedef struct wasm_func_ref_t wasm_func_ref_t;
 typedef struct wasm__call_frame_t wasm__call_frame_t;
 typedef struct wasm__exception_object_t wasm__exception_object_t;
+typedef struct wasm__cont_object_t wasm__cont_object_t;
 typedef struct wasm__emscripten_state_t wasm__emscripten_state_t;
 typedef struct wasm__wasi_state_t wasm__wasi_state_t;
+typedef struct wasm__type_group_t wasm__type_group_t;
 
 typedef struct wasm_structtype_t {
     uint32_t num_fields;
@@ -21,23 +23,31 @@ typedef struct wasm_arraytype_t {
     wasm_fieldtype_t field;
 } wasm_arraytype_t;
 
+typedef struct wasm_conttype_t {
+    uint32_t func_type; /* index of the function type the continuation takes and returns */
+} wasm_conttype_t;
+
 typedef struct wasm_comptype_t {
     wasm_comptype_kind_t kind;
     uint32_t num_supertypes;
     uint32_t* supertypes;
     uint32_t rec_group;
-    uint32_t canonical_id;
+    uint32_t canonical_id; /* the same for equal types of a runtime's modules, or 0 */
     int is_final;
+    uint32_t descriptor; /* index of the type describing this one, or UINT32_MAX */
+    uint32_t describes;  /* index of the type this one describes, or UINT32_MAX */
     union {
         wasm_functype_t func;
         wasm_structtype_t struct_;
         wasm_arraytype_t array;
+        wasm_conttype_t cont;
     } of;
 } wasm_comptype_t;
 
 typedef struct wasm_recgroup_t {
     uint32_t first_type;
     uint32_t num_types;
+    wasm__type_group_t* canonical; /* the group interned in the runtime, or NULL */
 } wasm_recgroup_t;
 
 typedef struct wasm_export_t {
@@ -66,6 +76,7 @@ struct wasm_table_t {
     int is_64;
     int is_import;
     struct wasm_table_t* import_table;
+    const wasm_module_t* type_module; /* module whose type indices reftype_info has, or NULL */
     wasm_allocator_t allocator; /* source of elems */
 };
 
@@ -85,7 +96,6 @@ typedef struct wasm_elem_segment_t {
     uint32_t num_elems;
     uint32_t table_index;
     uint64_t offset;
-    int uses_expr;
     int is_passive;
     int is_declarative;
     int is_dropped;

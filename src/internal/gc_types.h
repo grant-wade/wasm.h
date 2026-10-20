@@ -18,7 +18,8 @@ struct wasm_gc_header_t {
     uint32_t type_index;
     uint8_t kind;
     uint8_t marked;
-    uint16_t reserved;
+    uint8_t has_descriptor; /* a struct whose last pointer-sized bytes hold its descriptor */
+    uint8_t reserved;
 };
 
 typedef struct wasm_gc_struct_t {
@@ -40,6 +41,21 @@ struct wasm__exception_object_t {
     uint64_t tag_identity;
     wasm_value_t* values;
     uint32_t num_values;
+    int marked;
+};
+
+/* A continuation: the stacks from top through its parent links to bottom, a function and its bound arguments
+ * until it first runs, or neither once consumed. */
+struct wasm__cont_object_t {
+    struct wasm__exec_stack_t* top;    /* innermost stack, where execution resumes */
+    struct wasm__exec_stack_t* bottom; /* outermost stack, linked under the resumer */
+    wasm_module_t* start_module;       /* owner of start_func until the continuation first runs */
+    uint32_t start_func;
+    union wasm__slot_t* args; /* slots of the arguments bound before it first runs */
+    uint32_t num_args;
+    wasm_module_t* module;             /* owner of type_index, or NULL if the type is unknown */
+    uint32_t type_index;
+    int stale; /* nonzero if its stacks were dropped when a module they run was freed */
     int marked;
 };
 

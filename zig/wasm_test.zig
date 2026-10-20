@@ -410,15 +410,19 @@ test "features" {
     const rt = try wasm.Runtime.init(std.testing.allocator, .{ .lazy_validation = false });
     defer rt.deinit();
 
-    try expect(rt.features().simd);
-    try expect(!rt.features().threads);
-    rt.disableFeatures(.{ .simd = true });
-    try expect(!rt.features().simd);
-    try expect(std.meta.isError(rt.load(&basic_wasm)));
-    rt.enableFeatures(.{ .simd = true, .threads = true });
-    try expect(rt.features().simd and rt.features().threads);
+    try expectEqual(wasm.Features.all, rt.features());
     const mod = try rt.load(&basic_wasm);
     mod.deinit();
+
+    const no_simd = try wasm.Runtime.init(std.testing.allocator, .{ .features = .{ .simd = false } });
+    defer no_simd.deinit();
+    try expect(!no_simd.features().simd and no_simd.features().threads);
+    try expect(std.meta.isError(no_simd.load(&basic_wasm)));
+
+    const standard = try wasm.Runtime.init(std.testing.allocator, .{ .features = wasm.Features.standard });
+    defer standard.deinit();
+    try expect(standard.features().simd and !standard.features().threads);
+    try expectError(error.Malformed, wasm.Runtime.init(std.testing.allocator, .{ .features = .{ .reserved = 1 } }));
 }
 
 test "shared memory across runtimes" {
@@ -429,7 +433,6 @@ test "shared memory across runtimes" {
     var runtimes: [2]*wasm.Runtime = undefined;
     for (&runtimes, &modules) |*rt, *mod| {
         rt.* = try wasm.Runtime.init(std.testing.allocator, .{});
-        rt.*.enableFeatures(.{ .threads = true });
         try rt.*.bindMemory("env", "memory", shared.raw());
         mod.* = try rt.*.load(&shared_wasm);
     }
@@ -478,6 +481,22 @@ test "gc structs and arrays" {
     defer held.release();
     rt.collectGarbage();
     try expectEqual(@as(i64, 4), try (try mod.structGet(held.get(), 1)).to(i64));
+}
+
+test "gc structs with descriptors" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const mod = try rt.load(&desc_wasm);
+    defer mod.deinit();
+
+    const vtable = try mod.structNew(1, .{@as(i32, 7)});
+    const obj = try mod.structNewDesc(0, .{@as(i32, 1)}, vtable);
+    try expectEqual(@as(i32, 7), try (try mod.structGet(try mod.structGetDesc(obj), 0)).to(i32));
+    const vt_id = try mod.func("vt_id", fn (wasm.Value) i32);
+    try expectEqual(@as(i32, 7), try vt_id.call(.{obj}));
+    try expectError(error.TypeMismatch, mod.structNew(0, .{@as(i32, 1)}));
+    try expectError(error.TypeMismatch, mod.structNewDesc(0, .{@as(i32, 1)}, obj));
+    try expectError(error.TypeMismatch, mod.structGetDesc(vtable));
 }
 
 test "value conversions" {
@@ -613,6 +632,19 @@ const gc_wasm = [_]u8{
     0x20, 0x00, 0xfb, 0x02, 0x00, 0x00, 0x0b, 0x00, 0x20, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x04, 0x0e,
     0x02, 0x00, 0x05, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x01, 0x04, 0x69, 0x6e, 0x74, 0x73, 0x0a, 0x09,
     0x01, 0x00, 0x02, 0x00, 0x01, 0x78, 0x01, 0x01, 0x79,
+};
+
+// (module
+//   (rec
+//     (type $obj (descriptor $vt) (struct (field i32)))
+//     (type $vt (describes $obj) (struct (field i32))))
+//   (func (export "vt_id") (param (ref null $obj)) (result i32)
+//     (struct.get $vt 0 (ref.get_desc $obj (local.get 0)))))
+const desc_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x15, 0x02, 0x4e, 0x02, 0x4d, 0x01, 0x5f,
+    0x01, 0x7f, 0x00, 0x4c, 0x00, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x02, 0x07, 0x09, 0x01, 0x05, 0x76, 0x74, 0x5f, 0x69, 0x64, 0x00, 0x00, 0x0a, 0x0d,
+    0x01, 0x0b, 0x00, 0x20, 0x00, 0xfb, 0x22, 0x00, 0xfb, 0x02, 0x01, 0x00, 0x0b,
 };
 
 test "allocation failures return errors without leaking" {
@@ -1114,6 +1146,88 @@ test "reference types and gc type introspection" {
     try expectEqual(@as(?wasm.RefType, null), host_info.info().importAt(5).ref_type);
 }
 
+test "custom descriptor introspection" {
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const compiled = try rt.compile(&desc_info_wasm);
+    defer compiled.deinit();
+    const info = compiled.info();
+
+    try expectEqual(@as(?u32, 1), info.typeDescriptor(0));
+    try expectEqual(@as(?u32, null), info.typeDescribes(0));
+    try expectEqual(@as(?u32, 0), info.typeDescribes(1));
+    try expectEqual(@as(?u32, null), info.typeDescriptor(1));
+    try expectEqual(@as(?u32, null), info.typeDescriptor(2));
+    try expectEqual(@as(?u32, null), info.typeDescribes(99));
+
+    const param = info.typeFunc(2).?.paramRefType(0).?;
+    try expectEqual(@as(?u32, 0), param.type_index);
+    try expect(param.nullable and param.exact);
+    try expect(info.importAt(0).exact);
+    try expect(!info.importAt(1).exact);
+}
+
+// (module
+//   (rec
+//     (type $obj (descriptor $vt) (struct (field i32)))
+//     (type $vt (describes $obj) (struct (field i32))))
+//   (type $f (func (param (ref null (exact $obj)))))
+//   (import "env" "f" (func (exact (type $f))))
+//   (import "env" "g" (func (type $f))))
+const desc_info_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x15, 0x02, 0x4e, 0x02, 0x4d, 0x01, 0x5f,
+    0x01, 0x7f, 0x00, 0x4c, 0x00, 0x5f, 0x01, 0x7f, 0x00, 0x60, 0x01, 0x63, 0x62, 0x00, 0x00, 0x02,
+    0x11, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x01, 0x66, 0x20, 0x02, 0x03, 0x65, 0x6e, 0x76, 0x01, 0x67,
+    0x00, 0x02,
+};
+
+// (module
+//   (type $f (func (result i32)))
+//   (type $c (cont $f))
+//   (func $forty-two (result i32) (i32.const 42))
+//   (elem declare func $forty-two)
+//   (func (export "make") (result (ref $c)) (cont.new $c (ref.func $forty-two)))
+//   (func (export "run") (param (ref null $c)) (result i32) (resume $c (local.get 0))))
+const cont_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x12, 0x04, 0x60, 0x00, 0x01, 0x7f, 0x5d,
+    0x00, 0x60, 0x00, 0x01, 0x64, 0x01, 0x60, 0x01, 0x63, 0x01, 0x01, 0x7f, 0x03, 0x04, 0x03, 0x00,
+    0x02, 0x03, 0x07, 0x0e, 0x02, 0x04, 0x6d, 0x61, 0x6b, 0x65, 0x00, 0x01, 0x03, 0x72, 0x75, 0x6e,
+    0x00, 0x02, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0a, 0x15, 0x03, 0x04, 0x00, 0x41, 0x2a,
+    0x0b, 0x06, 0x00, 0xd2, 0x00, 0xe0, 0x01, 0x0b, 0x07, 0x00, 0x20, 0x00, 0xe3, 0x01, 0x00, 0x0b,
+};
+
+test "continuation references" {
+    try expectError(error.Malformed, wasm.Runtime.init(std.testing.allocator, .{ .cont_call_depth = 0 }));
+    const rt = try wasm.Runtime.init(std.testing.allocator, .{
+        .cont_stack_values = 64,
+        .cont_call_depth = 8,
+        .cont_frame_arena_size = 1024,
+        .max_cont_stacks = 1,
+    });
+    defer rt.deinit();
+    const mod = try rt.load(&cont_wasm);
+    defer mod.deinit();
+    try expectEqual(wasm.TypeKind.cont, mod.info().typeKind(1));
+    try expectEqual(@as(?u32, 0), mod.info().contTypeFunc(1));
+    try expectEqual(@as(?u32, null), mod.info().contTypeFunc(0));
+
+    const make = try mod.func("make", fn () wasm.Value);
+    const run = try mod.func("run", fn (wasm.Value) i32);
+    const k = try make.call(.{});
+    try expectEqual(wasm.ValType.contref, k.kind);
+    const held = try rt.hold(k);
+    defer held.release();
+    try expectEqual(wasm.ValType.contref, (try make.call(.{})).kind);
+    rt.collectGarbage();
+    try expectEqual(@as(i32, 42), try run.call(.{held.get()}));
+    try expectError(error.Trap, run.call(.{held.get()}));
+    try expectError(error.Trap, run.call(.{.null(.nullcontref)}));
+    var forged: wasm.Value = .null(.contref);
+    forged.of.externref = @intFromPtr(&forged);
+    try expectError(error.TypeMismatch, run.call(.{forged}));
+    try expectEqual(@as(i32, 42), try run.call(.{try make.call(.{})}));
+}
+
 test "formatting values, signatures, and frames" {
     var buffer: [128]u8 = undefined;
     try expectEqualStrings("i32 -5", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.from(@as(i32, -5))}));
@@ -1121,6 +1235,7 @@ test "formatting values, signatures, and frames" {
     try expectEqualStrings("funcref null", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.null(.funcref)}));
     try expectEqualStrings("funcref 3", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.from(@as(wasm.FuncRef, @enumFromInt(3)))}));
     try expectEqualStrings("externref null", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.null(.externref)}));
+    try expectEqualStrings("contref null", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.null(.contref)}));
     try expectEqualStrings("i31ref -7", try std.fmt.bufPrint(&buffer, "{f}", .{wasm.Value.i31ref(-7)}));
 
     const rt = try wasm.Runtime.init(std.testing.allocator, .{});

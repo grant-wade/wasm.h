@@ -114,6 +114,10 @@ enum {
 #define WASM__CLAUSE_CATCH_ALL 1u
 #define WASM__CLAUSE_DELEGATE 2u
 
+/* Words per entry of a resume handler table: kind (0 for a label, 1 for switch), tag, the label's
+ * continuation type index or UINT32_MAX, and a branch descriptor, all zero for switch. */
+#define WASM__HANDLER_WORDS 7u
+
 /* What validating a function body tells its translation. */
 typedef struct wasm__body_info_t {
     const uint32_t* heights;      /* operand stack slots before the instruction at each byte offset */

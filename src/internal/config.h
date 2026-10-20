@@ -18,18 +18,12 @@
 #define WASM__ALIGNOF(type) offsetof(struct { char c; type value; }, value)
 #endif
 
-#define WASM__IMPLEMENTED_FEATURES                                                     \
-    (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE | \
-     WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY |                         \
-     WASM_FEATURE_REFERENCE_TYPES | WASM_FEATURE_MULTI_MEMORY |                        \
-     WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL | WASM_FEATURE_EXCEPTIONS |  \
-     WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64 | WASM_FEATURE_WIDE_ARITHMETIC | \
-     WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS | WASM_FEATURE_THREADS)
-
-#define WASM__PROPOSAL_FEATURES                                                                  \
-    (WASM_FEATURE_WIDE_ARITHMETIC | WASM_FEATURE_CUSTOM_PAGE_SIZES | WASM_FEATURE_COMPACT_IMPORTS | \
-     WASM_FEATURE_THREADS)
-
-#define WASM__DEFAULT_FEATURES (WASM__IMPLEMENTED_FEATURES & ~WASM__PROPOSAL_FEATURES)
+#if defined(__GNUC__) || defined(__clang__)
+#define WASM__NOINLINE __attribute__((noinline))
+#define WASM__COLD __attribute__((noinline, cold))
+#else
+#define WASM__NOINLINE
+#define WASM__COLD
+#endif
 
 #endif /* WASM_INTERNAL_CONFIG_H */

@@ -8,9 +8,9 @@
 #include "exec/interpreter.h"
 #include "runtime.h"
 #include "init_expr.h"
+#include "gc.h"
 #include "types/canonical.h"
 #include "validate/function.h"
-#include "internal/gc_types.h"
 #include "internal/alloc.h"
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +23,24 @@ static uint32_t wasm__section_rank(uint8_t sid) {
     return sid < 14u ? ranks[sid] : 0u;
 }
 
-/* Decodes and validates a module. With compile_only, imports become placeholders and nothing is
+static wasm_module_t* wasm__load_module(wasm_runtime_t* rt, const uint8_t* bytes, size_t len, int compile_only,
+                                        const wasm_module_t* compiled, void* userdata);
+
+/* Replaces rt's error with the error that decoding or validating bytes reports, if any. */
+static void wasm__prefer_validation_error(wasm_runtime_t* rt, const uint8_t* bytes, size_t len) {
+    wasm_error_t err = rt->last_error;
+    char msg[sizeof(rt->error_msg)];
+    wasm_module_t* check;
+
+    memcpy(msg, rt->error_msg, sizeof(msg));
+    check = wasm__load_module(rt, bytes, len, 1, NULL, NULL);
+    if (!check) return;
+    wasm_module_free(check);
+    rt->last_error = err;
+    memcpy(rt->error_msg, msg, sizeof(msg));
+}
+
+/* Decodes and validates a module. With compile_only, imports stay unbound and nothing is
    instantiated; otherwise `compiled`, when given, supplies function bodies it already validated. */
 static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
                                         const uint8_t* bytes,
@@ -73,7 +90,7 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     mod->identity = wasm__alloc_tag_identity(rt);
     mod->start_func = UINT32_MAX;
     mod->is_compiled = compile_only;
-    mod->loaded_features = rt->enabled_features;
+    mod->loaded_features = rt->features;
     if (len > 0) {
         mod->module_bytes = (uint8_t*)wasm__malloc(&rt->allocator, len);
         if (!mod->module_bytes) {
@@ -196,17 +213,13 @@ static wasm_module_t* wasm__load_module(wasm_runtime_t* rt,
     }
     if (err != WASM_OK) {
         wasm_module_free(mod);
+        if (!compile_only && !compiled) wasm__prefer_validation_error(rt, bytes, len);
         return NULL;
     }
 
     err = wasm__resolve_module_reftypes(mod);
     if (err != WASM_OK) {
         WASM__LOAD_FAIL("resolve_module_reftypes");
-    }
-
-    err = wasm__canonicalize_types(mod);
-    if (err != WASM_OK) {
-        WASM__LOAD_FAIL("canonicalize_types");
     }
 
     err = wasm__validate_types(mod);
@@ -322,7 +335,6 @@ wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compile
 }
 
 void wasm_module_free(wasm_module_t* mod) {
-    wasm_gc_header_t* object;
     wasm__linked_func_t* linked;
     const wasm_allocator_t* a;
     uint32_t i;
@@ -330,22 +342,25 @@ void wasm_module_free(wasm_module_t* mod) {
     a = &mod->rt->allocator;
     if (mod->rt) {
         wasm__interp_cancel_using(mod->rt, mod);
-        for (object = mod->rt->gc_allocations; object; object = object->next_alloc) {
-            if (object->module == mod) object->module = NULL;
-        }
+        wasm__gc_retire_types(mod->rt, mod);
         for (i = 0; i < mod->rt->num_func_refs; i++) {
             if (mod->rt->func_refs[i].module == mod) mod->rt->func_refs[i].module = NULL;
         }
         for (linked = mod->rt->linked_funcs; linked; linked = linked->next) {
             if (linked->module == mod) linked->module = NULL;
         }
+        for (i = 0; i < mod->rt->num_imports; i++) {
+            if (mod->rt->imports[i].type_module == mod) mod->rt->imports[i].type_module = NULL;
+        }
+        for (i = 0; i < mod->rt->num_tag_imports; i++) {
+            if (mod->rt->tag_imports[i].type_module == mod) mod->rt->tag_imports[i].type_module = NULL;
+        }
+        for (i = 0; i < mod->rt->num_global_imports; i++) {
+            if (mod->rt->global_imports[i].type_module == mod) mod->rt->global_imports[i].type_module = NULL;
+        }
         wasm__gc_unregister_module(mod->rt, mod);
     }
-    if (mod->is_compiled) {
-        for (i = 0; i < mod->num_globals; i++) {
-            if (mod->globals[i].is_import) wasm__free(a, mod->globals[i].import_value);
-        }
-    }
+    if (mod->rt) wasm__release_type_groups(mod->rt, mod->rec_groups, mod->num_rec_groups);
     for (i = 0; i < mod->num_types; i++) wasm__free_comptype(a, &mod->types[i]);
     wasm__free(a, mod->types);
     wasm__free(a, mod->rec_groups);

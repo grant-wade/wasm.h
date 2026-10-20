@@ -153,7 +153,7 @@ WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v) {
     memcpy(p, &v, 8);
 }
 
-static const char* wasm__feature_name(uint32_t flag) {
+static const char* wasm__feature_name(uint64_t flag) {
     switch (flag) {
         case WASM_FEATURE_SIGN_EXT:
             return "sign-extension operators";
@@ -189,27 +189,26 @@ static const char* wasm__feature_name(uint32_t flag) {
             return "compact imports";
         case WASM_FEATURE_THREADS:
             return "threads";
+        case WASM_FEATURE_STACK_SWITCHING:
+            return "stack switching";
+        case WASM_FEATURE_CUSTOM_DESCRIPTORS:
+            return "custom descriptors";
         default:
             return "unknown feature";
     }
 }
 
-WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag) {
+WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint64_t flag) {
     mod->required_features |= flag;
 
-    if ((flag & WASM__IMPLEMENTED_FEATURES) == 0) {
-        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "feature '%s' is not implemented", wasm__feature_name(flag));
-        return WASM_ERR_MALFORMED;
-    }
-
-    if ((mod->rt->enabled_features & flag) == 0) {
+    if ((mod->rt->features & flag) == 0) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "feature '%s' is disabled", wasm__feature_name(flag));
         return WASM_ERR_MALFORMED;
     }
 
     if ((flag & WASM_FEATURE_GC) != 0) {
         mod->required_features |= WASM_FEATURE_REFERENCE_TYPES;
-        if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+        if ((mod->rt->features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED,
                           "feature '%s' is disabled",
                           wasm__feature_name(WASM_FEATURE_REFERENCE_TYPES));
@@ -217,11 +216,24 @@ WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t fla
         }
     }
 
+    if ((flag & WASM_FEATURE_STACK_SWITCHING) != 0) {
+        wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_GC);
+
+        if (err != WASM_OK) return err;
+        return wasm__require_feature(mod, WASM_FEATURE_EXCEPTIONS);
+    }
+    if ((flag & WASM_FEATURE_CUSTOM_DESCRIPTORS) != 0) return wasm__require_feature(mod, WASM_FEATURE_GC);
+
     return WASM_OK;
 }
 
+WASM_PRIVATE int wasm__allow_tag_results(wasm_module_t* mod) {
+    if ((mod->rt->features & WASM_FEATURE_STACK_SWITCHING) == 0) return 0;
+    return wasm__require_feature(mod, WASM_FEATURE_STACK_SWITCHING) == WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod) {
-    if ((mod->rt->enabled_features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
+    if ((mod->rt->features & WASM_FEATURE_REFERENCE_TYPES) == 0) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "multiple tables");
         return WASM_ERR_MALFORMED;
     }
@@ -231,8 +243,7 @@ WASM_PRIVATE wasm_error_t wasm__require_multi_table(wasm_module_t* mod) {
 }
 
 WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod) {
-    if ((mod->rt->enabled_features & WASM_FEATURE_MULTI_MEMORY) == 0 ||
-        (WASM__IMPLEMENTED_FEATURES & WASM_FEATURE_MULTI_MEMORY) == 0) {
+    if ((mod->rt->features & WASM_FEATURE_MULTI_MEMORY) == 0) {
         WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "multiple memories");
         return WASM_ERR_MALFORMED;
     }

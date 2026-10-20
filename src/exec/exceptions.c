@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "calls.h"
 #include "slots.h"
+#include "stack.h"
 #include "translate.h"
 #include "../internal/alloc.h"
 #include "../module.h"
@@ -36,8 +37,9 @@ WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt) {
     return WASM_ERR_TRAP;
 }
 
-static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc) {
+WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc) {
     wasm_runtime_t* rt = cf->module->rt;
+    wasm__exec_stack_t* exec = rt->exec;
     uint32_t arity = desc[1];
     uint32_t pops = desc[3] >> WASM__BRANCH_POPS_SHIFT;
     uint32_t dst = cf->sp_base + desc[2];
@@ -46,9 +48,9 @@ static wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* d
         cf->pc = NULL;
         return WASM_OK;
     }
-    if (arity > 0 && rt->sp - arity != dst)
-        memmove(&rt->stack[dst], &rt->stack[rt->sp - arity], arity * sizeof(wasm__slot_t));
-    rt->sp = dst + arity;
+    if (arity > 0 && exec->sp - arity != dst)
+        memmove(&exec->stack[dst], &exec->stack[exec->sp - arity], arity * sizeof(wasm__slot_t));
+    exec->sp = dst + arity;
     while (pops-- > 0 && cf->lsp > 0) {
         wasm__clear_label(&cf->labels[cf->lsp - 1]);
         cf->lsp--;
@@ -74,6 +76,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
                               wasm_error_t* out_err) {
     wasm_module_t* mod = cf->module;
     wasm_runtime_t* rt = mod->rt;
+    wasm__exec_stack_t* exec = rt->exec;
     wasm__label_t* label = &cf->labels[idx - 1];
     const uint32_t* clause = label->handler + 1;
     uint32_t count = label->handler[0];
@@ -97,15 +100,15 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
         if (clause[0] == WASM__CLAUSE_CATCH && !wasm__tag_matches(mod, clause[1], &rt->pending_exception)) continue;
 
         wasm__unwind_labels(cf, idx);
-        rt->sp = label->sp_base;
+        exec->sp = label->sp_base;
         *out_err = wasm__copy_exception_to_label(&rt->allocator, label, &rt->pending_exception);
         if (*out_err != WASM_OK) return 1;
         if (clause[0] == WASM__CLAUSE_CATCH) {
-            if (rt->sp + wasm__values_slots(label->caught_values, label->caught_count) > rt->max_stack) {
+            if (exec->sp + wasm__values_slots(label->caught_values, label->caught_count) > exec->max_stack) {
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
-            rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], label->caught_values, label->caught_count);
+            exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], label->caught_values, label->caught_count);
         }
         wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
         cf->pc = cf->func->ops + clause[2];
@@ -118,6 +121,7 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
 static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_error_t* out_err) {
     wasm_module_t* mod = cf->module;
     wasm_runtime_t* rt = mod->rt;
+    wasm__exec_stack_t* exec = rt->exec;
     wasm__label_t* label = &cf->labels[idx - 1];
     const uint32_t* clause = label->handler + 1;
     uint32_t count = label->handler[0];
@@ -141,22 +145,22 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
 
         if (clause[0] == 0x01 || clause[0] == 0x03) wasm__gc_collect_handles_if_needed(rt);
         wasm__unwind_labels(cf, idx - 1);
-        rt->sp = label->sp_base;
+        exec->sp = label->sp_base;
         if (tag_type) {
-            if (rt->sp + wasm__valtypes_slots(tag_type->params, tag_type->num_params) + 1u > rt->max_stack) {
+            if (exec->sp + wasm__valtypes_slots(tag_type->params, tag_type->num_params) + 1u > exec->max_stack) {
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
-            rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], rt->pending_exception.values, tag_type->num_params);
+            exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], rt->pending_exception.values, tag_type->num_params);
         }
         if (clause[0] == 0x01 || clause[0] == 0x03) {
             *out_err = wasm__new_exception_ref(rt, &rt->pending_exception, &exnref_value);
             if (*out_err != WASM_OK) return 1;
-            if (rt->sp >= rt->max_stack) {
+            if (exec->sp >= exec->max_stack) {
                 *out_err = WASM_ERR_STACK_OVERFLOW;
                 return 1;
             }
-            rt->sp += wasm__slot_from_value(&rt->stack[rt->sp], &exnref_value);
+            exec->sp += wasm__slot_from_value(&exec->stack[exec->sp], &exnref_value);
         }
         wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
         *out_err = wasm__branch_frame(cf, clause + 2);
@@ -166,7 +170,7 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
 }
 
 WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf) {
-    wasm_runtime_t* rt = cf->module->rt;
+    wasm__exec_stack_t* exec = cf->module->rt->exec;
     wasm_error_t err = WASM_OK;
     uint32_t idx = cf->lsp;
 
@@ -186,11 +190,11 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf
             if (wasm__catch_try_table(cf, idx, &err)) return err;
         }
         wasm__clear_label(label);
-        rt->sp = label->sp_base;
+        exec->sp = label->sp_base;
         idx--;
     }
 
     cf->lsp = 0;
-    rt->sp = cf->sp_base;
+    exec->sp = cf->sp_base;
     return WASM__ERR_EXCEPTION;
 }

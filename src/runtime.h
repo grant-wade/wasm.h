@@ -6,6 +6,7 @@
 #include "internal/gc_types.h"
 #include "internal/slot.h"
 #include "handles.h"
+#include "exec/stack.h"
 
 /* ── Portable snprintf ────────────────────────────────────────────── */
 #if defined(_MSC_VER) && _MSC_VER < 1900
@@ -22,25 +23,6 @@
                            __VA_ARGS__);                             \
         }                                                            \
     } while (0)
-
-/* One block of the frame arena. Blocks are added as calls nest deeper and dropped as they return;
- * the block's storage follows this header. */
-typedef struct wasm__arena_chunk_t {
-    struct wasm__arena_chunk_t* prev;
-    size_t size;
-    size_t used;
-} wasm__arena_chunk_t;
-
-/* A position in the frame arena for wasm__arena_reset to return to. */
-typedef struct wasm__arena_mark_t {
-    wasm__arena_chunk_t* chunk;
-    size_t used;
-} wasm__arena_mark_t;
-
-/* Block storage starts this far into a block, and allocations are aligned to it. */
-#define WASM__ARENA_ALIGN ((size_t)16u)
-#define WASM__ARENA_HEADER \
-    ((sizeof(wasm__arena_chunk_t) + WASM__ARENA_ALIGN - 1u) / WASM__ARENA_ALIGN * WASM__ARENA_ALIGN)
 
 #define WASM__HELD_BLOCK_SLOTS 64u
 
@@ -60,6 +42,7 @@ typedef struct wasm__gc_root_t {
     struct wasm__gc_root_t* prev;
     wasm_value_t* const* values; /* address of the array, which may be reallocated while pushed */
     const uint32_t* count;
+    wasm_value_t* mirror; /* if not NULL, values as the host sees them, updated where a collection moves values */
 } wasm__gc_root_t;
 
 /* A function export registered by wasm_register_module, called through a host trampoline. */
@@ -95,13 +78,12 @@ struct wasm_runtime_t {
     uint32_t num_tag_imports;
     uint32_t cap_tag_imports;
     uint64_t next_tag_identity;
-    wasm__slot_t* stack;
-    uint32_t max_stack;
-    uint32_t sp;
+    wasm__exec_stack_t* exec; /* the stack execution is running on */
+    wasm__exec_stack_t* loop_stack; /* the stack the innermost interpreter loop started on */
     uint64_t fuel;
     int fuel_enabled;
     size_t interrupt_requested; /* set by wasm_runtime_interrupt from any thread; accessed atomically */
-    uint32_t enabled_features;
+    uint64_t features;
     int lazy_validation;
     uint32_t max_function_locals;
     uint64_t max_memory_bytes;
@@ -112,6 +94,21 @@ struct wasm_runtime_t {
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
     wasm__handle_set_t exception_objects;
+    wasm__handle_set_t cont_objects;
+    wasm__exec_stack_t* cont_stacks;     /* continuation stacks in use */
+    wasm__exec_stack_t* cont_stack_pool; /* released continuation stacks kept for reuse */
+    uint32_t num_cont_stacks;
+    uint32_t num_pooled_cont_stacks;
+    uint32_t max_cont_stacks;
+    uint32_t cont_gc_threshold; /* continuation stacks in use at which starting another collects first */
+    uint32_t cont_stack_values;
+    uint32_t cont_call_depth;
+    size_t cont_frame_arena_size;
+    wasm_module_t* type_owners; /* types of freed modules that GC objects or continuations have, linked by gc_next */
+    wasm__type_group_t** type_groups; /* hash buckets of interned rec groups */
+    uint32_t type_group_buckets;
+    uint32_t num_type_groups;
+    uint32_t next_type_id; /* canonical id of the next interned type */
     uint8_t* gc_heap;
     size_t gc_heap_size;
     size_t gc_heap_offset;
@@ -124,13 +121,9 @@ struct wasm_runtime_t {
     wasm__held_block_t* held_values;
     wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
-    uint32_t handle_gc_threshold; /* boxes plus exception objects that trigger a collection */
-    wasm__arena_chunk_t* frame_arena;       /* innermost block */
+    uint32_t handle_gc_threshold; /* boxes plus exception and continuation objects that trigger a collection */
+    wasm__exec_stack_t main_stack;
     wasm__arena_chunk_t* frame_arena_spare; /* last dropped block, kept for reuse */
-    size_t frame_arena_size;                /* minimum block size */
-    wasm__call_frame_t* call_frames;
-    uint32_t max_call_frames;
-    uint32_t call_frame_sp;
     wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
     wasm_module_t* yield_module;          /* owner of yield_type's type indices */
     const wasm_functype_t* yield_type;    /* type of the host import a suspended call yielded in */
@@ -151,6 +144,7 @@ struct wasm_runtime_t {
     uint32_t* validator_map_bits;
     uint32_t validator_map_bits_capacity;
     uint32_t backtrace_depth;
+    uint32_t backtrace_capacity;
     uint32_t max_labels;
     uint32_t* backtrace_func_indices;
     wasm_module_t** backtrace_modules;
@@ -200,13 +194,14 @@ WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, 
 
 WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
-/* Collects garbage once enough externref boxes and exception objects have accumulated. Call it
+/* Collects garbage once enough externref boxes, exception objects, and continuations have accumulated. Call it
  * only where every live reference is reachable from the runtime's roots. */
 WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
 
 /* Consumes a pending wasm_runtime_interrupt; returns nonzero, with the error set, if there was one. */
 WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt);
 
+/* A struct of a type with a descriptor gets a null descriptor slot for the caller to fill. */
 WASM_PRIVATE wasm_gc_struct_t* wasm__gc_alloc_struct_object(wasm_runtime_t* rt,
                                                       const wasm_module_t* mod,
                                                       uint32_t type_index,
@@ -217,24 +212,6 @@ WASM_PRIVATE wasm_gc_array_t* wasm__gc_alloc_array_object(wasm_runtime_t* rt,
                                                     uint32_t type_index,
                                                     const wasm_arraytype_t* type,
                                                     uint32_t length);
-
-WASM_PRIVATE void wasm__arena_destroy(wasm_runtime_t* rt);
-
-WASM_PRIVATE wasm_error_t wasm__arena_init(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE void* wasm__arena_alloc(wasm_runtime_t* rt, size_t size);
-
-WASM_PRIVATE wasm__arena_mark_t wasm__arena_mark(const wasm_runtime_t* rt);
-
-WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__arena_mark_t mark);
-
-WASM_INLINE void wasm__arena_reset(wasm_runtime_t* rt, wasm__arena_mark_t mark) {
-    if (rt->frame_arena == mark.chunk) {
-        if (mark.chunk) mark.chunk->used = mark.used;
-        return;
-    }
-    wasm__arena_reset_slow(rt, mark);
-}
 
 WASM_PRIVATE wasm_error_t wasm__register_import_internal(wasm_runtime_t* rt,
                                                    const wasm_import_t* imp,

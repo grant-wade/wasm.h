@@ -257,7 +257,9 @@ static int wasm_cli_parse_v128(const char* text, uint8_t out_bytes[16]) {
 static int wasm_cli_is_null_ref(const wasm_value_t* value) {
     if (!value) return 1;
     if (wasm__uses_funcref_storage(value->type)) return value->of.funcref == UINT32_MAX;
-    if (wasm__uses_externref_storage(value->type)) return value->of.externref == (uintptr_t)0;
+    if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type) ||
+        wasm__uses_contref_storage(value->type))
+        return value->of.externref == (uintptr_t)0;
     if (wasm__uses_gc_ref_storage(value->type)) return value->of.gc_ref == (uintptr_t)0;
     return 0;
 }
@@ -288,10 +290,18 @@ static const char* wasm_cli_valtype_name(wasm_valtype_t type) {
             return "structref";
         case WASM_TYPE_ARRAYREF:
             return "arrayref";
+        case WASM_TYPE_EXNREF:
+            return "exnref";
+        case WASM_TYPE_CONTREF:
+            return "contref";
         case WASM_TYPE_NOFUNC:
             return "nofunc";
         case WASM_TYPE_NOEXTERN:
             return "noextern";
+        case WASM_TYPE_NOEXN:
+            return "noexn";
+        case WASM_TYPE_NOCONT:
+            return "nocont";
         case WASM_TYPE_NONE:
             return "none";
         case WASM_TYPE_VOID:
@@ -326,6 +336,8 @@ static const char* wasm_cli_comptype_kind_name(wasm_comptype_kind_t kind) {
             return "struct";
         case WASM_COMP_ARRAY:
             return "array";
+        case WASM_COMP_CONT:
+            return "cont";
         default:
             return "invalid";
     }
@@ -335,10 +347,12 @@ static void wasm_cli_print_reftype_suffix(FILE* stream, const wasm_reftype_t* re
     if (!stream || !ref_type) return;
     if (!wasm__uses_funcref_storage(ref_type->type) &&
         !wasm__uses_externref_storage(ref_type->type) &&
-        !wasm__uses_gc_ref_storage(ref_type->type))
+        !wasm__uses_gc_ref_storage(ref_type->type) &&
+        !wasm__uses_exnref_storage(ref_type->type) &&
+        !wasm__uses_contref_storage(ref_type->type))
         return;
     if (ref_type->has_type_index)
-        fprintf(stream, "<type=%u%s>", (unsigned)ref_type->type_index,
+        fprintf(stream, "<type=%u%s%s>", (unsigned)ref_type->type_index, ref_type->exact ? ", exact" : "",
                 ref_type->nullable ? ", nullable" : "");
     else if (!ref_type->nullable)
         fprintf(stream, "<non-null>");
@@ -400,6 +414,16 @@ static void wasm_cli_print_value(FILE* stream, const wasm_value_t* value) {
                 fputs("null", stream);
             else
                 fprintf(stream, "0x%" PRIxPTR, value->of.externref);
+            break;
+        case WASM_TYPE_EXNREF:
+        case WASM_TYPE_NOEXN:
+        case WASM_TYPE_CONTREF:
+        case WASM_TYPE_NOCONT:
+            if (wasm_cli_is_null_ref(value))
+                fputs("null", stream);
+            else
+                fprintf(stream, "%s(0x%" PRIxPTR ")", wasm__uses_exnref_storage(value->type) ? "exn" : "cont",
+                        value->of.externref);
             break;
         case WASM_TYPE_I31REF:
             if (wasm_cli_is_null_ref(value))
@@ -491,7 +515,9 @@ static int wasm_cli_parse_value(const char* text, wasm_valtype_t type,
             *out_value = wasm_i31ref(i32_value);
             return 1;
         default:
-            if (wasm__uses_gc_ref_storage(type) && strcmp(text, "null") == 0) {
+            if ((wasm__uses_gc_ref_storage(type) || wasm__uses_exnref_storage(type) ||
+                 wasm__uses_contref_storage(type)) &&
+                strcmp(text, "null") == 0) {
                 *out_value = wasm_ref_null(type);
                 return 1;
             }
@@ -564,7 +590,7 @@ static void wasm_cli_print_summary(wasm_module_t* mod, const char* module_path) 
     printf("memories: %u (%u exports)\n", (unsigned)wasm_memory_count(mod),
            (unsigned)wasm_cli_count_exports_of_kind(mod, WASM_EXPORT_MEM));
     printf("custom sections: %u\n", (unsigned)wasm_custom_section_count(mod));
-    printf("required features: 0x%08x\n", (unsigned)mod->required_features);
+    printf("required features: 0x%08llx\n", (unsigned long long)mod->required_features);
 }
 
 static void wasm_cli_print_imports(wasm_module_t* mod) {
@@ -577,7 +603,7 @@ static void wasm_cli_print_imports(wasm_module_t* mod) {
         printf("[%u] %s.%s kind=%s index=%u", (unsigned)i, info->module, info->name,
                wasm_cli_export_kind_name((wasm_export_kind_t)info->kind), (unsigned)info->index);
         if (info->kind == WASM_IMPORT_FUNC) {
-            fputc(' ', stdout);
+            fputs(info->exact ? " exact " : " ", stdout);
             wasm_cli_print_func_signature(stdout, mod, info->index);
         } else if (info->kind == WASM_IMPORT_GLOBAL) {
             printf(" %s ", info->is_mutable ? "var" : "const");
@@ -655,6 +681,10 @@ static void wasm_cli_print_types(wasm_module_t* mod) {
             continue;
         }
         if (kind == WASM_COMP_STRUCT) {
+            if (wasm_type_describes(mod, type_idx) != UINT32_MAX)
+                printf(" describes=%u", (unsigned)wasm_type_describes(mod, type_idx));
+            if (wasm_type_descriptor(mod, type_idx) != UINT32_MAX)
+                printf(" descriptor=%u", (unsigned)wasm_type_descriptor(mod, type_idx));
             printf(" fields=%u\n", (unsigned)wasm_struct_type_field_count(mod, type_idx));
             for (field_idx = 0; field_idx < wasm_struct_type_field_count(mod, type_idx); field_idx++) {
                 const wasm_fieldtype_t* field = wasm_struct_type_field(mod, type_idx, field_idx);
@@ -671,6 +701,10 @@ static void wasm_cli_print_types(wasm_module_t* mod) {
             fputs(" element=", stdout);
             wasm_cli_print_field_type(stdout, field);
             fputc('\n', stdout);
+            continue;
+        }
+        if (kind == WASM_COMP_CONT) {
+            printf(" func=%u\n", (unsigned)wasm_cont_type_func(mod, type_idx));
             continue;
         }
 
@@ -1270,7 +1304,6 @@ int main(int argc, char** argv) {
         for (ci = 0; ci < sizeof(inspect_commands) / sizeof(inspect_commands[0]); ci++) {
             if (strcmp(command, inspect_commands[ci]) == 0) inspect_only = 1;
         }
-        /* Inspection never instantiates, so it needs no imports and runs no guest code. */
         module = inspect_only ? wasm_compile(runtime, bytes, bytes_len) : wasm_load(runtime, bytes, bytes_len);
     }
     free(bytes);

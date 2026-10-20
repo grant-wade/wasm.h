@@ -145,7 +145,7 @@ wasm [--help] [--wasi] [--dir HOST[::GUEST]] [--env NAME=VALUE] [--emscripten] [
 | `memory-read <idx> <offset> <len>` | Hex-dump memory. |
 | `memory-string <idx> <offset> [max]` | Print a null-terminated string from memory. |
 
-`info`, `imports`, `exports`, `funcs`, `types`, `memories`, and `custom-sections` compile the module without instantiating it, so they need no imports and run no guest code.
+`info`, `imports`, `exports`, `funcs`, `types`, `memories`, and `custom-sections` compile the module and do not instantiate it: they need no imports and run no guest code.
 
 ```sh
 ./build/wasm hello.wasm info
@@ -166,7 +166,7 @@ Generate typed C wrappers for a module's exports and imports:
 ./build/wasm2api --singleton --embed --init-func init_state module.wasm my_module
 ```
 
-Output is `<prefix>.h` and `<prefix>.c`. Wrappers support `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported signatures are skipped with diagnostics.
+Output is `<prefix>.h` and `<prefix>.c`; with `--check`, `wasm2api` writes nothing and fails unless those files match its output. `wasm2api` reads modules with every implemented proposal enabled. Wrappers support `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported signatures are skipped with diagnostics.
 
 | Option | Effect |
 | --- | --- |
@@ -178,11 +178,11 @@ Output is `<prefix>.h` and `<prefix>.c`. Wrappers support `i32`, `i64`, `f32`, `
 | `--include-export`, `--include-prefix` | Include matching names; overrides defaults. |
 | `--exclude-export`, `--exclude-prefix` | Exclude matching names. |
 
-Wrappers cache export indices and own a runtime by default. Use `*_init_options_t` to supply a runtime, configuration, allocator for the owned runtime (`wasm_libc_allocator()` by default), or import bindings. An imports struct is emitted for host functions and globals. Memory helpers use the exported memory, preferring an export named `memory`.
+Wrappers cache export indices and own a runtime by default. Use `*_init_options_t` to supply a runtime, configuration, allocator for the owned runtime (`wasm_libc_allocator()` by default), or import bindings. `*_get_required_features()` returns the `WASM_FEATURE_*` bits the module uses, and initialization fails when the runtime lacks any of them. An imports struct is emitted for host functions and globals. Memory helpers use the exported memory, preferring an export named `memory`.
 
 Non-singleton output also provides `*_api_t` with `ctx`, `owns_ctx`, and `vtable`. `*_api_init` and `*_api_init_embedded` create owned contexts; `*_api_from_ctx` borrows one. `*_api_free` frees only owned contexts. Call through `api.vtable->method(&api, ...)` or the flat `*_func(ctx, ...)` API.
 
-With `emcc` installed, `session_math_wasm` builds [the example module](examples/session_math_wasm.c), `session_math_generate` refreshes its wrappers, and `session_math_demo` builds the native demo. `./cbuild --test` runs the demo.
+`examples/session_math.wasm` is built from [the example module](examples/session_math_wasm.c), and `examples/session_math.c` and `.h` are its committed wrappers. `./cbuild --test` runs the native demo and checks the wrappers against `wasm2api --check`; `./cbuild --regenerate-examples -t session_math_regenerate` rebuilds the module with `emcc` and rewrites the wrappers.
 
 ## Proposal support
 
@@ -204,14 +204,16 @@ With `emcc` installed, `session_math_wasm` builds [the example module](examples/
 | Garbage Collection | Implemented |
 | Exception Handling | Implemented |
 | Memory64 | Implemented |
-| Wide Arithmetic | Implemented, opt-in (`WASM_FEATURE_WIDE_ARITHMETIC`) |
-| Custom Page Sizes | Implemented, opt-in (`WASM_FEATURE_CUSTOM_PAGE_SIZES`) |
-| Compact Import Section | Implemented, opt-in (`WASM_FEATURE_COMPACT_IMPORTS`) |
-| Threads | Implemented, opt-in (`WASM_FEATURE_THREADS`); see [Threads](docs/EMBEDDING.md#threads) |
+| Wide Arithmetic | Implemented, not yet standardized (`WASM_FEATURE_WIDE_ARITHMETIC`) |
+| Custom Page Sizes | Implemented, not yet standardized (`WASM_FEATURE_CUSTOM_PAGE_SIZES`) |
+| Compact Import Section | Implemented, not yet standardized (`WASM_FEATURE_COMPACT_IMPORTS`) |
+| Threads | Implemented, not yet standardized (`WASM_FEATURE_THREADS`); see [Threads](docs/EMBEDDING.md#threads) |
+| Stack Switching | Implemented, not yet standardized (`WASM_FEATURE_STACK_SWITCHING`); see [Stack switching](docs/EMBEDDING.md#stack-switching) |
+| Custom Descriptors | Implemented, not yet standardized (`WASM_FEATURE_CUSTOM_DESCRIPTORS`); see [GC references](docs/EMBEDDING.md#gc-references) |
 | Extended Name Section | Not applicable: only module and function names are read, for backtraces, and malformed name sections never reject a module |
 | Branch Hinting | Not implemented |
 
-Opt-in proposals have not been standardized yet; enable them with `wasm_runtime_enable_feature` or `wasm_runtime_enable_all_features`.
+Every implemented proposal is enabled by default; turn proposals off with the `WASM_FEATURE_*` bits of `wasm_config_t.features`. `WASM_FEATURES_STANDARD` enables only the standardized ones.
 
 SIMD execution includes ARM NEON and x86_64 SSE2 fast paths where the platform instructions preserve Wasm semantics exactly.
 
@@ -236,10 +238,8 @@ JS-only proposals (BigInt-to-i64, JS String Builtins) and text-format proposals 
 | `wasm.c` | CLI runner. |
 | `wasm2api.c` | Typed wrapper generator. |
 | `examples/` | Demo code. |
-| `test/wasm_test.c` | Runtime regression tests. |
-| `test/wl.h` | Local support library used by native tests. |
-| `test/wl_test.c` | Tests for `wl.h`. |
-| `test/` | Unit tests, spectest harness, emcc fixtures, and fixture runner. |
+| `test/unit/` | Runtime regression tests, one `*_test.c` per `src/` unit. |
+| `test/` | Unit tests, spectest harness, vendored proposal tests (`test/proposals/`), emcc fixtures, and fixture runner. |
 | `docs/` | Release-facing embedding and build documentation. |
 | `SECURITY.md` | Vulnerability reporting and host-capability security model. |
 | `test/fuzz_wasm_load.c` | ASan/UBSan libFuzzer harness for module loading. |

@@ -22,6 +22,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/decode.c",
     "src/exec/atomic.c",
     "src/exec/calls.c",
+    "src/exec/cont.c",
     "src/exec/translate.c",
     "src/exec/exceptions.c",
     "src/exec/frames.c",
@@ -29,6 +30,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/exec/bulk.c",
     "src/exec/simd.c",
     "src/exec/slots.c",
+    "src/exec/stack.c",
     "src/exec/interpreter.c",
     "src/gc.c",
     "src/handles.c",
@@ -64,6 +66,7 @@ static const char* const wasm_runtime_sources[] = {
     "src/types/decode.c",
     "src/types/references.c",
     "src/validate/atomic.c",
+    "src/validate/cont.c",
     "src/validate/function.c",
     "src/validate/gc.c",
     "src/validate/module.c",
@@ -81,16 +84,16 @@ typedef struct {
 } emcc_case_t;
 
 static const emcc_case_t emcc_cases[] = {
-    { "basic_add", { "call-i32", "wl_case", "10" }, { "-O0" } },
-    { "function_pointer", { "call-i32", "wl_case", "37" }, { "-O1" } },
-    { "bulk_memory", { "call-i32", "wl_case", "410" }, { "-O0", "-mbulk-memory" } },
-    { "sign_extension", { "call-i32", "wl_case", "-32895" }, { "-O2" } },
-    { "switch_table", { "call-i32", "wl_case", "40" }, { "-O2" } },
-    { "start_constructor", { "call-i32", "wl_case", "77" }, { "-O0", "-Wl,--export=__wasm_call_ctors" } },
-    { "i64_return", { "call-i64", "wl_case", "1099511627785" }, { "-O1" } },
-    { "trunc_sat", { "call-i32", "wl_case", "255" }, { "-O2" } },
-    { "tail_call", { "call-i32", "wl_case", "29" }, { "-O1", "-mtail-call" } },
-    { "stdout_print", { "call-stdout", "wl_case", "stdout-fixture-ok" }, { "-O0" } },
+    { "basic_add", { "call-i32", "fixture_case", "10" }, { "-O0" } },
+    { "function_pointer", { "call-i32", "fixture_case", "37" }, { "-O1" } },
+    { "bulk_memory", { "call-i32", "fixture_case", "410" }, { "-O0", "-mbulk-memory" } },
+    { "sign_extension", { "call-i32", "fixture_case", "-32895" }, { "-O2" } },
+    { "switch_table", { "call-i32", "fixture_case", "40" }, { "-O2" } },
+    { "start_constructor", { "call-i32", "fixture_case", "77" }, { "-O0", "-Wl,--export=__wasm_call_ctors" } },
+    { "i64_return", { "call-i64", "fixture_case", "1099511627785" }, { "-O1" } },
+    { "trunc_sat", { "call-i32", "fixture_case", "255" }, { "-O2" } },
+    { "tail_call", { "call-i32", "fixture_case", "29" }, { "-O1", "-mtail-call" } },
+    { "stdout_print", { "call-stdout", "fixture_case", "stdout-fixture-ok" }, { "-O0" } },
     { "unresolved_import", { "load-fail" }, { "-O0", "-Wl,--allow-undefined" } },
 };
 
@@ -104,6 +107,8 @@ typedef struct {
     int zig;
     int fuzzer;
     int spec_proposals; /* also run proposal suites the runtime does not implement */
+    int gc_stress;      /* collect garbage before every GC allocation */
+    int regenerate_examples; /* rebuild the committed example module and its wrappers with emcc */
     int announce; /* report missing optional tools */
     int msvc;
     int x86_32;
@@ -312,7 +317,7 @@ static void project_options(target_t* t) {
     cbuild_add_include_dir(ctx, t, ".");
     cbuild_add_define(ctx, t, "_POSIX_C_SOURCE=200809L");
     cbuild_add_define(ctx, t, opt.platform ? "WASM_ENABLE_PLATFORM=1" : "WASM_ENABLE_PLATFORM=0");
-    cbuild_add_define(ctx, t, opt.platform ? "WL_ENABLE_PLATFORM=1" : "WL_ENABLE_PLATFORM=0");
+    if (opt.gc_stress) cbuild_add_define(ctx, t, "WASM_GC_STRESS");
 #ifndef _WIN32
     if (opt.platform) {
         cbuild_add_cflags(ctx, t, "-pthread");
@@ -399,13 +404,124 @@ typedef struct {
     const char* status;
     const char* log;
     const char* dir;
+    const char* flat_wast; /* where the copy with flattened legacy try forms goes, or NULL */
 } wast_job_t;
+
+typedef struct {
+    char* data;
+    size_t len;
+    size_t cap;
+} text_t;
+
+static void text_append(text_t* t, const char* s, size_t n) {
+    if (t->len + n + 1 > t->cap) {
+        t->cap = (t->len + n + 1) * 2;
+        t->data = (char*)realloc(t->data, t->cap);
+        if (!t->data) exit(1);
+    }
+    memcpy(t->data + t->len, s, n);
+    t->len += n;
+    t->data[t->len] = '\0';
+}
+
+static int wast_delimiter(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '(' || c == ')' || c == '"' || c == ';';
+}
+
+/* Returns the index just past the comment, string, form, or token starting at i. */
+static size_t wast_item_end(const char* s, size_t n, size_t i) {
+    if (s[i] == ';' && i + 1 < n && s[i + 1] == ';') {
+        while (i < n && s[i] != '\n') i++;
+        return i;
+    }
+    if (s[i] == '(' && i + 1 < n && s[i + 1] == ';') {
+        int depth = 0;
+        while (i + 1 < n) {
+            if (s[i] == '(' && s[i + 1] == ';') {
+                depth++;
+                i += 2;
+            } else if (s[i] == ';' && s[i + 1] == ')') {
+                i += 2;
+                if (--depth == 0) return i;
+            } else {
+                i++;
+            }
+        }
+        return n;
+    }
+    if (s[i] == '"') {
+        for (i++; i < n && s[i] != '"'; i++) {
+            if (s[i] == '\\') i++;
+        }
+        return i < n ? i + 1 : n;
+    }
+    if (s[i] == '(') {
+        for (i++; i < n && s[i] != ')';) i = wast_item_end(s, n, i);
+        return i < n ? i + 1 : n;
+    }
+    for (i++; i < n && !wast_delimiter(s[i]);) i++;
+    return i;
+}
+
+/* Returns the length of "(keyword" when the form at i starts with keyword, or 0. */
+static size_t wast_form_keyword(const char* s, size_t n, size_t i, const char* keyword) {
+    size_t k = strlen(keyword);
+    if (s[i] != '(' || i + 1 + k > n || strncmp(s + i + 1, keyword, k) != 0) return 0;
+    return i + 1 + k == n || wast_delimiter(s[i + 1 + k]) ? k + 1 : 0;
+}
+
+/* Appends s[i, n) to out, writing folded legacy try forms as flat instructions. */
+static void flatten_legacy_try(const char* s, size_t i, size_t n, text_t* out) {
+    static const char* const clauses[] = { "do", "catch", "catch_all", "delegate" };
+    while (i < n) {
+        size_t next = wast_item_end(s, n, i);
+        size_t k = wast_form_keyword(s, n, i, "try");
+        int form = s[i] == '(' && next - i >= 2 && s[i + 1] != ';' && s[next - 1] == ')';
+        if (!form) {
+            text_append(out, s + i, next - i);
+        } else if (!k) {
+            text_append(out, "(", 1);
+            flatten_legacy_try(s, i + 1, next - 1, out);
+            text_append(out, ")", 1);
+        } else {
+            int delegated = 0;
+            text_append(out, "try", 3);
+            for (size_t j = i + k; j < next - 1;) {
+                size_t child_end = wast_item_end(s, next - 1, j);
+                size_t ck = 0;
+                int c = 0;
+                while (c < COUNT(clauses) && !(ck = wast_form_keyword(s, next - 1, j, clauses[c]))) c++;
+                if (ck && s[child_end - 1] == ')') {
+                    if (c > 0) text_append(out, clauses[c], strlen(clauses[c]));
+                    if (c == 3) delegated = 1;
+                    flatten_legacy_try(s, j + ck, child_end - 1, out);
+                } else {
+                    flatten_legacy_try(s, j, child_end, out);
+                }
+                j = child_end;
+            }
+            if (!delegated) text_append(out, " end", 4);
+        }
+        i = next;
+    }
+}
 
 /* A failed conversion leaves an empty command list and a status the runner reports as a skip. */
 static void json_from_wast(void* user_data) {
     wast_job_t* job = (wast_job_t*)user_data;
     make_dirs(job->dir);
-    const char* argv[] = { job->wasm_tools, "json-from-wast", job->wast, "-o", job->json, "--wasm-dir", job->dir };
+    const char* source = job->wast;
+    if (job->flat_wast) {
+        char* text = read_file(job->wast);
+        text_t flat = { NULL, 0, 0 };
+        text_append(&flat, "", 0);
+        if (text) flatten_legacy_try(text, 0, strlen(text), &flat);
+        write_file(job->flat_wast, flat.data);
+        free(text);
+        free(flat.data);
+        source = job->flat_wast;
+    }
+    const char* argv[] = { job->wasm_tools, "json-from-wast", source, "-o", job->json, "--wasm-dir", job->dir };
     char* output = NULL;
     int rc = cbuild_spawn(ctx, argv, COUNT(argv), &output);
     write_file(job->log, output ? output : "");
@@ -458,20 +574,39 @@ typedef struct {
     target_t* support_build;
     const char* wasm_tools;
     const char* support;
+    const char* support_extra;
 } spec_env_t;
 
-/* Proposal directories under test/spec/proposals whose suites run by default, with the wasm-tools features
-   they need. Suites written before a later feature was standardized disable it ("-name"), and the runner
-   disables it in the runtime too. */
+/* Proposal directories under test/spec/proposals or test/proposals whose suites run by default, with the
+   wasm-tools features they need. Suites written before a later feature was standardized disable it ("-name"),
+   and the runner disables it in the runtime too. */
 static const struct {
     const char* name;
     const char* features;
 } implemented_proposals[] = {
     { "compact-import-section", "all" },
+    { "custom-descriptors", "all" },
+    { "custom-descriptors-disabled", "all,-custom-descriptors" },
+    { "gc", "all" },
     { "custom-page-sizes", "all" },
     { "extended-name-section", "all" },
+    { "stack-switching", "all" },
     { "threads", "all,-multi-memory,-reference-types" },
     { "wide-arithmetic", "all" },
+};
+
+/* Directories under test/wast holding this runtime's own suites, with the wasm-tools features each runs with. */
+static const struct {
+    const char* name;
+    const char* features;
+} wast_suites[] = {
+    { "linking", "all" },
+    { "stack-switching", "all" },
+    { "stack-switching-disabled", "all,-stack-switching" },
+    { "custom-descriptors", "all" },
+    { "custom-descriptors-disabled", "all,-custom-descriptors" },
+    { "gc", "all" },
+    { "subtyping", "all" },
 };
 
 static const char* proposal_features(const char* proposal) {
@@ -482,12 +617,13 @@ static const char* proposal_features(const char* proposal) {
 }
 
 /* skip_status, when set, replaces the conversion status so the runner skips the test.
-   features, when set, is passed to wasm-tools validate. */
+   features, when set, is passed to wasm-tools validate. legacy_try converts folded legacy try forms first. */
 static void add_spectest(const spec_env_t* env, const char* wast, const char* out_dir, const char* stem,
-                         const char* test_name, const char* skip_status, const char* features) {
+                         const char* test_name, const char* skip_status, const char* features, int legacy_try) {
     wast_job_t* job = (wast_job_t*)calloc(1, sizeof(*job));
     job->wasm_tools = env->wasm_tools;
     job->wast = wast;
+    job->flat_wast = legacy_try ? fmt("%s/%s.flat.wast", out_dir, stem) : NULL;
     job->json = fmt("%s/%s.json", out_dir, stem);
     job->status = fmt("%s/%s.status", out_dir, stem);
     job->log = fmt("%s/%s.json-from-wast.log", out_dir, stem);
@@ -499,9 +635,9 @@ static void add_spectest(const spec_env_t* env, const char* wast, const char* ou
                               cbuild_command_function(ctx, fmt("json-from-wast %s", wast), json_from_wast, job));
 
     /* Both runners compile the same text fixtures to the same paths. */
-    const char* args[] = { job->json, env->wasm_tools, env->support, skip_status ? skip_status : job->status,
-                           features };
-    int argc = features ? 5 : 4;
+    const char* args[] = { job->json, env->wasm_tools, env->support, env->support_extra,
+                           skip_status ? skip_status : job->status, features };
+    int argc = features ? 6 : 5;
     const char* label2 = strncmp(test_name, "proposal.", 9) == 0 ? "proposal" : NULL;
     char* lock = fmt("spectest_%s", test_name);
     test_t* single = add_test(fmt("spectest.%s", test_name), env->runner, args, argc, "spectest", label2);
@@ -555,6 +691,46 @@ static void fuzz_corpus_replay(target_t* header) {
     for (int i = 0; i < wat_count; ++i) cbuild_test_add_dependency(ctx, test, builds[i]);
 }
 
+/* Registers the suites under proposals_root, one directory per proposal. Exits if a proposal there also has a
+   directory under upstream_root, when upstream_root is not NULL. */
+static void add_proposal_spectests(const spec_env_t* env, const char* spec_dir, const char* proposals_root,
+                                   const char* upstream_root) {
+    char** proposal_wasts = NULL;
+    int proposal_count = 0;
+    cbuild_expand_wildcard(fmt("%s**/*.wast", proposals_root), &proposal_wasts, &proposal_count);
+    for (int i = 0; i < proposal_count; ++i) {
+        const char* relative = proposal_wasts[i] + strlen(proposals_root);
+        const char* slash = strchr(relative, '/');
+        if (strncmp(proposal_wasts[i], proposals_root, strlen(proposals_root)) != 0 || !slash) continue;
+        char* proposal = fmt("%.*s", (int)(slash - relative), relative);
+        if (upstream_root && cbuild_dir_exists(fmt("%s%s", upstream_root, proposal))) {
+            fprintf(stderr, "%s%s duplicates %s%s; remove the vendored copy.\n", proposals_root, proposal,
+                    upstream_root, proposal);
+            exit(1);
+        }
+        char* stem = fmt("%.*s", (int)(strlen(slash + 1) - strlen(".wast")), slash + 1);
+        for (char* c = stem; *c; ++c) {
+            if (*c == '/') *c = '.';
+        }
+        char* out_dir = fmt("%s/proposals/%s", spec_dir, proposal);
+        char* test_name = fmt("proposal.%s.%s", proposal, stem);
+        char* skip_status = NULL;
+        const char* features = proposal_features(proposal);
+        if (!features && !opt.spec_proposals) {
+            make_dirs(out_dir);
+            skip_status = fmt("%s/not-implemented.status", out_dir);
+            char* text = fmt("skip\nproposal %s is not implemented; pass --spec-proposals to run it\n", proposal);
+            write_if_changed(skip_status, text);
+            free(text);
+        }
+        add_spectest(env, proposal_wasts[i], out_dir, stem, test_name, skip_status, features ? features : "all", 0);
+        free(proposal);
+        free(stem);
+        free(test_name);
+    }
+    free(proposal_wasts);
+}
+
 static void spectests(target_t* runner, target_t* modular_runner) {
     static const char* const names[] = { "wasm-tools" };
     char* wasm_tools = find_program(names, 1, NULL, 0);
@@ -578,8 +754,14 @@ static void spectests(target_t* runner, target_t* modular_runner) {
     char* parse_argv[] = { wasm_tools, "parse", "test/spectest_support.wat", "-o", support };
     cbuild_target_add_command(ctx, support_build, cbuild_command_argv(ctx, "wasm-tools parse spectest_support.wat",
                                                                       parse_argv, COUNT(parse_argv)));
+    char* support_extra = out_path("spectest_support_extra.wasm");
+    cbuild_add_source(ctx, support_build, "test/spectest_support_extra.wat");
+    char* parse_extra_argv[] = { wasm_tools, "parse", "test/spectest_support_extra.wat", "-o", support_extra };
+    cbuild_target_add_command(ctx, support_build,
+                              cbuild_command_argv(ctx, "wasm-tools parse spectest_support_extra.wat", parse_extra_argv,
+                                                  COUNT(parse_extra_argv)));
 
-    spec_env_t env = { runner, modular_runner, support_build, wasm_tools, support };
+    spec_env_t env = { runner, modular_runner, support_build, wasm_tools, support, support_extra };
     char* spec_dir = out_path("spec");
     char** wasts = NULL;
     int wast_count = 0;
@@ -587,41 +769,53 @@ static void spectests(target_t* runner, target_t* modular_runner) {
     for (int i = 0; i < wast_count; ++i) {
         const char* base = strrchr(wasts[i], '/') + 1;
         char* stem = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
-        add_spectest(&env, wasts[i], spec_dir, stem, stem, NULL, NULL);
+        add_spectest(&env, wasts[i], spec_dir, stem, stem, NULL, NULL, 0);
         free(stem);
     }
     free(wasts);
 
-    const char* proposals_root = "test/spec/proposals/";
-    char** proposal_wasts = NULL;
-    int proposal_count = 0;
-    cbuild_expand_wildcard("test/spec/proposals/**/*.wast", &proposal_wasts, &proposal_count);
-    for (int i = 0; i < proposal_count; ++i) {
-        const char* relative = proposal_wasts[i] + strlen(proposals_root);
-        const char* slash = strchr(relative, '/');
-        if (strncmp(proposal_wasts[i], proposals_root, strlen(proposals_root)) != 0 || !slash) continue;
-        char* proposal = fmt("%.*s", (int)(slash - relative), relative);
-        char* stem = fmt("%.*s", (int)(strlen(slash + 1) - strlen(".wast")), slash + 1);
-        for (char* c = stem; *c; ++c) {
-            if (*c == '/') *c = '.';
-        }
-        char* out_dir = fmt("%s/proposals/%s", spec_dir, proposal);
-        char* test_name = fmt("proposal.%s.%s", proposal, stem);
-        char* skip_status = NULL;
-        const char* features = proposal_features(proposal);
-        if (!features && !opt.spec_proposals) {
-            make_dirs(out_dir);
-            skip_status = fmt("%s/not-implemented.status", out_dir);
-            char* text = fmt("skip\nproposal %s is not implemented; pass --spec-proposals to run it\n", proposal);
-            write_if_changed(skip_status, text);
-            free(text);
-        }
-        add_spectest(&env, proposal_wasts[i], out_dir, stem, test_name, skip_status, features ? features : "all");
-        free(proposal);
+    char* legacy_dir = fmt("%s/legacy", spec_dir);
+    cbuild_expand_wildcard("test/spec/legacy/*.wast", &wasts, &wast_count);
+    for (int i = 0; i < wast_count; ++i) {
+        const char* base = strrchr(wasts[i], '/') + 1;
+        char* stem = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
+        char* test_name = fmt("legacy.%s", stem);
+        add_spectest(&env, wasts[i], legacy_dir, stem, test_name, NULL, "all", 1);
         free(stem);
         free(test_name);
     }
-    free(proposal_wasts);
+    free(wasts);
+
+    char* custom_dir = fmt("%s/custom", spec_dir);
+    cbuild_expand_wildcard("test/spec/custom/*.wast", &wasts, &wast_count);
+    for (int i = 0; i < wast_count; ++i) {
+        const char* base = strrchr(wasts[i], '/') + 1;
+        char* stem = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
+        char* test_name = fmt("custom.%s", stem);
+        add_spectest(&env, wasts[i], custom_dir, stem, test_name, NULL, NULL, 0);
+        free(stem);
+        free(test_name);
+    }
+    free(wasts);
+
+    add_proposal_spectests(&env, spec_dir, "test/spec/proposals/", NULL);
+    add_proposal_spectests(&env, spec_dir, "test/proposals/", "test/spec/proposals/");
+
+    for (int i = 0; i < COUNT(wast_suites); ++i) {
+        char** suite_wasts = NULL;
+        int suite_count = 0;
+        char* out_dir = fmt("%s/wast/%s", spec_dir, wast_suites[i].name);
+        cbuild_expand_wildcard(fmt("test/wast/%s/*.wast", wast_suites[i].name), &suite_wasts, &suite_count);
+        for (int j = 0; j < suite_count; ++j) {
+            const char* base = strrchr(suite_wasts[j], '/') + 1;
+            char* stem = fmt("%.*s", (int)(strlen(base) - strlen(".wast")), base);
+            char* test_name = fmt("wast.%s.%s", wast_suites[i].name, stem);
+            add_spectest(&env, suite_wasts[j], out_dir, stem, test_name, NULL, wast_suites[i].features, 0);
+            free(stem);
+            free(test_name);
+        }
+        free(suite_wasts);
+    }
 }
 
 static char* find_emcc(void) {
@@ -644,7 +838,7 @@ static void emcc_fixtures(const char* emcc, target_t* runner) {
         argv[argc++] = source;
         argv[argc++] = "-sSTANDALONE_WASM=1";
         argv[argc++] = "-Wl,--no-entry";
-        argv[argc++] = "-Wl,--export=wl_case";
+        argv[argc++] = "-Wl,--export=fixture_case";
         for (int f = 0; f < COUNT(c->emcc_flags) && c->emcc_flags[f]; ++f) argv[argc++] = c->emcc_flags[f];
         argv[argc++] = "-o";
         argv[argc++] = wasm;
@@ -662,41 +856,40 @@ static void emcc_fixtures(const char* emcc, target_t* runner) {
     }
 }
 
-static void session_math_example(const char* emcc, target_t* wasm2api, target_t* header) {
-    char* dir = out_path("examples");
-    char* wasm = fmt("%s/session_math.wasm", dir);
-    char* stamp = fmt("%s/session_math.stamp", dir);
+static void session_math_example(target_t* wasm2api, target_t* header) {
+    static const char* const check_args[] = {
+        "--check", "--singleton", "--embed", "--init-func", "init_state", "examples/session_math.wasm",
+        "examples/session_math",
+    };
+    add_test("session_math_wrappers", wasm2api, check_args, COUNT(check_args), "unit", NULL);
 
+    target_t* demo = native_executable("session_math_demo", "examples/session_math_demo.c", header);
+    cbuild_add_source(ctx, demo, "examples/session_math.c");
+    add_test("session_math_demo", demo, NULL, 0, "unit", NULL);
+}
+
+static void session_math_regenerate(const char* emcc, target_t* wasm2api) {
+    char* stamp = out_path("session_math_regenerate.stamp");
     char* emcc_argv[] = {
         (char*)emcc, "examples/session_math_wasm.c", "-sSTANDALONE_WASM=1", "-Wl,--no-entry",
         "-Wl,--export=add", "-Wl,--export=sub", "-Wl,--export=init_state", "-Wl,--export=ready",
         "-Wl,--export=add_scaled", "-Wl,--export=set_bias", "-Wl,--export=get_bias",
-        "-Wl,--export=get_total", "-Wl,--export=reset_total", "-O1", "-o", wasm,
+        "-Wl,--export=get_total", "-Wl,--export=reset_total", "-O1", "-o", "examples/session_math.wasm",
     };
-    target_t* module = cbuild_file_dep_target(ctx, "session_math_wasm", wasm);
-    cbuild_add_source(ctx, module, "examples/session_math_wasm.c");
-    cbuild_add_source(ctx, module, "build.c");
-    cbuild_target_add_command(ctx, module, cbuild_command_function(ctx, "create example output directory",
-                                                                   make_dir_command, dir));
-    cbuild_target_add_command(ctx, module, cbuild_command_argv(ctx, "emcc session_math_wasm.c", emcc_argv,
-                                                               COUNT(emcc_argv)));
-
-    /* The wrappers are committed, so a stamp stands in for them and --clean leaves them alone. */
     char* generate_argv[] = {
-        exe_path("wasm2api"), "--singleton", "--embed", "--init-func", "init_state", wasm, "examples/session_math",
+        exe_path("wasm2api"), "--singleton", "--embed", "--init-func", "init_state",
+        "examples/session_math.wasm", "examples/session_math",
     };
-    target_t* generate = cbuild_file_dep_target(ctx, "session_math_generate", stamp);
-    cbuild_add_link_target(ctx, generate, wasm2api);
-    cbuild_add_link_target(ctx, generate, module);
-    cbuild_target_add_command(ctx, generate, cbuild_command_argv(ctx, "wasm2api session_math", generate_argv,
-                                                                 COUNT(generate_argv)));
-    cbuild_target_add_command(ctx, generate, cbuild_command_function(ctx, "stamp session_math wrappers",
-                                                                     touch_stamp, stamp));
-
-    target_t* demo = native_executable("session_math_demo", "examples/session_math_demo.c", header);
-    cbuild_add_source(ctx, demo, "examples/session_math.c");
-    cbuild_add_link_target(ctx, demo, generate);
-    add_test("session_math_demo", demo, NULL, 0, "unit", NULL);
+    target_t* regenerate = cbuild_file_dep_target(ctx, "session_math_regenerate", stamp);
+    cbuild_add_source(ctx, regenerate, "examples/session_math_wasm.c");
+    cbuild_add_source(ctx, regenerate, "build.c");
+    cbuild_add_link_target(ctx, regenerate, wasm2api);
+    cbuild_target_add_command(ctx, regenerate, cbuild_command_argv(ctx, "emcc session_math_wasm.c", emcc_argv,
+                                                                   COUNT(emcc_argv)));
+    cbuild_target_add_command(ctx, regenerate, cbuild_command_argv(ctx, "wasm2api session_math", generate_argv,
+                                                                   COUNT(generate_argv)));
+    cbuild_target_add_command(ctx, regenerate, cbuild_command_function(ctx, "stamp session_math example",
+                                                                       touch_stamp, stamp));
 }
 
 /* build.zig targets one Zig release; other versions would fail on build API changes, not on the runtime. */
@@ -746,6 +939,8 @@ static void read_options(int argc, char** argv) {
     opt.zig = !cbuild_has_flag(argc, argv, "no-zig", 0);
     opt.fuzzer = cbuild_has_flag(argc, argv, "fuzzer", 0);
     opt.spec_proposals = cbuild_has_flag(argc, argv, "spec-proposals", 0);
+    opt.gc_stress = cbuild_has_flag(argc, argv, "gc-stress", 0);
+    opt.regenerate_examples = cbuild_has_flag(argc, argv, "regenerate-examples", 0);
     opt.announce = cbuild_has_flag(argc, argv, "test", 0) || cbuild_has_flag(argc, argv, "list-tests", 0);
 
     opt.cc = cbuild_get_flag_value(argc, argv, "cc", 0);
@@ -758,7 +953,8 @@ static void read_options(int argc, char** argv) {
     opt.msvc = is_msvc_compiler(opt.cc);
 
     opt.build_dir = cbuild_get_flag_value(argc, argv, "build-dir", 0);
-    if (!opt.build_dir || !*opt.build_dir) opt.build_dir = opt.release ? "build/release" : "build/debug";
+    if (!opt.build_dir || !*opt.build_dir)
+        opt.build_dir = opt.gc_stress ? "build/gc-stress" : opt.release ? "build/release" : "build/debug";
     opt.cflags = join_flags(getenv("CFLAGS"), cbuild_get_flag_value(argc, argv, "cflags", 0));
     opt.ldflags = join_flags(getenv("LDFLAGS"), cbuild_get_flag_value(argc, argv, "ldflags", 0));
 
@@ -768,7 +964,7 @@ static void read_options(int argc, char** argv) {
     cbuild_register_flag_bool(ctx, "release", 0, CBUILD_FLAG_PRE,
                               "Optimized build (-O3 -DNDEBUG, or /O2) in build/release", &bound_bool);
     cbuild_register_flag_str(ctx, "build-dir", 0, CBUILD_FLAG_PRE,
-                             "Output directory (default build/debug or build/release)", &bound_str);
+                             "Output directory (default build/debug, build/release, or build/gc-stress)", &bound_str);
     cbuild_register_flag_str(ctx, "cc", 0, CBUILD_FLAG_PRE, "C compiler (default $CC, else cc or cl)", &bound_str);
     cbuild_register_flag_str(ctx, "cflags", 0, CBUILD_FLAG_PRE,
                              "Extra compile flags, after $CFLAGS and all built-in flags", &bound_str);
@@ -782,6 +978,12 @@ static void read_options(int argc, char** argv) {
                               "Skip the Zig package tests even when zig 0.17 is available", &bound_bool);
     cbuild_register_flag_bool(ctx, "fuzzer", 0, CBUILD_FLAG_PRE,
                               "Also build the libFuzzer harnesses wasm_load_fuzzer and wasm_exec_fuzzer (Clang)", &bound_bool);
+    cbuild_register_flag_bool(ctx, "gc-stress", 0, CBUILD_FLAG_PRE,
+                              "Collect garbage before every GC allocation (WASM_GC_STRESS) in build/gc-stress",
+                              &bound_bool);
+    cbuild_register_flag_bool(ctx, "regenerate-examples", 0, CBUILD_FLAG_PRE,
+                              "Rebuild examples/session_math.wasm with emcc and rewrite its committed wrappers",
+                              &bound_bool);
     cbuild_register_flag_bool(ctx, "spec-proposals", 0, CBUILD_FLAG_PRE,
                               "Run spec proposal suites the runtime does not implement instead of skipping them",
                               &bound_bool);
@@ -829,10 +1031,13 @@ int main(int argc, char** argv) {
     native_executable("wasm", "wasm.c", header);
     native_executable("wasm_bench", "bench/wasm_bench.c", header);
 
-    target_t* wl_test = native_executable("wl_test", "test/wl_test.c", header);
-    target_t* wasm_test = native_executable("wasm_test", "test/wasm_test.c", header);
-    target_t* wasm_modular_test = native_executable("wasm_modular_test", "test/wasm_test.c", header);
+    target_t* wasm_test = native_executable("wasm_test", "test/unit/amalgamation.c", header);
+    target_t* wasm_modular_test = native_executable("wasm_modular_test", "test/unit/**/*_test.c", header);
+    cbuild_add_source(ctx, wasm_modular_test, "test/unit/test.c");
+    cbuild_add_source(ctx, wasm_modular_test, "test/unit/support.c");
+    cbuild_add_source(ctx, wasm_modular_test, "test/unit/main.c");
     cbuild_add_define(ctx, wasm_modular_test, "WASM_TEST_MODULAR=1");
+    if (!opt.msvc) cbuild_add_cflags(ctx, wasm_modular_test, "-Wmissing-prototypes");
     cbuild_add_link_target(ctx, wasm_modular_test, runtime);
     target_t* runner = native_executable("wasm_runner", "test/fixture_runner.c", header);
     target_t* spectest_runner = native_executable("spectest_runner", "test/spectest_runner.c", header);
@@ -861,9 +1066,22 @@ int main(int argc, char** argv) {
     cbuild_add_source(ctx, amalgamate_test, "test/amalgamate_test.c");
     project_options(amalgamate_test);
 
-    add_test("wl_test", wl_test, NULL, 0, "unit", NULL);
-    add_test("wasm_test", wasm_test, NULL, 0, "unit", NULL);
-    add_test("wasm_modular_test", wasm_modular_test, NULL, 0, "unit", "modular");
+    char** unit_files = NULL;
+    int unit_file_count = 0;
+    cbuild_expand_wildcard("test/unit/**/*_test.c", &unit_files, &unit_file_count);
+    for (int i = 0; i < unit_file_count; ++i) {
+        const char* path = unit_files[i] + strlen("test/unit/");
+        char* suite = fmt("%.*s", (int)(strlen(path) - strlen("_test.c")), path);
+        for (char* c = suite; *c; ++c) {
+            if (*c == '/' || *c == '\\') *c = '.';
+        }
+        const char* suite_args[] = { suite };
+        add_test(fmt("wasm_test.%s", suite), wasm_test, suite_args, 1, "unit", NULL);
+        add_test(fmt("wasm_modular_test.%s", suite), wasm_modular_test, suite_args, 1, "unit", "modular");
+        free(suite);
+        free(unit_files[i]);
+    }
+    free(unit_files);
     add_test("wasm_core_test", core_test, NULL, 0, "unit", NULL);
     add_test("wasm_modular_core_test", modular_core_test, NULL, 0, "unit", "modular");
 
@@ -899,12 +1117,14 @@ int main(int argc, char** argv) {
     spectests(spectest_runner, spectest_modular_runner);
     fuzz_corpus_replay(header);
 
+    session_math_example(wasm2api, header);
     char* emcc = find_emcc();
     if (emcc) {
         if (opt.emcc && opt.platform) emcc_fixtures(emcc, runner);
-        session_math_example(emcc, wasm2api, header);
-    } else if (opt.announce) {
-        printf("emcc not found; skipping Emscripten fixtures and the session_math example.\n");
+        if (opt.regenerate_examples) session_math_regenerate(emcc, wasm2api);
+    } else if (opt.announce || opt.regenerate_examples) {
+        printf("emcc not found; skipping the Emscripten fixtures%s.\n",
+               opt.regenerate_examples ? " and example regeneration" : "");
     }
 
     if (opt.zig) zig_package_tests();

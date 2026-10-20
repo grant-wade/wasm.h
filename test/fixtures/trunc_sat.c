@@ -4,7 +4,7 @@ volatile double g_f64_big = 1.0e300;
 volatile double g_f64_neg_big = -1.0e300;
 volatile double g_f64_neg_small = -123.0;
 
-int wl_case(void) {
+int fixture_case(void) {
     int mask = 0;
 
     if (__builtin_wasm_trunc_saturate_s_i32_f32(g_f32_big) == 2147483647)

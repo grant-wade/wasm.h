@@ -6,6 +6,10 @@
 
 WASM_PRIVATE wasm_error_t wasm__report_uncaught_exception(wasm_runtime_t* rt);
 
+/* Takes branch descriptor desc from cf, the top frame of its runtime's current stack; a branch that
+ * returns leaves cf's pc NULL. */
+WASM_PRIVATE wasm_error_t wasm__branch_frame(wasm__call_frame_t* cf, const uint32_t* desc);
+
 /* Returns WASM_OK with cf at the handler, or clears its labels and returns WASM__ERR_EXCEPTION. */
 WASM_PRIVATE wasm_error_t wasm__handle_exception_in_frame(wasm__call_frame_t* cf);
 

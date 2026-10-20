@@ -1090,6 +1090,20 @@ static int spec_message_matches(const char* expected, const char* actual) {
          strstr(actual_lower, "kind does not match supertype") != NULL ||
          strstr(actual_lower, "is not a valid subtype of") != NULL))
         return 1;
+    {
+        unsigned sub_index;
+        unsigned super_index;
+        char subtype_text[64];
+
+        if (sscanf(expected_lower, "sub type %u does not match super type %u", &sub_index, &super_index) == 2) {
+            snprintf(subtype_text, sizeof(subtype_text), "type %u is not a valid subtype of %u", sub_index,
+                     super_index);
+            if (strstr(actual_lower, subtype_text) != NULL) return 1;
+        }
+    }
+    if (strstr(expected_lower, "instruction requires concrete continuation reference type") != NULL &&
+        strstr(actual_lower, "instruction requires concrete continuation reference type") != NULL)
+        return 1;
     if (strcmp(expected_lower, "malformed import kind") == 0 &&
         (strstr(actual_lower, "unknown type ") != NULL ||
          (strstr(actual_lower, "section 2 decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL)))
@@ -1123,6 +1137,7 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strncmp(expected_lower, "unknown label", 13u) == 0 &&
         ((strstr(actual_lower, "branch depth") != NULL && strstr(actual_lower, "out of range") != NULL) ||
          (strstr(actual_lower, "br table depth") != NULL && strstr(actual_lower, "out of range") != NULL) ||
+         (strstr(actual_lower, "delegate depth") != NULL && strstr(actual_lower, "out of range") != NULL) ||
          strstr(actual_lower, "undefined label variable") != NULL))
         return 1;
     if (strncmp(expected_lower, "unknown local", 13u) == 0 &&
@@ -1315,6 +1330,11 @@ static int spec_message_matches(const char* expected, const char* actual) {
     if (strcmp(expected_lower, "malformed reference type") == 0 &&
         strstr(actual_lower, "malformed module") != NULL)
         return 1;
+    if ((strcmp(expected_lower, "malformed definition type") == 0 ||
+         strcmp(expected_lower, "malformed storage type") == 0) &&
+        ((strstr(actual_lower, "decode failed") != NULL && strstr(actual_lower, "malformed module") != NULL) ||
+         strstr(actual_lower, "trailing bytes") != NULL))
+        return 1;
     if ((strcmp(expected_lower, "non-empty tag result type") == 0 ||
          strstr(expected_lower, "tag result type") != NULL) &&
         strstr(actual_lower, "tag") != NULL && strstr(actual_lower, "must not declare results") != NULL)
@@ -1349,8 +1369,10 @@ static int spec_message_matches(const char* expected, const char* actual) {
         (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
          strstr(actual_lower, "typed select requires exactly one value type") != NULL))
         return 1;
-    if (strstr(expected_lower, "type mismatch: instruction requires [") != NULL &&
+    if ((strstr(expected_lower, "type mismatch: instruction requires [") != NULL ||
+         strstr(expected_lower, "type mismatch: block requires [") != NULL) &&
         (strstr(actual_lower, "type mismatch: stack underflow") != NULL ||
+         strstr(actual_lower, "leaves wrong stack height") != NULL ||
          strstr(actual_lower, "type mismatch: expected 0x") != NULL))
         return 1;
     if (strcmp(expected_lower, "type mismatch") == 0 &&
@@ -2145,7 +2167,7 @@ static int spec_run_command_capture(const char* command, char** out_text, int* o
     char temp_path[MAX_PATH];
     DWORD temp_dir_len;
 #else
-    char temp_path[] = "/tmp/wl-spectest-XXXXXX";
+    char temp_path[] = "/tmp/wasm-spectest-XXXXXX";
     int fd;
 #endif
     char* text = NULL;
@@ -2985,7 +3007,7 @@ static int spec_run_command(spec_harness_t* harness,
         }
         spec_action_result_dispose(&result);
     } else if (strcmp(type_text, "assert_trap") == 0 || strcmp(type_text, "assert_exhaustion") == 0 ||
-               strcmp(type_text, "assert_exception") == 0) {
+               strcmp(type_text, "assert_exception") == 0 || strcmp(type_text, "assert_suspension") == 0) {
         spec_action_result_t result;
         int action_index = spec_object_get(json, tokens, command_index, "action");
         int text_index = spec_object_get(json, tokens, command_index, "text");
@@ -3004,6 +3026,7 @@ static int spec_run_command(spec_harness_t* harness,
             goto done;
         }
 
+        if (!text_field && strcmp(type_text, "assert_exception") == 0) text_field = spec_strdup_cstr("uncaught exception");
         ok = spec_message_matches(text_field, result.error_text);
         if (!ok) {
             spec_set_error(command_error, sizeof(command_error),
@@ -3075,10 +3098,14 @@ static int spec_harness_init(spec_harness_t* harness,
                              const char* json_path,
                              const char* wasm_tools_path,
                              const char* support_wasm,
+                             const char* support_extra_wasm,
+                             uint64_t features,
                              char* error_text,
                              size_t error_size) {
+    wasm_config_t config;
     wasm_error_t err;
     wasm_module_t* support_module;
+    wasm_module_t* support_extra_module;
 
     memset(harness, 0, sizeof(*harness));
     harness->json_path = json_path;
@@ -3090,13 +3117,13 @@ static int spec_harness_init(spec_harness_t* harness,
         return 0;
     }
 
-    err = wasm__runtime_init(&harness->runtime, wasm_libc_allocator(), NULL);
+    wasm_config_default(&config);
+    config.features = features;
+    err = wasm__runtime_init(&harness->runtime, wasm_libc_allocator(), &config);
     if (err != WASM_OK) {
         spec_set_error(error_text, error_size, "failed to initialize runtime: %s", wasm_error_string(err));
         return 0;
     }
-
-    wasm_runtime_enable_all_features(&harness->runtime);
 
 #if WASM_ENABLE_PLATFORM
     err = wasm_bind_wasi_stubs(&harness->runtime);
@@ -3132,6 +3159,10 @@ static int spec_harness_init(spec_harness_t* harness,
     }
 
     if (!spec_register_module_exports(harness, "spectest", support_module, error_text, error_size)) return 0;
+
+    support_extra_module = spec_load_module_file(harness, support_extra_wasm, NULL, 0, error_text, error_size);
+    if (!support_extra_module) return 0;
+    if (!spec_register_module_exports(harness, "spectest", support_extra_module, error_text, error_size)) return 0;
 
     return 1;
 }
@@ -3196,17 +3227,22 @@ cleanup:
     return ok;
 }
 
-/* Proposal suites written before later features were standardized turn them off with "-name" entries in
-   the wasm-tools feature list; the runtime gets the same restriction. */
-static void spec_disable_runtime_features(wasm_runtime_t* rt, const char* features) {
+/* Returns the features wasm-tools validates with: its defaults, which leave out stack switching and custom
+   descriptors, when features is NULL, else all features but those the list turns off with "-name" entries. */
+static uint64_t spec_runtime_features(const char* features) {
     static const struct {
         const char* name;
-        uint32_t flag;
+        uint64_t flag;
     } names[] = {
         { "multi-memory", WASM_FEATURE_MULTI_MEMORY },
         { "reference-types", WASM_FEATURE_REFERENCE_TYPES },
+        { "stack-switching", WASM_FEATURE_STACK_SWITCHING },
+        { "custom-descriptors", WASM_FEATURE_CUSTOM_DESCRIPTORS },
     };
     const char* entry = features;
+    uint64_t mask = WASM_FEATURES_ALL;
+
+    if (!features) mask &= ~(WASM_FEATURE_STACK_SWITCHING | WASM_FEATURE_CUSTOM_DESCRIPTORS);
 
     while (entry && *entry) {
         const char* end = strchr(entry, ',');
@@ -3216,16 +3252,18 @@ static void spec_disable_runtime_features(wasm_runtime_t* rt, const char* featur
         if (len > 1 && entry[0] == '-') {
             for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
                 if (strlen(names[i].name) == len - 1 && strncmp(entry + 1, names[i].name, len - 1) == 0)
-                    wasm_runtime_disable_feature(rt, names[i].flag);
+                    mask &= ~names[i].flag;
             }
         }
         entry = end ? end + 1 : NULL;
     }
+    return mask;
 }
 
 static void spec_print_usage(const char* argv0) {
     fprintf(stderr,
-            "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> [conversion.status [wasm-tools-features]]\n",
+            "usage: %s <spec.json> <wasm-tools> <spectest_support.wasm> <spectest_support_extra.wasm> "
+            "[conversion.status [wasm-tools-features]]\n",
             argv0);
 }
 
@@ -3246,12 +3284,12 @@ int main(int argc, char** argv) {
         return 7;
     }
 
-    if (argc < 4 || argc > 6) {
+    if (argc < 5 || argc > 7) {
         spec_print_usage(argv[0]);
         return 2;
     }
 
-    if (argc >= 5 && spec_status_requests_skip(argv[4], error_text, sizeof(error_text))) {
+    if (argc >= 6 && spec_status_requests_skip(argv[5], error_text, sizeof(error_text))) {
         fprintf(stderr, "skipped: %s\n", error_text[0] ? error_text : "spectest JSON conversion failed for this spec file");
         return 125;
     }
@@ -3259,15 +3297,13 @@ int main(int argc, char** argv) {
     memset(&harness, 0, sizeof(harness));
     memset(error_text, 0, sizeof(error_text));
 
-    if (!spec_harness_init(&harness, argv[1], argv[2], argv[3], error_text, sizeof(error_text))) {
+    if (!spec_harness_init(&harness, argv[1], argv[2], argv[3], argv[4],
+                           spec_runtime_features(argc == 7 ? argv[6] : NULL), error_text, sizeof(error_text))) {
         fprintf(stderr, "%s\n", error_text[0] ? error_text : "failed to initialize spectest harness");
         spec_harness_destroy(&harness);
         return 1;
     }
-    if (argc == 6) {
-        harness.wasm_tools_features = argv[5];
-        spec_disable_runtime_features(&harness.runtime, argv[5]);
-    }
+    if (argc == 7) harness.wasm_tools_features = argv[6];
 
     if (spec_run_file(&harness)) exit_code = 0;
 

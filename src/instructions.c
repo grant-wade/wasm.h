@@ -67,6 +67,23 @@ static void wasm__skip_try_table_immediates(wasm__reader_t* r) {
     }
 }
 
+static void wasm__skip_resume_handlers(wasm__reader_t* r) {
+    uint32_t count = wasm__read_leb128_u32(r);
+
+    while (count-- > 0 && r->ptr < r->end) {
+        uint8_t kind = wasm__read_u8(r);
+
+        wasm__read_leb128_u32(r);
+        if (kind == 0x00) {
+            wasm__read_leb128_u32(r);
+        } else if (kind != 0x01) {
+            r->ptr = r->end;
+            r->malformed = 1;
+            return;
+        }
+    }
+}
+
 static void wasm__skip_prefixed_immediates(wasm__reader_t* r) {
     uint32_t subop = wasm__read_leb128_u32(r);
 
@@ -119,6 +136,9 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
         case 0x0D:
         case 0x0E:
         case 0x10:
+        case 0x20:
+        case 0x21:
+        case 0x22:
             wasm__read_leb128_u32(r);
             break;
         case 0x02:
@@ -141,10 +161,14 @@ static void wasm__skip_gc_immediates(wasm__reader_t* r) {
         case 0x15:
         case 0x16:
         case 0x17:
+        case 0x23:
+        case 0x24:
             wasm__skip_heaptype(r);
             break;
         case 0x18:
         case 0x19:
+        case 0x25:
+        case 0x26:
             if (r->ptr < r->end) r->ptr++;
             wasm__read_leb128_u32(r);
             wasm__skip_heaptype(r);
@@ -303,6 +327,25 @@ WASM_PRIVATE void wasm__skip_immediates(uint8_t op, wasm__reader_t* r) {
         case 0xD5:
         case 0xD6:
             wasm__read_leb128_u32(r);
+            break;
+        case 0xE0:
+        case 0xE2:
+            wasm__read_leb128_u32(r);
+            break;
+        case 0xE1:
+        case 0xE6:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            break;
+        case 0xE4:
+            wasm__read_leb128_u32(r);
+            wasm__read_leb128_u32(r);
+            wasm__skip_resume_handlers(r);
+            break;
+        case 0xE3:
+        case 0xE5:
+            wasm__read_leb128_u32(r);
+            wasm__skip_resume_handlers(r);
             break;
         case 0xFC:
             wasm__skip_prefixed_immediates(r);

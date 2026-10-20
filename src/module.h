@@ -31,6 +31,9 @@ struct wasm_func_t {
     uint32_t matched_type;
     int is_declared_ref;
     int is_import;
+    int is_inexact; /* an import whose actual type may be a subtype of type_idx */
+    int is_bound_exactly; /* an import bound to a function of exactly type_idx */
+    int traces_params; /* an import some of whose parameters the collector traces */
     wasm_host_func_t host_func;
     void* host_userdata;
 };
@@ -72,18 +75,19 @@ struct wasm_module_t {
     uint32_t num_memories;
     uint32_t num_code_bodies;
     uint32_t declared_data_count;
-    uint32_t required_features;
+    uint64_t required_features;
     int has_data_count_section;
     int uses_data_count_section;
     int preserve_on_failure;
-    int is_compiled; /* from wasm_compile: validated against placeholder imports, never instantiated */
-    int init_expr_read_placeholder; /* an init expression read a compiled module's placeholder global */
-    uint32_t loaded_features;       /* runtime features enabled when the module was decoded */
+    int is_compiled; /* from wasm_compile: validated with unbound imports, never instantiated */
+    uint64_t loaded_features;       /* runtime features enabled when the module was decoded */
     uint32_t start_func;
     int startup_ran;
     wasm_module_t* gc_prev;
     wasm_module_t* gc_next;
     wasm_module_t* failed_next;
+    int retired_types;      /* holds only the types of a freed module that GC objects or continuations have */
+    int retired_types_used; /* during a collection, whether a live object or continuation has them */
 };
 
 WASM_PRIVATE wasm_error_t wasm__resolve_exported_global(const wasm_module_t* mod,

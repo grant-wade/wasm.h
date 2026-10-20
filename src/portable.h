@@ -46,7 +46,10 @@ WASM_PRIVATE void wasm__store_le32(void* p, uint32_t v);
 
 WASM_PRIVATE void wasm__store_le64(void* p, uint64_t v);
 
-WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint32_t flag);
+WASM_PRIVATE wasm_error_t wasm__require_feature(wasm_module_t* mod, uint64_t flag);
+
+/* Returns whether tag types may declare results, recording the requirement when they may. */
+WASM_PRIVATE int wasm__allow_tag_results(wasm_module_t* mod);
 
 WASM_PRIVATE wasm_error_t wasm__require_multi_memory(wasm_module_t* mod);
 

@@ -149,9 +149,33 @@ static wasm_error_t wasm__decode_comptype_body(wasm_module_t* mod,
             type->kind = WASM_COMP_ARRAY;
             return wasm__decode_fieldtype(mod, r, &type->of.array.field);
         }
+        case 0x5D: {
+            int64_t func_type;
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_STACK_SWITCHING);
+            if (err != WASM_OK) return err;
+
+            func_type = wasm__read_leb128_i64(r);
+            if (func_type < 0 || func_type > (int64_t)UINT32_MAX) return WASM_ERR_MALFORMED;
+            type->kind = WASM_COMP_CONT;
+            type->of.cont.func_type = (uint32_t)func_type;
+            return WASM_OK;
+        }
         default:
             return WASM_ERR_MALFORMED;
     }
+}
+
+static wasm_error_t wasm__read_descriptor_clause(wasm_module_t* mod, wasm__reader_t* r, uint32_t* out_index) {
+    wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_DESCRIPTORS);
+
+    if (err != WASM_OK) return err;
+    *out_index = wasm__read_leb128_u32(r);
+    if (r->malformed) return WASM_ERR_MALFORMED;
+    if (*out_index == UINT32_MAX) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)*out_index);
+        return WASM_ERR_MALFORMED;
+    }
+    return WASM_OK;
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
@@ -162,6 +186,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
     memset(type, 0, sizeof(*type));
     type->rec_group = rec_group_idx;
     type->is_final = 1;
+    type->descriptor = UINT32_MAX;
+    type->describes = UINT32_MAX;
 
     if (opcode == 0x50 || opcode == 0x4F) {
         uint32_t i;
@@ -176,6 +202,16 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_entry(wasm_module_t* mod,
         }
         for (i = 0; i < type->num_supertypes; i++)
             type->supertypes[i] = wasm__read_leb128_u32(r);
+        opcode = wasm__read_u8(r);
+    }
+    if (opcode == 0x4C) {
+        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->describes);
+        if (err != WASM_OK) return err;
+        opcode = wasm__read_u8(r);
+    }
+    if (opcode == 0x4D) {
+        wasm_error_t err = wasm__read_descriptor_clause(mod, r, &type->descriptor);
+        if (err != WASM_OK) return err;
         opcode = wasm__read_u8(r);
     }
 

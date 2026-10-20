@@ -1,4 +1,4 @@
-int wl_case(void) {
+int fixture_case(void) {
     volatile int selector = 3;
 
     switch (selector) {

@@ -19,6 +19,10 @@ WASM_PRIVATE int wasm__functype_equal(const wasm_functype_t* lhs, const wasm_fun
 
 WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod);
 
+WASM_PRIVATE void wasm__release_type_groups(wasm_runtime_t* rt, wasm_recgroup_t* groups, uint32_t count);
+
+WASM_PRIVATE void wasm__free_type_groups(wasm_runtime_t* rt);
+
 WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx);
 
 WASM_PRIVATE int wasm__is_heap_subtype(const wasm_module_t* mod,

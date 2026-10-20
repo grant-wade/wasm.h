@@ -106,7 +106,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_init(wasm__validator_t* v, wasm_module
     ft = wasm__module_functype(mod, func->type_idx);
     if (!ft) return WASM_ERR_MALFORMED;
     rt = mod->rt;
-    stack_capacity = rt->max_stack ? rt->max_stack : 1u;
+    stack_capacity = rt->main_stack.max_stack ? rt->main_stack.max_stack : 1u;
     frame_capacity = rt->max_labels ? rt->max_labels : 1u;
 
     if (!rt->validator_stack) {
@@ -201,7 +201,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_error(wasm__validator_t* v,
 
 WASM_PRIVATE wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
                                                     const uint8_t* at,
-                                                    uint32_t flag) {
+                                                    uint64_t flag) {
     wasm_error_t err = wasm__require_feature(v->mod, flag);
     if (err != WASM_OK)
         return wasm__validator_error(v, at, "%s", v->mod->rt->error_msg);
@@ -508,6 +508,9 @@ static int wasm__validator_meet_type(const wasm_module_t* mod,
     } else if (wasm__uses_exnref_storage(lhs_effective.type) &&
                wasm__uses_exnref_storage(rhs_effective.type)) {
         common_ref.type = WASM_TYPE_NOEXN;
+    } else if (wasm__uses_contref_storage(lhs_effective.type) &&
+               wasm__uses_contref_storage(rhs_effective.type)) {
+        common_ref.type = WASM_TYPE_NOCONT;
     } else if (wasm__uses_gc_ref_storage(lhs_effective.type) && wasm__uses_gc_ref_storage(rhs_effective.type)) {
         common_ref.type = WASM_TYPE_NONE;
     } else {
@@ -619,21 +622,13 @@ WASM_PRIVATE wasm_error_t wasm__validator_finish_try_arm(wasm__validator_t* v,
 WASM_PRIVATE wasm_error_t wasm__validator_find_rethrow_frame(wasm__validator_t* v,
                                                        uint32_t depth,
                                                        wasm__val_frame_t** out_frame) {
-    uint32_t i;
+    wasm__val_frame_t* frame;
 
-    for (i = v->fp; i > 0; i--) {
-        wasm__val_frame_t* frame = &v->frames[i - 1];
-
-        if (frame->opcode == 0x06 && frame->in_catch) {
-            if (depth == 0) {
-                *out_frame = frame;
-                return WASM_OK;
-            }
-            depth--;
-        }
-    }
-
-    return WASM_ERR_MALFORMED;
+    if (depth >= v->fp) return WASM_ERR_MALFORMED;
+    frame = &v->frames[v->fp - 1 - depth];
+    if (frame->opcode != 0x06 || !frame->in_catch) return WASM_ERR_MALFORMED;
+    *out_frame = frame;
+    return WASM_OK;
 }
 
 WASM_PRIVATE wasm_error_t wasm__validator_read_memarg(wasm__validator_t* v,
@@ -761,6 +756,8 @@ WASM_PRIVATE wasm_error_t wasm__validator_read_heap_reftype(wasm__validator_t* v
     wasm__clear_reftype(out_reftype);
     out_reftype->nullable = nullable;
     err = wasm__read_heaptype(v->mod, &v->r, out_reftype);
+    if (err != WASM_OK && v->mod->rt->last_error != WASM_OK)
+        return wasm__validator_error(v, at, "%s", v->mod->rt->error_msg);
     if (err != WASM_OK) return wasm__validator_error(v, at, "invalid heaptype");
     if (out_type) *out_type = out_reftype->type ? out_reftype->type : WASM_TYPE_ANYREF;
     return WASM_OK;
@@ -801,6 +798,38 @@ WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_subtype(wasm__validator_t* v,
     return WASM_OK;
 }
 
+static wasm_valtype_t wasm__validator_top_type(wasm_valtype_t type) {
+    switch (type) {
+        case WASM_TYPE_FUNCREF:
+        case WASM_TYPE_NOFUNC:
+            return WASM_TYPE_FUNCREF;
+        case WASM_TYPE_EXTERNREF:
+        case WASM_TYPE_NOEXTERN:
+            return WASM_TYPE_EXTERNREF;
+        case WASM_TYPE_EXNREF:
+        case WASM_TYPE_NOEXN:
+            return WASM_TYPE_EXNREF;
+        case WASM_TYPE_CONTREF:
+        case WASM_TYPE_NOCONT:
+            return WASM_TYPE_CONTREF;
+        case WASM_TYPE_ANYREF:
+        case WASM_TYPE_EQREF:
+        case WASM_TYPE_I31REF:
+        case WASM_TYPE_STRUCTREF:
+        case WASM_TYPE_ARRAYREF:
+        case WASM_TYPE_NONE:
+            return WASM_TYPE_ANYREF;
+        default:
+            return WASM_TYPE_VOID;
+    }
+}
+
+WASM_PRIVATE int wasm__validator_same_hierarchy(const wasm_reftype_t* lhs, const wasm_reftype_t* rhs) {
+    wasm_valtype_t top = wasm__validator_top_type(lhs->type);
+
+    return top != WASM_TYPE_VOID && top == wasm__validator_top_type(rhs->type);
+}
+
 WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_castable(wasm__validator_t* v,
                                                      const uint8_t* at,
                                                      wasm_valtype_t expected_type,
@@ -824,7 +853,8 @@ WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_castable(wasm__validator_t* v,
         !((wasm__is_gc_ref_type(actual_effective.type) && wasm__is_gc_ref_type(expected_effective.type)) ||
           (wasm__uses_funcref_storage(actual_effective.type) && wasm__uses_funcref_storage(expected_effective.type)) ||
           (wasm__uses_externref_storage(actual_effective.type) && wasm__uses_externref_storage(expected_effective.type)) ||
-          (wasm__uses_exnref_storage(actual_effective.type) && wasm__uses_exnref_storage(expected_effective.type)))) {
+          (wasm__uses_exnref_storage(actual_effective.type) && wasm__uses_exnref_storage(expected_effective.type)) ||
+          (wasm__uses_contref_storage(actual_effective.type) && wasm__uses_contref_storage(expected_effective.type)))) {
         return wasm__validator_error(v, at,
                                      "type mismatch: expected 0x%X, got 0x%X",
                                      (unsigned)expected_type,
@@ -839,30 +869,7 @@ WASM_PRIVATE void wasm__validator_reference_difference(const wasm_reftype_t* sou
                                                  wasm_reftype_t* out_ref) {
     wasm_reftype_t diff = *source;
 
-    if (source->nullable && target->nullable) diff.nullable = 0;
-
-    if (source->nullable && !target->nullable &&
-        source->has_type_index == target->has_type_index &&
-        source->type_index == target->type_index &&
-        source->type == target->type) {
-        diff.has_type_index = 0;
-        diff.nullable = 1;
-        switch (source->type) {
-            case WASM_TYPE_FUNCREF:
-                diff.type = WASM_TYPE_NOFUNC;
-                break;
-            case WASM_TYPE_EXTERNREF:
-                diff.type = WASM_TYPE_NOEXTERN;
-                break;
-            case WASM_TYPE_EXNREF:
-                diff.type = WASM_TYPE_NOEXN;
-                break;
-            default:
-                diff.type = WASM_TYPE_NONE;
-                break;
-        }
-    }
-
+    if (target->nullable) diff.nullable = 0;
     if (out_type) *out_type = diff.type;
     if (out_ref) *out_ref = diff;
 }

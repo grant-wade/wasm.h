@@ -32,6 +32,6 @@ WASM_PRIVATE int wasm__indirect_callee_matches(const wasm_module_t* mod, uint32_
 
 WASM_PRIVATE wasm_error_t wasm__finish_call_frame(wasm_runtime_t* rt, uint32_t base_frame_sp);
 
-WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_module_t* mod, uint32_t base_frame_sp);
+WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_runtime_t* rt, uint32_t base_frame_sp);
 
 #endif /* WASM_SRC_EXEC_CALLS_H */

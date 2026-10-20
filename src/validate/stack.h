@@ -26,7 +26,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_error(wasm__validator_t* v,
 
 WASM_PRIVATE wasm_error_t wasm__validator_require_feature(wasm__validator_t* v,
                                                     const uint8_t* at,
-                                                    uint32_t flag);
+                                                    uint64_t flag);
 
 WASM_PRIVATE int wasm__validator_get_effective_reftype(wasm_valtype_t type,
                                                  const wasm_reftype_t* ref_type,
@@ -203,6 +203,9 @@ WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_subtype(wasm__validator_t* v,
                                                     const wasm_reftype_t* expected_ref,
                                                     wasm_valtype_t* out_type,
                                                     wasm_reftype_t* out_ref);
+
+/* Whether lhs and rhs, which must be resolved, share a top type. */
+WASM_PRIVATE int wasm__validator_same_hierarchy(const wasm_reftype_t* lhs, const wasm_reftype_t* rhs);
 
 WASM_PRIVATE wasm_error_t wasm__validator_pop_ref_castable(wasm__validator_t* v,
                                                      const uint8_t* at,

@@ -10,9 +10,11 @@
 #include "types/canonical.h"
 #include "portable.h"
 #include "init_expr.h"
+#include "link.h"
 #include "types/cross_module.h"
 #include "validate/module.h"
 #include "internal/config.h"
+#include "internal/slot.h"
 #include "internal/alloc.h"
 #include <string.h>
 #include <stdio.h>
@@ -57,7 +59,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_type_section(wasm_module_t* mod, wasm__re
         }
     }
 
-    return WASM_OK;
+    return wasm__canonicalize_types(mod);
 }
 
 WASM_PRIVATE wasm_error_t wasm__decode_custom_section(wasm_module_t* mod, wasm__reader_t* r) {
@@ -139,6 +141,7 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     wasm_error_t err;
 
     memset(table, 0, sizeof(*table));
+    table->type_module = mod;
     table->allocator = mod->rt->allocator;
     leading = wasm__read_u8(r);
     if (leading == 0x40u) {
@@ -195,10 +198,8 @@ static wasm_error_t wasm__read_table_type(wasm_module_t* mod,
     if (has_init_expr) {
         wasm_value_t init_value;
 
-        err = wasm__eval_init_expr(mod, r, mod->num_globals, &init_value);
+        err = wasm__eval_init_expr(mod, r, mod->num_globals, table->reftype, &table->reftype_info, &init_value);
         if (err != WASM_OK) return err;
-        if (!wasm__runtime_value_matches_type(mod, &init_value, table->reftype, &table->reftype_info))
-            return WASM_ERR_TYPE_MISMATCH;
         table->default_value = init_value;
     } else if (!wasm__runtime_value_matches_type(mod,
                                                  &table->default_value,
@@ -216,6 +217,20 @@ static wasm_error_t wasm__import_mismatch(wasm_runtime_t* rt, const char* kind, 
     return WASM_ERR_TYPE_MISMATCH;
 }
 
+/* With exact, binding must provide a function of exactly type_index rather than of a subtype. */
+static int wasm__func_binding_matches(const wasm_module_t* mod, const wasm_import_t* binding, uint32_t type_index,
+                                      int exact) {
+    const wasm_module_t* type_mod;
+    uint32_t type_idx;
+    int binding_exact;
+
+    if (!binding->has_type_context) return wasm__host_functype_equal(mod, &binding->type, type_index);
+    binding_exact = wasm__func_binding_type(binding, &type_mod, &type_idx);
+    if (!type_mod) return 0;
+    if (exact) return binding_exact && wasm__type_equal_across_modules(type_mod, type_idx, mod, type_index);
+    return wasm__type_is_subtype_across_modules(type_mod, type_idx, mod, type_index);
+}
+
 /* The match functions return WASM_ERR_UNKNOWN_IMPORT, without setting an error, when rt binds
    nothing named like info. */
 static wasm_error_t wasm__match_func_import(wasm_runtime_t* rt,
@@ -223,7 +238,6 @@ static wasm_error_t wasm__match_func_import(wasm_runtime_t* rt,
                                             const wasm_import_info_t* info,
                                             uint32_t type_index,
                                             const wasm_import_t** out_binding) {
-    const wasm_functype_t* import_type = wasm__module_const_functype(mod, type_index);
     uint32_t j;
 
     *out_binding = NULL;
@@ -232,10 +246,7 @@ static wasm_error_t wasm__match_func_import(wasm_runtime_t* rt,
 
         if (strcmp(binding->module, info->module) != 0 || strcmp(binding->name, info->name) != 0) continue;
         if (!wasm__functype_is_unspecified(&binding->type) &&
-            !((binding->has_type_context && binding->type_module &&
-               wasm__functype_is_subtype_across_modules(binding->type_module, binding->type_index, mod,
-                                                        type_index)) ||
-              (!binding->has_type_context && wasm__functype_is_subtype(mod, &binding->type, import_type)))) {
+            !wasm__func_binding_matches(mod, binding, type_index, info->exact)) {
             return wasm__import_mismatch(rt, "function", info);
         }
         *out_binding = binding;
@@ -317,12 +328,14 @@ static wasm_error_t wasm__match_global_import(wasm_runtime_t* rt,
         if (wasm__has_import_named(rt, info->module, info->name)) return wasm__import_mismatch(rt, "global", info);
         return WASM_ERR_UNKNOWN_IMPORT;
     }
-    if (!wasm__globaltype_matches_import(mod, gimp->type, &gimp->ref_type, gimp->is_mutable, type, ref_type,
-                                         is_mutable)) {
+    if ((gimp->ref_type.has_type_index && !gimp->type_module) ||
+        !wasm__globaltype_matches_import(gimp->type_module, gimp->type, &gimp->ref_type, gimp->is_mutable, mod, type,
+                                         ref_type, is_mutable)) {
         return wasm__import_mismatch(rt, "global", info);
     }
     if (!gimp->value) return WASM_ERR_MALFORMED;
-    if (!wasm__runtime_value_matches_type(mod, gimp->value, gimp->type, &gimp->ref_type)) {
+    if (!wasm__runtime_value_matches_type(gimp->type_module ? gimp->type_module : mod, gimp->value, gimp->type,
+                                          &gimp->ref_type)) {
         WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global import value mismatch: %.64s.%.64s", info->module,
                       info->name);
         return WASM_ERR_TYPE_MISMATCH;
@@ -344,9 +357,8 @@ static wasm_error_t wasm__match_tag_import(wasm_runtime_t* rt,
         return WASM_ERR_UNKNOWN_IMPORT;
     }
     if (!((timp->has_type_context && timp->type_module &&
-           wasm__functype_equal_across_modules(timp->type_module, timp->type_index, mod, type_index)) ||
-          (!timp->has_type_context &&
-           wasm__functype_equal(&timp->type, wasm__module_const_functype(mod, type_index))))) {
+           wasm__type_equal_across_modules(timp->type_module, timp->type_index, mod, type_index)) ||
+          (!timp->has_type_context && wasm__host_functype_equal(mod, &timp->type, type_index)))) {
         return wasm__import_mismatch(rt, "tag", info);
     }
     *out_binding = timp;
@@ -358,16 +370,31 @@ static wasm_error_t wasm__unresolved_import(wasm_runtime_t* rt, const wasm_impor
     return WASM_ERR_UNKNOWN_IMPORT;
 }
 
+static int wasm__functype_traces_params(const wasm_functype_t* ft) {
+    uint32_t i;
+
+    for (i = 0; i < ft->num_params; i++) {
+        if (wasm__slot_kind(ft->params[i]) != WASM__SLOT_KIND_NONE) return 1;
+    }
+    return 0;
+}
+
 static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
                                              wasm__reader_t* r,
                                              wasm_import_info_t* info,
                                              uint8_t kind) {
-    if (kind == 0x00) {
+    if (kind == 0x00 || kind == 0x20) {
         uint32_t ti = wasm__read_leb128_u32(r);
         uint32_t fi;
         const wasm_import_t* binding;
         wasm_error_t err;
 
+        if (kind == 0x20) {
+            err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_DESCRIPTORS);
+            if (err != WASM_OK) return err;
+            info->kind = WASM_IMPORT_FUNC;
+            info->exact = 1;
+        }
         if (!wasm__module_const_functype(mod, ti)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)ti);
             return WASM_ERR_MALFORMED;
@@ -376,6 +403,8 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         mod->funcs[fi].type_idx = ti;
         mod->funcs[fi].is_declared_ref = 1;
         mod->funcs[fi].is_import = 1;
+        mod->funcs[fi].is_inexact = kind == 0x00;
+        mod->funcs[fi].traces_params = wasm__functype_traces_params(wasm__module_const_functype(mod, ti));
         mod->num_func_imports++;
         info->index = fi;
         info->type_index = ti;
@@ -386,6 +415,8 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
         if (err != WASM_OK) return err;
         mod->funcs[fi].host_func = binding->func;
         mod->funcs[fi].host_userdata = binding->userdata;
+        mod->funcs[fi].is_bound_exactly =
+            !wasm__functype_is_unspecified(&binding->type) && wasm__func_binding_matches(mod, binding, ti, 1);
     } else if (kind == 0x01) {
         uint32_t table_index;
         wasm_table_t* table;
@@ -445,7 +476,6 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
     } else if (kind == 0x03) {
         uint32_t gi;
         wasm_global_import_t* gimp = NULL;
-        wasm_value_t* placeholder = NULL;
         wasm_valtype_t type;
         wasm_reftype_t ref_type;
         uint8_t is_mutable;
@@ -463,24 +493,17 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             if (feature_err != WASM_OK) return feature_err;
         }
 
-        if (mod->is_compiled) {
-            placeholder = (wasm_value_t*)wasm__malloc(&mod->rt->allocator, sizeof(*placeholder));
-            if (!placeholder) return WASM_ERR_OOM;
-            *placeholder = wasm__default_value(type);
-        } else {
+        if (!mod->is_compiled) {
             err = wasm__match_global_import(mod->rt, mod, info, type, &ref_type, (int)is_mutable, &gimp);
             if (err == WASM_ERR_UNKNOWN_IMPORT) return wasm__unresolved_import(mod->rt, info);
             if (err != WASM_OK) return err;
         }
-        if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) {
-            wasm__free(&mod->rt->allocator, placeholder);
-            return WASM_ERR_OOM;
-        }
+        if (wasm__append_global_slots(mod, 1, &gi) != WASM_OK) return WASM_ERR_OOM;
         mod->globals[gi].type = type;
         mod->globals[gi].ref_type = ref_type;
         mod->globals[gi].is_mutable = is_mutable;
         mod->globals[gi].is_import = 1;
-        mod->globals[gi].import_value = placeholder ? placeholder : gimp->value;
+        mod->globals[gi].import_value = gimp ? gimp->value : NULL;
         mod->num_global_imports++;
         info->index = gi;
         info->type = type;
@@ -501,7 +524,7 @@ static wasm_error_t wasm__decode_import_desc(wasm_module_t* mod,
             WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown type %u", (unsigned)type_index);
             return WASM_ERR_MALFORMED;
         }
-        if (import_type->num_results != 0) {
+        if (import_type->num_results != 0 && !wasm__allow_tag_results(mod)) {
             WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "non-empty tag result type");
             return WASM_ERR_TYPE_MISMATCH;
         }
@@ -578,6 +601,12 @@ wasm_error_t wasm_import_check(wasm_runtime_t* rt, const wasm_module_t* compiled
 /* Parses an import description into temporaries so a shared compact-import type can be re-read per item. */
 static wasm_error_t wasm__skip_import_desc(wasm_module_t* mod, wasm__reader_t* r, uint8_t kind) {
     switch (kind) {
+        case 0x20: {
+            wasm_error_t err = wasm__require_feature(mod, WASM_FEATURE_CUSTOM_DESCRIPTORS);
+            if (err != WASM_OK) return err;
+            wasm__read_leb128_u32(r);
+            break;
+        }
         case 0x00:
             wasm__read_leb128_u32(r);
             break;
@@ -783,14 +812,9 @@ WASM_PRIVATE wasm_error_t wasm__decode_global_section(wasm_module_t* mod, wasm__
             err = wasm__require_feature(mod, WASM_FEATURE_MUTABLE_GLOBALS);
             if (err != WASM_OK) return err;
         }
-        mod->init_expr_read_placeholder = 0;
-        err = wasm__eval_init_expr(mod, r, global_index, &value);
+        err = wasm__eval_init_expr(mod, r, global_index, mod->globals[global_index].type,
+                                   &mod->globals[global_index].ref_type, &value);
         if (err != WASM_OK) return err;
-        if (!wasm__init_value_matches(mod,
-                                      &value,
-                                      mod->globals[global_index].type,
-                                      &mod->globals[global_index].ref_type))
-            return WASM_ERR_TYPE_MISMATCH;
         wasm__global_set_value(&mod->globals[global_index], value);
     }
     return WASM_OK;
@@ -823,6 +847,10 @@ WASM_PRIVATE wasm_error_t wasm__decode_export_section(wasm_module_t* mod, wasm__
         err = wasm__read_name_owned_len(&mod->rt->allocator, r, &mod->exports[i].name, &mod->exports[i].name_len);
         if (err != WASM_OK) return err;
         mod->exports[i].kind = (wasm_export_kind_t)wasm__read_u8(r);
+        if (mod->exports[i].kind > WASM_EXPORT_TAG) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "malformed export kind %u", (unsigned)mod->exports[i].kind);
+            return WASM_ERR_MALFORMED;
+        }
         mod->exports[i].index = wasm__read_leb128_u32(r);
         if (mod->exports[i].kind == WASM_EXPORT_FUNC && mod->exports[i].index < mod->num_funcs)
             wasm__declare_func_ref(mod, mod->exports[i].index);
@@ -857,8 +885,7 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 
         segment->elem_type = WASM_TYPE_FUNCREF;
         segment->elem_ref_type.type = WASM_TYPE_FUNCREF;
-        segment->elem_ref_type.nullable = 1;
-        segment->uses_expr = uses_expr;
+        segment->elem_ref_type.nullable = uses_expr;
         if (flags & 0x01) {
             if (flags & 0x02)
                 segment->is_declarative = 1;
@@ -872,9 +899,8 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
 
             segment->table_index = (flags & 0x02) ? wasm__read_leb128_u32(r) : 0;
             if (segment->table_index < mod->num_tables) table = &mod->tables[segment->table_index];
-            err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
+            err = wasm__eval_init_expr(mod, r, mod->num_globals, wasm__table_index_type(table), NULL, &offset_value);
             if (err != WASM_OK) return err;
-            if (offset_value.type != wasm__table_index_type(table)) return WASM_ERR_TYPE_MISMATCH;
             segment->offset = wasm__table_index_value(table, &offset_value);
         }
 
@@ -906,11 +932,9 @@ WASM_PRIVATE wasm_error_t wasm__decode_element_section(wasm_module_t* mod, wasm_
             wasm_value_t value;
 
             if (uses_expr) {
-                mod->init_expr_read_placeholder = 0;
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &value);
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, segment->elem_type, &segment->elem_ref_type,
+                                           &value);
                 if (err != WASM_OK) return err;
-                if (!wasm__init_value_matches(mod, &value, segment->elem_type, &segment->elem_ref_type))
-                    return WASM_ERR_TYPE_MISMATCH;
             } else {
                 uint32_t func_index = wasm__read_leb128_u32(r);
                 if (func_index >= mod->num_funcs) {
@@ -1024,11 +1048,11 @@ WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__re
                     WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "unknown memory %u", 0u);
                     return WASM_ERR_MALFORMED;
                 }
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
-                if (err != WASM_OK) return err;
                 segment->memory_index = 0;
                 memory = &mod->memories[segment->memory_index];
-                if (offset_value.type != wasm__memory_index_type(memory)) return WASM_ERR_TYPE_MISMATCH;
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, wasm__memory_index_type(memory), NULL,
+                                           &offset_value);
+                if (err != WASM_OK) return err;
                 segment->offset = memory->is_64 ? (uint64_t)offset_value.of.i64
                                                 : (uint64_t)(uint32_t)offset_value.of.i32;
                 break;
@@ -1050,10 +1074,10 @@ WASM_PRIVATE wasm_error_t wasm__decode_data_section(wasm_module_t* mod, wasm__re
                                   (unsigned)segment->memory_index);
                     return WASM_ERR_MALFORMED;
                 }
-                err = wasm__eval_init_expr(mod, r, mod->num_globals, &offset_value);
-                if (err != WASM_OK) return err;
                 memory = &mod->memories[segment->memory_index];
-                if (offset_value.type != wasm__memory_index_type(memory)) return WASM_ERR_TYPE_MISMATCH;
+                err = wasm__eval_init_expr(mod, r, mod->num_globals, wasm__memory_index_type(memory), NULL,
+                                           &offset_value);
+                if (err != WASM_OK) return err;
                 segment->offset = memory->is_64 ? (uint64_t)offset_value.of.i64
                                                 : (uint64_t)(uint32_t)offset_value.of.i32;
                 break;

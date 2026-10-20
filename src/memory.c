@@ -516,6 +516,21 @@ const wasm_fieldtype_t* wasm_array_type_field(const wasm_module_t* mod, uint32_t
     return &at->field;
 }
 
+uint32_t wasm_cont_type_func(const wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types || mod->types[type_idx].kind != WASM_COMP_CONT) return UINT32_MAX;
+    return mod->types[type_idx].of.cont.func_type;
+}
+
+uint32_t wasm_type_descriptor(const wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types) return UINT32_MAX;
+    return mod->types[type_idx].descriptor;
+}
+
+uint32_t wasm_type_describes(const wasm_module_t* mod, uint32_t type_idx) {
+    if (!mod || type_idx >= mod->num_types) return UINT32_MAX;
+    return mod->types[type_idx].describes;
+}
+
 uint32_t wasm_func_count(const wasm_module_t* mod) {
     return mod ? mod->num_funcs : 0;
 }

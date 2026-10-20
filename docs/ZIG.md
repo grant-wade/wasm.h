@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
 
 `Runtime.init` takes the allocator the runtime uses for everything, which must outlive it, and a `Config` whose non-null fields override `wasm_config_default`. `load` compiles and instantiates in one step; it copies its input. Free instances and compiled modules before their runtime.
 
-`Config.features` replaces the enabled proposals and `Config.fuel` sets an initial fuel budget. For untrusted modules, these fields set limits, where 0 is unlimited:
+`Config.features` is a `Features` packed struct, bit-compatible with `WASM_FEATURE_*`, whose fields all default to true: `.features = .{ .threads = false }` turns off just threads. `Features.all` and `Features.standard` mirror `WASM_FEATURES_ALL` and `WASM_FEATURES_STANDARD`, and `Runtime.features` returns a runtime's features. `Config.fuel` sets an initial fuel budget. For untrusted modules, these fields set limits, where 0 is unlimited:
 
 | Field | Limit |
 | --- | --- |
@@ -68,6 +68,7 @@ pub fn main(init: std.process.Init) !void {
 | `max_total_memory_bytes` | Bytes across all the runtime's linear memories. |
 | `max_table_elements` | Elements per table, at instantiation and on growth. |
 | `max_gc_heap_bytes` | Bytes of GC heap. |
+| `max_cont_stacks` | Continuation stacks alive at once. |
 | `max_function_locals` | Locals per function, parameters included. |
 
 ```zig
@@ -349,9 +350,9 @@ while (it.next()) |exp| switch (exp.kind) {
 const producers = info.customSection("producers");
 ```
 
-`imports`, `customSections`, `funcType`, `funcName`, `typeKind`, `tagType`, `structField`, and `arrayField` cover the rest of the C introspection API. `FuncType.paramRefType`, `Import.ref_type`, `globalRefType`, and `tableRefType` describe reference types. `wasm.Value`, `wasm.FuncType`, and `wasm.CallFrame` format with `{f}`.
+`imports`, `customSections`, `funcType`, `funcName`, `typeKind`, `tagType`, `structField`, `arrayField`, `contTypeFunc`, `typeDescriptor`, and `typeDescribes` cover the rest of the C introspection API. `FuncType.paramRefType`, `Import.ref_type`, `globalRefType`, and `tableRefType` describe reference types, and `RefType.exact` and `Import.exact` mark exact types and function imports. Continuations, with `Features.stack_switching` enabled, are `wasm.Value`s of kind `.contref` and follow the C rules in [Stack switching](EMBEDDING.md#stack-switching). `wasm.Value`, `wasm.FuncType`, and `wasm.CallFrame` format with `{f}`.
 
-The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and return `wasm.Value` references. `structNew` and `arrayNew` take a tuple of values, such as `.{ @as(i32, 3), @as(i64, 4) }`. A reference stays valid only while Wasm code can reach it, or until `release` on the `Held` that `Runtime.hold` returns:
+The GC accessors (`structNew`, `structGet`, `arrayNew`, and the rest) take and return `wasm.Value` references. `structNew` and `arrayNew` take a tuple of values, such as `.{ @as(i32, 3), @as(i64, 4) }`. `structNewDesc` creates a struct whose type has a descriptor, and `structGetDesc` returns a struct's descriptor. A reference stays valid only while Wasm code can reach it, or until `release` on the `Held` that `Runtime.hold` returns:
 
 ```zig
 const held = try rt.hold(point);
@@ -364,7 +365,7 @@ const y = try instance.structGet(held.get(), 1);
 
 A runtime and its modules belong to one thread at a time. To run Wasm on several threads:
 
-1. Give each thread its own runtime and enable `.threads` on each.
+1. Give each thread its own runtime.
 2. Create a `wasm.SharedMemory`. Its allocator, and any allocator the runtimes share, must be thread-safe.
 3. Bind it with `bindMemory` in every runtime before loading.
 
@@ -376,7 +377,6 @@ defer shared.deinit();
 
 // On each thread:
 const rt = try wasm.Runtime.init(std.heap.smp_allocator, .{});
-rt.enableFeatures(.{ .threads = true });
 try rt.bindMemory("env", "memory", shared);
 const instance = try rt.instantiate(compiled);
 ```

@@ -17,6 +17,7 @@
 #include "stack.h"
 #include "../values.h"
 #include "atomic.h"
+#include "cont.h"
 #include <string.h>
 
 /* Grows *buf to hold need words; returns 0 when out of memory. */
@@ -118,7 +119,6 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
     wasm__clear_reftype(&v.frames[0].inline_result_reftype);
     v.frames[0].in_catch = 0;
     v.frames[0].seen_catch_all = 0;
-    v.frames[0].seen_delegate = 0;
     v.fp = 1;
     v.max_fp = 1;
 
@@ -188,7 +188,6 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].seen_else = 0;
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
-                v.frames[v.fp].seen_delegate = 0;
                 wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
@@ -230,7 +229,6 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].seen_else = 0;
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
-                v.frames[v.fp].seen_delegate = 0;
                 wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
@@ -294,7 +292,6 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].seen_else = 0;
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
-                v.frames[v.fp].seen_delegate = 0;
                 wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
@@ -310,7 +307,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (v.fp <= 1)
                     return wasm__validator_error(&v, at, "catch without matching try");
                 frame = wasm__validator_frame(&v);
-                if (frame->opcode != 0x06 || frame->seen_catch_all || frame->seen_delegate)
+                if (frame->opcode != 0x06 || frame->seen_catch_all)
                     return wasm__validator_error(&v, at, "unexpected catch");
                 if (tag_index >= mod->num_tags)
                     return wasm__validator_error(&v, at, "tag %u out of range", (unsigned)tag_index);
@@ -318,6 +315,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!tag_type)
                     return wasm__validator_error(&v, at, "tag %u does not reference a function type",
                                                  (unsigned)tag_index);
+                if (tag_type->num_results != 0)
+                    return wasm__validator_error(&v, at, "invalid exception type: non-empty tag result type");
                 err = wasm__validator_finish_try_arm(&v, at, frame);
                 if (err != WASM_OK) return err;
                 err = wasm__validator_push_many_typed(&v, at,
@@ -339,6 +338,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (!tag_type)
                     return wasm__validator_error(&v, at, "tag %u does not reference a function type",
                                                  (unsigned)tag_index);
+                if (tag_type->num_results != 0)
+                    return wasm__validator_error(&v, at, "invalid exception type: non-empty tag result type");
                 err = wasm__validator_check_types_typed(&v, at,
                                                         tag_type->params,
                                                         tag_type->param_reftypes,
@@ -357,7 +358,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 err = wasm__validator_find_rethrow_frame(&v, depth, &target_frame);
                 if (err != WASM_OK) {
                     return wasm__validator_error(&v, at,
-                                                 "rethrow depth %u does not reference an active catch",
+                                                 "invalid rethrow label %u",
                                                  (unsigned)depth);
                 }
                 (void)target_frame;
@@ -723,7 +724,6 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 v.frames[v.fp].seen_else = 0;
                 v.frames[v.fp].in_catch = 0;
                 v.frames[v.fp].seen_catch_all = 0;
-                v.frames[v.fp].seen_delegate = 0;
                 wasm__validator_enter_child_frame(&v, v.fp);
                 v.fp++;
                 if (v.fp > v.max_fp) v.max_fp = v.fp;
@@ -763,6 +763,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                 return wasm__validator_error(&v, at,
                                                              "tag %u does not reference a function type",
                                                              (unsigned)clause.tag_index);
+                            if (tag_type->num_results != 0)
+                                return wasm__validator_error(&v, at,
+                                                             "invalid exception type: non-empty tag result type");
                             if (!wasm__validator_types_match(&v,
                                                              tag_type->params,
                                                              tag_type->param_reftypes,
@@ -797,6 +800,9 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                                 return wasm__validator_error(&v, at,
                                                              "tag %u does not reference a function type",
                                                              (unsigned)clause.tag_index);
+                            if (tag_type->num_results != 0)
+                                return wasm__validator_error(&v, at,
+                                                             "invalid exception type: non-empty tag result type");
                             if (branch_count != tag_type->num_params + 1u ||
                                 !wasm__validator_types_match(&v,
                                                              tag_type->params,
@@ -845,21 +851,27 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
             }
             case 0x18: {
                 uint32_t depth = wasm__read_leb128_u32(&v.r);
-                wasm__val_frame_t* frame;
+                wasm__val_frame_t frame;
 
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_EXCEPTIONS);
                 if (err != WASM_OK) return err;
                 if (v.fp <= 1)
                     return wasm__validator_error(&v, at, "delegate without matching try");
-                frame = wasm__validator_frame(&v);
-                if (frame->opcode != 0x06 || frame->seen_delegate || frame->seen_catch_all)
+                frame = v.frames[v.fp - 1];
+                if (frame.opcode != 0x06 || frame.in_catch)
                     return wasm__validator_error(&v, at, "unexpected delegate");
                 if (depth >= v.fp - 1)
                     return wasm__validator_error(&v, at, "delegate depth %u out of range", (unsigned)depth);
-                err = wasm__validator_finish_try_arm(&v, at, frame);
+                err = wasm__validator_check_frame_results(&v, at, &frame,
+                                                          "type mismatch: block leaves wrong stack height");
                 if (err != WASM_OK) return err;
-                frame->seen_delegate = 1;
-                wasm__validator_mark_unreachable(&v);
+                v.sp = frame.height;
+                v.fp--;
+                err = wasm__validator_push_many_typed(&v, at,
+                                                      frame.result_types,
+                                                      frame.result_reftypes,
+                                                      frame.num_results);
+                if (err != WASM_OK) return err;
                 break;
             }
             case 0x1A: {
@@ -877,7 +889,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 if (v.fp <= 1)
                     return wasm__validator_error(&v, at, "catch_all without matching try");
                 frame = wasm__validator_frame(&v);
-                if (frame->opcode != 0x06 || frame->seen_catch_all || frame->seen_delegate)
+                if (frame->opcode != 0x06 || frame->seen_catch_all)
                     return wasm__validator_error(&v, at, "unexpected catch_all");
                 err = wasm__validator_finish_try_arm(&v, at, frame);
                 if (err != WASM_OK) return err;
@@ -1346,10 +1358,8 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 wasm_reftype_t type_info = { 0 };
                 err = wasm__validator_require_feature(&v, at, WASM_FEATURE_REFERENCE_TYPES);
                 if (err != WASM_OK) return err;
-                err = wasm__read_heaptype(mod, &v.r, &type_info);
-                if (err != WASM_OK) return wasm__validator_error(&v, at, "invalid heaptype");
-                type_info.nullable = 1;
-                reftype = type_info.type ? type_info.type : WASM_TYPE_ANYREF;
+                err = wasm__validator_read_heap_reftype(&v, at, 1, &reftype, &type_info);
+                if (err != WASM_OK) return err;
                 err = wasm__validator_push_typed(&v, at, reftype, &type_info);
                 if (err != WASM_OK) return err;
                 break;
@@ -1378,7 +1388,7 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                     ref_type.type = WASM_TYPE_FUNCREF;
                     ref_type.has_type_index = 1;
                     ref_type.type_index = mod->funcs[func_ref].type_idx;
-                    ref_type.nullable = 0;
+                    ref_type.exact = !mod->funcs[func_ref].is_inexact;
                     err = wasm__validator_push_typed(&v, at, WASM_TYPE_FUNCREF, &ref_type);
                 }
                 if (err != WASM_OK) return err;
@@ -1471,6 +1481,16 @@ static wasm_error_t wasm__validate_function(wasm_module_t* mod, uint32_t func_id
                 }
                 break;
             }
+            case 0xE0:
+            case 0xE1:
+            case 0xE2:
+            case 0xE3:
+            case 0xE4:
+            case 0xE5:
+            case 0xE6:
+                err = wasm__validator_validate_cont(&v, at, op);
+                if (err != WASM_OK) return err;
+                break;
             case 0xFB:
                 err = wasm__validator_validate_gc(&v, at);
                 if (err != WASM_OK) return err;

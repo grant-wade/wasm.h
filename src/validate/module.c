@@ -1,6 +1,7 @@
 #include "module.h"
 #include "../module.h"
 #include "../memory_internal.h"
+#include "../portable.h"
 #include "../reader.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
@@ -31,6 +32,219 @@ WASM_PRIVATE wasm_error_t wasm__set_validation_error(wasm_runtime_t* rt,
     return WASM_ERR_MALFORMED;
 }
 
+static int wasm__type_in_group(const wasm_recgroup_t* group, uint32_t type_idx) {
+    return type_idx >= group->first_type && type_idx - group->first_type < group->num_types;
+}
+
+static wasm_error_t wasm__validate_descriptor_clauses(wasm_module_t* mod, const wasm_recgroup_t* group, uint32_t i) {
+    const wasm_comptype_t* type = &mod->types[i];
+
+    if (type->describes != UINT32_MAX) {
+        const wasm_comptype_t* described;
+
+        if (!wasm__type_in_group(group, type->describes))
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "described type is outside rec group");
+        described = &mod->types[type->describes];
+        if (described->descriptor != i)
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s",
+                                              "described type is not described by descriptor");
+        if (type->describes >= i)
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "forward use of described type");
+        if ((described->is_final != 0) != (type->is_final != 0))
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s",
+                                              "descriptor and described types have mismatched finality");
+    }
+    if (type->descriptor != UINT32_MAX) {
+        const wasm_comptype_t* descriptor;
+
+        if (!wasm__type_in_group(group, type->descriptor))
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "descriptor type is outside rec group");
+        descriptor = &mod->types[type->descriptor];
+        if (descriptor->describes != i)
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s",
+                                              "type is not described by its descriptor");
+        if ((descriptor->is_final != 0) != (type->is_final != 0))
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s",
+                                              "descriptor and described types have mismatched finality");
+    }
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__validate_type_definition(wasm_module_t* mod, uint32_t i) {
+    wasm_comptype_t* type = &mod->types[i];
+    wasm_recgroup_t* group;
+    uint32_t j;
+
+    if (type->rec_group >= mod->num_rec_groups) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "type %u refers to missing rec group %u",
+                                          (unsigned)i,
+                                          (unsigned)type->rec_group);
+    }
+
+    group = &mod->rec_groups[type->rec_group];
+    if (i < group->first_type || i >= group->first_type + group->num_types) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "type %u is outside rec group %u bounds",
+                                          (unsigned)i,
+                                          (unsigned)type->rec_group);
+    }
+
+    switch (type->kind) {
+        case WASM_COMP_FUNC:
+            for (j = 0; j < type->of.func.num_params; j++) {
+                wasm_reftype_t* ref = type->of.func.param_reftypes ? &type->of.func.param_reftypes[j] : NULL;
+
+                if (!ref || !ref->has_type_index) continue;
+                if (ref->type_index >= mod->num_types ||
+                    (ref->type_index >= group->first_type &&
+                     ref->type_index >= group->first_type + group->num_types)) {
+                    return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                      "unknown type %u",
+                                                      (unsigned)ref->type_index);
+                }
+            }
+            for (j = 0; j < type->of.func.num_results; j++) {
+                wasm_reftype_t* ref = type->of.func.result_reftypes ? &type->of.func.result_reftypes[j] : NULL;
+
+                if (!ref || !ref->has_type_index) continue;
+                if (ref->type_index >= mod->num_types ||
+                    (ref->type_index >= group->first_type &&
+                     ref->type_index >= group->first_type + group->num_types)) {
+                    return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                      "unknown type %u",
+                                                      (unsigned)ref->type_index);
+                }
+            }
+            break;
+        case WASM_COMP_STRUCT:
+            for (j = 0; j < type->of.struct_.num_fields; j++) {
+                wasm_reftype_t* ref = &type->of.struct_.fields[j].storage.ref_type;
+
+                if (!ref->has_type_index) continue;
+                if (ref->type_index >= mod->num_types ||
+                    (ref->type_index >= group->first_type &&
+                     ref->type_index >= group->first_type + group->num_types)) {
+                    return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                      "unknown type %u",
+                                                      (unsigned)ref->type_index);
+                }
+            }
+            break;
+        case WASM_COMP_ARRAY: {
+            wasm_reftype_t* ref = &type->of.array.field.storage.ref_type;
+
+            if (ref->has_type_index &&
+                (ref->type_index >= mod->num_types ||
+                 (ref->type_index >= group->first_type &&
+                  ref->type_index >= group->first_type + group->num_types))) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "unknown type %u",
+                                                  (unsigned)ref->type_index);
+            }
+            break;
+        }
+        case WASM_COMP_CONT: {
+            uint32_t func_type = type->of.cont.func_type;
+
+            if (func_type >= mod->num_types || func_type >= group->first_type + group->num_types) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "unknown type %u",
+                                                  (unsigned)func_type);
+            }
+            if (mod->types[func_type].kind != WASM_COMP_FUNC) {
+                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                                  "non-function type %u",
+                                                  (unsigned)func_type);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (type->kind != WASM_COMP_STRUCT && type->descriptor != UINT32_MAX)
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "descriptor type must be a struct");
+    if (type->kind != WASM_COMP_STRUCT && type->describes != UINT32_MAX)
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s", "described type must be a struct");
+
+    if (type->num_supertypes > 1) {
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                          "type %u has multiple supertypes",
+                                          (unsigned)i);
+    }
+    for (j = 0; j < type->num_supertypes; j++) {
+        uint32_t super_idx = type->supertypes[j];
+        wasm_comptype_t* supertype;
+
+        if (super_idx >= mod->num_types) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u supertype %u out of range",
+                                              (unsigned)i,
+                                              (unsigned)super_idx);
+        }
+        if (super_idx >= i) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u supertype %u must have a lower index",
+                                              (unsigned)i,
+                                              (unsigned)super_idx);
+        }
+
+        supertype = &mod->types[super_idx];
+        if (supertype->is_final) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u cannot extend final type %u",
+                                              (unsigned)i,
+                                              (unsigned)super_idx);
+        }
+        if (type->kind != supertype->kind) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u kind does not match supertype %u",
+                                              (unsigned)i,
+                                              (unsigned)super_idx);
+        }
+    }
+    return WASM_OK;
+}
+
+/* lhs and rhs are the descriptor or describes clauses of type i and its supertype super_idx; what names the
+   clause in the error. */
+static wasm_error_t wasm__validate_clause_subtyping(wasm_module_t* mod, uint32_t i, uint32_t super_idx,
+                                                   uint32_t lhs, uint32_t rhs, const char* what) {
+    if (lhs == UINT32_MAX && rhs == UINT32_MAX) return WASM_OK;
+    if (lhs == UINT32_MAX || rhs == UINT32_MAX)
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "type %u is not a valid subtype of %u",
+                                          (unsigned)i, (unsigned)super_idx);
+    if (!wasm__is_subtype(mod, lhs, rhs))
+        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0, "%s type %u does not match %u", what,
+                                          (unsigned)lhs, (unsigned)rhs);
+    return WASM_OK;
+}
+
+static wasm_error_t wasm__validate_type_subtyping(wasm_module_t* mod, uint32_t i) {
+    const wasm_comptype_t* type = &mod->types[i];
+    uint32_t j;
+
+    for (j = 0; j < type->num_supertypes; j++) {
+        uint32_t super_idx = type->supertypes[j];
+        const wasm_comptype_t* supertype = &mod->types[super_idx];
+        wasm_error_t err = wasm__validate_clause_subtyping(mod, i, super_idx, type->describes,
+                                                           supertype->describes, "described");
+
+        if (err != WASM_OK) return err;
+        err = wasm__validate_clause_subtyping(mod, i, super_idx, type->descriptor, supertype->descriptor,
+                                              "descriptor");
+        if (err != WASM_OK) return err;
+        if (!wasm__is_comptype_immediate_subtype(mod, type, supertype)) {
+            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
+                                              "type %u is not a valid subtype of %u",
+                                              (unsigned)i,
+                                              (unsigned)super_idx);
+        }
+    }
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
     uint32_t i;
 
@@ -45,125 +259,23 @@ WASM_PRIVATE wasm_error_t wasm__validate_types(wasm_module_t* mod) {
         }
     }
 
-    for (i = 0; i < mod->num_types; i++) {
-        wasm_comptype_t* type = &mod->types[i];
-        wasm_recgroup_t* group;
-        uint32_t j;
+    for (i = 0; i < mod->num_rec_groups; i++) {
+        const wasm_recgroup_t* group = &mod->rec_groups[i];
+        uint32_t end = group->first_type + group->num_types;
+        uint32_t t;
+        wasm_error_t err;
 
-        if (type->rec_group >= mod->num_rec_groups) {
-            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "type %u refers to missing rec group %u",
-                                              (unsigned)i,
-                                              (unsigned)type->rec_group);
+        for (t = group->first_type; t < end; t++) {
+            err = wasm__validate_descriptor_clauses(mod, group, t);
+            if (err != WASM_OK) return err;
         }
-
-        group = &mod->rec_groups[type->rec_group];
-        if (i < group->first_type || i >= group->first_type + group->num_types) {
-            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "type %u is outside rec group %u bounds",
-                                              (unsigned)i,
-                                              (unsigned)type->rec_group);
+        for (t = group->first_type; t < end; t++) {
+            err = wasm__validate_type_definition(mod, t);
+            if (err != WASM_OK) return err;
         }
-
-        switch (type->kind) {
-            case WASM_COMP_FUNC:
-                for (j = 0; j < type->of.func.num_params; j++) {
-                    wasm_reftype_t* ref = type->of.func.param_reftypes ? &type->of.func.param_reftypes[j] : NULL;
-
-                    if (!ref || !ref->has_type_index) continue;
-                    if (ref->type_index >= mod->num_types ||
-                        (ref->type_index >= group->first_type &&
-                         ref->type_index >= group->first_type + group->num_types)) {
-                        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                          "unknown type %u",
-                                                          (unsigned)ref->type_index);
-                    }
-                }
-                for (j = 0; j < type->of.func.num_results; j++) {
-                    wasm_reftype_t* ref = type->of.func.result_reftypes ? &type->of.func.result_reftypes[j] : NULL;
-
-                    if (!ref || !ref->has_type_index) continue;
-                    if (ref->type_index >= mod->num_types ||
-                        (ref->type_index >= group->first_type &&
-                         ref->type_index >= group->first_type + group->num_types)) {
-                        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                          "unknown type %u",
-                                                          (unsigned)ref->type_index);
-                    }
-                }
-                break;
-            case WASM_COMP_STRUCT:
-                for (j = 0; j < type->of.struct_.num_fields; j++) {
-                    wasm_reftype_t* ref = &type->of.struct_.fields[j].storage.ref_type;
-
-                    if (!ref->has_type_index) continue;
-                    if (ref->type_index >= mod->num_types ||
-                        (ref->type_index >= group->first_type &&
-                         ref->type_index >= group->first_type + group->num_types)) {
-                        return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                          "unknown type %u",
-                                                          (unsigned)ref->type_index);
-                    }
-                }
-                break;
-            case WASM_COMP_ARRAY: {
-                wasm_reftype_t* ref = &type->of.array.field.storage.ref_type;
-
-                if (ref->has_type_index &&
-                    (ref->type_index >= mod->num_types ||
-                     (ref->type_index >= group->first_type &&
-                      ref->type_index >= group->first_type + group->num_types))) {
-                    return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                      "unknown type %u",
-                                                      (unsigned)ref->type_index);
-                }
-                break;
-            }
-            default:
-                break;
-        }
-
-        if (type->num_supertypes > 1) {
-            return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                              "type %u has multiple supertypes",
-                                              (unsigned)i);
-        }
-        for (j = 0; j < type->num_supertypes; j++) {
-            uint32_t super_idx = type->supertypes[j];
-            wasm_comptype_t* supertype;
-
-            if (super_idx >= mod->num_types) {
-                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "type %u supertype %u out of range",
-                                                  (unsigned)i,
-                                                  (unsigned)super_idx);
-            }
-            if (super_idx >= i) {
-                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "type %u supertype %u must have a lower index",
-                                                  (unsigned)i,
-                                                  (unsigned)super_idx);
-            }
-
-            supertype = &mod->types[super_idx];
-            if (supertype->is_final) {
-                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "type %u cannot extend final type %u",
-                                                  (unsigned)i,
-                                                  (unsigned)super_idx);
-            }
-            if (type->kind != supertype->kind) {
-                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "type %u kind does not match supertype %u",
-                                                  (unsigned)i,
-                                                  (unsigned)super_idx);
-            }
-            if (!wasm__is_comptype_immediate_subtype(mod, type, supertype)) {
-                return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
-                                                  "type %u is not a valid subtype of %u",
-                                                  (unsigned)i,
-                                                  (unsigned)super_idx);
-            }
+        for (t = group->first_type; t < end; t++) {
+            err = wasm__validate_type_subtyping(mod, t);
+            if (err != WASM_OK) return err;
         }
     }
 
@@ -213,6 +325,8 @@ WASM_PRIVATE wasm_error_t wasm__resolve_module_reftypes(wasm_module_t* mod) {
             case WASM_COMP_ARRAY:
                 err = wasm__resolve_storagetype_reftype(mod, &type->of.array.field.storage);
                 if (err != WASM_OK) return err;
+                break;
+            case WASM_COMP_CONT:
                 break;
             default:
                 return WASM_ERR_MALFORMED;
@@ -286,7 +400,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                               "tag %u type must reference a function type",
                                               (unsigned)i);
         }
-        if (tag_type->num_results != 0) {
+        if (tag_type->num_results != 0 && !wasm__allow_tag_results(mod)) {
             return wasm__set_validation_error(mod->rt, UINT32_MAX, 0,
                                               "tag %u type must not declare results",
                                               (unsigned)i);
@@ -400,7 +514,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
             }
             table = wasm__table_at(mod, segment->table_index);
             if (!table) return WASM_ERR_MALFORMED;
-            if (!wasm__elem_segment_values_match_type(mod,
+            if (!wasm__elem_segment_matches_type(mod,
                                                       segment,
                                                       table->reftype,
                                                       &table->reftype_info)) {

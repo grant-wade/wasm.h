@@ -20,6 +20,9 @@ WASM_PRIVATE size_t wasm__gc_struct_field_offset(const wasm_structtype_t* type, 
 
 WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out_size);
 
+/* Returns the descriptor slot of a struct allocated with one, else NULL. */
+WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object);
+
 WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type);
 
 WASM_PRIVATE int wasm__gc_array_total_size(const wasm_arraytype_t* type,
@@ -34,11 +37,13 @@ WASM_PRIVATE_INLINE wasm_error_t wasm__gc_struct_get_field(const wasm_gc_struct_
                                                    int sign_extend,
                                                    wasm_value_t* out_value);
 
+/* value must match the field's type. */
 WASM_PRIVATE wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
                                               const wasm_structtype_t* type,
                                               uint32_t field_index,
                                               wasm_value_t value);
 
+/* Fails with WASM_ERR_TYPE_MISMATCH unless value matches the field's type. */
 WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
                                                 const wasm_structtype_t* type,
                                                 uint32_t field_index,
@@ -50,6 +55,7 @@ WASM_PRIVATE_INLINE wasm_error_t wasm__gc_array_get(const wasm_gc_array_t* objec
                                             int sign_extend,
                                             wasm_value_t* out_value);
 
+/* value must match the field's type. */
 WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
                                        const wasm_arraytype_t* type,
                                        uint32_t index,
@@ -57,6 +63,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
 
 WASM_PRIVATE_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object);
 
+/* Fails with WASM_ERR_TYPE_MISMATCH unless value matches the field's type. */
 WASM_PRIVATE wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
                                                  const wasm_arraytype_t* type,
                                                  uint32_t index,

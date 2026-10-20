@@ -29,7 +29,7 @@ WASM_INLINE uint32_t wasm__valtypes_slots(const wasm_valtype_t* types, uint32_t 
 #define WASM__SLOT_KIND_NONE 0u
 #define WASM__SLOT_KIND_ANY 1u
 #define WASM__SLOT_KIND_EXTERN 2u
-#define WASM__SLOT_KIND_EXN 3u
+#define WASM__SLOT_KIND_HANDLE 3u /* an exnref or contref: an object outside the GC heap */
 #define WASM__SLOT_KIND_BITS 2u
 
 WASM_INLINE uint32_t wasm__slot_kind(wasm_valtype_t type) {
@@ -46,7 +46,9 @@ WASM_INLINE uint32_t wasm__slot_kind(wasm_valtype_t type) {
             return WASM__SLOT_KIND_EXTERN;
         case WASM_TYPE_EXNREF:
         case WASM_TYPE_NOEXN:
-            return WASM__SLOT_KIND_EXN;
+        case WASM_TYPE_CONTREF:
+        case WASM_TYPE_NOCONT:
+            return WASM__SLOT_KIND_HANDLE;
         default:
             return WASM__SLOT_KIND_NONE;
     }

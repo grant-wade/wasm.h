@@ -71,17 +71,22 @@ config.max_call_depth = 1024;
 config.max_labels = 4096;
 config.initial_gc_heap_size = 2u * 1024u * 1024u;
 config.frame_arena_size = 256u * 1024u;
+config.cont_stack_values = 1024;
+config.cont_call_depth = 128;
+config.cont_frame_arena_size = 8u * 1024u;
 config.lazy_validation = 0;
 config.max_function_locals = 50000;
 config.max_memory_bytes = 256u * 1024u * 1024u;
 config.max_total_memory_bytes = 1024u * 1024u * 1024u;
 config.max_table_elements = 1000000;
 config.max_gc_heap_bytes = 512u * 1024u * 1024u;
+config.max_cont_stacks = 10000;
+config.features = WASM_FEATURES_ALL & ~WASM_FEATURE_THREADS;
 
 rt = wasm_runtime_new(wasm_libc_allocator(), &config);
 ```
 
-`max_stack_values` sizes the operand stack in 8-byte slots, and a `v128` takes two. With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return.
+`max_stack_values` sizes the operand stack in 8-byte slots, and a `v128` takes two. With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return. A continuation gets its own stack when it first runs: `cont_stack_values` slots (default 1,024) and `cont_call_depth` call frames (default 128), with frames in blocks of `cont_frame_arena_size` bytes (default 8 KiB).
 
 The remaining fields bound what a module can make the host allocate; 0 removes a limit:
 
@@ -90,10 +95,11 @@ The remaining fields bound what a module can make the host allocate; 0 removes a
 - `max_total_memory_bytes` (default 0, unlimited) caps the linear memories that all of the runtime's instances define, together, in the same way. Memories the host creates and registers do not count.
 - `max_table_elements` (default 10,000,000) caps each table the same way, at instantiation and for `table.grow`.
 - `max_gc_heap_bytes` (default 0, unlimited) caps the GC heap, including `initial_gc_heap_size`. The heap grows when a collection leaves too little room, and an allocation that needs more than the cap fails with `WASM_ERR_OOM`.
+- `max_cont_stacks` (default 0, unlimited) caps the continuation stacks alive at once. Starting a continuation past the cap collects unreachable ones first, then fails with `WASM_ERR_OOM`.
 
 Set `max_memory_bytes` when running untrusted modules: without it a module can grow each memory to the 4 GiB its type allows, or further with Memory64.
 
-All implemented standardized proposals are enabled by default; proposals still in the standardization process (currently `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, and `WASM_FEATURE_THREADS`) are enabled only by `wasm_runtime_enable_feature` or `wasm_runtime_enable_all_features`. Set feature flags before loading with `wasm_runtime_disable_feature`, `wasm_runtime_enable_feature`, or `wasm_runtime_set_enabled_features`.
+`features` is a mask of `WASM_FEATURE_*` bits, one per proposal, and defaults to `WASM_FEATURES_ALL`, every implemented proposal. `WASM_FEATURES_STANDARD` leaves out the proposals not yet standardized: `WASM_FEATURE_WIDE_ARITHMETIC`, `WASM_FEATURE_CUSTOM_PAGE_SIZES`, `WASM_FEATURE_COMPACT_IMPORTS`, `WASM_FEATURE_THREADS`, `WASM_FEATURE_STACK_SWITCHING`, and `WASM_FEATURE_CUSTOM_DESCRIPTORS`. A module using a disabled proposal fails to load, and `wasm_runtime_new` returns NULL for bits outside `WASM_FEATURES_ALL`. `wasm_runtime_features` returns a runtime's mask, which is fixed at creation.
 
 ## Calling exports
 
@@ -164,7 +170,7 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
 
-Lower-level registration supports functions, globals, tables, memories, and tags. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, which take an allocator, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
+Lower-level registration supports functions, globals, tables, memories, and tags. A function or tag type registered without a type context has no type indices and is a final type in a rec group of its own, matching only imports of that type; with `has_type_context`, the type is type `type_index` of `type_module`, a module of the same runtime. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, which take an allocator, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
 
 ### Linking modules
 
@@ -176,7 +182,7 @@ wasm_register_module(rt, "lib", lib);
 wasm_module_t* app = wasm_load(rt, app_bytes, app_len); /* may import "lib" "..." */
 ```
 
-Importers share the exporting instance's globals, tables, memories, and tags, and call its functions, so free `lib` only after the modules that import from it. A call into a freed module's function traps.
+Importers share the exporting instance's globals, tables, memories, and tags, and call its functions directly, as Wasm calls: fuel, interrupt, and yield stops inside them suspend the whole call, and suspensions and exceptions pass through them. Free `lib` only after the modules that import from it. A call into a freed module's function traps. A funcref to an imported function has the type of the Wasm function the import is bound to, also through modules registered with `wasm_register_module`, and `ref.test`, `ref.cast`, `call_indirect`, and `call_ref` check that type. An exact function import, `(func (exact (type $t)))`, links only to a function of exactly type `$t`: a Wasm function defined with it or a host function registered with it, bound directly or through registered modules.
 
 Enable platform compatibility helpers in the implementation translation unit:
 
@@ -226,7 +232,7 @@ Tables are read and changed with `wasm_table_size`, `wasm_table_get`, `wasm_tabl
 
 ## GC references
 
-The collector runs when the GC heap fills, when enough `externref` conversions and caught `exnref` values accumulate, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects. A host value that reaches Wasm as an `anyref`, directly or through `any.convert_extern`, comes back to the host with its original bits; passed back in as an `anyref`, an odd one reads as an `i31ref`. Set reference values through `wasm_global_set`, `wasm_global_set_index`, and `wasm_table_set`: a host `anyref` stored through the pointers from `wasm_module_global` or `wasm_ref_hold`, or through `wasm_global_import_t.value`, may be read as a GC object. A GC reference, an `externref` made by `extern.convert_any`, or an `exnref` held only by the host is valid until the next collection. Keep one longer with `wasm_ref_hold`, which returns a slot the collector keeps current, and read the reference from that slot when using it:
+The collector runs when the GC heap fills, when enough `externref` conversions, caught `exnref` values, and continuations accumulate, before starting a continuation once continuation stacks take 4 MiB and twice what the last collection left, and on `wasm_gc_collect`. It keeps what globals, tables, element segments, and running frames reach, and moves GC objects, which keep their types after the module that allocated them is freed. A host value that reaches Wasm as an `anyref`, directly or through `any.convert_extern`, comes back to the host with its original bits; passed back in as an `anyref`, an odd one reads as an `i31ref`. Set reference values through `wasm_global_set`, `wasm_global_set_index`, and `wasm_table_set`: a host `anyref` stored through the pointers from `wasm_module_global` or `wasm_ref_hold`, or through `wasm_global_import_t.value`, may be read as a GC object. A GC reference, an `externref` made by `extern.convert_any`, an `exnref`, or a `contref` held only by the host is valid until the next collection; a host function's arguments stay valid until it returns. Keep one longer with `wasm_ref_hold`, which returns a slot the collector keeps current, and read the reference from that slot when using it:
 
 ```c
 wasm_value_t* held = wasm_ref_hold(rt, point);
@@ -234,6 +240,8 @@ wasm_value_t* held = wasm_ref_hold(rt, point);
 wasm_struct_get_field(mod, *held, 0, &x);
 wasm_ref_release(rt, held);
 ```
+
+With `WASM_FEATURE_CUSTOM_DESCRIPTORS` enabled, a struct type can name a descriptor type, and each of its structs refers to a descriptor struct of exactly that type. `wasm_struct_new_desc` takes the descriptor, `wasm_struct_get_desc` returns it, and `wasm_struct_new` fails such types with `WASM_ERR_TYPE_MISMATCH`.
 
 ## Threads
 
@@ -245,7 +253,6 @@ wasm_memory_import_t imp = { "env", "memory", memory };
 
 /* On each thread: */
 wasm_runtime_t* rt = wasm_runtime_new(wasm_libc_allocator(), NULL);
-wasm_runtime_enable_feature(rt, WASM_FEATURE_THREADS);
 wasm_register_memory_import(rt, &imp);
 wasm_module_t* mod = wasm_load(rt, bytes, len);
 ```
@@ -256,9 +263,17 @@ A shared memory exported by one module can be imported the same way. Free it wit
 
 `memory.atomic.wait32`/`wait64` block and `memory.atomic.notify` wakes threads when the platform layer is compiled in (`WASM_ENABLE_PLATFORM`), using pthreads or Win32; link with `-pthread` on toolchains that need it. Without it, a wait that would block traps, because no other thread could wake it.
 
+## Stack switching
+
+With `WASM_FEATURE_STACK_SWITCHING` enabled, modules can declare continuation types and tags with results, and use `cont.new`, `cont.bind`, `resume`, `suspend`, `switch`, `resume_throw`, and `resume_throw_ref`. `wasm_type_kind` returns `WASM_COMP_CONT` for a continuation type, and `wasm_cont_type_func` returns its function type.
+
+A continuation reaches the host as a `wasm_value_t` of type `WASM_TYPE_CONTREF` whose `of.externref` is an opaque handle, 0 for null. Call arguments, host function results, `wasm_runtime_resume` host results, and the global and table setters accept only handles of live continuations of the same runtime, and fail others with `WASM_ERR_TYPE_MISMATCH`. A continuation runs once: resuming or binding it again traps. Resuming a continuation that runs code of a freed module traps; freeing the module that declared its type does not affect it.
+
+A host function that calls back into Wasm is a barrier: in that call, a `suspend` with no handler inside the call traps, and an uncaught exception returns to the host function as `WASM_ERR_TRAP`.
+
 ## Introspection
 
-Inspect imports, exports, signatures, custom sections, memories, tables, globals, tags, and GC types through the public accessors. For example:
+Inspect imports, exports, signatures, custom sections, memories, tables, globals, tags, and GC and continuation types through the public accessors. `wasm_type_descriptor` and `wasm_type_describes` return the type index a struct type's `descriptor` or `describes` clause names, or `UINT32_MAX` without one, and the `exact` fields of `wasm_reftype_t` and `wasm_import_info_t` mark exact reference types and function imports. For example:
 
 ```c
 uint32_t i;
@@ -293,7 +308,7 @@ Every instruction except `block`, `loop`, and `end` costs one unit. Bulk instruc
 
 To stop a guest from another thread, call `wasm_runtime_interrupt`. The running call stops with `WASM_ERR_INTERRUPTED` at its next loop iteration, function entry, atomic wait, or WASI sleep; if no call is running, the next one fails before it starts.
 
-After a trap, use `wasm_runtime_backtrace` or `wasm_runtime_call_frame` to inspect the captured Wasm stack. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
+After a trap, use `wasm_runtime_backtrace` or `wasm_runtime_call_frame` to inspect the captured Wasm stack, innermost frame first, including the frames of running continuations and the frames that resumed them. Frames name their module and function when the module has a `name` section, as in `#0 app!parse (func[12]) at offset 0x002A`; `wasm_func_name` and `wasm_module_name` return those names.
 
 ```c
 char trace[2048];
@@ -318,7 +333,7 @@ A yielding host function's results are passed to `wasm_runtime_resume`, which ch
 
 - Fuel and interrupt stops fall between instructions; the call continues with the instruction it stopped before, and `memory.atomic.wait` waits again.
 - `wasm_runtime_resume` clears a pending interrupt.
-- Only the outermost call suspends. Calls made by host functions and start functions run by `wasm_load` or `wasm_instantiate` fail with the stop's code.
+- Only the outermost call suspends, also when it stops inside a continuation; `wasm_runtime_resume` continues inside that continuation. Calls made by host functions and start functions run by `wasm_load` or `wasm_instantiate` fail with the stop's code.
 - An interrupt observed inside a host function, such as WASI sleep, fails the call.
 - A host function that yields outside a suspendable call, including one called directly with `wasm_call_index`, fails it with `WASM_ERR_TRAP`.
 - A runtime holds one suspended call; until it is resumed or cancelled, other calls on the runtime, including start functions, fail with `WASM_ERR_SUSPENDED`.

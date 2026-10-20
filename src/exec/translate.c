@@ -21,6 +21,7 @@ typedef struct wasm__xframe_t {
     uint32_t if_fixup; /* if: index + 1 of the word that takes the else body or continuation */
     uint32_t handlers; /* handler labels open outside the block */
     uint32_t try_id;   /* try: its index in try_operands */
+    uint32_t cont_type; /* type index of the continuation its label passes last, or UINT32_MAX */
 } wasm__xframe_t;
 
 typedef struct wasm__xclause_t {
@@ -157,6 +158,13 @@ static wasm__xframe_t* wasm__x_push_frame(wasm__translator_t* t, uint8_t opcode,
     frame->height = height - frame->params;
     frame->handlers = t->handlers;
     frame->start = t->len;
+    frame->cont_type = UINT32_MAX;
+    if (opcode == 0x03 && blocktype->param_arity > 0 && blocktype->param_reftypes &&
+        blocktype->param_reftypes[blocktype->param_arity - 1u].has_type_index)
+        frame->cont_type = blocktype->param_reftypes[blocktype->param_arity - 1u].type_index;
+    else if (opcode != 0x03 && blocktype->result_arity > 0 && blocktype->result_reftypes &&
+             blocktype->result_reftypes[blocktype->result_arity - 1u].has_type_index)
+        frame->cont_type = blocktype->result_reftypes[blocktype->result_arity - 1u].type_index;
     return frame;
 }
 
@@ -382,6 +390,93 @@ static void wasm__x_fuse(wasm__translator_t* t) {
     wasm__free(t->allocator, cost);
 }
 
+static const wasm_functype_t* wasm__x_cont_functype(const wasm_module_t* mod, uint32_t type_idx) {
+    if (type_idx >= mod->num_types || mod->types[type_idx].kind != WASM_COMP_CONT) return NULL;
+    return wasm__module_const_functype(mod, mod->types[type_idx].of.cont.func_type);
+}
+
+static const wasm_functype_t* wasm__x_tag_functype(const wasm_module_t* mod, uint32_t tag_idx) {
+    if (tag_idx >= mod->num_tags) return NULL;
+    return wasm__module_const_functype(mod, mod->tags[tag_idx].type_idx);
+}
+
+/* Emits a resume handler table: count, then WASM__HANDLER_WORDS words per handler. */
+static wasm_error_t wasm__x_handlers(wasm__translator_t* t, wasm__reader_t* r) {
+    uint32_t count = wasm__read_leb128_u32(r);
+    uint32_t i;
+
+    wasm__x_emit(t, count);
+    for (i = 0; i < count && !t->failed; i++) {
+        uint8_t kind = wasm__read_u8(r);
+        uint32_t tag_idx = wasm__read_leb128_u32(r);
+
+        wasm__x_emit(t, kind);
+        wasm__x_emit(t, tag_idx);
+        if (kind == 0x00) {
+            uint32_t depth = wasm__read_leb128_u32(r);
+
+            if (depth >= t->fp || r->malformed) return WASM_ERR_MALFORMED;
+            wasm__x_emit(t, t->frames[t->fp - 1u - depth].cont_type);
+            wasm__x_descriptor(t, depth);
+        } else if (kind == 0x01) {
+            wasm__x_emit(t, UINT32_MAX);
+            wasm__x_emit(t, 0);
+            wasm__x_emit(t, 0);
+            wasm__x_emit(t, 0);
+            wasm__x_emit(t, 0);
+        } else {
+            return WASM_ERR_MALFORMED;
+        }
+    }
+    return r->malformed ? WASM_ERR_MALFORMED : WASM_OK;
+}
+
+static wasm_error_t wasm__x_cont(wasm__translator_t* t, const wasm_module_t* mod, uint8_t op, wasm__reader_t* r) {
+    uint32_t type_idx = wasm__read_leb128_u32(r);
+    const wasm_functype_t* type = op == 0xE2 ? wasm__x_tag_functype(mod, type_idx)
+                                             : wasm__x_cont_functype(mod, type_idx);
+
+    if (!type) return WASM_ERR_MALFORMED;
+    wasm__x_emit(t, op);
+    wasm__x_emit(t, type_idx);
+    switch (op) {
+        case 0xE1: {
+            uint32_t bound_idx = wasm__read_leb128_u32(r);
+            const wasm_functype_t* bound_type = wasm__x_cont_functype(mod, bound_idx);
+
+            if (!bound_type || bound_type->num_params > type->num_params) return WASM_ERR_MALFORMED;
+            wasm__x_emit(t, bound_idx);
+            wasm__x_emit(t, wasm__valtypes_slots(type->params, type->num_params - bound_type->num_params));
+            return WASM_OK;
+        }
+        case 0xE2:
+            wasm__x_emit(t, wasm__valtypes_slots(type->params, type->num_params));
+            wasm__x_emit(t, wasm__valtypes_slots(type->results, type->num_results));
+            return WASM_OK;
+        case 0xE3:
+            wasm__x_emit(t, wasm__valtypes_slots(type->params, type->num_params));
+            return wasm__x_handlers(t, r);
+        case 0xE4: {
+            uint32_t tag_idx = wasm__read_leb128_u32(r);
+            const wasm_functype_t* tag_type = wasm__x_tag_functype(mod, tag_idx);
+
+            if (!tag_type) return WASM_ERR_MALFORMED;
+            wasm__x_emit(t, tag_idx);
+            wasm__x_emit(t, wasm__valtypes_slots(tag_type->params, tag_type->num_params));
+            return wasm__x_handlers(t, r);
+        }
+        case 0xE5:
+            return wasm__x_handlers(t, r);
+        case 0xE6:
+            if (type->num_params == 0) return WASM_ERR_MALFORMED;
+            wasm__x_emit(t, wasm__read_leb128_u32(r));
+            wasm__x_emit(t, wasm__valtypes_slots(type->params, type->num_params - 1u));
+            return WASM_OK;
+        default:
+            return WASM_OK;
+    }
+}
+
 static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm_func_t* func,
                                  const wasm__body_info_t* info) {
     const uint32_t* heights = info->heights;
@@ -394,6 +489,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
     memset(&no_block, 0, sizeof(no_block));
     no_block.result_arity = ft->num_results;
     no_block.results = ft->results;
+    no_block.result_reftypes = ft->result_reftypes;
     if (!wasm__x_push_frame(t, 0, 0, &no_block)) return WASM_ERR_OOM;
 
     r.ptr = func->code;
@@ -468,12 +564,14 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
 
                 if (depth + 2u > t->fp) return WASM_ERR_MALFORMED;
                 target = &t->frames[t->fp - 2u - depth];
-                wasm__x_emit(t, WASM__OP_TRY_LEAVE);
-                wasm__x_target(t, top);
                 wasm__x_add_clause(t, top->try_id, WASM__CLAUSE_DELEGATE,
                                    top->handlers - target->handlers -
                                        ((target->opcode == 0x06 || target->opcode == 0x1F) ? 1u : 0u),
                                    0);
+                wasm__x_emit(t, WASM__OP_TRY_END);
+                t->handlers--;
+                wasm__x_patch(t, top->fixups, t->len);
+                t->fp--;
                 break;
             }
             case 0x10:
@@ -522,17 +620,13 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 break;
             case 0x09: {
                 uint32_t depth = wasm__read_leb128_u32(&r);
-                uint32_t i;
+                const wasm__xframe_t* frame;
 
-                for (i = t->fp; i > 0; i--) {
-                    const wasm__xframe_t* frame = &t->frames[i - 1u];
-
-                    if (frame->opcode != 0x06 || !frame->in_catch) continue;
-                    if (depth-- == 0) break;
-                }
-                if (i == 0) return WASM_ERR_MALFORMED;
+                if (depth >= t->fp) return WASM_ERR_MALFORMED;
+                frame = &t->frames[t->fp - 1u - depth];
+                if (frame->opcode != 0x06 || !frame->in_catch) return WASM_ERR_MALFORMED;
                 wasm__x_emit(t, 0x09);
-                wasm__x_emit(t, t->handlers - t->frames[i - 1u].handlers - 1u);
+                wasm__x_emit(t, t->handlers - frame->handlers - 1u);
                 break;
             }
             case 0x0B:
@@ -672,6 +766,15 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 wasm__x_descriptor(t, depth);
                 break;
             }
+            case 0xE0:
+            case 0xE1:
+            case 0xE2:
+            case 0xE3:
+            case 0xE4:
+            case 0xE5:
+            case 0xE6:
+                if (wasm__x_cont(t, mod, op, &r) != WASM_OK) return WASM_ERR_MALFORMED;
+                break;
             case 0xFB:
             case 0xFC:
             case 0xFD:
@@ -690,6 +793,16 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                     wasm__x_emit(t, subop);
                     wasm__x_emit(t, flags_offset);
                     wasm__x_descriptor(t, depth);
+                } else if (op == 0xFB && (subop == 0x25 || subop == 0x26)) {
+                    uint32_t depth;
+
+                    (void)wasm__read_u8(&r);
+                    depth = wasm__read_leb128_u32(&r);
+                    if (depth >= t->fp || r.malformed) return WASM_ERR_MALFORMED;
+                    /* wasm__exec_gc replaces the descriptor operand by whether to branch. */
+                    wasm__x_emit(t, op);
+                    wasm__x_emit(t, (uint32_t)(immediates - func->code));
+                    wasm__x_branch(t, WASM__OP_BR_IF, WASM__OP_BR_IF_LOOP, WASM__OP_BR_IF_X, depth, height - 1u);
                 } else {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, (uint32_t)(immediates - func->code));

@@ -142,6 +142,10 @@ WASM_PRIVATE_INLINE int wasm__uses_exnref_storage(wasm_valtype_t type) {
     return type == WASM_TYPE_EXNREF || type == WASM_TYPE_NOEXN;
 }
 
+WASM_PRIVATE_INLINE int wasm__uses_contref_storage(wasm_valtype_t type) {
+    return type == WASM_TYPE_CONTREF || type == WASM_TYPE_NOCONT;
+}
+
 WASM_PRIVATE_INLINE int wasm__uses_gc_ref_storage(wasm_valtype_t type) {
     switch (type) {
         case WASM_TYPE_NONE:

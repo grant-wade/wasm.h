@@ -1,4 +1,4 @@
-int wl_case(void) {
+int fixture_case(void) {
     int a = 3;
     int b = 7;
 

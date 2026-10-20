@@ -2,16 +2,20 @@
 #include <stdio.h>
 #include "bulk.h"
 #include "calls.h"
+#include "cont.h"
 #include "translate.h"
 #include "exceptions.h"
 #include "frames.h"
 #include "gc.h"
 #include "simd.h"
 #include "slots.h"
+#include "stack.h"
 #include "atomic.h"
 #include "../atomics.h"
 #include "../instructions.h"
 #include "../internal/alloc.h"
+#include "../internal/gc_types.h"
+#include "../link.h"
 #include "../memory_internal.h"
 #include "../module.h"
 #include "../portable.h"
@@ -307,39 +311,61 @@ WASM_INLINE uint64_t wasm__f64_binop(uint32_t op, const wasm__slot_t* a, const w
 }
 
 #if defined(__GNUC__) || defined(__clang__)
-#define WASM__NOINLINE __attribute__((noinline))
 #define WASM__UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-#define WASM__NOINLINE
 #define WASM__UNLIKELY(x) (x)
 #endif
 
-/* args holds the slots of ft's parameters just above rt->sp. */
+/* args holds the slots of ft's parameters just above rt->exec->sp. */
 static WASM__NOINLINE wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod,
                                                const wasm_functype_t* ft,
                                                const wasm_func_t* func,
                                                const wasm__slot_t* args) {
     wasm_runtime_t* rt = mod->rt;
-    wasm_value_t args_buf[8];
+    wasm__exec_stack_t* exec = rt->exec;
+    wasm_value_t args_buf[16];
     wasm_value_t results_buf[8];
     wasm_value_t* call_args = args_buf;
     wasm_value_t* call_results = results_buf;
+    uint32_t num_params = ft->num_params;
+    wasm__gc_root_t root;
     wasm_error_t err = WASM_ERR_OOM;
 
-    if (ft->num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_params, sizeof(wasm_value_t));
+    if (num_params > 8) call_args = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, num_params, 2u * sizeof(wasm_value_t));
     if (ft->num_results > 8) call_results = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, ft->num_results, sizeof(wasm_value_t));
     if (call_args && call_results) {
-        wasm__values_from_slots(rt, ft->params, ft->param_reftypes, ft->num_params, args, call_args);
-        wasm__values_to_host(rt, call_args, ft->num_params);
-        err = wasm__invoke_host_func(mod, ft, func->host_func, call_args, call_results, func->host_userdata);
+        wasm_value_t* host_args = call_args;
+
+        wasm__values_from_slots(rt, ft->params, ft->param_reftypes, num_params, args, call_args);
+        if (func->traces_params) {
+            host_args = call_args + num_params;
+            wasm__values_to_host(rt, call_args, host_args, num_params);
+            wasm__gc_push_root(rt, &root, &call_args, &num_params);
+            root.mirror = host_args;
+        }
+        err = wasm__invoke_host_func(mod, ft, func->host_func, host_args, call_results, func->host_userdata);
+        if (func->traces_params) wasm__gc_pop_root(rt, &root);
         if (err == WASM_OK) err = wasm__values_from_host(rt, call_results, ft->num_results);
-        if (err == WASM_OK && wasm__valtypes_slots(ft->results, ft->num_results) > rt->max_stack - rt->sp)
+        if (err == WASM_OK && wasm__valtypes_slots(ft->results, ft->num_results) > exec->max_stack - exec->sp)
             err = WASM_ERR_STACK_OVERFLOW;
-        if (err == WASM_OK) rt->sp += wasm__slots_from_values(&rt->stack[rt->sp], call_results, ft->num_results);
+        if (err == WASM_OK) exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], call_results, ft->num_results);
     }
     if (call_args != args_buf) wasm__free(&mod->rt->allocator, call_args);
     if (call_results != results_buf) wasm__free(&mod->rt->allocator, call_results);
     return err;
+}
+
+static WASM__NOINLINE void wasm__set_global_from_slot(wasm_runtime_t* rt, wasm_global_t* global, const wasm__slot_t* s) {
+    wasm__global_set_value(global, wasm__value_from_slot(rt, global->type, &global->ref_type, s));
+}
+
+static WASM__NOINLINE void wasm__store_table_elem(wasm_table_t* table, uint64_t index, const wasm_value_t* value) {
+    table->elems[index] = *value;
+}
+
+static WASM__NOINLINE wasm_error_t wasm__set_caught_exception(wasm_runtime_t* rt, const wasm__label_t* label) {
+    return wasm__set_exception_state(&rt->allocator, &rt->pending_exception, label->caught_tag,
+                                     label->caught_tag_identity, label->caught_values, label->caught_count);
 }
 
 /* Copies callee's parameter slots from args into locals and zeroes its other locals. */
@@ -349,15 +375,210 @@ static WASM__NOINLINE void wasm__init_locals(wasm__slot_t* locals, const wasm__s
     for (i = 0; i < callee->param_slots; i++) locals[i] = args[i];
     if (i < callee->num_local_slots) memset(locals + i, 0, (callee->num_local_slots - i) * sizeof(*locals));
 }
+/* Makes an exception of tag tag_index of mod, whose payload is the slots at args, rt's pending exception. */
+static wasm_error_t wasm__set_pending_tag(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t tag_index,
+                                          const wasm__slot_t* args) {
+    const wasm_functype_t* tag_type = wasm__module_functype(mod, mod->tags[tag_index].type_idx);
+    wasm_value_t payload_buf[8];
+    wasm_value_t* payload = payload_buf;
+    wasm_error_t err;
+
+    if (!tag_type) return WASM_ERR_MALFORMED;
+    if (tag_type->num_params > 8) {
+        payload = (wasm_value_t*)wasm__malloc_array(&rt->allocator, tag_type->num_params, sizeof(wasm_value_t));
+        if (!payload) return WASM_ERR_OOM;
+    }
+    wasm__values_from_slots(rt, tag_type->params, tag_type->param_reftypes, tag_type->num_params, args, payload);
+    err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, tag_index, mod->tags[tag_index].identity,
+                                    payload, tag_type->num_params);
+    if (payload != payload_buf) wasm__free(&rt->allocator, payload);
+    return err;
+}
+
+/* Returns the type index of the continuation a switch to continuation type ct of mod passes last, or
+ * UINT32_MAX. */
+static uint32_t wasm__switch_cont_type(wasm_module_t* mod, uint32_t ct) {
+    const wasm_functype_t* ft = wasm__module_functype(mod, mod->types[ct].of.cont.func_type);
+
+    if (!ft || ft->num_params == 0 || !ft->param_reftypes || !ft->param_reftypes[ft->num_params - 1u].has_type_index)
+        return UINT32_MAX;
+    return ft->param_reftypes[ft->num_params - 1u].type_index;
+}
+
+/* Hands rt's pending exception to the nearest handler on the running stacks down to rt->loop_stack's frame
+ * floor, releasing the continuation stacks it leaves. */
+static WASM__NOINLINE wasm_error_t wasm__throw_across_stacks(wasm_runtime_t* rt) {
+    for (;;) {
+        wasm__exec_stack_t* exec = rt->exec;
+        wasm_error_t err = wasm__handle_exception_frames(rt, exec->frame_floor - 1u);
+
+        if (err != WASM__ERR_EXCEPTION || exec == rt->loop_stack || !exec->parent) return err;
+        rt->exec = exec->parent;
+        wasm__cont_stack_release(rt, exec);
+    }
+}
+
+/* Runs op, a stack switching instruction whose frame's state is saved. Returns WASM__ERR_CALL_FRAME when
+ * host function *out_func_idx of *out_mod must run on the top *out_slots slots of rt->exec, and
+ * WASM__ERR_EXCEPTION when an exception it raises leaves the frames above rt->loop_stack's frame floor. */
+static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt, uint32_t op, wasm_module_t** out_mod,
+                                                              uint32_t* out_func_idx, uint32_t* out_slots) {
+    wasm__exec_stack_t* exec = rt->exec;
+    wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1u];
+    wasm_module_t* mod = cf->module;
+    const uint32_t* imm = cf->pc;
+    wasm__slot_t* top = &exec->stack[exec->sp];
+    wasm__cont_object_t* k;
+    wasm_error_t err;
+
+    switch (op) {
+        case 0xE0: {
+            uint32_t ref_id = wasm__slot_funcref(top - 1);
+
+            if (wasm__slot_u64(top - 1) == 0) {
+                WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null function reference");
+                return WASM_ERR_TRAP;
+            }
+            if (ref_id >= rt->num_func_refs || !rt->func_refs[ref_id].module) return WASM_ERR_MALFORMED;
+            err = wasm__cont_new_func(rt, mod, imm[0], rt->func_refs[ref_id].module, rt->func_refs[ref_id].func_idx,
+                                      &k);
+            if (err != WASM_OK) return err;
+            wasm__slot_set_ref(top - 1, (uintptr_t)k);
+            cf->pc = imm + 1;
+            return WASM_OK;
+        }
+        case 0xE1: {
+            wasm__cont_object_t* bound;
+
+            wasm__gc_collect_handles_if_needed(rt);
+            k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
+            if (!k) return err;
+            err = wasm__cont_bind(rt, k, mod, imm[1], top - 1 - imm[2], imm[2], &bound);
+            if (err != WASM_OK) return err;
+            exec->sp -= imm[2];
+            wasm__slot_set_ref(&exec->stack[exec->sp - 1u], (uintptr_t)bound);
+            cf->pc = imm + 3;
+            return WASM_OK;
+        }
+        case 0xE2: {
+            const uint32_t* handler;
+            wasm__exec_stack_t* outer;
+
+            wasm__gc_collect_handles_if_needed(rt);
+            outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[0]].identity, 0, &handler);
+            if (!outer) return WASM_ERR_TRAP;
+            cf->pc = imm + 3;
+            err = wasm__cont_suspend(rt, outer, handler, imm[1]);
+            if (err != WASM_OK) {
+                cf->pc = imm;
+                return err;
+            }
+            return wasm__branch_frame(&rt->exec->call_frames[rt->exec->call_frame_sp - 1u], handler + 3);
+        }
+        case 0xE4:
+        case 0xE5: {
+            const uint32_t* handlers = op == 0xE4 ? imm + 3 : imm + 1;
+            uint32_t slots = op == 0xE4 ? imm[2] : 1u;
+
+            wasm__gc_collect_handles_if_needed(rt);
+            if (op == 0xE5) {
+                wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, top - 2);
+                wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
+
+                if (!exn) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null exception reference");
+                    return WASM_ERR_TRAP;
+                }
+                k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
+                if (!k) return err;
+                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception, exn->tag_index,
+                                                exn->tag_identity, exn->values, exn->num_values);
+            } else {
+                k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
+                if (!k) return err;
+                err = wasm__set_pending_tag(rt, mod, imm[1], top - 1 - slots);
+            }
+            if (err != WASM_OK) return err;
+            exec->sp -= 1u + slots;
+            cf->pc = handlers + 1 + handlers[0] * WASM__HANDLER_WORDS;
+            if (!k->top || k->top->call_frame_sp == 0) {
+                wasm__cont_drop_stacks(rt, k);
+                return wasm__throw_across_stacks(rt);
+            }
+            err = wasm__cont_resume(rt, k, NULL, 0, handlers);
+            if (err != WASM_OK) {
+                wasm__free_exception_state(&rt->allocator, &rt->pending_exception);
+                exec->sp += 1u + slots;
+                cf->pc = imm;
+                return err;
+            }
+            return wasm__throw_across_stacks(rt);
+        }
+        case 0xE6: {
+            const uint32_t* handler;
+            wasm__exec_stack_t* outer;
+
+            wasm__gc_collect_handles_if_needed(rt);
+            k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
+            if (!k) return err;
+            outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[1]].identity, 1, &handler);
+            if (!outer) return WASM_ERR_TRAP;
+            if (!k->top && !k->start_module->funcs[k->start_func].is_import) {
+                err = wasm__cont_start(rt, k);
+                if (err != WASM_OK) return err;
+            }
+            cf->pc = imm + 3;
+            err = wasm__cont_switch(rt, k, outer, mod, wasm__switch_cont_type(mod, imm[0]), imm[2], out_mod,
+                                    out_func_idx, out_slots);
+            if (err != WASM_OK && err != WASM__ERR_CALL_FRAME) cf->pc = imm;
+            return err;
+        }
+        default: {
+            const uint32_t* handlers = imm + 2;
+            uint32_t slots = imm[1];
+
+            k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
+            if (!k) return err;
+            top -= 1u + slots;
+            if (!k->top && k->start_module->funcs[k->start_func].is_import) {
+                uint32_t bound = k->num_args;
+
+                if (bound > exec->max_stack - exec->sp + 1u) {
+                    WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded",
+                                  (unsigned)exec->max_stack);
+                    return WASM_ERR_STACK_OVERFLOW;
+                }
+                memmove(top + bound, top, slots * sizeof(*top));
+                if (bound > 0) memcpy(top, k->args, bound * sizeof(*top));
+                *out_mod = k->start_module;
+                *out_func_idx = k->start_func;
+                *out_slots = bound + slots;
+                exec->sp = exec->sp - 1u + bound;
+                cf->pc = handlers + 1 + handlers[0] * WASM__HANDLER_WORDS;
+                wasm__cont_drop_stacks(rt, k);
+                return WASM__ERR_CALL_FRAME;
+            }
+            if (!k->top) {
+                err = wasm__cont_start(rt, k);
+                if (err != WASM_OK) return err;
+            }
+            exec->sp -= 1u + slots;
+            cf->pc = handlers + 1 + handlers[0] * WASM__HANDLER_WORDS;
+            err = wasm__cont_resume(rt, k, top, slots, handlers);
+            if (err != WASM_OK) {
+                exec->sp += 1u + slots;
+                cf->pc = imm;
+            }
+            return err;
+        }
+    }
+}
 #undef WASM__NOINLINE
 
 /* Hands an exception raised by a host import to the nearest Wasm handler. A tail call has
    already given up its frame, so that frame's handlers are skipped. Returns
    WASM__ERR_RESUME_FRAME once a handler is found. */
-static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
-                                                wasm__call_frame_t* cf,
-                                                uint32_t base_frame_sp,
-                                                int is_tail_call) {
+static wasm_error_t wasm__unwind_host_exception(wasm_runtime_t* rt, wasm__call_frame_t* cf, int is_tail_call) {
     wasm_error_t err;
 
     if (is_tail_call) {
@@ -366,37 +587,43 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
             cf->lsp--;
         }
     }
-    err = wasm__handle_exception_frames(mod, base_frame_sp);
+    err = wasm__throw_across_stacks(rt);
     return err == WASM_OK ? WASM__ERR_RESUME_FRAME : err;
 }
 
-/* Must run before anything outside the loop reads the frame or rt->sp. */
-#define WASM__SAVE_STATE()                   \
-    do {                                     \
-        cf->pc = pc;                         \
-        cf->op_at = op_at;                   \
-        rt->sp = (uint32_t)(sp - stack);     \
-        cf->lsp = lsp;                       \
+/* Must run before anything outside the loop reads the frame or rt->exec->sp. */
+#define WASM__SAVE_STATE()                     \
+    do {                                       \
+        cf->pc = pc;                           \
+        cf->op_at = op_at;                     \
+        rt->exec->sp = (uint32_t)(sp - stack); \
+        cf->lsp = lsp;                         \
     } while (0)
 #define WASM__LOAD_STATE()                   \
     do {                                     \
         pc = cf->pc;                         \
-        sp = stack + rt->sp;                 \
+        sp = stack + rt->exec->sp;           \
         lsp = cf->lsp;                       \
         WASM__LOAD_FUEL();                   \
     } while (0)
-#define WASM__ENTER_FRAME()                           \
-    do {                                              \
-        cf = &rt->call_frames[rt->call_frame_sp - 1]; \
-        mod = cf->module;                             \
-        func = cf->func;                              \
-        ops = func->ops;                              \
-        labels = cf->labels;                          \
-        locals = cf->locals;                          \
-        sp_base = cf->sp_base;                        \
-        op_at = cf->op_at;                            \
-        mem0_size = 0;                                \
-        WASM__LOAD_STATE();                           \
+/* Points stack at the slots of the stack rt is running on. */
+#define WASM__LOAD_STACK()                   \
+    do {                                     \
+        stack = rt->exec->stack;             \
+    } while (0)
+#define WASM__ENTER_FRAME()                                             \
+    do {                                                                \
+        WASM__LOAD_STACK();                                             \
+        cf = &rt->exec->call_frames[rt->exec->call_frame_sp - 1];       \
+        mod = cf->module;                                               \
+        func = cf->func;                                                \
+        ops = func->ops;                                                \
+        labels = cf->labels;                                            \
+        locals = cf->locals;                                            \
+        sp_base = cf->sp_base;                                          \
+        op_at = cf->op_at;                                              \
+        mem0_size = 0;                                                  \
+        WASM__LOAD_STATE();                                             \
     } while (0)
 /* Points cf->r at the immediates at bytecode offset offset. */
 #define WASM__SET_READER(offset)                          \
@@ -489,10 +716,10 @@ static wasm_error_t wasm__unwind_host_exception(wasm_module_t* mod,
     } while (0)
 #endif
 
-/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame above base_frame_sp returns.
- * If resumable, fuel, interrupt, and yield stops leave the frames in place with rt->suspended set. */
-static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp, int resumable) {
-    wasm__slot_t* const stack = rt->stack;
+/* Returns WASM__ERR_RETURN_FRAME with results on the stack once the frame at rt->loop_stack's frame floor
+ * returns. If resumable, fuel, interrupt, and yield stops leave the frames in place with rt->suspended set. */
+static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
+    wasm__slot_t* stack;
     wasm__call_frame_t* cf;
     wasm_module_t* mod;
     wasm_func_t* func;
@@ -579,9 +806,9 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         [0xD4] = &&wasm__op_0xD4, [0xD5] = &&wasm__op_0xD5, [0xD6] = &&wasm__op_0xD6, [0xD7] = &&wasm__op_default,
         [0xD8] = &&wasm__op_default, [0xD9] = &&wasm__op_default, [0xDA] = &&wasm__op_default,
         [0xDB] = &&wasm__op_default, [0xDC] = &&wasm__op_default, [0xDD] = &&wasm__op_default,
-        [0xDE] = &&wasm__op_default, [0xDF] = &&wasm__op_default, [0xE0] = &&wasm__op_default,
-        [0xE1] = &&wasm__op_default, [0xE2] = &&wasm__op_default, [0xE3] = &&wasm__op_default,
-        [0xE4] = &&wasm__op_default, [0xE5] = &&wasm__op_default, [0xE6] = &&wasm__op_default,
+        [0xDE] = &&wasm__op_default, [0xDF] = &&wasm__op_default, [0xE0] = &&wasm__op_0xE0,
+        [0xE1] = &&wasm__op_0xE1, [0xE2] = &&wasm__op_0xE2, [0xE3] = &&wasm__op_0xE3,
+        [0xE4] = &&wasm__op_0xE4, [0xE5] = &&wasm__op_0xE5, [0xE6] = &&wasm__op_0xE6,
         [0xE7] = &&wasm__op_default, [0xE8] = &&wasm__op_default, [0xE9] = &&wasm__op_default,
         [0xEA] = &&wasm__op_default, [0xEB] = &&wasm__op_default, [0xEC] = &&wasm__op_default,
         [0xED] = &&wasm__op_default, [0xEE] = &&wasm__op_default, [0xEF] = &&wasm__op_default,
@@ -705,22 +932,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (err != WASM_OK) goto cleanup;
                 goto throw_pending;
             }
-            WASM__CASE(0x09): { /* rethrow */
-                uint32_t target_index = lsp - 1u - *pc++;
-
-                err = wasm__set_exception_state(&rt->allocator, &rt->pending_exception,
-                                                labels[target_index].caught_tag,
-                                                labels[target_index].caught_tag_identity,
-                                                labels[target_index].caught_values,
-                                                labels[target_index].caught_count);
+            WASM__CASE(0x09): /* rethrow */
+                err = wasm__set_caught_exception(rt, &labels[lsp - 1u - *pc++]);
                 if (err != WASM_OK) goto cleanup;
-                while (lsp > target_index) {
-                    wasm__clear_label(&labels[lsp - 1]);
-                    sp = stack + labels[lsp - 1].sp_base;
-                    lsp--;
-                }
                 goto throw_pending;
-            }
             WASM__CASE(0x0A): { /* throw_ref */
                 wasm_value_t exnref_value = wasm__value_from_slot(rt, WASM_TYPE_EXNREF, NULL, --sp);
                 wasm__exception_object_t* exn = wasm__exception_object_from_exnref(rt, &exnref_value);
@@ -875,6 +1090,17 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (op == 0x15) goto do_tail_call;
                 goto do_call;
             }
+            WASM__CASE(0xE0):
+            WASM__CASE(0xE1):
+            WASM__CASE(0xE2):
+            WASM__CASE(0xE3):
+            WASM__CASE(0xE4):
+            WASM__CASE(0xE5):
+            WASM__CASE(0xE6):
+                WASM__SAVE_STATE();
+                err = wasm__exec_stack_switching(rt, op, &call_mod, &call_idx, &call_slots);
+                if (err == WASM_OK) goto resume_frame;
+                goto stack_switching_stopped;
             WASM__CASE(0xFB):
                 WASM__SET_READER(*pc++);
                 WASM__CALL_OUT(wasm__exec_gc(mod, cf));
@@ -953,7 +1179,6 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             }
             WASM__CASE(0x24): {
                 uint32_t x = *pc++;
-                wasm_value_t value;
 
                 if (!mod->globals[x].is_mutable) {
                     WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "global %u is immutable", (unsigned)x);
@@ -961,13 +1186,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                     goto cleanup;
                 }
                 sp -= wasm__valtype_slots(mod->globals[x].type);
-                value = wasm__value_from_slot(rt, mod->globals[x].type, &mod->globals[x].ref_type, sp);
-                if (!wasm__runtime_value_matches_type(mod,
-                                                      &value,
-                                                      mod->globals[x].type,
-                                                      &mod->globals[x].ref_type))
-                    WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
-                wasm__global_set_value(&mod->globals[x], value);
+                wasm__set_global_from_slot(rt, &mod->globals[x], sp);
                 WASM__NEXT();
             }
             WASM__CASE(0x25): {
@@ -994,13 +1213,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
                 if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
                 value = wasm__value_from_slot(rt, table->reftype, &table->reftype_info, --sp);
                 element_index = wasm__slot_index(--sp, table->is_64);
-                if (!wasm__runtime_value_matches_type(mod,
-                                                      &value,
-                                                      table->reftype,
-                                                      &table->reftype_info))
-                    WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
                 if (element_index >= table->size || !table->elems) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
-                table->elems[element_index] = value;
+                wasm__store_table_elem(table, element_index, &value);
                 WASM__NEXT();
             }
 
@@ -2115,11 +2329,16 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
     }
 
     do_host_call:
+        if (wasm__linked_func_resolve(&call_mod, &call_idx)) {
+            callee = &call_mod->funcs[call_idx];
+            if (WASM__IS_TAIL_CALL(op)) goto do_tail_call;
+            goto do_call;
+        }
         call_type = wasm__module_functype(call_mod, callee->type_idx);
         sp -= call_slots;
         WASM__SAVE_STATE();
         err = wasm__call_host_from_stack(call_mod, call_type, callee, sp);
-        sp = stack + rt->sp;
+        sp = stack + rt->exec->sp;
         mem0_size = 0;
         WASM__LOAD_FUEL();
         if (WASM__IS_TAIL_CALL(op)) {
@@ -2133,7 +2352,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             if (err == WASM_YIELD) goto yielded;
         }
         if (err != WASM__ERR_EXCEPTION) goto cleanup;
-        err = wasm__unwind_host_exception(mod, cf, base_frame_sp, WASM__IS_TAIL_CALL(op));
+        err = wasm__unwind_host_exception(rt, cf, WASM__IS_TAIL_CALL(op));
         if (err == WASM_ERR_INTERRUPTED) goto interrupted_in_handler;
         if (err != WASM__ERR_RESUME_FRAME) return err;
         goto resume_frame;
@@ -2145,13 +2364,14 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         cf->op_at = op_at;
         cf->lsp = lsp;
     push_frame: {
-        wasm__arena_chunk_t* chunk = rt->frame_arena;
+        wasm__exec_stack_t* exec = rt->exec;
+        wasm__arena_chunk_t* chunk = exec->frame_arena;
         wasm__call_frame_t* next;
 
-        if (WASM__UNLIKELY(!callee->ops || rt->call_frame_sp >= rt->max_call_frames ||
-                           callee->max_stack > rt->max_stack - (uint32_t)(sp - stack) || !chunk ||
+        if (WASM__UNLIKELY(!callee->ops || exec->call_frame_sp >= exec->max_call_frames ||
+                           callee->max_stack > exec->max_stack - (uint32_t)(sp - stack) || !chunk ||
                            callee->frame_bytes > chunk->size - chunk->used)) {
-            rt->sp = (uint32_t)(sp - stack);
+            exec->sp = (uint32_t)(sp - stack);
             err = wasm__push_call_frame(call_mod, call_idx, sp, call_results_dst);
             if (err != WASM_OK) {
                 if (WASM__IS_TAIL_CALL(op)) return err;
@@ -2161,7 +2381,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             if (wasm__interrupt_pending(rt)) goto interrupted;
             WASM__NEXT();
         }
-        next = &rt->call_frames[rt->call_frame_sp++];
+        next = &exec->call_frames[exec->call_frame_sp++];
         next->module = call_mod;
         next->func_idx = call_idx;
         next->sp_base = (uint32_t)(sp - stack);
@@ -2197,13 +2417,13 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         wasm__drop_labels(labels, lsp, lsp);
         lsp = 0;
         WASM__SAVE_STATE();
-        wasm__arena_reset(rt, cf->arena_saved);
-        rt->call_frame_sp--;
+        wasm__arena_reset(rt, rt->exec, cf->arena_saved);
+        rt->exec->call_frame_sp--;
         goto push_frame;
 
     throw_pending:
         WASM__SAVE_STATE();
-        err = wasm__handle_exception_frames(mod, base_frame_sp);
+        err = wasm__throw_across_stacks(rt);
         if (err == WASM_ERR_INTERRUPTED) goto interrupted_in_handler;
         if (err != WASM_OK) return err;
     resume_frame:
@@ -2212,19 +2432,21 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
         WASM__NEXT();
 
     return_frame:
-        if (rt->call_frame_sp == base_frame_sp + 1u) {
+        if (WASM__UNLIKELY(rt->exec->call_frame_sp == rt->exec->frame_floor)) {
+            if (rt->exec != rt->loop_stack) goto cont_return;
             err = WASM__ERR_RETURN_FRAME;
             goto cleanup;
         }
         {
+            wasm__exec_stack_t* exec = rt->exec;
             wasm__slot_t* dst = stack + sp_base;
             wasm__slot_t* src = sp - func->result_slots;
 
             for (i = 0; i < func->result_slots; i++) dst[i] = src[i];
             sp = dst + func->result_slots;
             if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
-            wasm__arena_reset(rt, cf->arena_saved);
-            rt->call_frame_sp--;
+            wasm__arena_reset(rt, exec, cf->arena_saved);
+            exec->call_frame_sp--;
             cf--;
             if (cf->module != mod) {
                 mod = cf->module;
@@ -2240,7 +2462,29 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
             lsp = cf->lsp;
             WASM__NEXT();
         }
+    cont_return: {
+        wasm__exec_stack_t* exec = rt->exec;
+        wasm__exec_stack_t* parent = exec->parent;
+        uint32_t n = func->result_slots;
+
+        if (lsp > 0) wasm__drop_labels(labels, lsp, lsp);
+        cf->lsp = lsp = 0;
+        if (n > parent->max_stack - parent->sp) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+        if (n > 0) memcpy(&parent->stack[parent->sp], sp - n, n * sizeof(*sp));
+        parent->sp += n;
+        wasm__cont_stack_release(rt, exec);
+        rt->exec = parent;
+        WASM__ENTER_FRAME();
+        WASM__NEXT();
     }
+    }
+
+    stack_switching_stopped:
+        if (err != WASM__ERR_CALL_FRAME && err != WASM_ERR_INTERRUPTED) return err;
+        WASM__ENTER_FRAME();
+        if (err == WASM_ERR_INTERRUPTED) goto interrupted;
+        callee = &call_mod->funcs[call_idx];
+        goto do_host_call;
 
     interrupted_in_handler:
         WASM__ENTER_FRAME();
@@ -2261,6 +2505,7 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, uint32_t base_frame_sp
     suspend:
         if (!resumable) goto cleanup;
         WASM__SAVE_STATE();
+        rt->exec->parked = 1;
         rt->suspended = err;
         return err;
 
@@ -2283,6 +2528,7 @@ cleanup:
 #undef WASM__IS_TAIL_CALL
 #undef WASM__MEMORY_PTR
 #undef WASM__ENTER_FRAME
+#undef WASM__LOAD_STACK
 #undef WASM__DEFAULT
 #undef WASM__CASE
 #undef WASM__NEXT
@@ -2295,24 +2541,56 @@ cleanup:
 #undef WASM__SAVE_STATE
 
 static void wasm__drop_call_frames(wasm_runtime_t* rt, uint32_t base_frame_sp) {
-    while (rt->call_frame_sp > base_frame_sp) {
-        wasm__call_frame_t* cf = &rt->call_frames[rt->call_frame_sp - 1];
+    wasm__exec_stack_t* exec = rt->exec;
+
+    while (exec->call_frame_sp > base_frame_sp) {
+        wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1];
 
         wasm__clear_call_frame(cf);
-        wasm__arena_reset(rt, cf->arena_saved);
-        rt->sp = cf->sp_base;
+        wasm__arena_reset(rt, exec, cf->arena_saved);
+        exec->sp = cf->sp_base;
         memset(cf, 0, sizeof(*cf));
-        rt->call_frame_sp--;
+        exec->call_frame_sp--;
     }
 }
 
-static wasm_error_t wasm__interp_run(wasm_runtime_t* rt, uint32_t base_frame_sp, int resumable) {
-    wasm_error_t err = wasm__interp_loop(rt, base_frame_sp, resumable);
+/* Returns from rt->exec's top frame, whose host tail call finished with its results on the stack. */
+static wasm_error_t wasm__return_after_yield(wasm_runtime_t* rt) {
+    wasm__exec_stack_t* exec = rt->exec;
+    wasm__exec_stack_t* parent = exec->parent;
+    wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1u];
+    uint32_t n = cf->func->result_slots;
 
+    wasm__clear_call_frame(cf);
+    if (!parent || exec->call_frame_sp > exec->frame_floor) return wasm__finish_call_frame(rt, 0);
+    if (n > parent->max_stack - parent->sp) {
+        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)parent->max_stack);
+        return WASM_ERR_STACK_OVERFLOW;
+    }
+    if (n > 0) memcpy(&parent->stack[parent->sp], &exec->stack[exec->sp - n], n * sizeof(wasm__slot_t));
+    parent->sp += n;
+    wasm__cont_stack_release(rt, exec);
+    rt->exec = parent;
+    return WASM_OK;
+}
+
+/* Runs the frames above base_frame_sp of base_stack and the continuation stacks running on them. */
+static wasm_error_t wasm__interp_run(wasm_runtime_t* rt, wasm__exec_stack_t* base_stack, uint32_t base_frame_sp,
+                                     int resumable) {
+    wasm__exec_stack_t* outer_stack = rt->loop_stack;
+    uint32_t outer_floor = base_stack->frame_floor;
+    wasm_error_t err;
+
+    base_stack->frame_floor = base_frame_sp + 1u;
+    rt->loop_stack = base_stack;
+    err = wasm__interp_loop(rt, resumable);
+    base_stack->frame_floor = outer_floor;
+    rt->loop_stack = outer_stack;
     if (rt->suspended != WASM_OK) return err;
     if (err == WASM__ERR_RETURN_FRAME) err = wasm__finish_call_frame(rt, base_frame_sp);
-    if (err != WASM_OK && rt->call_frame_sp > base_frame_sp)
-        wasm__capture_backtrace(rt, base_frame_sp);
+    if (err != WASM_OK && (rt->exec != base_stack || rt->exec->call_frame_sp > base_frame_sp))
+        wasm__capture_backtrace(rt, base_stack, base_frame_sp);
+    wasm__cont_unwind(rt, base_stack);
     wasm__drop_call_frames(rt, base_frame_sp);
     return err;
 }
@@ -2322,7 +2600,7 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
                                  wasm_value_t* results) {
     wasm_runtime_t* rt = mod->rt;
     wasm_func_t* func;
-    uint32_t base_frame_sp = rt->call_frame_sp;
+    uint32_t base_frame_sp = rt->exec->call_frame_sp;
     wasm_error_t err;
 
     if (func_idx >= mod->num_funcs) return WASM_ERR_MALFORMED;
@@ -2341,22 +2619,24 @@ WASM_PRIVATE wasm_error_t wasm__interp(wasm_module_t* mod, uint32_t func_idx,
     if (wasm__runtime_take_interrupt(rt)) return WASM_ERR_INTERRUPTED;
     err = wasm__push_root_call_frame(mod, func_idx, args, num_args, results);
     if (err != WASM_OK) return err;
-    return wasm__interp_run(rt, base_frame_sp, base_frame_sp == 0 && rt->nonresumable_depth == 0);
+    return wasm__interp_run(rt, rt->exec, base_frame_sp, base_frame_sp == 0 && rt->nonresumable_depth == 0);
 }
 
 WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
                                         const wasm_value_t* host_results, uint32_t num_host_results,
                                         wasm_value_t* results, uint32_t num_results) {
+    wasm__exec_stack_t* exec = rt->exec;
+    wasm__exec_stack_t* root = &rt->main_stack;
     const wasm_functype_t* root_type;
     uint32_t expected = 0;
     uint32_t slots;
     uint32_t i;
 
-    if (rt->suspended == WASM_OK || rt->call_frame_sp == 0) {
+    if (rt->suspended == WASM_OK || root->call_frame_sp == 0) {
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "no call is suspended");
         return WASM_ERR_MALFORMED;
     }
-    root_type = wasm__frame_functype(&rt->call_frames[0]);
+    root_type = wasm__frame_functype(&root->call_frames[0]);
     if (num_results < root_type->num_results || (root_type->num_results > 0 && !results)) {
         WASM__SET_ERR(rt, WASM_ERR_TYPE_MISMATCH, "resume expects %u results, got %u",
                       (unsigned)root_type->num_results, (unsigned)num_results);
@@ -2378,7 +2658,7 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
             return WASM_ERR_TYPE_MISMATCH;
         }
     }
-    if (expected > 0 && wasm__valtypes_slots(rt->yield_type->results, expected) > rt->max_stack - rt->sp) {
+    if (expected > 0 && wasm__valtypes_slots(rt->yield_type->results, expected) > exec->max_stack - exec->sp) {
         wasm__interp_cancel(rt);
         WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
         return WASM_ERR_STACK_OVERFLOW;
@@ -2388,48 +2668,55 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
         wasm_error_t err = wasm__anyref_from_host(rt, &value);
 
         if (err != WASM_OK) return err;
-        slots += wasm__slot_from_value(&rt->stack[rt->sp + slots], &value);
+        slots += wasm__slot_from_value(&exec->stack[exec->sp + slots], &value);
     }
-    rt->sp += slots;
-    rt->call_frames[0].results_dst = results;
+    exec->sp += slots;
+    root->call_frames[0].results_dst = results;
+    exec->parked = 0;
     rt->suspended = WASM_OK;
     rt->yield_module = NULL;
     rt->yield_type = NULL;
     wasm__atomic_store_size(&rt->interrupt_requested, 0u);
-    if (!rt->call_frames[rt->call_frame_sp - 1u].pc) {
-        wasm_error_t err;
+    if (!exec->call_frames[exec->call_frame_sp - 1u].pc) {
+        wasm_error_t err = wasm__return_after_yield(rt);
 
-        wasm__clear_call_frame(&rt->call_frames[rt->call_frame_sp - 1u]);
-        err = wasm__finish_call_frame(rt, 0);
         if (err != WASM_OK) {
+            wasm__cont_unwind(rt, root);
             wasm__drop_call_frames(rt, 0);
             return err;
         }
-        if (rt->call_frame_sp == 0) return WASM_OK;
+        if (root->call_frame_sp == 0) return WASM_OK;
     }
-    return wasm__interp_run(rt, 0, 1);
+    return wasm__interp_run(rt, root, 0, 1);
 }
 
 WASM_PRIVATE void wasm__interp_cancel(wasm_runtime_t* rt) {
     if (!rt || rt->suspended == WASM_OK) return;
+    wasm__cont_unwind(rt, &rt->main_stack);
     wasm__drop_call_frames(rt, 0);
+    rt->exec->parked = 0;
     rt->suspended = WASM_OK;
     rt->yield_module = NULL;
     rt->yield_type = NULL;
 }
 
 WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_module_t* mod) {
+    const wasm__exec_stack_t* s;
     uint32_t i;
 
-    if (!rt || rt->suspended == WASM_OK) return;
+    if (!rt) return;
+    wasm__cont_invalidate_using(rt, mod);
+    if (rt->suspended == WASM_OK) return;
     if (rt->yield_module == mod) {
         wasm__interp_cancel(rt);
         return;
     }
-    for (i = 0; i < rt->call_frame_sp; i++) {
-        if (rt->call_frames[i].module == mod) {
-            wasm__interp_cancel(rt);
-            return;
+    for (s = wasm__next_live_stack(rt, NULL); s; s = wasm__next_live_stack(rt, s)) {
+        for (i = 0; i < s->call_frame_sp; i++) {
+            if (s->call_frames[i].module == mod) {
+                wasm__interp_cancel(rt);
+                return;
+            }
         }
     }
 }

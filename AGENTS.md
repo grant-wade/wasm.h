@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-This repo is a C99 WebAssembly runtime developed in `src/` and distributed as the generated single header `wasm.h`. `test/wl.h` is a local support library used by native tests, not the main product.
+This repo is a C99 WebAssembly runtime developed in `src/` and distributed as the generated single header `wasm.h`.
 
 ## Source Of Truth
 
@@ -18,18 +18,18 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - `wasm.h`: generated distribution; regenerate with `./cbuild -t wasm-header`.
 - `build.c`: build and test graph; `cbuild.h` is the vendored single-header build system it uses (generated upstream in the cbuild repository; do not edit it here).
 - `tools/amalgamate.c`: generator and freshness check for `wasm.h`.
-- `test/wasm_test.c`: primary regression coverage for the runtime.
+- `test/unit/`: primary regression coverage for the runtime, one `*_test.c` per `src/` unit; `test.h`/`test.c` are the test harness, `support.h`/`support.c` the shared helpers, `main.c` runs the suites declared in `suites.h`, and `amalgamation.c` builds them as one translation unit against `wasm.h`.
 - `wasm.c`: CLI runner and inspection tool built on top of `wasm.h`.
 - `wasm2api.c`: generator for typed C wrappers around Wasm exports and imports.
 - `build.zig`, `build.zig.zon`: Zig 0.17 package; it compiles every `.c` file under `src/`, so new units need no change there.
 - `zig/wasm.zig`: Zig bindings over the C API; `zig/wasm_test.zig` tests them.
 - `zig/wasm2zig.zig`: generator for Zig `Exports`, `Api`, and `Imports` declarations from a Wasm module, run at build time by `addBindings` in `build.zig`; `zig/wasm2zig_test.zig` tests its output for `zig/testdata/guest.wasm` (source in `guest.wat`).
 - `examples/zig/`: standalone Zig project that compiles `guest/calc.c` to Wasm and embeds it; `./cbuild --test` runs it as `zig_example`.
-- `test/wl.h`: local test support/platform layer.
-- `test/wl_test.c`: tests for `test/wl.h`.
 - `test/fixture_runner.c`: runner for emcc-generated Wasm fixtures.
 - `test/spectest_runner.c`: spec JSON harness and diagnostic normalization layer.
 - `test/spec/`: WebAssembly testsuite submodule content.
+- `test/proposals/`: proposal suites vendored from their repositories (each with a `SOURCE` file), registered like `test/spec/proposals/`.
+- `test/wast/<suite>/`: this runtime's own `.wast` suites, registered from `wast_suites` in `build.c` with the features each runs with.
 - `docs/`: release-facing embedding and build documentation for the current runtime.
 
 ## Build And Test
@@ -39,9 +39,9 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - Generate the root header: `./cbuild -t wasm-header`.
 - Check generation without modifying files: `cc -o amalgamate tools/amalgamate.c && ./amalgamate --check`.
 - Modular library: `wasm_runtime`; `--test` exercises both modular and single-header builds.
-- Focused native targets (`./cbuild -t <name>`): `wasm_test`, `wl_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` with `--fuzzer`.
-- Test selection: `--test-label=unit|modular|spectest|proposal|emcc`, `--test-filter=GLOB`, `--test-exclude=GLOB`, `--list-tests`. Logs land in `build/<config>/tests/`.
-- Proposal suites (`test/spec/proposals/`) skip unless listed in `implemented_proposals` in `build.c`; `--spec-proposals` runs them all.
+- Focused native targets (`./cbuild -t <name>`): `wasm_test`, `wasm`, `wasm2api`, `session_math_demo`, and `wasm_load_fuzzer` with `--fuzzer`.
+- Test selection: `--test-label=unit|modular|spectest|proposal|emcc`, `--test-filter=GLOB`, `--test-exclude=GLOB`, `--list-tests`. Unit suites run as `wasm_test.<suite>` and `wasm_modular_test.<suite>`, with `<suite>` the `test/unit/` path of a `*_test.c` file without `_test.c` and with `/` as `.` (e.g. `exec.cont`). Logs land in `build/<config>/tests/`.
+- Proposal suites (`test/spec/proposals/`, `test/proposals/`) skip unless listed in `implemented_proposals` in `build.c`; `--spec-proposals` runs them all.
 - Spectests exist only when `wasm-tools` on `PATH` provides both `json-from-wast` and `parse`; Emscripten fixtures only when `emcc` is found; the `zig` test only when `zig` 0.17 is found.
 - Zig package: `zig build test` (wrapper and modular C tests), `zig build cross` (compile for the targets in `cross_targets`). Public API changes in `src/wasm.h` usually need matching changes in `zig/wasm.zig`.
 
@@ -53,8 +53,8 @@ This repo is a C99 WebAssembly runtime developed in `src/` and distributed as th
 - Include a source file's own header first, then the interfaces it uses directly. Headers must be self-contained and their include graph acyclic. Shared layouts belong in focused owner/state headers; do not introduce umbrella internal headers.
 - Keep OS dependencies in `src/platform/` and SIMD intrinsics in `src/simd/native.h`. The build compiles each source header independently (`wasm_private_header_check`) and checks missing prototypes in modular runtime builds.
 - For generated `wasm.h`, public declarations must work without `WASM_IMPL`, implementation-only internals stay behind `#ifdef WASM_IMPL`. Internal linkage uses `WASM_PRIVATE`/`WASM_PRIVATE_INLINE` to support both build forms.
-- Platform helpers default ON for this repo build (`--no-platform` turns them off); `test/wl.h` and the runtime platform bridges may be compiled with them off.
-- If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/wasm_test.c` and `test/spectest_runner.c` together.
+- Platform helpers default ON for this repo build (`--no-platform` turns them off); the runtime platform bridges may be compiled with them off.
+- If a change touches validation, init expressions, memarg decoding, or spectest failures, check `test/unit/` and `test/spectest_runner.c` together.
 - `test/spectest_runner.c` intentionally normalizes only semantically equivalent diagnostics. Do not add aliases for cases that should actually change pass/fail behavior.
-- The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, and Memory64. Wide arithmetic, custom page sizes, compact imports, and threads are implemented behind opt-in feature flags (`WASM__PROPOSAL_FEATURES`). Atomic primitives live in `src/atomics.c`; thread blocking and shared-memory reservation live in `src/platform/threads.c`.
+- The current runtime supports reference types, bulk memory, multi-memory, tail calls, exceptions, SIMD, GC, extended const expressions, Memory64, and the not yet standardized wide arithmetic, custom page sizes, compact imports, threads, stack switching, and custom descriptors. All are enabled by default; `wasm_config_t.features` selects them (`WASM_FEATURES_ALL`, `WASM_FEATURES_STANDARD`). Atomic primitives live in `src/atomics.c`; thread blocking and shared-memory reservation live in `src/platform/threads.c`. Continuation objects, resume, suspend, and switch live in `src/exec/cont.c`; execution stacks, one per continuation plus the main stack, in `src/exec/stack.c`.
 - `wasm2api.c` currently generates wrappers for `i32`, `i64`, `f32`, `f64`, and `externref`; unsupported signatures are skipped with diagnostics.

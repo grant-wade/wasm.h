@@ -16,10 +16,10 @@ Compile the build program once; it rebuilds itself when `build.c` or `cbuild.h` 
 `--test` runs the native tests and every available specification test against both the single header and the modular library, in parallel, and exits non-zero if any fail. The output of a failed test is printed, and every test's output is kept in `build/<config>/tests/<name>.log`. Optional tools are detected each run:
 
 - `wasm-tools` with `json-from-wast` and `parse`: specification tests.
-- `emcc` (on `PATH`, or under `EMSDK` or `EMSCRIPTEN`): Emscripten fixtures and the `session_math` example.
+- `emcc` (on `PATH`, or under `EMSDK` or `EMSCRIPTEN`): Emscripten fixtures and `--regenerate-examples`.
 - `zig` 0.17 on `PATH`: the `zig` test, which runs `zig build test` with matching `--release`, `--no-platform`, and `--no-werror` settings. See the [Zig guide](ZIG.md).
 
-Suites under `test/spec/proposals/` run as `spectest.proposal.<proposal>.<file>` and also carry the `proposal` label. Proposals listed in `implemented_proposals` in `build.c` run by default; the rest are reported as skipped unless `--spec-proposals` is given.
+Each `test/unit/<path>_test.c` runs as `wasm_test.<suite>` and `wasm_modular_test.<suite>`, where `<suite>` is `<path>` with `/` replaced by `.`; `build/<config>/wasm_test <suite>...` runs suites directly. Suites under `test/spec/proposals/` and `test/proposals/` run as `spectest.proposal.<proposal>.<file>` and also carry the `proposal` label. A proposal directory in both fails the build. Proposals listed in `implemented_proposals` in `build.c` run by default; the rest are reported as skipped unless `--spec-proposals` is given. Suites under `test/wast/<suite>/` run as `spectest.wast.<suite>.<file>` with the features `wast_suites` in `build.c` gives them. Suites under `test/spec/legacy/` and `test/spec/custom/` run as `spectest.legacy.<file>` and `spectest.custom.<file>`.
 
 Pick tests with `--test-label` (`unit`, `modular`, `spectest`, `proposal`, `emcc`, `zig`), `--test-filter`, and `--test-exclude`, which take wildcards on test names. `--list-tests` shows what is selected. `-j` sets compile and test parallelism; `--test-timeout=SECONDS` limits each test.
 
@@ -36,14 +36,16 @@ The build has no cache: options that shape it are read on every run, so pass the
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--release` | off | Optimized build (`-O3 -DNDEBUG`, or `/O2`) in `build/release` instead of a debug build in `build/debug`. |
-| `--build-dir=DIR` | `build/debug` or `build/release` | Output directory. |
+| `--build-dir=DIR` | `build/debug`, `build/release`, or `build/gc-stress` | Output directory. |
 | `--cc=COMPILER` | `$CC`, else `cc` or `cl` | C compiler; GCC, Clang, and MSVC are supported. |
 | `--cflags=FLAGS`, `--ldflags=FLAGS` | `$CFLAGS`, `$LDFLAGS` | Extra flags, applied after all built-in ones. |
 | `--no-platform` | off | Build without platform-backed runtime and test helpers. |
 | `--no-werror` | off | Do not treat compiler warnings as errors. |
 | `--no-emcc` | off | Skip the Emscripten fixture tests even when `emcc` is available. |
 | `--no-zig` | off | Skip the Zig package tests even when `zig` 0.17 is available. |
+| `--gc-stress` | off | Collect garbage before every GC allocation (`-DWASM_GC_STRESS`) in `build/gc-stress`. |
 | `--fuzzer` | off | Also build the Clang/libFuzzer loader and execution harnesses. |
+| `--regenerate-examples` | off | Add `session_math_regenerate`, which rewrites the committed example module and wrappers with `emcc`. |
 | `--spec-proposals` | off | Run specification proposal suites the runtime does not implement instead of skipping them. |
 
 `./cbuild --help` lists these with cbuild's own options. For example, the CI sanitizer configuration is:
@@ -64,8 +66,9 @@ Build individual targets with `./cbuild -t <target>`; `./cbuild --list` shows th
 | `wasm_bench` | Interpreter micro-benchmarks from `bench/kernels.wat`; run a `--release` build. |
 | `wasm_runtime` | Modular static library. |
 | `wasm-header` | Regenerate the root `wasm.h` from `src/`. |
-| `wasm_test`, `wasm_modular_test`, `wl_test` | Native regression executables. |
-| `session_math_demo` | Wrapper example; requires `emcc`. |
+| `wasm_test`, `wasm_modular_test` | Native regression executables. |
+| `session_math_demo` | Wrapper example. |
+| `session_math_regenerate` | Rebuild `examples/session_math.wasm` and its wrappers; requires `emcc` and `--regenerate-examples`. |
 | `wasm_load_fuzzer`, `wasm_exec_fuzzer` | libFuzzer harnesses; require `--fuzzer`. |
 | `wasm_exec_fuzz_replay` | Execution harness over `test/fuzz/corpus`, run as a unit test; requires `wasm-tools`. |
 

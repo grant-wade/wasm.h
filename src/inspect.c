@@ -141,7 +141,7 @@ wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
     }
     err = wasm__anyref_from_host(mod->rt, &val);
     if (err != WASM_OK) return err;
-    return wasm__gc_struct_set_field((wasm_gc_struct_t*)header, type, field_idx, val);
+    return wasm__gc_struct_store_field((wasm_gc_struct_t*)header, type, field_idx, val);
 }
 
 wasm_error_t wasm_array_length(const wasm_module_t* mod, wasm_value_t array_ref,
@@ -211,7 +211,7 @@ wasm_error_t wasm_array_set_elem(wasm_module_t* mod, wasm_value_t array_ref,
     }
     err = wasm__anyref_from_host(mod->rt, &val);
     if (err != WASM_OK) return err;
-    return wasm__gc_array_set((wasm_gc_array_t*)header, type, index, val);
+    return wasm__gc_array_store_element((wasm_gc_array_t*)header, type, index, val);
 }
 
 /* Reads the module and function names from the "name" custom section. Names that are malformed,
@@ -361,26 +361,32 @@ void* wasm_module_userdata(const wasm_module_t* mod) {
     return mod ? mod->host_userdata : NULL;
 }
 
+/* last, when not NULL, is copied after the count values. */
 static wasm_error_t wasm__copy_host_values(wasm_module_t* mod, const wasm_value_t* values, uint32_t count,
-                                           wasm_value_t** out_copy) {
+                                           const wasm_value_t* last, wasm_value_t** out_copy) {
+    uint32_t total = count + (last ? 1u : 0u);
+
     *out_copy = NULL;
-    if (count == 0) return WASM_OK;
-    *out_copy = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, count, sizeof(wasm_value_t));
+    if (total == 0) return WASM_OK;
+    *out_copy = (wasm_value_t*)wasm__malloc_array(&mod->rt->allocator, total, sizeof(wasm_value_t));
     if (!*out_copy) {
         WASM__SET_ERR(mod->rt, WASM_ERR_OOM, "%s", "out of memory copying GC object values");
         return WASM_ERR_OOM;
     }
-    memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
-    return wasm__values_from_host(mod->rt, *out_copy, count);
+    if (count > 0) memcpy(*out_copy, values, (size_t)count * sizeof(wasm_value_t));
+    if (last) (*out_copy)[count] = *last;
+    return wasm__values_from_host(mod->rt, *out_copy, total);
 }
 
-wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
-                             const wasm_value_t* field_values, uint32_t num_fields,
-                             wasm_value_t* out_ref) {
+/* descriptor is NULL for a type without a descriptor. */
+static wasm_error_t wasm__struct_new(wasm_module_t* mod, uint32_t type_idx, const wasm_value_t* field_values,
+                                     uint32_t num_fields, const wasm_value_t* descriptor, wasm_value_t* out_ref) {
     const wasm_structtype_t* st;
     wasm_gc_struct_t* object;
     wasm_value_t* values;
     wasm__gc_root_t root;
+    uint32_t num_values;
+    uint32_t descriptor_idx;
     wasm_error_t err;
     uint32_t i;
 
@@ -399,23 +405,83 @@ wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                       (unsigned)num_fields);
         return WASM_ERR_TYPE_MISMATCH;
     }
-
-    err = wasm__copy_host_values(mod, field_values, num_fields, &values);
+    descriptor_idx = mod->types[type_idx].descriptor;
+    if ((descriptor_idx != UINT32_MAX) != (descriptor != NULL)) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                      descriptor ? "struct type %u has no descriptor" : "struct type %u requires a descriptor",
+                      (unsigned)type_idx);
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    num_values = num_fields + (descriptor ? 1u : 0u);
+    err = wasm__copy_host_values(mod, field_values, num_fields, descriptor, &values);
     if (err != WASM_OK) {
         wasm__free(&mod->rt->allocator, values);
         return err;
     }
-    wasm__gc_push_root(mod->rt, &root, &values, &num_fields);
+    if (descriptor) {
+        wasm_reftype_t descriptor_ref;
+        const wasm_gc_header_t* header = wasm__runtime_get_gc_object(mod, &values[num_fields]);
+
+        err = wasm__runtime_make_typeidx_reftype(mod, descriptor_idx, 0, &descriptor_ref);
+        descriptor_ref.exact = 1;
+        if (err == WASM_OK &&
+            (!header || header->kind != WASM_GC_OBJ_STRUCT ||
+             !wasm__runtime_value_matches_type(mod, &values[num_fields], descriptor_ref.type, &descriptor_ref))) {
+            WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH,
+                          "struct type %u requires a descriptor of exactly type %u",
+                          (unsigned)type_idx, (unsigned)descriptor_idx);
+            err = WASM_ERR_TYPE_MISMATCH;
+        }
+        if (err != WASM_OK) {
+            wasm__free(&mod->rt->allocator, values);
+            return err;
+        }
+    }
+    wasm__gc_push_root(mod->rt, &root, &values, &num_values);
     object = wasm__gc_alloc_struct_object(mod->rt, mod, type_idx, st);
     wasm__gc_pop_root(mod->rt, &root);
     err = object ? WASM_OK : WASM_ERR_OOM;
 
+    if (err == WASM_OK && descriptor) *wasm__gc_descriptor_slot(&object->header) = values[num_fields].of.gc_obj;
     for (i = 0; err == WASM_OK && i < st->num_fields; i++)
         err = wasm__gc_struct_store_field(object, st, i, values[i]);
     wasm__free(&mod->rt->allocator, values);
     if (err != WASM_OK) return err;
 
     *out_ref = wasm__gc_type_ref_value(mod, type_idx, &object->header);
+    return WASM_OK;
+}
+
+wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
+                             const wasm_value_t* field_values, uint32_t num_fields,
+                             wasm_value_t* out_ref) {
+    return wasm__struct_new(mod, type_idx, field_values, num_fields, NULL, out_ref);
+}
+
+wasm_error_t wasm_struct_new_desc(wasm_module_t* mod, uint32_t type_idx,
+                                  const wasm_value_t* field_values, uint32_t num_fields,
+                                  wasm_value_t descriptor, wasm_value_t* out_ref) {
+    return wasm__struct_new(mod, type_idx, field_values, num_fields, &descriptor, out_ref);
+}
+
+wasm_error_t wasm_struct_get_desc(const wasm_module_t* mod, wasm_value_t struct_ref, wasm_value_t* out_desc) {
+    const wasm_gc_header_t* header;
+    wasm_gc_header_t** descriptor;
+    wasm_error_t err;
+
+    if (!out_desc) {
+        if (mod && mod->rt)
+            WASM__SET_ERR(mod->rt, WASM_ERR_MALFORMED, "%s", "invalid struct get arguments");
+        return WASM_ERR_MALFORMED;
+    }
+    err = wasm__public_resolve_gc_object(mod, &struct_ref, WASM_GC_OBJ_STRUCT, &header);
+    if (err != WASM_OK) return err;
+    descriptor = wasm__gc_descriptor_slot((wasm_gc_header_t*)header);
+    if (!descriptor || !*descriptor) {
+        WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "struct has no descriptor");
+        return WASM_ERR_TYPE_MISMATCH;
+    }
+    *out_desc = wasm__gc_type_ref_value((*descriptor)->module, (*descriptor)->type_index, *descriptor);
     return WASM_OK;
 }
 
@@ -443,7 +509,7 @@ wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
         return WASM_ERR_MALFORMED;
     }
 
-    err = wasm__copy_host_values(mod, elem_values, num_elems, &values);
+    err = wasm__copy_host_values(mod, elem_values, num_elems, NULL, &values);
     if (err != WASM_OK) {
         wasm__free(&mod->rt->allocator, values);
         return err;

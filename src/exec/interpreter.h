@@ -15,7 +15,8 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
 
 WASM_PRIVATE void wasm__interp_cancel(wasm_runtime_t* rt);
 
-/* Cancels rt's suspended call if any of its frames belongs to mod. */
+/* Cancels rt's suspended call if any of its frames belongs to mod, and drops the stacks of
+ * continuations that run code of mod. */
 WASM_PRIVATE void wasm__interp_cancel_using(wasm_runtime_t* rt, const wasm_module_t* mod);
 
 #endif /* WASM_SRC_EXEC_INTERPRETER_H */

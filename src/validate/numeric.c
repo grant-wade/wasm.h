@@ -221,7 +221,7 @@ WASM_PRIVATE wasm_error_t wasm__validator_validate_prefixed(wasm__validator_t* v
                 return wasm__validator_error(v, at, "unknown elem segment %u", (unsigned)elem_idx);
             segment = &v->mod->elem_segments[elem_idx];
             table = &v->mod->tables[table_idx];
-            if (!wasm__elem_segment_values_match_type(v->mod,
+            if (!wasm__elem_segment_matches_type(v->mod,
                                                       segment,
                                                       table->reftype,
                                                       &table->reftype_info))

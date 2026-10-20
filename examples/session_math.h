@@ -28,7 +28,7 @@ uint64_t session_math_get_memory_size(void);
 const char* session_math_read_memory_string(uint64_t wasm_ptr, char* buffer, size_t max_len);
 bool session_math_read_memory(uint64_t wasm_ptr, void* dest, size_t len);
 bool session_math_write_memory(uint64_t wasm_ptr, const void* src, size_t len);
-uint32_t session_math_get_required_features(void);
+uint64_t session_math_get_required_features(void);
 wasm_error_t session_math_get_last_error(void);
 const char* session_math_get_last_error_string(void);
 const char* session_math_get_last_error_message(void);

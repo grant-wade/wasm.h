@@ -102,10 +102,12 @@ pub const ValType = enum(c.wasm_valtype_t) {
     structref = c.WASM_TYPE_STRUCTREF,
     arrayref = c.WASM_TYPE_ARRAYREF,
     exnref = c.WASM_TYPE_EXNREF,
+    contref = c.WASM_TYPE_CONTREF,
     nullref = c.WASM_TYPE_NONE,
     nullfuncref = c.WASM_TYPE_NOFUNC,
     nullexternref = c.WASM_TYPE_NOEXTERN,
     nullexnref = c.WASM_TYPE_NOEXN,
+    nullcontref = c.WASM_TYPE_NOCONT,
     void = c.WASM_TYPE_VOID,
     _,
 
@@ -333,6 +335,8 @@ pub const RefType = struct {
     kind: ValType,
     type_index: ?u32 = null,
     nullable: bool = true,
+    /// Refers to `type_index` and none of its subtypes.
+    exact: bool = false,
 
     fn fromC(kind: ValType, ref: ?*const c.wasm_reftype_t) ?RefType {
         if (!kind.isRef()) return null;
@@ -341,6 +345,7 @@ pub const RefType = struct {
             .kind = if (r.type == 0) kind else @fromBackingInt(r.type),
             .type_index = if (r.has_type_index != 0) r.type_index else null,
             .nullable = r.nullable != 0,
+            .exact = r.exact != 0,
         };
     }
 };
@@ -471,6 +476,12 @@ pub const Config = struct {
     initial_gc_heap_size: ?usize = null,
     /// Bytes per block of call frame storage; blocks are added as calls nest.
     frame_arena_size: ?usize = null,
+    /// Operand stack size of each continuation, in slots.
+    cont_stack_values: ?u32 = null,
+    /// Call frames each continuation holds.
+    cont_call_depth: ?u32 = null,
+    /// Bytes per block of a continuation's call frame storage.
+    cont_frame_arena_size: ?usize = null,
     /// Defer validating each function body until its first call.
     lazy_validation: ?bool = null,
     /// Locals per function, parameters included; 0 is unlimited.
@@ -483,32 +494,48 @@ pub const Config = struct {
     max_table_elements: ?u64 = null,
     /// Bytes the GC heap may grow to, capping `initial_gc_heap_size`; 0 is unlimited.
     max_gc_heap_bytes: ?u64 = null,
-    /// Replaces the default enabled proposals.
-    features: ?Features = null,
+    /// Continuation stacks alive at once; 0 is unlimited.
+    max_cont_stacks: ?u32 = null,
+    /// Proposals enabled for loaded modules.
+    features: Features = .{},
     /// Sets an initial fuel budget; see `Runtime.setFuel`.
     fuel: ?u64 = null,
 };
 
 /// Proposal feature flags, bit-compatible with `WASM_FEATURE_*`.
-pub const Features = packed struct(u32) {
-    sign_ext: bool = false,
-    nontrapping_fma: bool = false,
-    multi_value: bool = false,
-    mutable_globals: bool = false,
-    bulk_memory: bool = false,
-    reference_types: bool = false,
-    multi_memory: bool = false,
-    extended_const: bool = false,
-    tail_call: bool = false,
-    exceptions: bool = false,
-    simd: bool = false,
-    gc: bool = false,
-    memory64: bool = false,
-    wide_arithmetic: bool = false,
-    custom_page_sizes: bool = false,
-    compact_imports: bool = false,
-    threads: bool = false,
-    reserved: u15 = 0,
+pub const Features = packed struct(u64) {
+    sign_ext: bool = true,
+    nontrapping_fma: bool = true,
+    multi_value: bool = true,
+    mutable_globals: bool = true,
+    bulk_memory: bool = true,
+    reference_types: bool = true,
+    multi_memory: bool = true,
+    extended_const: bool = true,
+    tail_call: bool = true,
+    exceptions: bool = true,
+    simd: bool = true,
+    gc: bool = true,
+    memory64: bool = true,
+    wide_arithmetic: bool = true,
+    custom_page_sizes: bool = true,
+    compact_imports: bool = true,
+    threads: bool = true,
+    stack_switching: bool = true,
+    custom_descriptors: bool = true,
+    reserved: u45 = 0,
+
+    /// Every implemented proposal, `WASM_FEATURES_ALL`.
+    pub const all: Features = .{};
+    /// Standardized proposals only, `WASM_FEATURES_STANDARD`.
+    pub const standard: Features = .{
+        .wide_arithmetic = false,
+        .custom_page_sizes = false,
+        .compact_imports = false,
+        .threads = false,
+        .stack_switching = false,
+        .custom_descriptors = false,
+    };
 
     comptime {
         for (.{
@@ -529,12 +556,16 @@ pub const Features = packed struct(u32) {
             .{ "custom_page_sizes", c.WASM_FEATURE_CUSTOM_PAGE_SIZES },
             .{ "compact_imports", c.WASM_FEATURE_COMPACT_IMPORTS },
             .{ "threads", c.WASM_FEATURE_THREADS },
+            .{ "stack_switching", c.WASM_FEATURE_STACK_SWITCHING },
+            .{ "custom_descriptors", c.WASM_FEATURE_CUSTOM_DESCRIPTORS },
         }) |entry| {
-            if (@as(u32, 1) << @bitOffsetOf(Features, entry[0]) != entry[1]) @compileError("feature bit mismatch: " ++ entry[0]);
+            if (@as(u64, 1) << @bitOffsetOf(Features, entry[0]) != entry[1]) @compileError("feature bit mismatch: " ++ entry[0]);
         }
+        if (all.bits() != c.WASM_FEATURES_ALL) @compileError("Features.all mismatch");
+        if (standard.bits() != c.WASM_FEATURES_STANDARD) @compileError("Features.standard mismatch");
     }
 
-    fn bits(self: Features) u32 {
+    fn bits(self: Features) u64 {
         return @bitCast(self);
     }
 };
@@ -567,6 +598,8 @@ pub const Import = struct {
     /// Details when `type` is a reference type, for global and table imports.
     ref_type: ?RefType,
     mutable: bool,
+    /// A function import that accepts only functions of exactly `type_index`.
+    exact: bool,
 };
 
 /// How a GC struct field or array element is stored.
@@ -605,6 +638,7 @@ pub const TypeKind = enum(c.wasm_comptype_kind_t) {
     func = c.WASM_COMP_FUNC,
     @"struct" = c.WASM_COMP_STRUCT,
     array = c.WASM_COMP_ARRAY,
+    cont = c.WASM_COMP_CONT,
     invalid = c.WASM_COMP_INVALID,
     _,
 };
@@ -692,20 +726,25 @@ pub const Runtime = opaque {
         if (config.max_labels) |v| cfg.max_labels = v;
         if (config.initial_gc_heap_size) |v| cfg.initial_gc_heap_size = v;
         if (config.frame_arena_size) |v| cfg.frame_arena_size = v;
+        if (config.cont_stack_values) |v| cfg.cont_stack_values = v;
+        if (config.cont_call_depth) |v| cfg.cont_call_depth = v;
+        if (config.cont_frame_arena_size) |v| cfg.cont_frame_arena_size = v;
         if (config.lazy_validation) |v| cfg.lazy_validation = @intFromBool(v);
         if (config.max_function_locals) |v| cfg.max_function_locals = v;
         if (config.max_memory_bytes) |v| cfg.max_memory_bytes = v;
         if (config.max_total_memory_bytes) |v| cfg.max_total_memory_bytes = v;
         if (config.max_table_elements) |v| cfg.max_table_elements = v;
         if (config.max_gc_heap_bytes) |v| cfg.max_gc_heap_bytes = v;
-        if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0) return error.Malformed;
+        if (config.max_cont_stacks) |v| cfg.max_cont_stacks = v;
+        cfg.features = config.features.bits();
+        if (cfg.max_stack_values == 0 or cfg.max_call_depth == 0 or cfg.max_labels == 0 or
+            cfg.cont_stack_values == 0 or cfg.cont_call_depth == 0 or config.features.reserved != 0) return error.Malformed;
         const b = try AllocatorBridge.box(allocator);
         const bridged = AllocatorBridge.wrap(b);
         const rt: *Runtime = @ptrCast(c.wasm_runtime_new(&bridged, &cfg) orelse {
             allocator.destroy(b);
             return error.OutOfMemory;
         });
-        if (config.features) |set| rt.setFeatures(set);
         if (config.fuel) |units| rt.setFuel(units);
         return rt;
     }
@@ -742,24 +781,7 @@ pub const Runtime = opaque {
     }
 
     pub fn features(rt: *Runtime) Features {
-        return @bitCast(c.wasm_runtime_enabled_features(rt.raw()));
-    }
-
-    /// Replaces the enabled feature set. Applies to modules loaded afterwards.
-    pub fn setFeatures(rt: *Runtime, set: Features) void {
-        c.wasm_runtime_set_enabled_features(rt.raw(), set.bits());
-    }
-
-    pub fn enableFeatures(rt: *Runtime, set: Features) void {
-        c.wasm_runtime_enable_feature(rt.raw(), set.bits());
-    }
-
-    pub fn disableFeatures(rt: *Runtime, set: Features) void {
-        c.wasm_runtime_disable_feature(rt.raw(), set.bits());
-    }
-
-    pub fn enableAllFeatures(rt: *Runtime) void {
-        c.wasm_runtime_enable_all_features(rt.raw());
+        return @bitCast(c.wasm_runtime_features(rt.raw()));
     }
 
     fn lastErrorOr(rt: *Runtime, fallback: Error) Error {
@@ -1460,6 +1482,7 @@ pub const ModuleInfo = opaque {
             .type = @fromBackingInt(imp.type),
             .ref_type = if (imp.kind == c.WASM_IMPORT_GLOBAL or imp.kind == c.WASM_IMPORT_TABLE) RefType.fromC(@fromBackingInt(imp.type), &imp.ref_type) else null,
             .mutable = imp.is_mutable != 0,
+            .exact = imp.exact != 0,
         };
     }
 
@@ -1530,6 +1553,24 @@ pub const ModuleInfo = opaque {
     /// The element type of array type `type_index`, or null when it is not an array type.
     pub fn arrayField(info: *const ModuleInfo, type_index: u32) ?FieldType {
         return .fromC(c.wasm_array_type_field(info.raw(), type_index));
+    }
+
+    /// The function type index of continuation type `type_index`, or null when it is not one.
+    pub fn contTypeFunc(info: *const ModuleInfo, type_index: u32) ?u32 {
+        const index = c.wasm_cont_type_func(info.raw(), type_index);
+        return if (index == std.math.maxInt(u32)) null else index;
+    }
+
+    /// The type named by struct type `type_index`'s descriptor clause, or null when it has none.
+    pub fn typeDescriptor(info: *const ModuleInfo, type_index: u32) ?u32 {
+        const index = c.wasm_type_descriptor(info.raw(), type_index);
+        return if (index == std.math.maxInt(u32)) null else index;
+    }
+
+    /// The type named by struct type `type_index`'s describes clause, or null when it has none.
+    pub fn typeDescribes(info: *const ModuleInfo, type_index: u32) ?u32 {
+        const index = c.wasm_type_describes(info.raw(), type_index);
+        return if (index == std.math.maxInt(u32)) null else index;
     }
 
     pub fn tagCount(info: *const ModuleInfo) u32 {
@@ -1766,6 +1807,20 @@ pub const Instance = opaque {
         var ref: Value = undefined;
         try check(c.wasm_struct_new(instance.raw(), type_index, Value.cPtr(&values), @intCast(values.len), @ptrCast(&ref)));
         return ref;
+    }
+
+    /// Like `structNew` for a type with a descriptor; `descriptor` must refer to a struct of exactly the descriptor type.
+    pub fn structNewDesc(instance: *Instance, type_index: u32, fields: anytype, descriptor: Value) Error!Value {
+        const values = valueArray(fields);
+        var ref: Value = undefined;
+        try check(c.wasm_struct_new_desc(instance.raw(), type_index, Value.cPtr(&values), @intCast(values.len), descriptor.toC(), @ptrCast(&ref)));
+        return ref;
+    }
+
+    pub fn structGetDesc(instance: *Instance, ref: Value) Error!Value {
+        var value: Value = undefined;
+        try check(c.wasm_struct_get_desc(instance.raw(), ref.toC(), @ptrCast(&value)));
+        return value;
     }
 
     pub fn structGet(instance: *Instance, ref: Value, field_index: u32) Error!Value {

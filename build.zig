@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) !void {
     const platform = b.option(bool, "platform", "Compile the WASI, Emscripten, and thread-blocking helpers (default: on for OS targets)") orelse
         defaultPlatform(target.result);
     const werror = b.option(bool, "werror", "Treat C compiler warnings as errors") orelse false;
-    const sources = try runtimeSources(b);
+    const sources = try cSources(b, "src", "");
 
     const runtime = addRuntime(b, .{
         .target = target,
@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run the Zig wrapper and wasm2zig tests and the modular C regression tests");
     test_step.dependOn(&b.addRunArtifact(wrapper_tests).step);
     test_step.dependOn(&b.addRunArtifact(bindings_tests).step);
-    test_step.dependOn(cTests(b, target, optimize, platform, werror, runtime.library));
+    test_step.dependOn(try cTests(b, target, optimize, platform, werror, runtime.library));
 
     const cross_step = b.step("cross", "Compile the runtime and wrapper tests for every target in cross_targets");
     for (cross_targets) |triple| {
@@ -195,23 +195,23 @@ fn cTests(
     platform: bool,
     werror: bool,
     runtime: *std.Build.Step.Compile,
-) *std.Build.Step {
+) !*std.Build.Step {
     const step = b.step("c-test", "Run the modular C regression tests against the Zig-built runtime");
-    const cases = [_]struct { name: []const u8, source: []const u8, runtime: *std.Build.Step.Compile }{
-        .{ .name = "wasm_modular_test", .source = "test/wasm_test.c", .runtime = runtime },
-        .{ .name = "wasm_modular_core_test", .source = "test/wasm_core_test.c", .runtime = runtime },
+    const cases = [_]struct { name: []const u8, root: []const u8, files: []const []const u8, runtime: *std.Build.Step.Compile }{
+        .{ .name = "wasm_modular_test", .root = "test/unit", .files = try cSources(b, "test/unit", "amalgamation.c"), .runtime = runtime },
+        .{ .name = "wasm_modular_core_test", .root = "test", .files = &.{"wasm_core_test.c"}, .runtime = runtime },
     };
     for (cases) |case| {
         const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-        module.addCSourceFile(.{
-            .file = b.path(case.source),
+        module.addCSourceFiles(.{
+            .root = b.path(case.root),
+            .files = case.files,
             .flags = if (werror) &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Wextra" },
         });
         module.addIncludePath(b.path("src"));
         module.addCMacro("_POSIX_C_SOURCE", "200809L");
         module.addCMacro("WASM_TEST_MODULAR", "1");
         module.addCMacro("WASM_ENABLE_PLATFORM", if (platform) "1" else "0");
-        module.addCMacro("WL_ENABLE_PLATFORM", if (platform) "1" else "0");
         module.linkLibrary(case.runtime);
         const exe = b.addExecutable(.{ .name = case.name, .root_module = module });
         const run = b.addRunArtifact(exe);
@@ -222,19 +222,20 @@ fn cTests(
     return step;
 }
 
-fn runtimeSources(b: *std.Build) ![]const []const u8 {
+/// Returns the .c files under root, relative to it, except skip.
+fn cSources(b: *std.Build, root: []const u8, skip: []const u8) ![]const []const u8 {
     const io = b.graph.io;
-    var dir = try b.root.openDir(io, "src", .{ .iterate = true });
+    var dir = try b.root.openDir(io, root, .{ .iterate = true });
     defer dir.close(io);
-    b.dependOnDirectoryContents(b.path("src"));
+    b.dependOnDirectoryContents(b.path(root));
 
     var sources: std.ArrayList([]const u8) = .empty;
     var walker = try dir.walk(b.allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         switch (entry.kind) {
-            .directory => b.dependOnDirectoryContents(b.path(b.pathJoin(&.{ "src", entry.path }))),
-            .file => if (std.mem.endsWith(u8, entry.basename, ".c")) {
+            .directory => b.dependOnDirectoryContents(b.path(b.pathJoin(&.{ root, entry.path }))),
+            .file => if (std.mem.endsWith(u8, entry.basename, ".c") and !std.mem.eql(u8, entry.path, skip)) {
                 const path = try b.allocator.dupe(u8, entry.path);
                 std.mem.replaceScalar(u8, path, '\\', '/');
                 try sources.append(b.allocator, path);

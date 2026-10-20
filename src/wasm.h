@@ -73,7 +73,7 @@
  *   - Bulk memory, sign-extension ops, non-trapping float-to-int conversions, extended const exprs, tail calls, exceptions, SIMD, GC, and Memory64
  *   - Optional WASI stub bindings for common wasi_snapshot_preview1 imports
  *   - Load-time validation plus runtime-configurable feature gating
- *   - Opt-in threads, wide arithmetic, custom page sizes, and compact imports
+ *   - Not yet standardized: threads, wide arithmetic, custom page sizes, compact imports, stack switching, and custom descriptors
  *
  * MIT License
  *
@@ -202,24 +202,34 @@ typedef enum wasm_error_t {
 } wasm_error_t;
 
 /* ── Feature flags ───────────────────────────────────────────────── */
-#define WASM_FEATURE_SIGN_EXT (1u << 0)
-#define WASM_FEATURE_NONTRAPPING_FMA (1u << 1)
-#define WASM_FEATURE_MULTI_VALUE (1u << 2)
-#define WASM_FEATURE_MUTABLE_GLOBALS (1u << 3)
-#define WASM_FEATURE_BULK_MEMORY (1u << 4)
-#define WASM_FEATURE_REFERENCE_TYPES (1u << 5)
-#define WASM_FEATURE_MULTI_MEMORY (1u << 6)
-#define WASM_FEATURE_EXTENDED_CONST (1u << 7)
-#define WASM_FEATURE_TAIL_CALL (1u << 8)
-#define WASM_FEATURE_EXCEPTIONS (1u << 9)
-#define WASM_FEATURE_SIMD (1u << 10)
-#define WASM_FEATURE_GC (1u << 11)
-#define WASM_FEATURE_MEMORY64 (1u << 12)
-/* Proposals not yet standardized are implemented but disabled by default. */
-#define WASM_FEATURE_WIDE_ARITHMETIC (1u << 13)
-#define WASM_FEATURE_CUSTOM_PAGE_SIZES (1u << 14)
-#define WASM_FEATURE_COMPACT_IMPORTS (1u << 15)
-#define WASM_FEATURE_THREADS (1u << 16)
+#define WASM_FEATURE_SIGN_EXT ((uint64_t)1 << 0)
+#define WASM_FEATURE_NONTRAPPING_FMA ((uint64_t)1 << 1)
+#define WASM_FEATURE_MULTI_VALUE ((uint64_t)1 << 2)
+#define WASM_FEATURE_MUTABLE_GLOBALS ((uint64_t)1 << 3)
+#define WASM_FEATURE_BULK_MEMORY ((uint64_t)1 << 4)
+#define WASM_FEATURE_REFERENCE_TYPES ((uint64_t)1 << 5)
+#define WASM_FEATURE_MULTI_MEMORY ((uint64_t)1 << 6)
+#define WASM_FEATURE_EXTENDED_CONST ((uint64_t)1 << 7)
+#define WASM_FEATURE_TAIL_CALL ((uint64_t)1 << 8)
+#define WASM_FEATURE_EXCEPTIONS ((uint64_t)1 << 9)
+#define WASM_FEATURE_SIMD ((uint64_t)1 << 10)
+#define WASM_FEATURE_GC ((uint64_t)1 << 11)
+#define WASM_FEATURE_MEMORY64 ((uint64_t)1 << 12)
+#define WASM_FEATURE_WIDE_ARITHMETIC ((uint64_t)1 << 13)
+#define WASM_FEATURE_CUSTOM_PAGE_SIZES ((uint64_t)1 << 14)
+#define WASM_FEATURE_COMPACT_IMPORTS ((uint64_t)1 << 15)
+#define WASM_FEATURE_THREADS ((uint64_t)1 << 16)
+#define WASM_FEATURE_STACK_SWITCHING ((uint64_t)1 << 17)
+#define WASM_FEATURE_CUSTOM_DESCRIPTORS ((uint64_t)1 << 18)
+#define WASM_FEATURES_STANDARD                                                                             \
+    (WASM_FEATURE_SIGN_EXT | WASM_FEATURE_NONTRAPPING_FMA | WASM_FEATURE_MULTI_VALUE |                     \
+     WASM_FEATURE_MUTABLE_GLOBALS | WASM_FEATURE_BULK_MEMORY | WASM_FEATURE_REFERENCE_TYPES |              \
+     WASM_FEATURE_MULTI_MEMORY | WASM_FEATURE_EXTENDED_CONST | WASM_FEATURE_TAIL_CALL |                    \
+     WASM_FEATURE_EXCEPTIONS | WASM_FEATURE_SIMD | WASM_FEATURE_GC | WASM_FEATURE_MEMORY64)
+#define WASM_FEATURES_ALL                                                                                  \
+    (WASM_FEATURES_STANDARD | WASM_FEATURE_WIDE_ARITHMETIC | WASM_FEATURE_CUSTOM_PAGE_SIZES |              \
+     WASM_FEATURE_COMPACT_IMPORTS | WASM_FEATURE_THREADS | WASM_FEATURE_STACK_SWITCHING |                  \
+     WASM_FEATURE_CUSTOM_DESCRIPTORS)
 
 /* ── Value types ──────────────────────────────────────────────────── */
 typedef enum wasm_valtype_t {
@@ -233,6 +243,8 @@ typedef enum wasm_valtype_t {
     WASM_TYPE_I31REF = 0x14,
     WASM_TYPE_STRUCTREF = 0x15,
     WASM_TYPE_ARRAYREF = 0x16,
+    WASM_TYPE_NOCONT = 0x17,
+    WASM_TYPE_CONTREF = 0x18,
     WASM_TYPE_EXTERNREF = 0x6F,
     WASM_TYPE_FUNCREF = 0x70,
     WASM_TYPE_V128 = 0x7B,
@@ -330,6 +342,8 @@ WASM_INLINE wasm_value_t wasm_ref_null(wasm_valtype_t type) {
         case WASM_TYPE_NOEXTERN:
         case WASM_TYPE_EXNREF:
         case WASM_TYPE_NOEXN:
+        case WASM_TYPE_CONTREF:
+        case WASM_TYPE_NOCONT:
             r.of.externref = (uintptr_t)0;
             break;
         default:
@@ -344,6 +358,7 @@ typedef struct wasm_reftype_t {
     uint32_t type_index;
     int has_type_index;
     int nullable;
+    int exact; /* refers to type_index itself and none of its subtypes */
 } wasm_reftype_t;
 
 /* ── Host function callback ───────────────────────────────────────── */
@@ -391,6 +406,7 @@ typedef enum wasm_comptype_kind_t {
     WASM_COMP_FUNC = 0,
     WASM_COMP_STRUCT = 1,
     WASM_COMP_ARRAY = 2,
+    WASM_COMP_CONT = 3,
     WASM_COMP_INVALID = 0xFF
 } wasm_comptype_kind_t;
 
@@ -423,6 +439,7 @@ typedef struct wasm_import_info_t {
     wasm_valtype_t type;
     wasm_reftype_t ref_type;
     int is_mutable;
+    int exact; /* a function import of exactly type_index */
 } wasm_import_info_t;
 
 typedef struct wasm_global_import_t {
@@ -430,6 +447,7 @@ typedef struct wasm_global_import_t {
     const char* name;
     wasm_valtype_t type;
     wasm_reftype_t ref_type;
+    wasm_module_t* type_module; /* module whose type index ref_type has, if it has one */
     int is_mutable;
     wasm_value_t* value; /* must not hold a host anyref; see wasm_global_set */
 } wasm_global_import_t;
@@ -498,6 +516,18 @@ typedef struct wasm_tag_import_t {
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE (256u * 1024u)
 #endif
+#ifndef WASM_CONT_STACK_VALUES
+#define WASM_CONT_STACK_VALUES 1024
+#endif
+#ifndef WASM_CONT_CALL_DEPTH
+#define WASM_CONT_CALL_DEPTH 128
+#endif
+#ifndef WASM_CONT_FRAME_ARENA_SIZE
+#define WASM_CONT_FRAME_ARENA_SIZE (8u * 1024u)
+#endif
+#ifndef WASM_MAX_CONT_STACKS
+#define WASM_MAX_CONT_STACKS 0u
+#endif
 
 typedef struct wasm_config_t {
     uint32_t max_stack_values; /* operand stack size in 8-byte slots; a v128 takes two */
@@ -505,6 +535,9 @@ typedef struct wasm_config_t {
     uint32_t max_labels;
     size_t initial_gc_heap_size;
     size_t frame_arena_size; /* bytes per block of call frame storage; blocks are added as calls nest */
+    uint32_t cont_stack_values;   /* operand stack size of each continuation, in slots */
+    uint32_t cont_call_depth;     /* call frames each continuation holds */
+    size_t cont_frame_arena_size; /* bytes per block of a continuation's call frame storage */
     int lazy_validation;
     /* Limits for untrusted modules; 0 means unlimited. */
     uint32_t max_function_locals; /* locals per function, parameters included */
@@ -512,6 +545,8 @@ typedef struct wasm_config_t {
     uint64_t max_total_memory_bytes; /* bytes across the linear memories the runtime's modules define */
     uint64_t max_table_elements;  /* elements per table, at instantiation and on growth */
     uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
+    uint32_t max_cont_stacks;     /* continuation stacks alive at once */
+    uint64_t features;            /* WASM_FEATURE_* bits enabled for loaded modules */
 } wasm_config_t;
 
 /* Memory source for a runtime and for standalone memories and tables. size and new_size are never
@@ -553,8 +588,7 @@ wasm_error_t wasm_runtime_resume(wasm_runtime_t* rt, const wasm_value_t* host_re
                                  wasm_value_t* results, uint32_t num_results);
 /* Discards the suspended call, if any. */
 void wasm_runtime_cancel(wasm_runtime_t* rt);
-void wasm_runtime_set_enabled_features(wasm_runtime_t* rt, uint32_t enabled_features);
-uint32_t wasm_runtime_enabled_features(const wasm_runtime_t* rt);
+uint64_t wasm_runtime_features(const wasm_runtime_t* rt);
 wasm_error_t wasm_register_import(wasm_runtime_t* rt, const wasm_import_t* imp);
 wasm_error_t wasm_register_global_import(wasm_runtime_t* rt, const wasm_global_import_t* imp);
 wasm_error_t wasm_register_table_import(wasm_runtime_t* rt, const wasm_table_import_t* imp);
@@ -564,9 +598,6 @@ wasm_error_t wasm_register_tag_import(wasm_runtime_t* rt, const wasm_tag_import_
    module name name. Imports bind to mod's own functions, globals, tables, memories, and tags, so
    mod must outlive the modules that import from it; calls into a freed mod trap. */
 wasm_error_t wasm_register_module(wasm_runtime_t* rt, const char* name, wasm_module_t* mod);
-void wasm_runtime_enable_feature(wasm_runtime_t* rt, uint32_t flag);
-void wasm_runtime_disable_feature(wasm_runtime_t* rt, uint32_t flag);
-void wasm_runtime_enable_all_features(wasm_runtime_t* rt);
 void wasm_gc_collect(wasm_runtime_t* rt);
 /* Keeps a reference alive across collections until wasm_ref_release. Returns a slot holding the
    value, which collections update when they move the object; read the reference from the slot
@@ -647,10 +678,9 @@ wasm_error_t wasm_table_get(const wasm_module_t* mod, uint32_t table_idx, uint64
 wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t index, wasm_value_t val);
 /* Adds delta elements set to init and returns the previous size, or -1 if the table cannot grow. */
 int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
-/* Creates a table of size null references for hosts to register with wasm_register_table_import;
-   max_size UINT32_MAX means no maximum. It must outlive every module that imports it. */
-/* Creates a table for hosts to register with wasm_register_table_import, allocated from allocator as
-   for wasm_memory_new. */
+/* Creates a table of size null references for hosts to register with wasm_register_table_import, allocated
+   from allocator as for wasm_memory_new; max_size UINT32_MAX means no maximum. It must outlive every module
+   that imports it. */
 wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
                              uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);
@@ -687,6 +717,11 @@ uint32_t wasm_struct_type_field_count(const wasm_module_t* mod, uint32_t type_id
 const wasm_fieldtype_t* wasm_struct_type_field(const wasm_module_t* mod, uint32_t type_idx,
                                                uint32_t field_idx);
 const wasm_fieldtype_t* wasm_array_type_field(const wasm_module_t* mod, uint32_t type_idx);
+/* Returns the function type index of continuation type type_idx, or UINT32_MAX when it is not one. */
+uint32_t wasm_cont_type_func(const wasm_module_t* mod, uint32_t type_idx);
+/* Returns the index of the type named by type_idx's descriptor or describes clause, or UINT32_MAX when it has none. */
+uint32_t wasm_type_descriptor(const wasm_module_t* mod, uint32_t type_idx);
+uint32_t wasm_type_describes(const wasm_module_t* mod, uint32_t type_idx);
 uint32_t wasm_func_count(const wasm_module_t* mod);
 /* Names from the module's "name" custom section, or NULL when it has none. */
 const char* wasm_func_name(const wasm_module_t* mod, uint32_t func_idx);
@@ -703,6 +738,11 @@ const wasm_functype_t* wasm_tag_functype(const wasm_module_t* mod, uint32_t tag_
 wasm_error_t wasm_struct_new(wasm_module_t* mod, uint32_t type_idx,
                              const wasm_value_t* field_values, uint32_t num_fields,
                              wasm_value_t* out_ref);
+/* type_idx must have a descriptor clause; descriptor must be a non-null reference to a struct of exactly
+   the descriptor type. wasm_struct_new fails with WASM_ERR_TYPE_MISMATCH for such types. */
+wasm_error_t wasm_struct_new_desc(wasm_module_t* mod, uint32_t type_idx,
+                                  const wasm_value_t* field_values, uint32_t num_fields,
+                                  wasm_value_t descriptor, wasm_value_t* out_ref);
 wasm_error_t wasm_array_new(wasm_module_t* mod, uint32_t type_idx,
                             const wasm_value_t* elem_values, uint32_t num_elems,
                             wasm_value_t* out_ref);
@@ -710,6 +750,8 @@ wasm_error_t wasm_struct_get_field(const wasm_module_t* mod, wasm_value_t struct
                                    uint32_t field_idx, wasm_value_t* out_val);
 wasm_error_t wasm_struct_set_field(wasm_module_t* mod, wasm_value_t struct_ref,
                                    uint32_t field_idx, wasm_value_t val);
+/* Fails with WASM_ERR_TYPE_MISMATCH for a struct whose type has no descriptor. */
+wasm_error_t wasm_struct_get_desc(const wasm_module_t* mod, wasm_value_t struct_ref, wasm_value_t* out_desc);
 wasm_error_t wasm_array_length(const wasm_module_t* mod, wasm_value_t array_ref,
                                uint32_t* out_len);
 wasm_error_t wasm_array_get_elem(const wasm_module_t* mod, wasm_value_t array_ref,

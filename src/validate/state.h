@@ -19,7 +19,6 @@ struct wasm__val_frame_t {
     int seen_else;
     int in_catch;
     int seen_catch_all;
-    int seen_delegate;
     uint64_t* local_init;
     uint64_t* local_init_entry;
 };

@@ -18,6 +18,83 @@
         wasm__push_value((rt), &wasm__pushed);       \
     } while (0)
 
+static wasm_error_t wasm__exec_gc_trap(wasm_runtime_t* rt, const char* message) {
+    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", message);
+    return WASM_ERR_TRAP;
+}
+
+/* Returns the descriptor of the struct slot holds, or NULL if it holds no struct with one. */
+static wasm_gc_header_t* wasm__slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
+    uintptr_t bits = wasm__slot_ref(slot);
+    wasm_gc_header_t* object = (wasm_gc_header_t*)bits;
+    wasm_gc_header_t** descriptor;
+
+    if ((bits & WASM__GC_I31_TAG) != 0 || !wasm__gc_ptr_in_heap(rt, object) || object->kind != WASM_GC_OBJ_STRUCT)
+        return NULL;
+    descriptor = wasm__gc_descriptor_slot(object);
+    return descriptor ? *descriptor : NULL;
+}
+
+/* Executes the custom descriptors instruction subop, 0x20 through 0x26, reading its immediates from cf. */
+static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, wasm__call_frame_t* cf,
+                                                           uint32_t subop) {
+    wasm_runtime_t* rt = mod->rt;
+    wasm_gc_header_t* descriptor;
+    wasm_error_t err;
+    uint32_t i;
+
+    switch (subop) {
+        case 0x20:
+        case 0x21: {
+            uint32_t type_idx = wasm__read_leb128_u32(&cf->r);
+            const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
+            wasm_gc_struct_t* object;
+
+            if (!st) return WASM_ERR_MALFORMED;
+            if (wasm__slot_u64(WASM__PEEK(rt)) == 0) return wasm__exec_gc_trap(rt, "null descriptor reference");
+            object = wasm__gc_alloc_struct_object(rt, mod, type_idx, st);
+            if (!object) return WASM_ERR_OOM;
+            *wasm__gc_descriptor_slot(&object->header) = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
+            for (i = st->num_fields; i > 0; i--) {
+                const wasm_fieldtype_t* field = &st->fields[i - 1];
+
+                err = wasm__gc_struct_set_field(object, st, i - 1,
+                                                subop == 0x20 ? wasm__pop_field_value(rt, field)
+                                                              : wasm__gc_field_default_value(field));
+                if (err != WASM_OK) return err;
+            }
+            WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
+            return WASM_OK;
+        }
+        case 0x22:
+            if (wasm__slot_u64(WASM__PEEK(rt)) == 0) return wasm__exec_gc_trap(rt, "null reference");
+            descriptor = *wasm__gc_descriptor_slot((wasm_gc_header_t*)wasm__slot_ref(WASM__PEEK(rt)));
+            wasm__slot_set_ref(WASM__PEEK(rt), (uintptr_t)descriptor);
+            return WASM_OK;
+        case 0x23:
+        case 0x24:
+            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
+            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
+            if (subop == 0x24 && wasm__slot_u64(WASM__PEEK(rt)) == 0) return WASM_OK;
+            if (wasm__slot_descriptor(rt, WASM__PEEK(rt)) != descriptor)
+                return wasm__exec_gc_trap(rt, "descriptor cast failure");
+            return WASM_OK;
+        default: {
+            uint8_t flags = wasm__read_u8(&cf->r);
+            int matches;
+
+            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
+            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
+            if (wasm__slot_u64(WASM__PEEK(rt)) == 0)
+                matches = (flags & 0x02u) != 0;
+            else
+                matches = wasm__slot_descriptor(rt, WASM__PEEK(rt)) == descriptor;
+            wasm__slot_set_i32(WASM__PUSH(rt), matches == (subop == 0x25));
+            return WASM_OK;
+        }
+    }
+}
+
 WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* cf) {
     wasm_runtime_t* rt = mod->rt;
     wasm_error_t err = WASM_OK;
@@ -131,7 +208,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                     /* Allocate while the initial value is still on the stack, where a collection can see it. */
                     object = wasm__gc_alloc_array_object(rt, mod, type_idx, atype, count);
                     if (!object) WASM__TRAP(WASM_ERR_OOM);
-                    rt->sp--;
+                    rt->exec->sp--;
                     init_value = wasm__pop_field_value(rt, &atype->field);
                     for (i = 0; i < count; i++) {
                         err = wasm__gc_array_set(object, atype, i, init_value);
@@ -524,6 +601,15 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 wasm__slot_set_u32(WASM__PUSH(rt), wasm__gc_i31_get_u(value.of.gc_ref));
             break;
         }
+        case 0x20:
+        case 0x21:
+        case 0x22:
+        case 0x23:
+        case 0x24:
+        case 0x25:
+        case 0x26:
+            err = wasm__exec_descriptor_op(mod, cf, subop);
+            goto cleanup;
         default:
             WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "unknown GC opcode 0xFB 0x%X", (unsigned)subop);
             err = WASM_ERR_MALFORMED;
@@ -565,7 +651,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
         value = wasm__runtime_cast_success_value(&target_ref, value);
         *out_branch = subop == 0x18;
     } else {
-        value = wasm__runtime_cast_difference_value(&source_ref, &target_ref, value);
+        value = wasm__runtime_cast_difference_value(&source_ref, value);
         *out_branch = subop == 0x19;
     }
     wasm__slot_from_value(slot, &value);

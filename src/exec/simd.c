@@ -1,5 +1,6 @@
 #include "simd.h"
 #include "../module.h"
+#include "stack.h"
 #include "state.h"
 #include <stdio.h>
 #include "../instructions.h"
@@ -16,17 +17,20 @@
 #include <string.h>
 
 static wasm_value_t wasm__simd_pop(wasm_runtime_t* rt) {
+    wasm__exec_stack_t* exec = rt->exec;
     wasm_value_t value;
 
-    rt->sp -= WASM__V128_SLOTS;
+    exec->sp -= WASM__V128_SLOTS;
     value.type = WASM_TYPE_V128;
-    wasm__slot_v128(&rt->stack[rt->sp], value.of.v128);
+    wasm__slot_v128(&exec->stack[exec->sp], value.of.v128);
     return value;
 }
 
 static void wasm__simd_push(wasm_runtime_t* rt, wasm_value_t value) {
-    wasm__slot_set_v128(&rt->stack[rt->sp], value.of.v128);
-    rt->sp += WASM__V128_SLOTS;
+    wasm__exec_stack_t* exec = rt->exec;
+
+    wasm__slot_set_v128(&exec->stack[exec->sp], value.of.v128);
+    exec->sp += WASM__V128_SLOTS;
 }
 
 WASM_PRIVATE wasm_error_t wasm__exec_simd(wasm_module_t* mod, wasm__call_frame_t* cf) {

@@ -35,9 +35,9 @@ struct wasm__call_frame_t {
 #define WASM__ERR_RETURN_FRAME ((wasm_error_t) - 3)
 #define WASM__ERR_RESUME_FRAME ((wasm_error_t) - 4)
 #define WASM__ERR_TAIL_CALL_FRAME ((wasm_error_t) - 5)
-#define WASM__PUSH(rt) (&(rt)->stack[(rt)->sp++])
-#define WASM__POP(rt) (&(rt)->stack[--(rt)->sp])
-#define WASM__PEEK(rt) (&(rt)->stack[(rt)->sp - 1])
+#define WASM__PUSH(rt) (&(rt)->exec->stack[(rt)->exec->sp++])
+#define WASM__POP(rt) (&(rt)->exec->stack[--(rt)->exec->sp])
+#define WASM__PEEK(rt) (&(rt)->exec->stack[(rt)->exec->sp - 1])
 #define WASM__TRAP(code) \
     do {                 \
         err = (code);    \

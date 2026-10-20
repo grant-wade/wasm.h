@@ -272,11 +272,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!table) WASM__TRAP(WASM_ERR_MALFORMED);
             delta_value = WASM__POP(rt);
             init_value = wasm__pop_value(rt, table->reftype, &table->reftype_info);
-            if (!wasm__runtime_value_matches_type(mod,
-                                                  &init_value,
-                                                  table->reftype,
-                                                  &table->reftype_info))
-                WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             delta = wasm__slot_index(delta_value, table->is_64);
             if (rt->fuel_enabled && rt->fuel < delta / WASM__FUEL_ELEMS_PER_UNIT &&
                 (table->max_size == UINT64_MAX || delta <= table->max_size - table->size)) {
@@ -316,11 +311,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             dst = WASM__POP(rt);
             len = wasm__slot_index(count, table->is_64);
             dst_offset = wasm__slot_index(dst, table->is_64);
-            if (!wasm__runtime_value_matches_type(mod,
-                                                  &value,
-                                                  table->reftype,
-                                                  &table->reftype_info))
-                WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(dst_offset, len, table->size)) WASM__TRAP(WASM_ERR_OUT_OF_BOUNDS);
             WASM__CHARGE_ELEMS(rt, len);
             if (len > 0) {

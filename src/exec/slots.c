@@ -1,4 +1,5 @@
 #include "slots.h"
+#include "stack.h"
 #include "../runtime.h"
 #include "../support.h"
 #include "../values.h"
@@ -55,6 +56,7 @@ static wasm_value_t wasm__ref_from_slot(const wasm_runtime_t* rt,
             return value;
         case WASM_TYPE_EXTERNREF:
         case WASM_TYPE_EXNREF:
+        case WASM_TYPE_CONTREF:
             value.type = wasm__ref_top_type(type);
             value.of.externref = wasm__slot_ref(s);
             return value;
@@ -137,8 +139,10 @@ WASM_PRIVATE uint32_t wasm__values_from_slots(const wasm_runtime_t* rt,
 }
 
 WASM_PRIVATE wasm_value_t wasm__pop_value(wasm_runtime_t* rt, wasm_valtype_t type, const wasm_reftype_t* reftype) {
-    rt->sp -= wasm__valtype_slots(type);
-    return wasm__value_from_slot(rt, type, reftype, &rt->stack[rt->sp]);
+    wasm__exec_stack_t* exec = rt->exec;
+
+    exec->sp -= wasm__valtype_slots(type);
+    return wasm__value_from_slot(rt, type, reftype, &exec->stack[exec->sp]);
 }
 
 WASM_PRIVATE wasm_value_t wasm__pop_field_value(wasm_runtime_t* rt, const wasm_fieldtype_t* field) {
@@ -147,12 +151,15 @@ WASM_PRIVATE wasm_value_t wasm__pop_field_value(wasm_runtime_t* rt, const wasm_f
 }
 
 WASM_PRIVATE void wasm__push_value(wasm_runtime_t* rt, const wasm_value_t* value) {
-    rt->sp += wasm__slot_from_value(&rt->stack[rt->sp], value);
+    wasm__exec_stack_t* exec = rt->exec;
+
+    exec->sp += wasm__slot_from_value(&exec->stack[exec->sp], value);
 }
 
 WASM_PRIVATE wasm_valtype_t wasm__ref_top_type(wasm_valtype_t type) {
     if (wasm__uses_funcref_storage(type)) return WASM_TYPE_FUNCREF;
     if (wasm__uses_externref_storage(type)) return WASM_TYPE_EXTERNREF;
     if (wasm__uses_exnref_storage(type)) return WASM_TYPE_EXNREF;
+    if (wasm__uses_contref_storage(type)) return WASM_TYPE_CONTREF;
     return WASM_TYPE_ANYREF;
 }

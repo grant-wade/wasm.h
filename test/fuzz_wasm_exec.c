@@ -12,6 +12,7 @@
 #define WASM_FUZZ_MAX_MEMORY_BYTES (1u * 1024u * 1024u)
 #define WASM_FUZZ_MAX_TABLE_ELEMENTS 4096u
 #define WASM_FUZZ_MAX_GC_HEAP_BYTES (16u * 1024u * 1024u)
+#define WASM_FUZZ_MAX_CONT_STACKS 1024u
 
 /* Host objects created to satisfy one input's imports. */
 typedef struct wasm_fuzz_stubs_t {
@@ -188,6 +189,7 @@ static void wasm_fuzz_stub_imports(wasm_runtime_t* rt, wasm_module_t* compiled, 
                 imp.name = info->name;
                 imp.type = info->type;
                 imp.ref_type = info->ref_type;
+                imp.type_module = compiled;
                 imp.is_mutable = info->is_mutable;
                 imp.value = value;
                 (void)wasm_register_global_import(rt, &imp);
@@ -205,7 +207,6 @@ static void wasm_fuzz_stub_imports(wasm_runtime_t* rt, wasm_module_t* compiled, 
                 imp.type_module = compiled;
                 imp.type_index = info->type_index;
                 imp.has_type_context = 1;
-                imp.identity = wasm__alloc_tag_identity(rt);
                 (void)wasm_register_tag_import(rt, &imp);
                 break;
             }
@@ -236,11 +237,11 @@ static void wasm_fuzz_instance_open(wasm_fuzz_instance_t* inst, const uint8_t* d
     config.max_memory_bytes = WASM_FUZZ_MAX_MEMORY_BYTES;
     config.max_table_elements = WASM_FUZZ_MAX_TABLE_ELEMENTS;
     config.max_gc_heap_bytes = WASM_FUZZ_MAX_GC_HEAP_BYTES;
+    config.max_cont_stacks = WASM_FUZZ_MAX_CONT_STACKS;
+    config.features = WASM_FEATURES_ALL & ~WASM_FEATURE_THREADS;
 
     inst->rt = wasm_runtime_new(wasm_libc_allocator(), &config);
     if (!inst->rt || wasm_runtime_last_error(inst->rt) != WASM_OK) return;
-    wasm_runtime_enable_all_features(inst->rt);
-    wasm_runtime_disable_feature(inst->rt, WASM_FEATURE_THREADS);
 
     inst->compiled = wasm_compile(inst->rt, data, size);
     if (!inst->compiled) return;
@@ -294,20 +295,20 @@ static wasm_error_t wasm_fuzz_call_in_steps(wasm_fuzz_instance_t* inst, uint32_t
     while (wasm_runtime_suspended(rt) != WASM_OK && steps++ < 1000000u) {
         wasm_value_t host_results[16];
         uint32_t num_host_results = 0;
-        const wasm__call_frame_t* top = &rt->call_frames[rt->call_frame_sp - 1u];
+        const wasm__call_frame_t* top = &rt->exec->call_frames[rt->exec->call_frame_sp - 1u];
 
         if (err == WASM_YIELD) {
             num_host_results = rt->yield_type->num_results;
             if (num_host_results > 16u ||
                 !wasm_fuzz_default_results(rt->yield_type, host_results, num_host_results))
                 abort();
-        } else if (top->pc == last_pc && rt->call_frame_sp == last_depth) {
+        } else if (top->pc == last_pc && rt->exec->call_frame_sp == last_depth) {
             fuel *= 2u;
         } else {
             fuel = step;
         }
         last_pc = top->pc;
-        last_depth = rt->call_frame_sp;
+        last_depth = rt->exec->call_frame_sp;
         wasm_runtime_set_fuel(rt, fuel);
         err = wasm_runtime_resume(rt, host_results, num_host_results, results, num_results);
     }

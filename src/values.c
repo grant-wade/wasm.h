@@ -104,6 +104,11 @@ WASM_PRIVATE int wasm__gc_struct_size(const wasm_structtype_t* type, size_t* out
     return 1;
 }
 
+WASM_PRIVATE wasm_gc_header_t** wasm__gc_descriptor_slot(wasm_gc_header_t* object) {
+    if (!object->has_descriptor) return NULL;
+    return (wasm_gc_header_t**)(((uint8_t*)object) + object->object_size - sizeof(wasm_gc_header_t*));
+}
+
 WASM_PRIVATE size_t wasm__gc_array_data_offset(const wasm_arraytype_t* type) {
     return wasm__align_up_size(WASM__GC_ARRAY_HEADER_SIZE, wasm__gc_field_storage_alignment(&type->field));
 }
@@ -164,27 +169,30 @@ static wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
     return WASM_OK;
 }
 
-static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
-                                               const wasm_fieldtype_t* field,
-                                               void* dst,
-                                               wasm_value_t value) {
+static void wasm__gc_write_field_bytes(const wasm_fieldtype_t* field, void* dst, wasm_value_t value) {
     if (field->storage.kind == WASM_STORAGE_PACKED) {
-        if (value.type != WASM_TYPE_I32) return WASM_ERR_TYPE_MISMATCH;
         if (field->storage.of.packed_type == WASM_PACKED_I8) {
             *(uint8_t*)dst = (uint8_t)value.of.i32;
         } else {
             wasm__store_le16(dst, (uint16_t)value.of.i32);
         }
-        return WASM_OK;
+        return;
     }
-
-    if (!wasm__runtime_value_matches_type(mod,
-                                          &value,
-                                          field->storage.of.valtype,
-                                          &field->storage.ref_type))
-        return WASM_ERR_TYPE_MISMATCH;
     value.type = field->storage.of.valtype;
     *(wasm_value_t*)dst = value;
+}
+
+static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,
+                                               const wasm_fieldtype_t* field,
+                                               void* dst,
+                                               wasm_value_t value) {
+    if (field->storage.kind == WASM_STORAGE_PACKED ? value.type != WASM_TYPE_I32
+                                                   : !wasm__runtime_value_matches_type(mod,
+                                                                                       &value,
+                                                                                       field->storage.of.valtype,
+                                                                                       &field->storage.ref_type))
+        return WASM_ERR_TYPE_MISMATCH;
+    wasm__gc_write_field_bytes(field, dst, value);
     return WASM_OK;
 }
 
@@ -234,14 +242,21 @@ WASM_PRIVATE wasm_error_t wasm__gc_struct_set_field(wasm_gc_struct_t* object,
     if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
     dst = wasm__gc_struct_field_ptr(object, type, field_index);
     if (!dst) return WASM_ERR_OOM;
-    return wasm__gc_store_field_bytes(object->header.module, &type->fields[field_index], dst, value);
+    wasm__gc_write_field_bytes(&type->fields[field_index], dst, value);
+    return WASM_OK;
 }
 
 WASM_PRIVATE wasm_error_t wasm__gc_struct_store_field(wasm_gc_struct_t* object,
                                                 const wasm_structtype_t* type,
                                                 uint32_t field_index,
                                                 wasm_value_t value) {
-    return wasm__gc_struct_set_field(object, type, field_index, value);
+    void* dst;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type || field_index >= type->num_fields) return WASM_ERR_MALFORMED;
+    dst = wasm__gc_struct_field_ptr(object, type, field_index);
+    if (!dst) return WASM_ERR_OOM;
+    return wasm__gc_store_field_bytes(object->header.module, &type->fields[field_index], dst, value);
 }
 
 static const void* wasm__gc_array_element_const_ptr(const wasm_gc_array_t* object,
@@ -290,7 +305,8 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_set(wasm_gc_array_t* object,
     if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
     dst = wasm__gc_array_element_ptr(object, type, index);
     if (!dst) return WASM_ERR_OOM;
-    return wasm__gc_store_field_bytes(object->header.module, &type->field, dst, value);
+    wasm__gc_write_field_bytes(&type->field, dst, value);
+    return WASM_OK;
 }
 
 WASM_PRIVATE_INLINE uint32_t wasm__gc_array_len(const wasm_gc_array_t* object) {
@@ -301,7 +317,14 @@ WASM_PRIVATE wasm_error_t wasm__gc_array_store_element(wasm_gc_array_t* object,
                                                  const wasm_arraytype_t* type,
                                                  uint32_t index,
                                                  wasm_value_t value) {
-    return wasm__gc_array_set(object, type, index, value);
+    void* dst;
+
+    if (!object) return WASM_ERR_TRAP;
+    if (!type) return WASM_ERR_MALFORMED;
+    if (index >= object->length) return WASM_ERR_OUT_OF_BOUNDS;
+    dst = wasm__gc_array_element_ptr(object, type, index);
+    if (!dst) return WASM_ERR_OOM;
+    return wasm__gc_store_field_bytes(object->header.module, &type->field, dst, value);
 }
 
 WASM_PRIVATE wasm_value_t wasm__gc_type_ref_value(const wasm_module_t* mod,
@@ -400,7 +423,7 @@ WASM_PRIVATE int wasm__is_gc_ref_type(wasm_valtype_t type) {
 WASM_PRIVATE int wasm__is_ref_type(wasm_valtype_t type) {
     return type == WASM_TYPE_FUNCREF || type == WASM_TYPE_EXTERNREF ||
            type == WASM_TYPE_EXNREF || type == WASM_TYPE_NOEXN ||
-           wasm__is_gc_ref_type(type);
+           wasm__uses_contref_storage(type) || wasm__is_gc_ref_type(type);
 }
 
 WASM_PRIVATE int wasm__is_vector_type(wasm_valtype_t type) {
@@ -424,6 +447,7 @@ WASM_PRIVATE int wasm__is_null_ref(const wasm_value_t* value) {
     if (wasm__uses_funcref_storage(value->type)) return value->of.funcref == UINT32_MAX;
     if (wasm__uses_externref_storage(value->type)) return value->of.externref == (uintptr_t)0;
     if (wasm__uses_exnref_storage(value->type)) return value->of.externref == (uintptr_t)0;
+    if (wasm__uses_contref_storage(value->type)) return value->of.externref == (uintptr_t)0;
     if (wasm__uses_gc_ref_storage(value->type)) return value->of.gc_ref == (uintptr_t)0;
     return 0;
 }
@@ -447,6 +471,9 @@ WASM_PRIVATE wasm_value_t wasm__typed_ref_null(wasm_valtype_t type,
                 break;
             case WASM_TYPE_EXTERNREF:
                 null_type = WASM_TYPE_NOEXTERN;
+                break;
+            case WASM_TYPE_CONTREF:
+                null_type = WASM_TYPE_NOCONT;
                 break;
             default:
                 null_type = WASM_TYPE_NONE;
@@ -495,6 +522,7 @@ WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type) {
         case WASM_TYPE_NOFUNC:
         case WASM_TYPE_NOEXTERN:
         case WASM_TYPE_NOEXN:
+        case WASM_TYPE_NOCONT:
         case WASM_TYPE_NONE:
         case WASM_TYPE_ANYREF:
         case WASM_TYPE_EQREF:
@@ -502,6 +530,7 @@ WASM_PRIVATE wasm_value_t wasm__default_value(wasm_valtype_t type) {
         case WASM_TYPE_STRUCTREF:
         case WASM_TYPE_ARRAYREF:
         case WASM_TYPE_EXNREF:
+        case WASM_TYPE_CONTREF:
         case WASM_TYPE_FUNCREF:
         case WASM_TYPE_EXTERNREF:
             return wasm_ref_null(type);

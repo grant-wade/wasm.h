@@ -16,7 +16,6 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(bytes);
     const rt = try wasm.Runtime.init(gpa, .{});
     defer rt.deinit();
-    rt.enableAllFeatures();
     const compiled = rt.compile(bytes) catch |err| {
         std.debug.print("wasm2zig: {s}: {s} ({s})\n", .{ args[1], rt.errorMessage(), @errorName(err) });
         std.process.exit(1);
