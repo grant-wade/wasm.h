@@ -2,7 +2,7 @@
     .name = .wasm_h,
     .fingerprint = 0x44783dd7dd744b2d, // Changing this has security and trust implications.
     // Must match WASM_H_VERSION_STRING in src/wasm.h; `zig build test` checks it.
-    .version = "1.2.0",
+    .version = "2.0.0",
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     .paths = .{
