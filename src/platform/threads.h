@@ -29,4 +29,8 @@ WASM_PRIVATE void wasm__platform_shared_grow_lock(void);
 
 WASM_PRIVATE void wasm__platform_shared_grow_unlock(void);
 
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void);
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void);
+
 #endif /* WASM_PLATFORM_THREADS_H */

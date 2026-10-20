@@ -965,6 +965,77 @@ TEST(test_exact_function_imports_link_only_the_exact_type) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (type $g (func (param i32))) (type $cg (cont $g))
+     (func $nop) (elem declare func $nop)
+     (func (export "make") (result (ref $c)) (cont.new $c (ref.func $nop)))
+     (func (export "run") (param (ref null $c)) (resume $c (local.get 0)))
+     (func (export "take-c") (param (ref null $c)) (result i32) (ref.is_null (local.get 0)))
+     (func (export "take-cg") (param (ref null $cg)) (result i32) (ref.is_null (local.get 0)))
+     (func (export "take-cont") (param contref) (result i32) (ref.is_null (local.get 0)))
+     (func (export "take-nocont") (param nullcontref) (result i32) (ref.is_null (local.get 0)))) */
+static const uint8_t wasm_test_references_cont_sections[] = {
+    0x01, 0x2C, 0x0A, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x60, 0x01, 0x7F, 0x00, 0x5D, 0x02, 0x60, 0x00,
+    0x01, 0x64, 0x01, 0x60, 0x01, 0x63, 0x01, 0x00, 0x60, 0x01, 0x63, 0x01, 0x01, 0x7F, 0x60, 0x01,
+    0x63, 0x03, 0x01, 0x7F, 0x60, 0x01, 0x68, 0x01, 0x7F, 0x60, 0x01, 0x75, 0x01, 0x7F, 0x03, 0x08,
+    0x07, 0x00, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x07, 0x3B, 0x06, 0x04, 0x6D, 0x61, 0x6B, 0x65,
+    0x00, 0x01, 0x03, 0x72, 0x75, 0x6E, 0x00, 0x02, 0x06, 0x74, 0x61, 0x6B, 0x65, 0x2D, 0x63, 0x00,
+    0x03, 0x07, 0x74, 0x61, 0x6B, 0x65, 0x2D, 0x63, 0x67, 0x00, 0x04, 0x09, 0x74, 0x61, 0x6B, 0x65,
+    0x2D, 0x63, 0x6F, 0x6E, 0x74, 0x00, 0x05, 0x0B, 0x74, 0x61, 0x6B, 0x65, 0x2D, 0x6E, 0x6F, 0x63,
+    0x6F, 0x6E, 0x74, 0x00, 0x06, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x2B, 0x07, 0x02,
+    0x00, 0x0B, 0x06, 0x00, 0xD2, 0x00, 0xE0, 0x01, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xE3, 0x01, 0x00,
+    0x0B, 0x05, 0x00, 0x20, 0x00, 0xD1, 0x0B, 0x05, 0x00, 0x20, 0x00, 0xD1, 0x0B, 0x05, 0x00, 0x20,
+    0x00, 0xD1, 0x0B, 0x05, 0x00, 0x20, 0x00, 0xD1, 0x0B,
+};
+
+static wasm_error_t wasm_test_take_cont(wasm_module_t* m, const char* func_name, wasm_value_t k) {
+    wasm_value_t result;
+
+    return wasm_call(m, func_name, &k, 1, &result, 1);
+}
+
+TEST(test_contrefs_at_the_host_boundary_match_their_type_until_consumed) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t k;
+    wasm_value_t forged;
+    wasm_value_t* held;
+
+    wasm_init(&rt);
+    m = wasm_test_load_sections(&rt, wasm_test_references_cont_sections, sizeof(wasm_test_references_cont_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k, 1));
+    held = wasm_ref_hold(&rt, k);
+    CHECK(t, held != NULL);
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-c", k));
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-cont", k));
+    CHECK(t, wasm_test_take_cont(m, "take-cg", k) == WASM_ERR_TYPE_MISMATCH);
+    CHECK(t, wasm_test_take_cont(m, "take-nocont", k) == WASM_ERR_TYPE_MISMATCH);
+    WASM_CHECK_OK(t, wasm_call(m, "run", &k, 1, NULL, 0));
+
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-c", k));
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-cont", k));
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-cg", k));
+    CHECK(t, wasm_test_take_cont(m, "take-nocont", k) == WASM_ERR_TYPE_MISMATCH);
+    CHECK(t, wasm_call(m, "run", &k, 1, NULL, 0) == WASM_ERR_TRAP);
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_test_take_cont(m, "take-cg", k));
+
+    forged = k;
+    forged.of.externref += (uintptr_t)1u << WASM__CONT_GEN_SHIFT;
+    CHECK(t, wasm_test_take_cont(m, "take-cont", forged) == WASM_ERR_TYPE_MISMATCH);
+    if (held != NULL) wasm_ref_release(&rt, held);
+    wasm_gc_collect(&rt);
+    CHECK(t, wasm_test_take_cont(m, "take-cont", k) == WASM_ERR_TYPE_MISMATCH);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 static const test_case types_references_cases[] = {
     { "custom descriptors: exact function imports link only functions of exactly their type", test_exact_function_imports_link_only_the_exact_type },
     { "table64: import width mismatch is rejected", test_table64_import_width_mismatch },
@@ -976,5 +1047,6 @@ static const test_case types_references_cases[] = {
     { "wasmgc: function imports match host signatures by type equality", test_gc_function_import_matches_host_signature_by_type_equality },
     { "wasmgc: global imports accept GC subtype bindings", test_gc_global_import_accepts_subtype_binding },
     { "reference types: typed select chooses funcref operands", test_typed_select_funcref },
+    { "stack switching: host contrefs match their type until consumed, then any continuation type", test_contrefs_at_the_host_boundary_match_their_type_until_consumed },
 };
 const test_suite types_references_suite = { "types.references", types_references_cases, COUNTOF(types_references_cases) };

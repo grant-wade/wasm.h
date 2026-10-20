@@ -1,4 +1,5 @@
 #include "references.h"
+#include "../exec/cont.h"
 #include "../handles.h"
 #include <stdio.h>
 #include "../internal/alloc.h"
@@ -347,9 +348,9 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
     }
     if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) return 1;
     if (wasm__uses_contref_storage(value->type)) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)value->of.externref;
+        const wasm__cont_object_t* k = mod && mod->rt ? wasm__cont_live(mod->rt, value->of.externref) : NULL;
 
-        if (!mod || !mod->rt || !wasm__handle_set_contains(&mod->rt->cont_objects, k)) return 0;
+        if (!k) return 0;
         if (k->module) {
             out_reftype->has_type_index = 1;
             out_reftype->exact = 1;
@@ -426,8 +427,6 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
     if (!value) return 0;
     if (!wasm__is_ref_type(expected_type))
         return wasm__is_valtype_subtype(mod, value->type, expected_type);
-    if (!wasm__runtime_value_reftype(mod, value, &actual_ref, &actual_mod)) return 0;
-
     if (expected_ref && wasm__has_reftype_info(expected_ref))
         effective_expected = *expected_ref;
     else {
@@ -436,6 +435,9 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
         effective_expected.nullable = 1;
     }
     if (effective_expected.type == WASM_TYPE_VOID) effective_expected.type = expected_type;
+    if (wasm__uses_contref_storage(value->type) && mod && mod->rt && wasm__cont_consumed(mod->rt, value->of.externref))
+        return effective_expected.type == WASM_TYPE_CONTREF;
+    if (!wasm__runtime_value_reftype(mod, value, &actual_ref, &actual_mod)) return 0;
 
     if (wasm__is_null_ref(value)) {
         if (!effective_expected.nullable) return 0;

@@ -13,7 +13,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_stack_init(wasm_runtime_t* rt, wasm__exec_s
                                                 WASM__ALIGNOF(wasm__slot_t));
     if (!s->stack) return WASM_ERR_OOM;
     s->max_stack = max_stack;
-    s->call_frames = (wasm__call_frame_t*)wasm__calloc(&rt->allocator, max_call_frames, sizeof(*s->call_frames));
+    s->call_frames = (wasm__call_frame_t*)wasm__malloc_array(&rt->allocator, max_call_frames, sizeof(*s->call_frames));
     if (!s->call_frames || wasm__arena_init(rt, s, frame_arena_size) != WASM_OK) {
         wasm__exec_stack_destroy(rt, s);
         return WASM_ERR_OOM;

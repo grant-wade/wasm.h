@@ -1,6 +1,7 @@
 #include "../support.h"
 
 #ifdef WASM_TEST_MODULAR
+#include "../../../src/exec/cont.h"
 #include "../../../src/exec/state.h"
 #endif
 
@@ -2024,6 +2025,857 @@ TEST(test_stack_switching_lazy_validation_of_a_continuation) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $f1 (func (param i32) (result i32))) (type $c1 (cont $f1))
+     (type $f0 (func (result i32))) (type $c0 (cont $f0))
+     (type $hold (array (mut (ref null $c1))))
+     (tag $y (param i32) (result i32))
+     (import "host" "tick" (func $tick))
+     (global $g (export "g") (mut (ref null $c1)) (ref.null $c1))
+     (global $held (mut (ref null $hold)) (ref.null $hold))
+     (table $t (export "t") 1 (ref null $c1))
+     (func $echo (type $f1) (param $x i32) (result i32)
+       (loop $l
+         (call $tick)
+         (local.set $x (suspend $y (i32.add (local.get $x) (i32.const 100))))
+         (br_if $l (local.get $x)))
+       (i32.const -1))
+     (func $count (type $f1) (param $n i32) (result i32)
+       (loop $l
+         (drop (suspend $y (local.get $n)))
+         (call $tick)
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1)))))
+       (i32.const 0))
+     (elem declare func $echo $count)
+     (func $make (export "make") (result (ref $c1)) (local $k (ref null $c1))
+       (block $h (result i32 (ref $c1))
+         (resume $c1 (on $y $h) (i32.const 1) (cont.new $c1 (ref.func $echo)))
+         (unreachable))
+       (local.set $k) (drop) (ref.as_non_null (local.get $k)))
+     (func $run (export "run") (param $k (ref null $c1)) (param $x i32) (result i32)
+       (block $h (result i32 (ref $c1))
+         (return (resume $c1 (on $y $h) (local.get $x) (local.get $k))))
+       (drop))
+     (func (export "keep") (param $k (ref null $c1))
+       (global.set $g (local.get $k)) (table.set $t (i32.const 0) (local.get $k)))
+     (func (export "run-global") (param $x i32) (result i32) (call $run (global.get $g) (local.get $x)))
+     (func (export "run-table") (param $x i32) (result i32) (call $run (table.get $t (i32.const 0)) (local.get $x)))
+     (func (export "bind-run") (param $k (ref null $c1)) (result i32)
+       (block $h (result i32 (ref $c1))
+         (return (resume $c0 (on $y $h) (cont.bind $c1 $c0 (i32.const 7) (local.get $k)))))
+       (drop))
+     (func (export "stale-local") (result i32) (local $k (ref null $c1))
+       (local.set $k (call $make))
+       (drop (call $run (local.get $k) (i32.const 0)))
+       (global.set $g (call $make))
+       (call $run (local.get $k) (i32.const 0)))
+     (func (export "hold") (param $n i32) (local $i i32)
+       (global.set $held (array.new_default $hold (local.get $n)))
+       (loop $l
+         (array.set $hold (global.get $held) (local.get $i) (call $make))
+         (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (local.get $n)))))
+     (func (export "finish") (local $i i32)
+       (loop $l
+         (drop (call $run (array.get $hold (global.get $held) (local.get $i)) (i32.const 0)))
+         (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1)))
+                             (array.len (global.get $held))))))
+     (func (export "sum") (param $n i32) (result i32) (local $k (ref null $c1)) (local $acc i32)
+       (local.set $k (cont.new $c1 (ref.func $count)))
+       (block $done
+         (loop $next
+           (block $h (result i32 (ref $c1))
+             (drop (resume $c1 (on $y $h) (local.get $n) (local.get $k)))
+             (br $done))
+           (local.set $k)
+           (local.set $acc (i32.add (local.get $acc)))
+           (br $next)))
+       (local.get $acc))) */
+static const uint8_t wasm_test_cont_recycle_sections[] = {
+    0x01, 0x36, 0x0C, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x5D, 0x00, 0x60, 0x00, 0x01, 0x7F, 0x5D, 0x02,
+    0x5E, 0x63, 0x01, 0x01, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x64, 0x01, 0x60, 0x00, 0x02, 0x7F,
+    0x64, 0x01, 0x60, 0x02, 0x63, 0x01, 0x7F, 0x01, 0x7F, 0x60, 0x01, 0x63, 0x01, 0x00, 0x60, 0x01,
+    0x63, 0x01, 0x01, 0x7F, 0x60, 0x01, 0x7F, 0x00, 0x02, 0x0D, 0x01, 0x04, 0x68, 0x6F, 0x73, 0x74,
+    0x04, 0x74, 0x69, 0x63, 0x6B, 0x00, 0x05, 0x03, 0x0D, 0x0C, 0x00, 0x00, 0x06, 0x08, 0x09, 0x00,
+    0x00, 0x0A, 0x02, 0x0B, 0x05, 0x00, 0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x01, 0x0D, 0x03, 0x01,
+    0x00, 0x00, 0x06, 0x0D, 0x02, 0x63, 0x01, 0x01, 0xD0, 0x01, 0x0B, 0x63, 0x04, 0x01, 0xD0, 0x04,
+    0x0B, 0x07, 0x65, 0x0C, 0x01, 0x67, 0x03, 0x00, 0x01, 0x74, 0x01, 0x00, 0x04, 0x6D, 0x61, 0x6B,
+    0x65, 0x00, 0x03, 0x03, 0x72, 0x75, 0x6E, 0x00, 0x04, 0x04, 0x6B, 0x65, 0x65, 0x70, 0x00, 0x05,
+    0x0A, 0x72, 0x75, 0x6E, 0x2D, 0x67, 0x6C, 0x6F, 0x62, 0x61, 0x6C, 0x00, 0x06, 0x09, 0x72, 0x75,
+    0x6E, 0x2D, 0x74, 0x61, 0x62, 0x6C, 0x65, 0x00, 0x07, 0x08, 0x62, 0x69, 0x6E, 0x64, 0x2D, 0x72,
+    0x75, 0x6E, 0x00, 0x08, 0x0B, 0x73, 0x74, 0x61, 0x6C, 0x65, 0x2D, 0x6C, 0x6F, 0x63, 0x61, 0x6C,
+    0x00, 0x09, 0x04, 0x68, 0x6F, 0x6C, 0x64, 0x00, 0x0A, 0x06, 0x66, 0x69, 0x6E, 0x69, 0x73, 0x68,
+    0x00, 0x0B, 0x03, 0x73, 0x75, 0x6D, 0x00, 0x0C, 0x09, 0x06, 0x01, 0x03, 0x00, 0x02, 0x01, 0x02,
+    0x0A, 0xA5, 0x02, 0x0C, 0x17, 0x00, 0x03, 0x40, 0x10, 0x00, 0x20, 0x00, 0x41, 0xE4, 0x00, 0x6A,
+    0xE2, 0x00, 0x21, 0x00, 0x20, 0x00, 0x0D, 0x00, 0x0B, 0x41, 0x7F, 0x0B, 0x17, 0x00, 0x03, 0x40,
+    0x20, 0x00, 0xE2, 0x00, 0x1A, 0x10, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00,
+    0x0B, 0x41, 0x00, 0x0B, 0x1B, 0x01, 0x01, 0x63, 0x01, 0x02, 0x07, 0x41, 0x01, 0xD2, 0x01, 0xE0,
+    0x01, 0xE3, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x21, 0x00, 0x1A, 0x20, 0x00, 0xD4, 0x0B,
+    0x11, 0x00, 0x02, 0x07, 0x20, 0x01, 0x20, 0x00, 0xE3, 0x01, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x0B,
+    0x1A, 0x0B, 0x0C, 0x00, 0x20, 0x00, 0x24, 0x00, 0x41, 0x00, 0x20, 0x00, 0x26, 0x00, 0x0B, 0x08,
+    0x00, 0x23, 0x00, 0x20, 0x00, 0x10, 0x04, 0x0B, 0x0A, 0x00, 0x41, 0x00, 0x25, 0x00, 0x20, 0x00,
+    0x10, 0x04, 0x0B, 0x14, 0x00, 0x02, 0x07, 0x41, 0x07, 0x20, 0x00, 0xE1, 0x01, 0x03, 0xE3, 0x03,
+    0x01, 0x00, 0x00, 0x00, 0x0F, 0x0B, 0x1A, 0x0B, 0x1A, 0x01, 0x01, 0x63, 0x01, 0x10, 0x03, 0x21,
+    0x00, 0x20, 0x00, 0x41, 0x00, 0x10, 0x04, 0x1A, 0x10, 0x03, 0x24, 0x00, 0x20, 0x00, 0x41, 0x00,
+    0x10, 0x04, 0x0B, 0x23, 0x01, 0x01, 0x7F, 0x20, 0x00, 0xFB, 0x07, 0x04, 0x24, 0x01, 0x03, 0x40,
+    0x23, 0x01, 0x20, 0x01, 0x10, 0x03, 0xFB, 0x0E, 0x04, 0x20, 0x01, 0x41, 0x01, 0x6A, 0x22, 0x01,
+    0x20, 0x00, 0x49, 0x0D, 0x00, 0x0B, 0x0B, 0x21, 0x01, 0x01, 0x7F, 0x03, 0x40, 0x23, 0x01, 0x20,
+    0x00, 0xFB, 0x0B, 0x04, 0x41, 0x00, 0x10, 0x04, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6A, 0x22, 0x00,
+    0x23, 0x01, 0xFB, 0x0F, 0x49, 0x0D, 0x00, 0x0B, 0x0B, 0x2E, 0x02, 0x01, 0x63, 0x01, 0x01, 0x7F,
+    0xD2, 0x02, 0xE0, 0x01, 0x21, 0x01, 0x02, 0x40, 0x03, 0x40, 0x02, 0x07, 0x20, 0x00, 0x20, 0x01,
+    0xE3, 0x01, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x0C, 0x02, 0x0B, 0x21, 0x01, 0x20, 0x02, 0x6A, 0x21,
+    0x02, 0x0C, 0x00, 0x0B, 0x0B, 0x20, 0x02, 0x0B,
+};
+/* Nonzero: tick ages the free table entries to their last generation. */
+static int wasm_test_cont_tick_ages;
+/* Nonzero: every that many ticks, tick requests an interrupt. */
+static uint32_t wasm_test_cont_tick_interrupt_every;
+static uint32_t wasm_test_cont_ticks;
+
+static void wasm_test_cont_age_free_entries(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = rt->conts.free_head; i; i = wasm__cont_at(&rt->conts, i - 1u)->next_free)
+        wasm__cont_at(&rt->conts, i - 1u)->gen = WASM__CONT_GEN_MAX;
+}
+
+static wasm_error_t wasm_test_cont_tick(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                        wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)args;
+    (void)num_args;
+    (void)results;
+    (void)num_results;
+    (void)userdata;
+    wasm_test_cont_ticks++;
+    if (wasm_test_cont_tick_ages) wasm_test_cont_age_free_entries(mod->rt);
+    if (wasm_test_cont_tick_interrupt_every && wasm_test_cont_ticks % wasm_test_cont_tick_interrupt_every == 0)
+        wasm_runtime_interrupt(mod->rt);
+    return WASM_OK;
+}
+
+static wasm_module_t* wasm_test_load_cont_recycle(wasm_runtime_t* rt) {
+    wasm_test_cont_tick_ages = 0;
+    wasm_test_cont_tick_interrupt_every = 0;
+    wasm_test_cont_ticks = 0;
+    wasm_test_register_host(rt, "tick", wasm_test_cont_tick);
+    return wasm_test_load_cont(rt, wasm_test_cont_recycle_sections, sizeof(wasm_test_cont_recycle_sections));
+}
+
+static uint32_t wasm_test_cont_ref_index(wasm_value_t k) {
+    return (uint32_t)(k.of.externref >> 1) & (WASM__CONT_MAX_ENTRIES - 1u);
+}
+
+static uint32_t wasm_test_cont_ref_gen(wasm_value_t k) {
+    return (uint32_t)(k.of.externref >> WASM__CONT_GEN_SHIFT) & WASM__CONT_GEN_MAX;
+}
+
+/* Calls export func_name of m with arguments k and x, or x alone if k is NULL; returns the error and sets
+ * *result. */
+static wasm_error_t wasm_test_cont_run(wasm_module_t* m, const char* func_name, const wasm_value_t* k, int32_t x,
+                                       wasm_value_t* result) {
+    wasm_value_t args[2];
+
+    if (!k) {
+        args[0] = wasm_i32(x);
+        return wasm_call(m, func_name, args, 1, result, 1);
+    }
+    args[0] = *k;
+    args[1] = wasm_i32(x);
+    return wasm_call(m, func_name, args, 2, result, 1);
+}
+
+static void wasm_test_check_consumed(test_ctx* t, wasm_module_t* m, const char* what, wasm_error_t err) {
+    CHECK_MSG(t, err == WASM_ERR_TRAP && strstr(m->rt->error_msg, "continuation already consumed") != NULL,
+              "%s: expected a consumed trap, got %d (%s)", what, (int)err, m->rt->error_msg);
+}
+
+TEST(test_stack_switching_stale_references_to_reused_entries) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t k1;
+    wasm_value_t k2;
+    wasm_value_t result;
+    wasm_error_t err;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k1, 1));
+    WASM_CHECK_OK(t, wasm_call(m, "keep", &k1, 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run", &k1, 0, &result));
+    WASM_CHECK_I32(t, result.of.i32, -1);
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k2, 1));
+    CHECK_MSG(t, wasm_test_cont_ref_index(k2) == wasm_test_cont_ref_index(k1) &&
+                     wasm_test_cont_ref_gen(k2) > wasm_test_cont_ref_gen(k1),
+              "expected the consumed entry to be reused, got %u/%u after %u/%u", wasm_test_cont_ref_index(k2),
+              wasm_test_cont_ref_gen(k2), wasm_test_cont_ref_index(k1), wasm_test_cont_ref_gen(k1));
+
+    wasm_test_check_consumed(t, m, "host argument", wasm_test_cont_run(m, "run", &k1, 5, &result));
+    wasm_test_check_consumed(t, m, "global", wasm_test_cont_run(m, "run-global", NULL, 5, &result));
+    wasm_test_check_consumed(t, m, "table", wasm_test_cont_run(m, "run-table", NULL, 5, &result));
+    wasm_test_check_consumed(t, m, "cont.bind", wasm_call(m, "bind-run", &k1, 1, &result, 1));
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run", &k2, 5, &result));
+    WASM_CHECK_I32(t, result.of.i32, 105);
+
+    wasm_test_check_consumed(t, m, "local", wasm_call(m, "stale-local", NULL, 0, &result, 1));
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run-global", NULL, 3, &result));
+    WASM_CHECK_I32(t, result.of.i32, 103);
+    CHECK_MSG(t, rt.conts.count <= 2, "expected entries to be reused, %u used", (unsigned)rt.conts.count);
+
+    wasm_gc_collect(&rt);
+    wasm_test_check_consumed(t, m, "table after a collection", wasm_test_cont_run(m, "run-table", NULL, 5, &result));
+    wasm_test_check_consumed(t, m, "rooted host reference after a collection",
+                             wasm_test_cont_run(m, "run", &k1, 5, &result));
+    WASM_CHECK_OK(t, wasm_global_set(m, "g", wasm_ref_null(WASM_TYPE_CONTREF)));
+    WASM_CHECK_OK(t, wasm_table_set(m, 0, 0, wasm_ref_null(WASM_TYPE_CONTREF)));
+    wasm_gc_collect(&rt);
+    err = wasm_test_cont_run(m, "run", &k1, 5, &result);
+    CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "expected an unrooted consumed reference to be rejected, got %d",
+              (int)err);
+    CHECK(t, rt.conts.live == 0 && rt.num_cont_stacks == 0);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_stack_switching_forged_references) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t k;
+    wasm_value_t forged[4];
+    wasm_value_t result;
+    wasm_value_t* held;
+    wasm_value_t* global;
+    wasm_value_t saved;
+    wasm_error_t err;
+    uint32_t i;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k, 1));
+    held = wasm_ref_hold(&rt, k);
+    CHECK(t, held != NULL);
+    for (i = 0; i < COUNTOF(forged); i++) forged[i] = k;
+    forged[0].of.externref += (uintptr_t)1u << WASM__CONT_GEN_SHIFT;
+    forged[1].of.externref += (uintptr_t)WASM__CONT_BLOCK_ENTRIES << 1;
+    forged[2].of.externref ^= (uintptr_t)1u << WASM__CONT_TAG_SHIFT;
+    forged[3].of.externref &= ~(uintptr_t)1u;
+    for (i = 0; i < COUNTOF(forged); i++) {
+        wasm_value_t* held_forged;
+
+        err = wasm_test_cont_run(m, "run", &forged[i], 5, &result);
+        CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "forged reference %u: expected a type mismatch, got %d (%s)",
+                  (unsigned)i, (int)err, rt.error_msg);
+        CHECK(t, wasm_global_set(m, "g", forged[i]) == WASM_ERR_TYPE_MISMATCH);
+        CHECK(t, wasm_table_set(m, 0, 0, forged[i]) == WASM_ERR_TYPE_MISMATCH);
+        held_forged = wasm_ref_hold(&rt, forged[i]);
+        CHECK(t, held_forged != NULL);
+        wasm_gc_collect(&rt);
+        wasm_ref_release(&rt, held_forged);
+    }
+
+    global = wasm_module_global(m, 0);
+    CHECK(t, global != NULL);
+    if (held != NULL && global != NULL) {
+        saved = *global;
+        for (i = 0; i < COUNTOF(forged); i++) {
+            *global = forged[i];
+            wasm_gc_collect(&rt);
+            err = wasm_test_cont_run(m, "run-global", NULL, 5, &result);
+            CHECK_MSG(t, err == WASM_ERR_MALFORMED && strstr(rt.error_msg, "invalid continuation reference") != NULL,
+                      "forged global %u: expected an invalid reference, got %d (%s)", (unsigned)i, (int)err,
+                      rt.error_msg);
+        }
+        *global = saved;
+        WASM_CHECK_OK(t, wasm_test_cont_run(m, "run", held, 2, &result));
+        WASM_CHECK_I32(t, result.of.i32, 102);
+    }
+    if (held != NULL) wasm_ref_release(&rt, held);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_stack_switching_retired_entries) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t k1;
+    wasm_value_t k2;
+    wasm_value_t result;
+    wasm__cont_object_t* entry;
+    wasm_error_t err;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k1, 1));
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run", &k1, 0, &result));
+    entry = wasm__cont_at(&rt.conts, wasm_test_cont_ref_index(k1));
+    wasm_test_cont_tick_ages = 1;
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k2, 1));
+    wasm_test_cont_tick_ages = 0;
+    CHECK(t, wasm_test_cont_ref_index(k2) == entry->index && wasm_test_cont_ref_gen(k2) == WASM__CONT_GEN_MAX);
+    WASM_CHECK_OK(t, wasm_call(m, "keep", &k2, 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run-global", NULL, 0, &result));
+    WASM_CHECK_I32(t, result.of.i32, -1);
+    CHECK_MSG(t, rt.conts.retired == 1 && entry->gen > WASM__CONT_GEN_MAX, "expected a retired entry, %u retired",
+              (unsigned)rt.conts.retired);
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k1, 1));
+    CHECK(t, wasm_test_cont_ref_index(k1) != entry->index);
+    WASM_CHECK_OK(t, wasm_test_cont_run(m, "run", &k1, 4, &result));
+    WASM_CHECK_I32(t, result.of.i32, 104);
+
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.conts.retired == 1, "%s", "expected marked stale references to keep the entry retired");
+    wasm_test_check_consumed(t, m, "global", wasm_test_cont_run(m, "run-global", NULL, 5, &result));
+    wasm_test_check_consumed(t, m, "host", wasm_test_cont_run(m, "run", &k2, 5, &result));
+
+    WASM_CHECK_OK(t, wasm_global_set(m, "g", wasm_ref_null(WASM_TYPE_CONTREF)));
+    WASM_CHECK_OK(t, wasm_table_set(m, 0, 0, wasm_ref_null(WASM_TYPE_CONTREF)));
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.conts.retired == 0 && entry->gen == 0 && !entry->in_use,
+              "expected the unreferenced entry to restart its generations, %u retired, gen %u",
+              (unsigned)rt.conts.retired, (unsigned)entry->gen);
+    err = wasm_test_cont_run(m, "run", &k2, 5, &result);
+    CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "expected a type mismatch, got %d", (int)err);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_stack_switching_long_generator_runs_stay_bounded) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    uint64_t n = 200000;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m != NULL) {
+        arg = wasm_i32((int32_t)n);
+        WASM_CHECK_OK(t, wasm_call(m, "sum", &arg, 1, &result, 1));
+        CHECK(t, (uint32_t)result.of.i32 == (uint32_t)(n * (n + 1u) / 2u));
+        CHECK_MSG(t, rt.conts.count <= 1u + (uint32_t)(n / ((uint64_t)WASM__CONT_GEN_MAX + 1u)) && rt.conts.live == 0,
+                  "%u entries, %u live", (unsigned)rt.conts.count, (unsigned)rt.conts.live);
+        CHECK_MSG(t, rt.handle_gc_threshold == 0 && rt.cont_gc_threshold == 0, "%s",
+                  "expected no collection during the run");
+        CHECK(t, rt.num_cont_stacks == 0 && rt.num_pooled_cont_stacks == 1);
+        wasm_module_free(m);
+    }
+    wasm_destroy(&rt);
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    n = 5000;
+    wasm_test_cont_tick_ages = 1;
+    arg = wasm_i32((int32_t)n);
+    WASM_CHECK_OK(t, wasm_call(m, "sum", &arg, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, (int32_t)(n * (n + 1u) / 2u));
+    CHECK_MSG(t, rt.handle_gc_threshold != 0, "%s", "expected retired entries to call for a collection");
+    CHECK_MSG(t, rt.conts.count <= 1100u && rt.conts.retired < 1024u, "%u entries, %u retired",
+              (unsigned)rt.conts.count, (unsigned)rt.conts.retired);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_stack_switching_stops_inside_recycled_continuations) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_error_t err;
+    uint32_t stops = 0;
+    uint32_t inside = 0;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(300);
+    wasm_runtime_set_fuel(&rt, 37);
+    err = wasm_call(m, "sum", &arg, 1, &result, 1);
+    while (err == WASM_ERR_OUT_OF_FUEL && stops < 100000u) {
+        stops++;
+        if (rt.exec != &rt.main_stack) inside++;
+        if (stops % 5u == 0) wasm_gc_collect(&rt);
+        wasm_runtime_set_fuel(&rt, 37);
+        err = wasm_runtime_resume(&rt, NULL, 0, &result, 1);
+    }
+    WASM_CHECK_OK(t, err);
+    WASM_CHECK_I32(t, result.of.i32, 45150);
+    CHECK_MSG(t, inside > 0, "expected fuel to run out inside the generator, %u stops", (unsigned)stops);
+    wasm_runtime_disable_fuel(&rt);
+
+    stops = 0;
+    inside = 0;
+    wasm_test_cont_tick_interrupt_every = 7;
+    err = wasm_call(m, "sum", &arg, 1, &result, 1);
+    while (err == WASM_ERR_INTERRUPTED && stops < 100000u) {
+        stops++;
+        if (rt.exec != &rt.main_stack) inside++;
+        err = wasm_runtime_resume(&rt, NULL, 0, &result, 1);
+    }
+    wasm_test_cont_tick_interrupt_every = 0;
+    WASM_CHECK_OK(t, err);
+    WASM_CHECK_I32(t, result.of.i32, 45150);
+    CHECK_MSG(t, inside > 0 && stops >= 40, "%u interrupts, %u inside the generator", (unsigned)stops,
+              (unsigned)inside);
+    CHECK_MSG(t, rt.conts.count <= 2 && rt.conts.live == 0, "%u entries, %u live", (unsigned)rt.conts.count,
+              (unsigned)rt.conts.live);
+    CHECK(t, rt.num_cont_stacks == 0);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_stack_switching_stack_pool_follows_stacks_in_use) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont_recycle(&rt);
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(40);
+    WASM_CHECK_OK(t, wasm_call(m, "hold", &arg, 1, NULL, 0));
+    CHECK(t, rt.num_cont_stacks == 40 && rt.num_pooled_cont_stacks == 0);
+    WASM_CHECK_OK(t, wasm_call(m, "finish", NULL, 0, NULL, 0));
+    CHECK_MSG(t, rt.num_cont_stacks == 0 && rt.num_pooled_cont_stacks > 16, "%u stacks pooled",
+              (unsigned)rt.num_pooled_cont_stacks);
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.num_pooled_cont_stacks == 16, "expected the collection to trim the pool, %u pooled",
+              (unsigned)rt.num_pooled_cont_stacks);
+    arg = wasm_i32(16);
+    WASM_CHECK_OK(t, wasm_call(m, "hold", &arg, 1, NULL, 0));
+    CHECK(t, rt.num_cont_stacks == 16 && rt.num_pooled_cont_stacks == 0);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (table $t 8192 (ref null $c))
+     (func $nop (type $f)) (elem declare func $nop)
+     (func (export "pin") (param $i i32)
+       (table.set $t (local.get $i) (cont.new $c (ref.func $nop)))
+       (resume $c (table.get $t (local.get $i))))
+     (func (export "churn") (param $n i32)
+       (loop $l (resume $c (cont.new $c (ref.func $nop)))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))
+     (func (export "unpin") (table.fill $t (i32.const 0) (ref.null $c) (i32.const 8192)))) */
+static const uint8_t wasm_test_cont_pin_sections[] = {
+    0x01, 0x0A, 0x03, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x60, 0x01, 0x7F, 0x00, 0x03, 0x05, 0x04, 0x00,
+    0x02, 0x02, 0x00, 0x04, 0x06, 0x01, 0x63, 0x01, 0x00, 0x80, 0x40, 0x07, 0x17, 0x03, 0x03, 0x70,
+    0x69, 0x6E, 0x00, 0x01, 0x05, 0x63, 0x68, 0x75, 0x72, 0x6E, 0x00, 0x02, 0x05, 0x75, 0x6E, 0x70,
+    0x69, 0x6E, 0x00, 0x03, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x3A, 0x04, 0x02, 0x00,
+    0x0B, 0x11, 0x00, 0x20, 0x00, 0xD2, 0x00, 0xE0, 0x01, 0x26, 0x00, 0x20, 0x00, 0x25, 0x00, 0xE3,
+    0x01, 0x00, 0x0B, 0x15, 0x00, 0x03, 0x40, 0xD2, 0x00, 0xE0, 0x01, 0xE3, 0x01, 0x00, 0x20, 0x00,
+    0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B, 0x0D, 0x00, 0x41, 0x00, 0xD0, 0x01, 0x41,
+    0x80, 0xC0, 0x00, 0xFC, 0x11, 0x00, 0x0B,
+};
+
+TEST(test_stack_switching_pinned_retired_entries_stop_calling_for_collections) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    const wasm__cont_object_t* entry;
+    uint32_t i;
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_cont(&rt, wasm_test_cont_pin_sections, sizeof(wasm_test_cont_pin_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < 8192u && rt.conts.retired < 3000u; i++) {
+        wasm_test_cont_age_free_entries(&rt);
+        arg = wasm_i32((int32_t)i);
+        WASM_CHECK_OK(t, wasm_call(m, "pin", &arg, 1, NULL, 0));
+    }
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.conts.retired >= 3000u && !wasm__cont_collection_due(&rt, 0) && !wasm__cont_collection_due(&rt, 1),
+              "expected referenced retired entries to stop calling for collections, %u retired",
+              (unsigned)rt.conts.retired);
+
+    arg = wasm_i32(2000);
+    WASM_CHECK_OK(t, wasm_call(m, "churn", &arg, 1, NULL, 0));
+    CHECK(t, rt.conts.free_head != 0);
+    if (rt.conts.free_head != 0) {
+        entry = wasm__cont_at(&rt.conts, rt.conts.free_head - 1u);
+        CHECK_MSG(t, entry->gen - entry->swept_gen >= 1990u, "expected no collection during the run, %u uses since one",
+                  (unsigned)(entry->gen - entry->swept_gen));
+    }
+
+    WASM_CHECK_OK(t, wasm_call(m, "unpin", NULL, 0, NULL, 0));
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.conts.retired == 0, "expected unreferenced entries to restart their generations, %u retired",
+              (unsigned)rt.conts.retired);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (type $box (array (mut (ref null $c))))
+     (global $g (mut (ref null $box)) (ref.null $box))
+     (func $nop (type $f)) (elem declare func $nop)
+     (func (export "make") (result (ref $c)) (cont.new $c (ref.func $nop)))
+     (func (export "box") (param $k (ref null $c)) (global.set $g (array.new $box (local.get $k) (i32.const 1))))
+     (func (export "unbox") (global.set $g (ref.null $box)))
+     (func (export "run") (param $k (ref null $c)) (resume $c (local.get $k)))) */
+static const uint8_t wasm_test_cont_boxed_sections[] = {
+    0x01, 0x14, 0x05, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x5E, 0x63, 0x01, 0x01, 0x60, 0x00, 0x01, 0x64,
+    0x01, 0x60, 0x01, 0x63, 0x01, 0x00, 0x03, 0x06, 0x05, 0x00, 0x03, 0x04, 0x00, 0x04, 0x06, 0x07,
+    0x01, 0x63, 0x02, 0x01, 0xD0, 0x02, 0x0B, 0x07, 0x1C, 0x04, 0x04, 0x6D, 0x61, 0x6B, 0x65, 0x00,
+    0x01, 0x03, 0x62, 0x6F, 0x78, 0x00, 0x02, 0x05, 0x75, 0x6E, 0x62, 0x6F, 0x78, 0x00, 0x03, 0x03,
+    0x72, 0x75, 0x6E, 0x00, 0x04, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x26, 0x05, 0x02,
+    0x00, 0x0B, 0x06, 0x00, 0xD2, 0x00, 0xE0, 0x01, 0x0B, 0x0B, 0x00, 0x20, 0x00, 0x41, 0x01, 0xFB,
+    0x06, 0x02, 0x24, 0x00, 0x0B, 0x06, 0x00, 0xD0, 0x02, 0x24, 0x00, 0x0B, 0x07, 0x00, 0x20, 0x00,
+    0xE3, 0x01, 0x00, 0x0B,
+};
+
+TEST(test_stack_switching_failed_collections_keep_consumed_references) {
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t k;
+    wasm_error_t err;
+
+    wasm_init(&rt);
+    m = wasm_test_load_cont(&rt, wasm_test_cont_boxed_sections, sizeof(wasm_test_cont_boxed_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k, 1));
+    WASM_CHECK_OK(t, wasm_call(m, "box", &k, 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_call(m, "run", &k, 1, NULL, 0));
+    wasm_gc_collect(&rt);
+    wasm_test_check_consumed(t, m, "boxed after a collection", wasm_call(m, "run", &k, 1, NULL, 0));
+
+    g_wasm_test_alloc_fail_countdown = 1;
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, g_wasm_test_alloc_fail_countdown == 0 && rt.last_error == WASM_ERR_OOM, "%s",
+              "expected marking to run out of memory");
+    g_wasm_test_alloc_fail_countdown = 0;
+    wasm_test_check_consumed(t, m, "boxed after a failed collection", wasm_call(m, "run", &k, 1, NULL, 0));
+    wasm_gc_collect(&rt);
+    wasm_test_check_consumed(t, m, "boxed after the next collection", wasm_call(m, "run", &k, 1, NULL, 0));
+
+    WASM_CHECK_OK(t, wasm_call(m, "unbox", NULL, 0, NULL, 0));
+    wasm_gc_collect(&rt);
+    err = wasm_call(m, "run", &k, 1, NULL, 0);
+    CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "expected an unreferenced consumed reference to be rejected, got %d",
+              (int)err);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (table $t 0 (ref null $c))
+     (func $nop (type $f)) (elem declare func $nop)
+     (func (export "make") (result (ref $c)) (cont.new $c (ref.func $nop)))
+     (func (export "run") (param $k (ref null $c)) (resume $c (local.get $k)))
+     (func (export "hold") (param $n i32) (local $i i32)
+       (drop (table.grow $t (ref.null $c) (local.get $n)))
+       (loop $l
+         (table.set $t (local.get $i) (cont.new $c (ref.func $nop)))
+         (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (local.get $n)))))
+     (func (export "release") (table.set $t (i32.const 0) (ref.null $c)))
+     (func (export "convert") (param $n i32)
+       (loop $l
+         (drop (extern.convert_any (ref.i31 (local.get $n))))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))) */
+static const uint8_t wasm_test_cont_pool_sections[] = {
+    0x01, 0x14, 0x05, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x60, 0x00, 0x01, 0x64, 0x01, 0x60, 0x01, 0x63,
+    0x01, 0x00, 0x60, 0x01, 0x7F, 0x00, 0x03, 0x07, 0x06, 0x00, 0x02, 0x03, 0x04, 0x00, 0x04, 0x04,
+    0x05, 0x01, 0x63, 0x01, 0x00, 0x00, 0x07, 0x29, 0x05, 0x04, 0x6D, 0x61, 0x6B, 0x65, 0x00, 0x01,
+    0x03, 0x72, 0x75, 0x6E, 0x00, 0x02, 0x04, 0x68, 0x6F, 0x6C, 0x64, 0x00, 0x03, 0x07, 0x72, 0x65,
+    0x6C, 0x65, 0x61, 0x73, 0x65, 0x00, 0x04, 0x07, 0x63, 0x6F, 0x6E, 0x76, 0x65, 0x72, 0x74, 0x00,
+    0x05, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x56, 0x06, 0x02, 0x00, 0x0B, 0x06, 0x00,
+    0xD2, 0x00, 0xE0, 0x01, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xE3, 0x01, 0x00, 0x0B, 0x23, 0x01, 0x01,
+    0x7F, 0xD0, 0x01, 0x20, 0x00, 0xFC, 0x0F, 0x00, 0x1A, 0x03, 0x40, 0x20, 0x01, 0xD2, 0x00, 0xE0,
+    0x01, 0x26, 0x00, 0x20, 0x01, 0x41, 0x01, 0x6A, 0x22, 0x01, 0x20, 0x00, 0x49, 0x0D, 0x00, 0x0B,
+    0x0B, 0x08, 0x00, 0x41, 0x00, 0xD0, 0x01, 0x26, 0x00, 0x0B, 0x15, 0x00, 0x03, 0x40, 0x20, 0x00,
+    0xFB, 0x1C, 0xFB, 0x1B, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B,
+};
+
+/* A runtime with small stacks loading wasm_test_cont_pool_sections into *out_m, or NULL. */
+static wasm_runtime_t* wasm_test_cont_pool_runtime(wasm_module_t** out_m) {
+    wasm_builder_t mod = { 0 };
+    wasm_config_t cfg;
+    wasm_runtime_t* rt;
+
+    wasm_config_default(&cfg);
+    cfg.max_stack_values = 64;
+    cfg.max_call_depth = 8;
+    cfg.max_labels = 16;
+    cfg.initial_gc_heap_size = 0;
+    cfg.frame_arena_size = 1024;
+    *out_m = NULL;
+    rt = wasm_runtime_new(&wasm_test_allocator, &cfg);
+    if (!rt) return NULL;
+    emit_header(&mod);
+    emit_bytes(&mod, wasm_test_cont_pool_sections, sizeof(wasm_test_cont_pool_sections));
+    *out_m = wasm_load(rt, mod.buf, mod.len);
+    if (!*out_m) {
+        wasm_runtime_free(rt);
+        return NULL;
+    }
+    return rt;
+}
+
+static void wasm_test_cont_pool_free(wasm_runtime_t* rt, wasm_module_t* m) {
+    wasm_module_free(m);
+    wasm_runtime_free(rt);
+}
+
+static void wasm_test_check_foreign(test_ctx* t, wasm_module_t* m, wasm_value_t k, const char* what) {
+    wasm_error_t err = wasm_call(m, "run", &k, 1, NULL, 0);
+
+    CHECK_MSG(t, err == WASM_ERR_TYPE_MISMATCH, "%s: expected a type mismatch, got %d (%s)", what, (int)err,
+              m->rt->error_msg);
+}
+
+TEST(test_stack_switching_runtimes_alive_at_once_have_distinct_tags) {
+    wasm_module_t* ma;
+    wasm_module_t* mb;
+    wasm_runtime_t* a = wasm_test_cont_pool_runtime(&ma);
+    wasm_runtime_t* b;
+    wasm_value_t ka;
+    wasm_value_t kb;
+    uint32_t i;
+
+    CHECK(t, a != NULL);
+    if (!a) return;
+    WASM_CHECK_OK(t, wasm_call(ma, "make", NULL, 0, &ka, 1));
+    for (i = 0; i < 2u * WASM__CONT_TAG_MAX; i++) {
+        wasm_module_t* m;
+        wasm_runtime_t* rt = wasm_test_cont_pool_runtime(&m);
+        wasm_value_t k;
+
+        CHECK(t, rt != NULL);
+        if (!rt) break;
+        WASM_CHECK_OK(t, wasm_call(m, "make", NULL, 0, &k, 1));
+        CHECK(t, rt->conts.tag != a->conts.tag);
+        wasm_test_cont_pool_free(rt, m);
+    }
+    b = wasm_test_cont_pool_runtime(&mb);
+    CHECK(t, b != NULL);
+    if (b) {
+        WASM_CHECK_OK(t, wasm_call(mb, "make", NULL, 0, &kb, 1));
+        CHECK_MSG(t, b->conts.tag != a->conts.tag && kb.of.externref != ka.of.externref, "tags %u and %u",
+                  (unsigned)a->conts.tag, (unsigned)b->conts.tag);
+        wasm_test_check_foreign(t, mb, ka, "another runtime's continuation");
+        wasm_test_check_foreign(t, ma, kb, "a later runtime's continuation");
+        CHECK(t, b->conts.live == 1 && a->conts.live == 1);
+        WASM_CHECK_OK(t, wasm_call(mb, "run", &kb, 1, NULL, 0));
+        wasm_test_cont_pool_free(b, mb);
+    }
+    WASM_CHECK_OK(t, wasm_call(ma, "run", &ka, 1, NULL, 0));
+    wasm_test_cont_pool_free(a, ma);
+}
+
+TEST(test_stack_switching_runtimes_beyond_the_tags_take_slices_of_one) {
+    uint32_t cap = WASM__CONT_TAG_MAX + WASM__CONT_SLICES + 1u;
+    wasm_runtime_t** rts = (wasm_runtime_t**)calloc(cap, sizeof(*rts));
+    wasm_module_t** ms = (wasm_module_t**)calloc(cap, sizeof(*ms));
+    wasm_value_t* ks = (wasm_value_t*)calloc(cap, sizeof(*ks));
+    uint32_t first = UINT32_MAX;
+    uint32_t n;
+    uint32_t i;
+    wasm_error_t err = WASM_OK;
+
+    CHECK(t, rts != NULL && ms != NULL && ks != NULL);
+    if (!rts || !ms || !ks) goto done;
+    for (n = 0; n < cap; n++) {
+        rts[n] = wasm_test_cont_pool_runtime(&ms[n]);
+        CHECK(t, rts[n] != NULL);
+        if (!rts[n]) goto done;
+        err = wasm_call(ms[n], "make", NULL, 0, &ks[n], 1);
+        if (err != WASM_OK) break;
+        if (rts[n]->conts.tag == WASM__CONT_TAG_MAX && first == UINT32_MAX) first = n;
+    }
+    CHECK_MSG(t, err == WASM_ERR_OOM && n < cap && strstr(rts[n]->error_msg, "tags") != NULL,
+              "expected a runtime past the slices to fail, got %d after %u runtimes", (int)err, (unsigned)n);
+    CHECK_MSG(t, first != UINT32_MAX && first < WASM__CONT_TAG_MAX && n - first == WASM__CONT_SLICES,
+              "%u runtimes got tags of their own, then %u got slices", (unsigned)first, (unsigned)(n - first));
+    if (first == UINT32_MAX || first + 2u > n || n >= cap) goto done;
+    for (i = first; i < n; i++) {
+        CHECK(t, rts[i]->conts.tag == WASM__CONT_TAG_MAX && rts[i]->conts.limit == WASM__CONT_SLICE_ENTRIES);
+        CHECK(t, i == first || rts[i]->conts.base != rts[first]->conts.base);
+    }
+    wasm_test_check_foreign(t, ms[first], ks[0], "a runtime's continuation in a sliced runtime");
+    wasm_test_check_foreign(t, ms[0], ks[first], "a sliced runtime's continuation in another runtime");
+    wasm_test_check_foreign(t, ms[first + 1u], ks[first], "a continuation of another slice");
+    wasm_test_check_foreign(t, ms[first], ks[first + 1u], "a continuation of a later slice");
+    WASM_CHECK_OK(t, wasm_call(ms[first], "run", &ks[first], 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_call(ms[first + 1u], "run", &ks[first + 1u], 1, NULL, 0));
+
+    wasm_test_cont_pool_free(rts[first + 1u], ms[first + 1u]);
+    rts[first + 1u] = NULL;
+    WASM_CHECK_OK(t, wasm_call(ms[n], "make", NULL, 0, &ks[n], 1));
+    CHECK(t, rts[n]->conts.tag == WASM__CONT_TAG_MAX);
+    WASM_CHECK_OK(t, wasm_call(ms[n], "run", &ks[n], 1, NULL, 0));
+
+    {
+        wasm_runtime_t* rt = rts[first];
+        wasm_value_t arg = wasm_i32((int32_t)WASM__CONT_SLICE_ENTRIES);
+        wasm_value_t k;
+
+        WASM_CHECK_OK(t, wasm_call(ms[first], "hold", &arg, 1, NULL, 0));
+        CHECK_MSG(t, rt->conts.count == WASM__CONT_SLICE_ENTRIES && rt->conts.live == WASM__CONT_SLICE_ENTRIES,
+                  "%u entries, %u live", (unsigned)rt->conts.count, (unsigned)rt->conts.live);
+        err = wasm_call(ms[first], "make", NULL, 0, &k, 1);
+        CHECK_MSG(t, err == WASM_ERR_OOM && strstr(rt->error_msg, "continuation limit") != NULL,
+                  "expected a full slice to fail, got %d (%s)", (int)err, rt->error_msg);
+        arg = wasm_i32(100);
+        WASM_CHECK_OK(t, wasm_call(ms[first], "convert", &arg, 1, NULL, 0));
+        CHECK_MSG(t, rt->externref_boxes.count == 100u, "expected a full table not to collect, %u boxes left",
+                  (unsigned)rt->externref_boxes.count);
+        WASM_CHECK_OK(t, wasm_call(ms[first], "release", NULL, 0, NULL, 0));
+        WASM_CHECK_OK(t, wasm_call(ms[first], "make", NULL, 0, &k, 1));
+        WASM_CHECK_OK(t, wasm_call(ms[first], "run", &k, 1, NULL, 0));
+    }
+
+done:
+    if (rts) {
+        for (i = 0; i < cap; i++) {
+            if (rts[i]) wasm_test_cont_pool_free(rts[i], ms[i]);
+        }
+    }
+    if (rts && ms) {
+        wasm_runtime_t* rt = wasm_test_cont_pool_runtime(&ms[0]);
+        wasm_value_t k;
+
+        CHECK(t, rt != NULL);
+        if (rt) {
+            WASM_CHECK_OK(t, wasm_call(ms[0], "make", NULL, 0, &k, 1));
+            CHECK_MSG(t, rt->conts.tag != 0 && rt->conts.tag != WASM__CONT_TAG_MAX,
+                      "expected freed runtimes to give back their tags, got tag %u", (unsigned)rt->conts.tag);
+            wasm_test_cont_pool_free(rt, ms[0]);
+        }
+    }
+    free(rts);
+    free(ms);
+    free(ks);
+}
+
+#if defined(WASM_TEST_THREADS)
+#define WASM_TEST_CONT_THREADS 8u
+#define WASM_TEST_CONT_THREAD_RUNTIMES 24u
+
+typedef struct wasm_test_cont_worker_t {
+    wasm_runtime_t* rts[WASM_TEST_CONT_THREAD_RUNTIMES];
+    wasm_module_t* ms[WASM_TEST_CONT_THREAD_RUNTIMES];
+    wasm_value_t ks[WASM_TEST_CONT_THREAD_RUNTIMES];
+    uint32_t failures;
+} wasm_test_cont_worker_t;
+
+static void wasm_test_cont_worker_create(void* arg) {
+    wasm_test_cont_worker_t* worker = (wasm_test_cont_worker_t*)arg;
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_CONT_THREAD_RUNTIMES; i++) {
+        worker->rts[i] = wasm_test_cont_pool_runtime(&worker->ms[i]);
+        if (!worker->rts[i] || wasm_call(worker->ms[i], "make", NULL, 0, &worker->ks[i], 1) != WASM_OK)
+            worker->failures++;
+    }
+}
+
+static void wasm_test_cont_worker_free(void* arg) {
+    wasm_test_cont_worker_t* worker = (wasm_test_cont_worker_t*)arg;
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_CONT_THREAD_RUNTIMES; i++) {
+        if (worker->rts[i] && wasm_call(worker->ms[i], "run", &worker->ks[i], 1, NULL, 0) != WASM_OK)
+            worker->failures++;
+        if (worker->rts[i]) wasm_test_cont_pool_free(worker->rts[i], worker->ms[i]);
+        worker->rts[i] = NULL;
+    }
+}
+
+static void wasm_test_cont_run_workers(test_ctx* t, wasm_test_cont_worker_t* workers, void (*fn)(void*)) {
+    wasm_test_thread_start_t starts[WASM_TEST_CONT_THREADS];
+    wasm_test_thread_t threads[WASM_TEST_CONT_THREADS];
+    int spawned[WASM_TEST_CONT_THREADS];
+    uint32_t i;
+
+    for (i = 0; i < WASM_TEST_CONT_THREADS; i++) {
+        starts[i].fn = fn;
+        starts[i].arg = &workers[i];
+        spawned[i] = wasm_test_thread_spawn(&threads[i], &starts[i]);
+        CHECK(t, spawned[i]);
+        if (!spawned[i]) fn(&workers[i]);
+    }
+    for (i = 0; i < WASM_TEST_CONT_THREADS; i++) {
+        if (spawned[i]) wasm_test_thread_join(threads[i]);
+    }
+}
+
+TEST(test_stack_switching_tags_stay_distinct_across_threads) {
+    wasm_test_cont_worker_t* workers =
+        (wasm_test_cont_worker_t*)calloc(WASM_TEST_CONT_THREADS, sizeof(wasm_test_cont_worker_t));
+    uint32_t round;
+
+    CHECK(t, workers != NULL);
+    if (!workers) return;
+    for (round = 0; round < 4u; round++) {
+        uint32_t i;
+        uint32_t j;
+
+        wasm_test_cont_run_workers(t, workers, wasm_test_cont_worker_create);
+        for (i = 0; i < WASM_TEST_CONT_THREADS * WASM_TEST_CONT_THREAD_RUNTIMES; i++) {
+            const wasm_runtime_t* a = workers[i / WASM_TEST_CONT_THREAD_RUNTIMES].rts[i % WASM_TEST_CONT_THREAD_RUNTIMES];
+
+            for (j = i + 1u; a && j < WASM_TEST_CONT_THREADS * WASM_TEST_CONT_THREAD_RUNTIMES; j++) {
+                const wasm_runtime_t* b =
+                    workers[j / WASM_TEST_CONT_THREAD_RUNTIMES].rts[j % WASM_TEST_CONT_THREAD_RUNTIMES];
+
+                CHECK(t, !b || a->conts.tag != b->conts.tag || a->conts.base != b->conts.base);
+            }
+        }
+        for (i = 0; i < WASM_TEST_CONT_THREADS; i++) {
+            wasm_test_cont_worker_t* next = &workers[(i + 1u) % WASM_TEST_CONT_THREADS];
+
+            if (workers[i].rts[0] && next->rts[0]) wasm_test_check_foreign(t, workers[i].ms[0], next->ks[0], "threads");
+        }
+        wasm_test_cont_run_workers(t, workers, wasm_test_cont_worker_free);
+        for (i = 0; i < WASM_TEST_CONT_THREADS; i++) CHECK(t, workers[i].failures == 0);
+    }
+    free(workers);
+}
+#endif
+
 static const test_case exec_cont_cases[] = {
     { "stack switching: a generator suspends values to its consumer", test_stack_switching_generator },
     { "stack switching: resuming or binding a consumed continuation traps", test_stack_switching_one_shot },
@@ -2049,5 +2901,18 @@ static const test_case exec_cont_cases[] = {
     { "stack switching: continuations start in, switch to, and tail-call host functions that may yield", test_stack_switching_host_function_targets },
     { "stack switching: fuel stops at every point of switching, generators, and exceptions resume", test_stack_switching_fuel_stops_anywhere },
     { "stack switching: a continuation's lazily validated function fails each time it starts", test_stack_switching_lazy_validation_of_a_continuation },
+    { "stack switching: stale references to a reused entry trap without touching its new continuation", test_stack_switching_stale_references_to_reused_entries },
+    { "stack switching: forged references fail at the host boundary and trap inside Wasm", test_stack_switching_forged_references },
+    { "stack switching: entries out of generations stay retired while referenced", test_stack_switching_retired_entries },
+    { "stack switching: long generator runs reuse entries and never collect", test_stack_switching_long_generator_runs_stay_bounded },
+    { "stack switching: fuel and interrupts stop inside recycled continuations and resume", test_stack_switching_stops_inside_recycled_continuations },
+    { "stack switching: the stack pool keeps as many stacks as are in use", test_stack_switching_stack_pool_follows_stacks_in_use },
+    { "stack switching: retired entries that stay referenced stop calling for collections", test_stack_switching_pinned_retired_entries_stop_calling_for_collections },
+    { "stack switching: a failed collection keeps the consumed references the last one found", test_stack_switching_failed_collections_keep_consumed_references },
+    { "stack switching: runtimes alive at once have distinct tags", test_stack_switching_runtimes_alive_at_once_have_distinct_tags },
+    { "stack switching: runtimes beyond the tags take slices of one, then fail", test_stack_switching_runtimes_beyond_the_tags_take_slices_of_one },
+#if defined(WASM_TEST_THREADS)
+    { "stack switching: runtimes created and freed on several threads keep distinct tags", test_stack_switching_tags_stay_distinct_across_threads },
+#endif
 };
 const test_suite exec_cont_suite = { "exec.cont", exec_cont_cases, COUNTOF(exec_cont_cases) };

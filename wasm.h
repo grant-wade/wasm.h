@@ -2297,20 +2297,70 @@ struct wasm__exception_object_t {
     int marked;
 };
 
-/* A continuation: the stacks from top through its parent links to bottom, a function and its bound arguments
- * until it first runs, or neither once consumed. */
+/* A continuation reference has bit 0 set, the index of its entry in the runtime's continuation table in the next
+ * WASM__CONT_INDEX_BITS bits, the entry's generation in the next WASM__CONT_GEN_BITS, and the runtime's tag in
+ * the rest. Runtimes alive at once have distinct tags, except that runtimes with tag WASM__CONT_TAG_MAX each own
+ * a distinct slice of its indices. */
+#if UINTPTR_MAX > 0xFFFFFFFFu
+#define WASM__CONT_INDEX_BITS 27u
+#define WASM__CONT_GEN_BITS 24u
+#define WASM__CONT_SLICE_BITS 17u
+#else
+#define WASM__CONT_INDEX_BITS 18u
+#define WASM__CONT_GEN_BITS 8u
+#define WASM__CONT_SLICE_BITS 10u
+#endif
+#define WASM__CONT_GEN_SHIFT (1u + WASM__CONT_INDEX_BITS)
+#define WASM__CONT_TAG_SHIFT (WASM__CONT_GEN_SHIFT + WASM__CONT_GEN_BITS)
+#define WASM__CONT_MAX_ENTRIES ((uint32_t)1u << WASM__CONT_INDEX_BITS)
+#define WASM__CONT_GEN_MAX (((uint32_t)1u << WASM__CONT_GEN_BITS) - 1u)
+#define WASM__CONT_TAG_MAX ((uint32_t)(UINTPTR_MAX >> WASM__CONT_TAG_SHIFT))
+#define WASM__CONT_SLICE_ENTRIES ((uint32_t)1u << WASM__CONT_SLICE_BITS)
+#define WASM__CONT_SLICES ((uint32_t)1u << (WASM__CONT_INDEX_BITS - WASM__CONT_SLICE_BITS))
+#define WASM__CONT_BLOCK_ENTRIES 256u
+
+/* An entry of the continuation table. In use, it is a continuation: the stacks from top through their parent
+ * links to bottom, or a function and its bound arguments until it first runs. */
 struct wasm__cont_object_t {
     struct wasm__exec_stack_t* top;    /* innermost stack, where execution resumes */
     struct wasm__exec_stack_t* bottom; /* outermost stack, linked under the resumer */
     wasm_module_t* start_module;       /* owner of start_func until the continuation first runs */
-    uint32_t start_func;
-    union wasm__slot_t* args; /* slots of the arguments bound before it first runs */
-    uint32_t num_args;
+    union wasm__slot_t* args;          /* slots of the arguments bound before it first runs */
     wasm_module_t* module;             /* owner of type_index, or NULL if the type is unknown */
+    uint32_t start_func;
+    uint32_t num_args;
     uint32_t type_index;
-    int stale; /* nonzero if its stacks were dropped when a module they run was freed */
-    int marked;
+    uint32_t index;        /* the index its references hold */
+    uint32_t gen;          /* generation of its reference in use or next; above WASM__CONT_GEN_MAX once retired */
+    uint32_t swept_gen;    /* gen when the last collection finished */
+    uint32_t stale_low;    /* lowest generation of a consumed reference the last collection marked */
+    uint32_t stale_high;   /* highest such generation, or below stale_low if it marked none */
+    uint32_t marking_low;  /* stale_low of the collection marking now */
+    uint32_t marking_high; /* stale_high of the collection marking now */
+    uint32_t next_free;    /* 1 + the next free entry while this one is free, or 0 */
+    uint8_t in_use;
+    uint8_t stale; /* nonzero if its stacks were dropped when a module they run was freed */
+    uint8_t marked;
 };
+
+/* A runtime's continuations, in blocks of WASM__CONT_BLOCK_ENTRIES entries that never move. */
+typedef struct wasm__cont_table_t {
+    struct wasm__cont_object_t** blocks;
+    uint32_t num_blocks;
+    uint32_t cap_blocks;
+    uint32_t count;         /* entries ever used, the first count of the blocks */
+    uint32_t limit;         /* most entries it may use, or 0 until it has a tag */
+    uint32_t base;          /* index the references of its first entry hold */
+    uint32_t free_head;     /* 1 + the first free entry, or 0 */
+    uint32_t live;          /* entries in use */
+    uint32_t retired;       /* entries out of generations */
+    uint32_t retired_swept; /* retired when the last collection finished */
+    uintptr_t tag;          /* nonzero once the first entry is used */
+} wasm__cont_table_t;
+
+WASM_INLINE struct wasm__cont_object_t* wasm__cont_at(const wasm__cont_table_t* table, uint32_t index) {
+    return &table->blocks[index / WASM__CONT_BLOCK_ENTRIES][index % WASM__CONT_BLOCK_ENTRIES];
+}
 
 /* An externref wrapping an anyref, or an anyref wrapping a host externref; value is what it wraps. */
 struct wasm__externref_box_t {
@@ -2657,7 +2707,7 @@ struct wasm_runtime_t {
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
     wasm__handle_set_t exception_objects;
-    wasm__handle_set_t cont_objects;
+    wasm__cont_table_t conts;
     wasm__exec_stack_t* cont_stacks;     /* continuation stacks in use */
     wasm__exec_stack_t* cont_stack_pool; /* released continuation stacks kept for reuse */
     uint32_t num_cont_stacks;
@@ -2684,7 +2734,7 @@ struct wasm_runtime_t {
     wasm__held_block_t* held_values;
     wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
-    uint32_t handle_gc_threshold; /* boxes plus exception and continuation objects that trigger a collection */
+    uint32_t handle_gc_threshold; /* boxes, exception objects, and continuations in use that trigger a collection */
     wasm__exec_stack_t main_stack;
     wasm__arena_chunk_t* frame_arena_spare; /* last dropped block, kept for reuse */
     wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
@@ -2757,9 +2807,13 @@ WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, 
 
 WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
-/* Collects garbage once enough externref boxes, exception objects, and continuations have accumulated. Call it
- * only where every live reference is reachable from the runtime's roots. */
+/* Collects garbage once enough externref boxes, exception objects, and continuations in use have accumulated, or
+ * when the continuation table needs one. Call it only where every live reference is reachable from the runtime's
+ * roots. */
 WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
+
+/* Collects garbage as wasm__gc_collect_handles_if_needed does, or when the continuation table is full. */
+WASM_PRIVATE void wasm__gc_collect_handles_before_cont(wasm_runtime_t* rt);
 
 /* Consumes a pending wasm_runtime_interrupt; returns nonzero, with the error set, if there was one. */
 WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt);
@@ -3261,6 +3315,10 @@ WASM_PRIVATE void wasm__platform_shared_grow_lock(void);
 
 WASM_PRIVATE void wasm__platform_shared_grow_unlock(void);
 
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void);
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void);
+
 #endif /* WASM_PLATFORM_THREADS_H */
 /* END src/platform/threads.h */
 
@@ -3297,9 +3355,11 @@ static wasm__waiter_t* wasm__waiters_tail;
 #if defined(WASM__THREADS_POSIX)
 static pthread_mutex_t wasm__waiters_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t wasm__grow_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t wasm__cont_tags_mutex = PTHREAD_MUTEX_INITIALIZER;
 #else
 static SRWLOCK wasm__waiters_lock = SRWLOCK_INIT;
 static SRWLOCK wasm__grow_lock = SRWLOCK_INIT;
+static SRWLOCK wasm__cont_tags_mutex = SRWLOCK_INIT;
 #endif
 
 static void wasm__waiters_remove(wasm__waiter_t* waiter) {
@@ -3478,6 +3538,22 @@ WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
 #endif
 }
 
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_lock(&wasm__cont_tags_mutex);
+#else
+    AcquireSRWLockExclusive(&wasm__cont_tags_mutex);
+#endif
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__cont_tags_mutex);
+#else
+    ReleaseSRWLockExclusive(&wasm__cont_tags_mutex);
+#endif
+}
+
 #else
 
 WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns,
@@ -3500,6 +3576,12 @@ WASM_PRIVATE void wasm__platform_shared_grow_lock(void) {
 }
 
 WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void) {
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void) {
 }
 
 #endif
@@ -5123,6 +5205,103 @@ WASM_PRIVATE double wasm__sqrt_f64(double value) {
 /* BEGIN src/types/references.c */
 
 
+/* BEGIN src/exec/cont.h */
+#ifndef WASM_SRC_EXEC_CONT_H
+#define WASM_SRC_EXEC_CONT_H
+
+
+
+
+/* Returns the reference that names k while it is in use. */
+WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k);
+
+/* Returns the continuation ref names, or NULL with rt's error set if ref is null, not a continuation
+ * reference of rt, already consumed, or stale. */
+WASM_PRIVATE wasm__cont_object_t* wasm__cont_check(wasm_runtime_t* rt, uintptr_t ref, wasm_error_t* out_err);
+
+/* Returns the continuation ref names if it is in use, else NULL. */
+WASM_PRIVATE const wasm__cont_object_t* wasm__cont_live(const wasm_runtime_t* rt, uintptr_t ref);
+
+/* Returns nonzero if ref names a consumed continuation of rt that the host may still pass back. */
+WASM_PRIVATE int wasm__cont_consumed(const wasm_runtime_t* rt, uintptr_t ref);
+
+#ifndef NDEBUG
+/* Returns nonzero if rt handed out ref. */
+WASM_PRIVATE int wasm__cont_issued(const wasm_runtime_t* rt, uintptr_t ref);
+#endif
+
+/* Marks the continuation ref names and returns it, or returns NULL if it is consumed or already marked. */
+WASM_PRIVATE wasm__cont_object_t* wasm__cont_mark(wasm_runtime_t* rt, uintptr_t ref);
+
+WASM_PRIVATE void wasm__cont_clear_marks(wasm_runtime_t* rt);
+
+/* Every live reference must be marked. */
+WASM_PRIVATE void wasm__cont_sweep(wasm_runtime_t* rt);
+
+/* Returns nonzero when entries retired since the last collection call for one, or, if creating is nonzero,
+ * when the table is full. */
+WASM_PRIVATE int wasm__cont_collection_due(const wasm_runtime_t* rt, int creating);
+
+/* Returns in *out a continuation of type type_index of mod calling function func_idx of func_mod.
+ * Every live reference must be reachable from rt's roots. */
+WASM_PRIVATE wasm_error_t wasm__cont_new_func(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t type_index,
+                                              wasm_module_t* func_mod, uint32_t func_idx,
+                                              wasm__cont_object_t** out);
+
+/* Returns the type of the function k calls when it first runs, or NULL once it has stacks. */
+WASM_PRIVATE const wasm_functype_t* wasm__cont_start_type(const wasm__cont_object_t* k);
+
+/* Gives k, which has not run, a stack holding its bound arguments. Every live reference must be reachable
+ * from rt's roots. */
+WASM_PRIVATE wasm_error_t wasm__cont_start(wasm_runtime_t* rt, wasm__cont_object_t* k);
+
+/* Consumes k, binds the slots of args after its earlier arguments, and returns in *out a continuation of
+ * type type_index of mod over its stacks or function. */
+WASM_PRIVATE wasm_error_t wasm__cont_bind(wasm_runtime_t* rt, wasm__cont_object_t* k, wasm_module_t* mod,
+                                          uint32_t type_index, const wasm__slot_t* args, uint32_t slots,
+                                          wasm__cont_object_t** out);
+
+/* Starts or continues k, which has stacks, with the slots of args on top of rt->exec, whose top frame's state
+ * must be saved; handlers is the resume's handler table. */
+WASM_PRIVATE wasm_error_t wasm__cont_resume(wasm_runtime_t* rt, wasm__cont_object_t* k, const wasm__slot_t* args,
+                                            uint32_t slots, const uint32_t* handlers);
+
+/* Returns the outermost stack a suspension (kind 0) or switch (kind 1) of tag_identity captures, with
+ * *out_handler at the resume's handler entry, or NULL with rt's error set if no resume above barrier
+ * handles it. */
+WASM_PRIVATE wasm__exec_stack_t* wasm__cont_find_handler(wasm_runtime_t* rt, const wasm__exec_stack_t* barrier,
+                                                         uint64_t tag_identity, uint32_t kind,
+                                                         const uint32_t** out_handler);
+
+/* Captures the stacks from rt->exec through outer and passes the top payload_slots slots and the
+ * continuation to handler on the resumer's stack. */
+WASM_PRIVATE wasm_error_t wasm__cont_suspend(wasm_runtime_t* rt, wasm__exec_stack_t* outer, const uint32_t* handler,
+                                             uint32_t payload_slots);
+
+/* Runs k under outer's resumer in place of the stacks from rt->exec through outer, passing it the slots slots
+ * below k's ref atop rt->exec and those stacks as a continuation of type type_index of mod. k must have stacks
+ * unless it calls a host function. Returns WASM__ERR_CALL_FRAME when host function *out_func_idx of *out_mod
+ * must run on the resumer's top *out_slots slots. */
+WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_object_t* k, wasm__exec_stack_t* outer,
+                                            wasm_module_t* mod, uint32_t type_index, uint32_t slots,
+                                            wasm_module_t** out_mod, uint32_t* out_func_idx, uint32_t* out_slots);
+
+WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_t* s);
+
+/* Releases the running stacks above base and makes base current. */
+WASM_PRIVATE void wasm__cont_unwind(wasm_runtime_t* rt, wasm__exec_stack_t* base);
+
+/* Consumes k, releasing its stacks or bound arguments and its entry. */
+WASM_PRIVATE void wasm__cont_drop_stacks(wasm_runtime_t* rt, wasm__cont_object_t* k);
+
+/* Drops the stacks of continuations that run code of mod. */
+WASM_PRIVATE void wasm__cont_invalidate_using(wasm_runtime_t* rt, const wasm_module_t* mod);
+
+WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt);
+
+#endif /* WASM_SRC_EXEC_CONT_H */
+/* END src/exec/cont.h */
+
 #include <stdio.h>
 
 
@@ -5604,9 +5783,9 @@ WASM_PRIVATE int wasm__runtime_value_reftype(const wasm_module_t* mod,
     }
     if (wasm__uses_externref_storage(value->type) || wasm__uses_exnref_storage(value->type)) return 1;
     if (wasm__uses_contref_storage(value->type)) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)value->of.externref;
+        const wasm__cont_object_t* k = mod && mod->rt ? wasm__cont_live(mod->rt, value->of.externref) : NULL;
 
-        if (!mod || !mod->rt || !wasm__handle_set_contains(&mod->rt->cont_objects, k)) return 0;
+        if (!k) return 0;
         if (k->module) {
             out_reftype->has_type_index = 1;
             out_reftype->exact = 1;
@@ -5683,8 +5862,6 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
     if (!value) return 0;
     if (!wasm__is_ref_type(expected_type))
         return wasm__is_valtype_subtype(mod, value->type, expected_type);
-    if (!wasm__runtime_value_reftype(mod, value, &actual_ref, &actual_mod)) return 0;
-
     if (expected_ref && wasm__has_reftype_info(expected_ref))
         effective_expected = *expected_ref;
     else {
@@ -5693,6 +5870,9 @@ WASM_PRIVATE int wasm__runtime_value_matches_type(const wasm_module_t* mod,
         effective_expected.nullable = 1;
     }
     if (effective_expected.type == WASM_TYPE_VOID) effective_expected.type = expected_type;
+    if (wasm__uses_contref_storage(value->type) && mod && mod->rt && wasm__cont_consumed(mod->rt, value->of.externref))
+        return effective_expected.type == WASM_TYPE_CONTREF;
+    if (!wasm__runtime_value_reftype(mod, value, &actual_ref, &actual_mod)) return 0;
 
     if (wasm__is_null_ref(value)) {
         if (!effective_expected.nullable) return 0;
@@ -11757,7 +11937,7 @@ WASM_PRIVATE wasm_error_t wasm__exec_stack_init(wasm_runtime_t* rt, wasm__exec_s
                                                 WASM__ALIGNOF(wasm__slot_t));
     if (!s->stack) return WASM_ERR_OOM;
     s->max_stack = max_stack;
-    s->call_frames = (wasm__call_frame_t*)wasm__calloc(&rt->allocator, max_call_frames, sizeof(*s->call_frames));
+    s->call_frames = (wasm__call_frame_t*)wasm__malloc_array(&rt->allocator, max_call_frames, sizeof(*s->call_frames));
     if (!s->call_frames || wasm__arena_init(rt, s, frame_arena_size) != WASM_OK) {
         wasm__exec_stack_destroy(rt, s);
         return WASM_ERR_OOM;
@@ -11873,76 +12053,6 @@ WASM_PRIVATE void wasm__arena_reset_slow(wasm_runtime_t* rt, wasm__exec_stack_t*
 
 
 
-/* BEGIN src/exec/cont.h */
-#ifndef WASM_SRC_EXEC_CONT_H
-#define WASM_SRC_EXEC_CONT_H
-
-
-
-
-/* Returns the continuation ref points to, or NULL with rt's error set if ref is null, not a
- * continuation, already consumed, or stale. */
-WASM_PRIVATE wasm__cont_object_t* wasm__cont_check(wasm_runtime_t* rt, uintptr_t ref, wasm_error_t* out_err);
-
-/* Returns in *out a continuation of type type_index of mod calling function func_idx of func_mod.
- * Every live reference must be reachable from rt's roots. */
-WASM_PRIVATE wasm_error_t wasm__cont_new_func(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t type_index,
-                                              wasm_module_t* func_mod, uint32_t func_idx,
-                                              wasm__cont_object_t** out);
-
-/* Returns the type of the function k calls when it first runs, or NULL once it has stacks. */
-WASM_PRIVATE const wasm_functype_t* wasm__cont_start_type(const wasm__cont_object_t* k);
-
-/* Gives k, which has not run, a stack holding its bound arguments. Every live reference must be reachable
- * from rt's roots. */
-WASM_PRIVATE wasm_error_t wasm__cont_start(wasm_runtime_t* rt, wasm__cont_object_t* k);
-
-/* Consumes k, binds the slots of args after its earlier arguments, and returns in *out a continuation of
- * type type_index of mod over its stacks or function. */
-WASM_PRIVATE wasm_error_t wasm__cont_bind(wasm_runtime_t* rt, wasm__cont_object_t* k, wasm_module_t* mod,
-                                          uint32_t type_index, const wasm__slot_t* args, uint32_t slots,
-                                          wasm__cont_object_t** out);
-
-/* Starts or continues k, which has stacks, with the slots of args on top of rt->exec, whose top frame's state
- * must be saved; handlers is the resume's handler table. */
-WASM_PRIVATE wasm_error_t wasm__cont_resume(wasm_runtime_t* rt, wasm__cont_object_t* k, const wasm__slot_t* args,
-                                            uint32_t slots, const uint32_t* handlers);
-
-/* Returns the outermost stack a suspension (kind 0) or switch (kind 1) of tag_identity captures, with
- * *out_handler at the resume's handler entry, or NULL with rt's error set if no resume above barrier
- * handles it. */
-WASM_PRIVATE wasm__exec_stack_t* wasm__cont_find_handler(wasm_runtime_t* rt, const wasm__exec_stack_t* barrier,
-                                                         uint64_t tag_identity, uint32_t kind,
-                                                         const uint32_t** out_handler);
-
-/* Captures the stacks from rt->exec through outer and passes the top payload_slots slots and the
- * continuation to handler on the resumer's stack. */
-WASM_PRIVATE wasm_error_t wasm__cont_suspend(wasm_runtime_t* rt, wasm__exec_stack_t* outer, const uint32_t* handler,
-                                             uint32_t payload_slots);
-
-/* Runs k under outer's resumer in place of the stacks from rt->exec through outer, passing it the slots slots
- * below k's ref atop rt->exec and those stacks as a continuation of type type_index of mod. k must have stacks
- * unless it calls a host function. Returns WASM__ERR_CALL_FRAME when host function *out_func_idx of *out_mod
- * must run on the resumer's top *out_slots slots. */
-WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_object_t* k, wasm__exec_stack_t* outer,
-                                            wasm_module_t* mod, uint32_t type_index, uint32_t slots,
-                                            wasm_module_t** out_mod, uint32_t* out_func_idx, uint32_t* out_slots);
-
-WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_t* s);
-
-/* Releases the running stacks above base and makes base current. */
-WASM_PRIVATE void wasm__cont_unwind(wasm_runtime_t* rt, wasm__exec_stack_t* base);
-
-/* Consumes k, releasing its stacks or bound arguments. */
-WASM_PRIVATE void wasm__cont_drop_stacks(wasm_runtime_t* rt, wasm__cont_object_t* k);
-
-/* Drops the stacks of continuations that run code of mod. */
-WASM_PRIVATE void wasm__cont_invalidate_using(wasm_runtime_t* rt, const wasm_module_t* mod);
-
-WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt);
-
-#endif /* WASM_SRC_EXEC_CONT_H */
-/* END src/exec/cont.h */
 
 /* BEGIN src/exec/interpreter.h */
 #ifndef WASM_SRC_EXEC_INTERPRETER_H
@@ -12381,19 +12491,29 @@ WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt) {
 
 #define WASM__HANDLE_GC_MIN_THRESHOLD 1024u
 
-WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+static void wasm__gc_collect_handles_when_due(wasm_runtime_t* rt, int creating_cont) {
     uint32_t threshold;
     uint32_t live;
 
     if (!rt) return;
     threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
-    if (rt->externref_boxes.count + rt->exception_objects.count + rt->cont_objects.count < threshold) return;
+    if (rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live < threshold &&
+        !wasm__cont_collection_due(rt, creating_cont))
+        return;
 
     wasm_gc_collect(rt);
-    live = rt->externref_boxes.count + rt->exception_objects.count + rt->cont_objects.count;
+    live = rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live;
     rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
     if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
         rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
+}
+
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+    wasm__gc_collect_handles_when_due(rt, 0);
+}
+
+WASM_PRIVATE void wasm__gc_collect_handles_before_cont(wasm_runtime_t* rt) {
+    wasm__gc_collect_handles_when_due(rt, 1);
 }
 
 static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {
@@ -20081,8 +20201,7 @@ static void wasm__check_ref_slot(const wasm_runtime_t* rt, const wasm__call_fram
         valid = (bits & WASM__GC_I31_TAG) != 0 || wasm__gc_ptr_in_heap(rt, (const void*)bits) ||
                 wasm__handle_set_contains(&rt->externref_boxes, (const void*)bits);
     else if (kind == WASM__SLOT_KIND_HANDLE)
-        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) ||
-                wasm__handle_set_contains(&rt->cont_objects, (const void*)bits);
+        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) || wasm__cont_issued(rt, bits);
     if (valid) return;
     if (cf)
         fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u of kind %u holds %p\n",
@@ -20098,9 +20217,9 @@ WASM_PRIVATE void wasm__check_stack_maps(const wasm_runtime_t* rt) {
     const wasm__exec_stack_t* s;
     uint32_t i;
 
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)rt->cont_objects.slots[i];
-        const wasm_functype_t* start_type = k ? wasm__cont_start_type(k) : NULL;
+    for (i = 0; i < rt->conts.count; i++) {
+        const wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
+        const wasm_functype_t* start_type = k->in_use ? wasm__cont_start_type(k) : NULL;
         uint32_t j;
 
         for (j = 0; start_type && j < start_type->num_params; j++) {
@@ -20462,10 +20581,10 @@ static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_
     if (!handle) return;
     if (wasm__uses_externref_storage(value->type)) {
         wasm__gc_mark_box(stack, value->of.externref);
-    } else if (wasm__handle_set_contains(&stack->rt->cont_objects, handle)) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)handle;
+    } else if ((value->of.externref & 1u) != 0) {
+        wasm__cont_object_t* k = wasm__cont_mark(stack->rt, value->of.externref);
 
-        if (k->marked) return;
+        if (!k) return;
         if (stack->cont_count == stack->cont_capacity) {
             wasm__cont_object_t** conts =
                 (wasm__cont_object_t**)wasm__gc_grow(stack, stack->conts, &stack->cont_capacity);
@@ -20473,7 +20592,6 @@ static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_
             if (!conts) return;
             stack->conts = conts;
         }
-        k->marked = 1;
         stack->conts[stack->cont_count++] = k;
     } else {
         wasm__exception_object_t* exception;
@@ -20756,10 +20874,10 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     if (!rt) return;
 
     for (s = wasm__next_live_stack(rt, NULL); s; s = wasm__next_live_stack(rt, s)) wasm__gc_stack_slots(NULL, rt, s);
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k) wasm__gc_cont_args(NULL, rt, k);
+        if (k->in_use) wasm__gc_cont_args(NULL, rt, k);
     }
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_root(rt, root);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
@@ -20812,10 +20930,6 @@ static int wasm__gc_exception_is_marked(void* handle) {
     return ((wasm__exception_object_t*)handle)->marked;
 }
 
-static int wasm__gc_cont_is_marked(void* handle) {
-    return ((wasm__cont_object_t*)handle)->marked;
-}
-
 static void wasm__gc_free_box(const wasm_allocator_t* a, void* handle) {
     wasm__free(a, handle);
 }
@@ -20840,11 +20954,7 @@ static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
 
         if (exception) exception->marked = 0;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
-
-        if (k) k->marked = 0;
-    }
+    wasm__cont_clear_marks(rt);
 }
 
 static int wasm__gc_live_bytes(const wasm_runtime_t* rt, size_t* out_live) {
@@ -20881,10 +20991,10 @@ static void wasm__gc_free_unused_types(wasm_runtime_t* rt) {
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->module && object->module->retired_types) object->module->retired_types_used = 1;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k && k->module && k->module->retired_types) k->module->retired_types_used = 1;
+        if (k->in_use && k->module && k->module->retired_types) k->module->retired_types_used = 1;
     }
     link = &rt->type_owners;
     while (*link) {
@@ -20909,7 +21019,6 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     size_t needed;
     size_t new_size;
     wasm__gc_mark_stack_t stack;
-    uint32_t i;
 
     if (!rt) return WASM_ERR_MALFORMED;
 #ifndef NDEBUG
@@ -20933,12 +21042,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
 
     wasm__handle_set_filter(&rt->allocator, &rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
     wasm__handle_set_filter(&rt->allocator, &rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
-
-        if (k && !k->marked) wasm__cont_drop_stacks(rt, k);
-    }
-    wasm__handle_set_filter(&rt->allocator, &rt->cont_objects, wasm__gc_cont_is_marked, wasm__gc_free_box);
+    wasm__cont_sweep(rt);
 
     if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
     needed = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
@@ -21022,10 +21126,10 @@ WASM_PRIVATE int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->module == mod) return 1;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        const wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k && k->module == mod) return 1;
+        if (k->in_use && k->module == mod) return 1;
     }
     return 0;
 }
@@ -21379,13 +21483,25 @@ WASM_PRIVATE wasm_error_t wasm__handle_exception_frames(wasm_runtime_t* rt, uint
 
 
 
+
 #include <string.h>
 
-/* Most released continuation stacks the runtime keeps for reuse. */
-#define WASM__CONT_STACK_POOL_MAX 16u
+/* Fewest released continuation stacks the runtime keeps for reuse. */
+#define WASM__CONT_STACK_POOL_MIN 16u
 
 /* Bytes of continuation stacks in use below which starting a continuation never collects first. */
 #define WASM__CONT_GC_MIN_BYTES ((size_t)4u * 1024u * 1024u)
+
+/* Entries retired since the last collection below which the table never asks for a collection. */
+#define WASM__CONT_RETIRED_MIN 1024u
+
+#define WASM__CONT_UNIQUE_TAGS (WASM__CONT_TAG_MAX - 1u)
+
+/* Bit i is set while a runtime holds tag i + 1. */
+static uint32_t wasm__cont_tag_bits[(WASM__CONT_UNIQUE_TAGS + 31u) / 32u];
+
+/* Bit i is set while a runtime holds slice i of tag WASM__CONT_TAG_MAX. */
+static uint32_t wasm__cont_slice_bits[(WASM__CONT_SLICES + 31u) / 32u];
 
 static void wasm__cont_stack_clear(wasm_runtime_t* rt, wasm__exec_stack_t* s) {
     while (s->call_frame_sp > 0) {
@@ -21443,7 +21559,7 @@ WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_
         rt->cont_stacks = s->next;
     if (s->next) s->next->prev = s->prev;
     rt->num_cont_stacks--;
-    if (rt->num_pooled_cont_stacks >= WASM__CONT_STACK_POOL_MAX) {
+    if (rt->num_pooled_cont_stacks >= WASM__CONT_STACK_POOL_MIN && rt->num_pooled_cont_stacks >= rt->num_cont_stacks) {
         wasm__cont_stack_free(rt, s);
         return;
     }
@@ -21454,15 +21570,151 @@ WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_
     rt->num_pooled_cont_stacks++;
 }
 
-static wasm__cont_object_t* wasm__cont_new(wasm_runtime_t* rt, wasm__exec_stack_t* top, wasm__exec_stack_t* bottom,
-                                           wasm_module_t* mod, uint32_t type_index) {
-    wasm__cont_object_t* k = (wasm__cont_object_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*k));
+static void wasm__cont_trim_pool(wasm_runtime_t* rt) {
+    while (rt->num_pooled_cont_stacks > WASM__CONT_STACK_POOL_MIN && rt->num_pooled_cont_stacks > rt->num_cont_stacks) {
+        wasm__exec_stack_t* s = rt->cont_stack_pool;
 
-    if (!k || wasm__handle_set_insert(&rt->allocator, &rt->cont_objects, k) != WASM_OK) {
-        wasm__free(&rt->allocator, k);
-        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for a continuation");
+        rt->cont_stack_pool = s->next;
+        rt->num_pooled_cont_stacks--;
+        wasm__cont_stack_free(rt, s);
+    }
+}
+
+/* Sets the lowest clear bit below count and returns its index, or returns UINT32_MAX if there is none. */
+static uint32_t wasm__cont_claim_bit(uint32_t* bits, uint32_t count) {
+    uint32_t w;
+
+    for (w = 0; w * 32u < count; w++) {
+        uint8_t* word = (uint8_t*)&bits[w];
+        uint32_t width = count - w * 32u < 32u ? count - w * 32u : 32u;
+        uint32_t seen = (uint32_t)wasm__atomic_load(word, 4u);
+
+        for (;;) {
+            uint32_t b = 0;
+            uint32_t prev;
+
+            while (b < width && ((seen >> b) & 1u) != 0) b++;
+            if (b == width) break;
+            prev = (uint32_t)wasm__atomic_compare_exchange(word, 4u, seen, seen | ((uint32_t)1u << b));
+            if (prev == seen) return w * 32u + b;
+            seen = prev;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static void wasm__cont_clear_bit(uint32_t* bits, uint32_t i) {
+    uint8_t* word = (uint8_t*)&bits[i / 32u];
+    uint32_t seen = (uint32_t)wasm__atomic_load(word, 4u);
+
+    for (;;) {
+        uint32_t prev = (uint32_t)wasm__atomic_compare_exchange(word, 4u, seen, seen & ~((uint32_t)1u << (i % 32u)));
+
+        if (prev == seen) return;
+        seen = prev;
+    }
+}
+
+static int wasm__cont_take_tag(wasm__cont_table_t* table) {
+    uint32_t i;
+
+    wasm__platform_cont_tags_lock();
+    i = wasm__cont_claim_bit(wasm__cont_tag_bits, WASM__CONT_UNIQUE_TAGS);
+    if (i != UINT32_MAX) {
+        table->tag = (uintptr_t)i + 1u;
+        table->base = 0;
+        table->limit = WASM__CONT_MAX_ENTRIES;
+    } else {
+        i = wasm__cont_claim_bit(wasm__cont_slice_bits, WASM__CONT_SLICES);
+        if (i != UINT32_MAX) {
+            table->tag = WASM__CONT_TAG_MAX;
+            table->base = i << WASM__CONT_SLICE_BITS;
+            table->limit = WASM__CONT_SLICE_ENTRIES;
+        }
+    }
+    wasm__platform_cont_tags_unlock();
+    return table->tag != 0;
+}
+
+static void wasm__cont_give_back_tag(const wasm__cont_table_t* table) {
+    if (!table->tag) return;
+    wasm__platform_cont_tags_lock();
+    if (table->tag == WASM__CONT_TAG_MAX)
+        wasm__cont_clear_bit(wasm__cont_slice_bits, table->base >> WASM__CONT_SLICE_BITS);
+    else
+        wasm__cont_clear_bit(wasm__cont_tag_bits, (uint32_t)table->tag - 1u);
+    wasm__platform_cont_tags_unlock();
+}
+
+WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k) {
+    return (rt->conts.tag << WASM__CONT_TAG_SHIFT) | ((uintptr_t)k->gen << WASM__CONT_GEN_SHIFT) |
+           ((uintptr_t)k->index << 1) | (uintptr_t)1u;
+}
+
+/* Returns the entry ref names, with ref's generation in *out_gen, or NULL if ref is no continuation reference
+ * of rt. */
+static wasm__cont_object_t* wasm__cont_decode(const wasm_runtime_t* rt, uintptr_t ref, uint32_t* out_gen) {
+    uint32_t index = ((uint32_t)(ref >> 1) & (WASM__CONT_MAX_ENTRIES - 1u)) - rt->conts.base;
+
+    if ((ref & 1u) == 0 || (ref >> WASM__CONT_TAG_SHIFT) != rt->conts.tag || index >= rt->conts.count) return NULL;
+    *out_gen = (uint32_t)(ref >> WASM__CONT_GEN_SHIFT) & WASM__CONT_GEN_MAX;
+    return wasm__cont_at(&rt->conts, index);
+}
+
+/* Returns a new entry, or NULL with rt's error set. */
+static wasm__cont_object_t* wasm__cont_grow(wasm_runtime_t* rt) {
+    wasm__cont_table_t* table = &rt->conts;
+    wasm__cont_object_t* k;
+
+    if (table->tag == 0 && !wasm__cont_take_tag(table)) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of continuation tags: too many runtimes hold continuations");
         return NULL;
     }
+    if (table->count >= table->limit) {
+        WASM__SET_ERR(rt, WASM_ERR_OOM, "continuation limit %u reached", (unsigned)table->limit);
+        return NULL;
+    }
+    if (table->count == table->num_blocks * WASM__CONT_BLOCK_ENTRIES) {
+        if (table->num_blocks == table->cap_blocks) {
+            uint32_t cap = table->cap_blocks ? table->cap_blocks * 2u : 4u;
+            wasm__cont_object_t** blocks =
+                (wasm__cont_object_t**)wasm__realloc_array(&rt->allocator, table->blocks, cap, sizeof(*blocks));
+
+            if (!blocks) goto oom;
+            table->blocks = blocks;
+            table->cap_blocks = cap;
+        }
+        table->blocks[table->num_blocks] = (wasm__cont_object_t*)wasm__malloc_array(
+            &rt->allocator, WASM__CONT_BLOCK_ENTRIES, sizeof(wasm__cont_object_t));
+        if (!table->blocks[table->num_blocks]) goto oom;
+        table->num_blocks++;
+    }
+    k = wasm__cont_at(table, table->count);
+    memset(k, 0, sizeof(*k));
+    k->index = table->base + table->count++;
+    k->stale_low = UINT32_MAX;
+    k->marking_low = UINT32_MAX;
+    return k;
+
+oom:
+    WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for a continuation");
+    return NULL;
+}
+
+static wasm__cont_object_t* wasm__cont_new(wasm_runtime_t* rt, wasm__exec_stack_t* top, wasm__exec_stack_t* bottom,
+                                           wasm_module_t* mod, uint32_t type_index) {
+    wasm__cont_table_t* table = &rt->conts;
+    wasm__cont_object_t* k;
+
+    if (table->free_head) {
+        k = wasm__cont_at(table, table->free_head - 1u);
+        table->free_head = k->next_free;
+    } else {
+        k = wasm__cont_grow(rt);
+        if (!k) return NULL;
+    }
+    k->in_use = 1;
+    table->live++;
     k->top = top;
     k->bottom = bottom;
     if (mod && type_index < mod->num_types) {
@@ -21472,36 +21724,158 @@ static wasm__cont_object_t* wasm__cont_new(wasm_runtime_t* rt, wasm__exec_stack_
     return k;
 }
 
+/* k must no longer own stacks or arguments. */
+static void wasm__cont_free_entry(wasm_runtime_t* rt, wasm__cont_object_t* k) {
+    wasm__cont_table_t* table = &rt->conts;
+
+    k->top = NULL;
+    k->bottom = NULL;
+    k->start_module = NULL;
+    k->start_func = 0;
+    k->args = NULL;
+    k->num_args = 0;
+    k->module = NULL;
+    k->type_index = 0;
+    k->in_use = 0;
+    k->stale = 0;
+    table->live--;
+    if (++k->gen > WASM__CONT_GEN_MAX) {
+        table->retired++;
+        return;
+    }
+    k->next_free = table->free_head;
+    table->free_head = k->index - table->base + 1u;
+}
+
+static void wasm__cont_free_stacks(wasm_runtime_t* rt, wasm__cont_object_t* k) {
+    wasm__exec_stack_t* s = k->top;
+
+    while (s) {
+        wasm__exec_stack_t* next = s == k->bottom ? NULL : s->parent;
+
+        wasm__cont_stack_release(rt, s);
+        s = next;
+    }
+    wasm__free(&rt->allocator, k->args);
+    k->top = NULL;
+    k->bottom = NULL;
+    k->start_module = NULL;
+    k->args = NULL;
+    k->num_args = 0;
+}
+
 WASM_PRIVATE wasm__cont_object_t* wasm__cont_check(wasm_runtime_t* rt, uintptr_t ref, wasm_error_t* out_err) {
-    wasm__cont_object_t* k = (wasm__cont_object_t*)ref;
+    wasm__cont_object_t* k;
+    uint32_t gen = 0;
 
     *out_err = WASM_ERR_TRAP;
-    if (!k) {
+    if (!ref) {
         WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null continuation reference");
         return NULL;
     }
-    if (!wasm__handle_set_contains(&rt->cont_objects, k)) {
+    k = wasm__cont_decode(rt, ref, &gen);
+    if (!k || gen > k->gen || (gen == k->gen && !k->in_use)) {
         *out_err = WASM_ERR_MALFORMED;
         WASM__SET_ERR(rt, WASM_ERR_MALFORMED, "%s", "invalid continuation reference");
+        return NULL;
+    }
+    if (gen != k->gen) {
+        WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "continuation already consumed");
         return NULL;
     }
     if (k->stale) {
         WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "continuation runs code of a freed module");
         return NULL;
     }
-    if (!k->top && !k->start_module) {
-        WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "continuation already consumed");
-        return NULL;
-    }
     *out_err = WASM_OK;
     return k;
+}
+
+WASM_PRIVATE const wasm__cont_object_t* wasm__cont_live(const wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+    const wasm__cont_object_t* k = wasm__cont_decode(rt, ref, &gen);
+
+    return k && k->in_use && gen == k->gen ? k : NULL;
+}
+
+WASM_PRIVATE int wasm__cont_consumed(const wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+    const wasm__cont_object_t* k = wasm__cont_decode(rt, ref, &gen);
+
+    return k && gen < k->gen && (gen >= k->swept_gen || (gen >= k->stale_low && gen <= k->stale_high));
+}
+
+#ifndef NDEBUG
+WASM_PRIVATE int wasm__cont_issued(const wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+    const wasm__cont_object_t* k = wasm__cont_decode(rt, ref, &gen);
+
+    return k && (gen < k->gen || (gen == k->gen && k->in_use));
+}
+#endif
+
+WASM_PRIVATE wasm__cont_object_t* wasm__cont_mark(wasm_runtime_t* rt, uintptr_t ref) {
+    uint32_t gen = 0;
+    wasm__cont_object_t* k = wasm__cont_decode(rt, ref, &gen);
+
+    if (!k) return NULL;
+    if (gen < k->gen) {
+        if (gen < k->marking_low) k->marking_low = gen;
+        if (gen > k->marking_high) k->marking_high = gen;
+        return NULL;
+    }
+    if (gen != k->gen || !k->in_use || k->marked) return NULL;
+    k->marked = 1;
+    return k;
+}
+
+WASM_PRIVATE void wasm__cont_clear_marks(wasm_runtime_t* rt) {
+    uint32_t i;
+
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
+
+        k->marked = 0;
+        k->marking_low = UINT32_MAX;
+        k->marking_high = 0;
+    }
+}
+
+WASM_PRIVATE void wasm__cont_sweep(wasm_runtime_t* rt) {
+    wasm__cont_table_t* table = &rt->conts;
+    uint32_t i;
+
+    for (i = 0; i < table->count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(table, i);
+
+        if (k->in_use && !k->marked) wasm__cont_drop_stacks(rt, k);
+        if (k->gen > WASM__CONT_GEN_MAX && k->marking_high < k->marking_low) {
+            k->gen = 0;
+            table->retired--;
+            k->next_free = table->free_head;
+            table->free_head = i + 1u;
+        }
+        k->stale_low = k->marking_low;
+        k->stale_high = k->marking_high;
+        k->swept_gen = k->gen;
+    }
+    table->retired_swept = table->retired;
+    wasm__cont_trim_pool(rt);
+}
+
+WASM_PRIVATE int wasm__cont_collection_due(const wasm_runtime_t* rt, int creating) {
+    const wasm__cont_table_t* table = &rt->conts;
+    uint32_t retired = table->retired - table->retired_swept;
+
+    if (creating && table->limit != 0 && !table->free_head && table->count == table->limit) return 1;
+    return retired >= WASM__CONT_RETIRED_MIN && (size_t)retired >= rt->gc_heap_size / sizeof(wasm__cont_object_t);
 }
 
 WASM_PRIVATE wasm_error_t wasm__cont_new_func(wasm_runtime_t* rt, wasm_module_t* mod, uint32_t type_index,
                                               wasm_module_t* func_mod, uint32_t func_idx,
                                               wasm__cont_object_t** out) {
     (void)wasm__linked_func_resolve(&func_mod, &func_idx);
-    wasm__gc_collect_handles_if_needed(rt);
+    wasm__gc_collect_handles_before_cont(rt);
     *out = wasm__cont_new(rt, NULL, NULL, mod, type_index);
     if (!*out) return WASM_ERR_OOM;
     (*out)->start_module = func_mod;
@@ -21590,11 +21964,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_bind(wasm_runtime_t* rt, wasm__cont_object_
         (*out)->args = bound;
         (*out)->num_args = k->num_args + slots;
     }
-    k->top = NULL;
-    k->bottom = NULL;
-    k->start_module = NULL;
-    k->args = NULL;
-    k->num_args = 0;
+    wasm__cont_free_entry(rt, k);
     return WASM_OK;
 }
 
@@ -21621,8 +21991,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_resume(wasm_runtime_t* rt, wasm__cont_objec
     top->parked = 0;
     k->bottom->parent = parent;
     k->bottom->handlers = handlers;
-    k->top = NULL;
-    k->bottom = NULL;
+    wasm__cont_free_entry(rt, k);
     rt->exec = top;
     return WASM_OK;
 }
@@ -21668,7 +22037,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_suspend(wasm_runtime_t* rt, wasm__exec_stac
     inner->sp -= payload_slots;
     if (payload_slots > 0)
         memcpy(&parent->stack[dst], &inner->stack[inner->sp], payload_slots * sizeof(wasm__slot_t));
-    wasm__slot_set_ref(&parent->stack[dst + payload_slots], (uintptr_t)k);
+    wasm__slot_set_ref(&parent->stack[dst + payload_slots], wasm__cont_ref(rt, k));
     parent->sp = dst + desc[1];
     inner->parked = 1;
     outer->parent = NULL;
@@ -21689,7 +22058,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_objec
     wasm_error_t err = WASM__ERR_CALL_FRAME;
 
     if (!captured) return WASM_ERR_OOM;
-    wasm__slot_set_ref(&args[slots], (uintptr_t)captured);
+    wasm__slot_set_ref(&args[slots], wasm__cont_ref(rt, captured));
     if (!start) {
         uint32_t bound = k->num_args;
 
@@ -21714,8 +22083,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_objec
     if (err != WASM_OK && err != WASM__ERR_CALL_FRAME) {
         rt->exec = inner;
         args[slots] = target;
-        captured->top = NULL;
-        captured->bottom = NULL;
+        wasm__cont_free_entry(rt, captured);
         return err;
     }
     inner->sp -= slots + 1u;
@@ -21735,20 +22103,8 @@ WASM_PRIVATE void wasm__cont_unwind(wasm_runtime_t* rt, wasm__exec_stack_t* base
 }
 
 WASM_PRIVATE void wasm__cont_drop_stacks(wasm_runtime_t* rt, wasm__cont_object_t* k) {
-    wasm__exec_stack_t* s = k->top;
-
-    while (s) {
-        wasm__exec_stack_t* next = s == k->bottom ? NULL : s->parent;
-
-        wasm__cont_stack_release(rt, s);
-        s = next;
-    }
-    wasm__free(&rt->allocator, k->args);
-    k->top = NULL;
-    k->bottom = NULL;
-    k->start_module = NULL;
-    k->args = NULL;
-    k->num_args = 0;
+    wasm__cont_free_stacks(rt, k);
+    wasm__cont_free_entry(rt, k);
 }
 
 static int wasm__cont_stack_uses(const wasm__exec_stack_t* s, const wasm_module_t* mod) {
@@ -21764,19 +22120,19 @@ static int wasm__cont_stack_uses(const wasm__exec_stack_t* s, const wasm_module_
 WASM_PRIVATE void wasm__cont_invalidate_using(wasm_runtime_t* rt, const wasm_module_t* mod) {
     uint32_t i;
 
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
         const wasm__exec_stack_t* s;
 
-        if (!k) continue;
+        if (!k->in_use) continue;
         if (k->start_module == mod) {
-            wasm__cont_drop_stacks(rt, k);
+            wasm__cont_free_stacks(rt, k);
             k->stale = 1;
             continue;
         }
         for (s = k->top; s; s = s == k->bottom ? NULL : s->parent) {
             if (!wasm__cont_stack_uses(s, mod)) continue;
-            wasm__cont_drop_stacks(rt, k);
+            wasm__cont_free_stacks(rt, k);
             k->stale = 1;
             break;
         }
@@ -21784,15 +22140,18 @@ WASM_PRIVATE void wasm__cont_invalidate_using(wasm_runtime_t* rt, const wasm_mod
 }
 
 WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt) {
+    wasm__cont_table_t* table = &rt->conts;
     uint32_t i;
 
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < table->count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(table, i);
 
-        if (k) wasm__free(&rt->allocator, k->args);
-        wasm__free(&rt->allocator, k);
+        if (k->in_use) wasm__free(&rt->allocator, k->args);
     }
-    wasm__handle_set_free(&rt->allocator, &rt->cont_objects);
+    for (i = 0; i < table->num_blocks; i++) wasm__free(&rt->allocator, table->blocks[i]);
+    wasm__free(&rt->allocator, table->blocks);
+    wasm__cont_give_back_tag(table);
+    memset(table, 0, sizeof(*table));
     while (rt->cont_stacks) {
         wasm__exec_stack_t* s = rt->cont_stacks;
 
@@ -25553,20 +25912,20 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             err = wasm__cont_new_func(rt, mod, imm[0], rt->func_refs[ref_id].module, rt->func_refs[ref_id].func_idx,
                                       &k);
             if (err != WASM_OK) return err;
-            wasm__slot_set_ref(top - 1, (uintptr_t)k);
+            wasm__slot_set_ref(top - 1, wasm__cont_ref(rt, k));
             cf->pc = imm + 1;
             return WASM_OK;
         }
         case 0xE1: {
             wasm__cont_object_t* bound;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
             if (!k) return err;
             err = wasm__cont_bind(rt, k, mod, imm[1], top - 1 - imm[2], imm[2], &bound);
             if (err != WASM_OK) return err;
             exec->sp -= imm[2];
-            wasm__slot_set_ref(&exec->stack[exec->sp - 1u], (uintptr_t)bound);
+            wasm__slot_set_ref(&exec->stack[exec->sp - 1u], wasm__cont_ref(rt, bound));
             cf->pc = imm + 3;
             return WASM_OK;
         }
@@ -25574,7 +25933,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             const uint32_t* handler;
             wasm__exec_stack_t* outer;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[0]].identity, 0, &handler);
             if (!outer) return WASM_ERR_TRAP;
             cf->pc = imm + 3;
@@ -25628,7 +25987,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             const uint32_t* handler;
             wasm__exec_stack_t* outer;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
             if (!k) return err;
             outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[1]].identity, 1, &handler);

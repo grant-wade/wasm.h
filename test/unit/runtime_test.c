@@ -382,6 +382,50 @@ TEST(test_runtime_interrupt_stops_loops_calls_and_waits) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (func $nop) (elem declare func $nop)
+     (func (export "run") (param $n i32)
+       (loop $l (resume $c (cont.new $c (ref.func $nop)))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))
+     (func (export "drop") (param $n i32)
+       (loop $l (drop (cont.new $c (ref.func $nop)))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))) */
+static const uint8_t wasm_test_runtime_cont_churn_sections[] = {
+    0x01, 0x0A, 0x03, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x60, 0x01, 0x7F, 0x00, 0x03, 0x04, 0x03, 0x00,
+    0x02, 0x02, 0x07, 0x0E, 0x02, 0x03, 0x72, 0x75, 0x6E, 0x00, 0x01, 0x04, 0x64, 0x72, 0x6F, 0x70,
+    0x00, 0x02, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x2E, 0x03, 0x02, 0x00, 0x0B, 0x15,
+    0x00, 0x03, 0x40, 0xD2, 0x00, 0xE0, 0x01, 0xE3, 0x01, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22,
+    0x00, 0x0D, 0x00, 0x0B, 0x0B, 0x13, 0x00, 0x03, 0x40, 0xD2, 0x00, 0xE0, 0x01, 0x1A, 0x20, 0x00,
+    0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B,
+};
+
+TEST(test_runtime_collections_count_unconsumed_continuations) {
+    uint32_t retirements = (uint32_t)(5000u / ((uint64_t)WASM__CONT_GEN_MAX + 1u));
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+
+    wasm_init(&rt);
+    m = wasm_test_load_sections(&rt, wasm_test_runtime_cont_churn_sections,
+                                sizeof(wasm_test_runtime_cont_churn_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(5000);
+    WASM_CHECK_OK(t, wasm_call(m, "run", &arg, 1, NULL, 0));
+    CHECK_MSG(t, rt.handle_gc_threshold == 0 && rt.conts.count <= 1u + retirements, "threshold %u, %u entries",
+              (unsigned)rt.handle_gc_threshold, (unsigned)rt.conts.count);
+    WASM_CHECK_OK(t, wasm_call(m, "drop", &arg, 1, NULL, 0));
+    CHECK_MSG(t, rt.handle_gc_threshold != 0, "%s", "expected unconsumed continuations to trigger a collection");
+    CHECK_MSG(t, rt.conts.live < 1024u && rt.conts.count <= 1025u + retirements, "%u live, %u entries",
+              (unsigned)rt.conts.live, (unsigned)rt.conts.count);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 static const test_case runtime_cases[] = {
     { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
     { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
@@ -390,5 +434,6 @@ static const test_case runtime_cases[] = {
     { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
     { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
     { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
+    { "runtime: consumed continuations never trigger collections, unconsumed ones do", test_runtime_collections_count_unconsumed_continuations },
 };
 const test_suite runtime_suite = { "runtime", runtime_cases, COUNTOF(runtime_cases) };

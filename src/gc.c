@@ -66,10 +66,10 @@ static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_
     if (!handle) return;
     if (wasm__uses_externref_storage(value->type)) {
         wasm__gc_mark_box(stack, value->of.externref);
-    } else if (wasm__handle_set_contains(&stack->rt->cont_objects, handle)) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)handle;
+    } else if ((value->of.externref & 1u) != 0) {
+        wasm__cont_object_t* k = wasm__cont_mark(stack->rt, value->of.externref);
 
-        if (k->marked) return;
+        if (!k) return;
         if (stack->cont_count == stack->cont_capacity) {
             wasm__cont_object_t** conts =
                 (wasm__cont_object_t**)wasm__gc_grow(stack, stack->conts, &stack->cont_capacity);
@@ -77,7 +77,6 @@ static void wasm__gc_mark_handle(wasm__gc_mark_stack_t* stack, const wasm_value_
             if (!conts) return;
             stack->conts = conts;
         }
-        k->marked = 1;
         stack->conts[stack->cont_count++] = k;
     } else {
         wasm__exception_object_t* exception;
@@ -360,10 +359,10 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     if (!rt) return;
 
     for (s = wasm__next_live_stack(rt, NULL); s; s = wasm__next_live_stack(rt, s)) wasm__gc_stack_slots(NULL, rt, s);
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k) wasm__gc_cont_args(NULL, rt, k);
+        if (k->in_use) wasm__gc_cont_args(NULL, rt, k);
     }
     for (root = rt->gc_roots; root; root = root->prev) wasm__gc_forward_root(rt, root);
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
@@ -416,10 +415,6 @@ static int wasm__gc_exception_is_marked(void* handle) {
     return ((wasm__exception_object_t*)handle)->marked;
 }
 
-static int wasm__gc_cont_is_marked(void* handle) {
-    return ((wasm__cont_object_t*)handle)->marked;
-}
-
 static void wasm__gc_free_box(const wasm_allocator_t* a, void* handle) {
     wasm__free(a, handle);
 }
@@ -444,11 +439,7 @@ static void wasm__gc_clear_handle_marks(wasm_runtime_t* rt) {
 
         if (exception) exception->marked = 0;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
-
-        if (k) k->marked = 0;
-    }
+    wasm__cont_clear_marks(rt);
 }
 
 static int wasm__gc_live_bytes(const wasm_runtime_t* rt, size_t* out_live) {
@@ -485,10 +476,10 @@ static void wasm__gc_free_unused_types(wasm_runtime_t* rt) {
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->module && object->module->retired_types) object->module->retired_types_used = 1;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k && k->module && k->module->retired_types) k->module->retired_types_used = 1;
+        if (k->in_use && k->module && k->module->retired_types) k->module->retired_types_used = 1;
     }
     link = &rt->type_owners;
     while (*link) {
@@ -513,7 +504,6 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
     size_t needed;
     size_t new_size;
     wasm__gc_mark_stack_t stack;
-    uint32_t i;
 
     if (!rt) return WASM_ERR_MALFORMED;
 #ifndef NDEBUG
@@ -537,12 +527,7 @@ WASM_PRIVATE wasm_error_t wasm__gc_collect(wasm_runtime_t* rt, size_t request) {
 
     wasm__handle_set_filter(&rt->allocator, &rt->externref_boxes, wasm__gc_box_is_marked, wasm__gc_free_box);
     wasm__handle_set_filter(&rt->allocator, &rt->exception_objects, wasm__gc_exception_is_marked, wasm__gc_free_exception);
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        wasm__cont_object_t* k = (wasm__cont_object_t*)rt->cont_objects.slots[i];
-
-        if (k && !k->marked) wasm__cont_drop_stacks(rt, k);
-    }
-    wasm__handle_set_filter(&rt->allocator, &rt->cont_objects, wasm__gc_cont_is_marked, wasm__gc_free_box);
+    wasm__cont_sweep(rt);
 
     if (!wasm__gc_live_bytes(rt, &live)) live = SIZE_MAX;
     needed = wasm__align_up_size(live, (size_t)WASM__ALIGNOF(wasm_value_t));
@@ -626,10 +611,10 @@ WASM_PRIVATE int wasm__gc_types_used(const wasm_runtime_t* rt, const wasm_module
     for (object = rt->gc_allocations; object; object = object->next_alloc) {
         if (object->module == mod) return 1;
     }
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)rt->cont_objects.slots[i];
+    for (i = 0; i < rt->conts.count; i++) {
+        const wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
 
-        if (k && k->module == mod) return 1;
+        if (k->in_use && k->module == mod) return 1;
     }
     return 0;
 }

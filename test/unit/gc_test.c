@@ -229,6 +229,7 @@ TEST(test_gc_collect_marks_runtime_roots_and_preserves_object_graphs) {
     fake_func.num_stack_maps = 1;
     fake_func.stack_map_bits = fake_map_bits;
     fake_func.num_stack_map_bits = 1;
+    memset(&rt.exec->call_frames[0], 0, sizeof(rt.exec->call_frames[0]));
     rt.exec->call_frame_sp = 1;
     rt.exec->call_frames[0].func = &fake_func;
     rt.exec->call_frames[0].locals = frame_locals;
@@ -1796,6 +1797,139 @@ TEST(test_gc_objects_of_every_field_kind_survive_their_module) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $box (struct (field i32)))
+     (type $f1 (func (param i32) (result i32))) (type $c1 (cont $f1))
+     (tag $y (param i32) (result i32))
+     (global $k (mut (ref null $c1)) (ref.null $c1))
+     (func $field_plus (param $b (ref null $box)) (param $v i32) (result i32)
+       (i32.add (struct.get $box 0 (local.get $b)) (local.get $v)))
+     (func $holder (type $f1) (param $x i32) (result i32) (local $b (ref null $box))
+       (local.set $b (struct.new $box (local.get $x)))
+       (i32.add (struct.get $box 0 (local.get $b))
+         (call $field_plus (struct.new $box (i32.mul (local.get $x) (i32.const 2)))
+                           (suspend $y (i32.const 0)))))
+     (elem declare func $holder)
+     (func (export "start") (param $x i32)
+       (block $h (result i32 (ref $c1))
+         (drop (resume $c1 (on $y $h) (local.get $x) (cont.new $c1 (ref.func $holder))))
+         (return))
+       (global.set $k) (drop))
+     (func (export "finish") (param $v i32) (result i32) (resume $c1 (local.get $v) (global.get $k)))
+     (func (export "garbage") (param $n i32)
+       (loop $l (drop (struct.new $box (local.get $n)))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))
+     (func (export "abandon") (param $n i32)
+       (loop $l
+         (block $h (result i32 (ref $c1))
+           (drop (resume $c1 (on $y $h) (local.get $n) (cont.new $c1 (ref.func $holder))))
+           (unreachable))
+         (drop) (drop)
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))) */
+static const uint8_t wasm_test_gc_suspended_sections[] = {
+    0x01, 0x1D, 0x06, 0x5F, 0x01, 0x7F, 0x00, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x5D, 0x01, 0x60, 0x02,
+    0x63, 0x00, 0x7F, 0x01, 0x7F, 0x60, 0x01, 0x7F, 0x00, 0x60, 0x00, 0x02, 0x7F, 0x64, 0x02, 0x03,
+    0x07, 0x06, 0x03, 0x01, 0x04, 0x01, 0x04, 0x04, 0x0D, 0x03, 0x01, 0x00, 0x01, 0x06, 0x07, 0x01,
+    0x63, 0x02, 0x01, 0xD0, 0x02, 0x0B, 0x07, 0x26, 0x04, 0x05, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00,
+    0x02, 0x06, 0x66, 0x69, 0x6E, 0x69, 0x73, 0x68, 0x00, 0x03, 0x07, 0x67, 0x61, 0x72, 0x62, 0x61,
+    0x67, 0x65, 0x00, 0x04, 0x07, 0x61, 0x62, 0x61, 0x6E, 0x64, 0x6F, 0x6E, 0x00, 0x05, 0x09, 0x05,
+    0x01, 0x03, 0x00, 0x01, 0x01, 0x0A, 0x87, 0x01, 0x06, 0x0B, 0x00, 0x20, 0x00, 0xFB, 0x02, 0x00,
+    0x00, 0x20, 0x01, 0x6A, 0x0B, 0x21, 0x01, 0x01, 0x63, 0x00, 0x20, 0x00, 0xFB, 0x00, 0x00, 0x21,
+    0x01, 0x20, 0x01, 0xFB, 0x02, 0x00, 0x00, 0x20, 0x00, 0x41, 0x02, 0x6C, 0xFB, 0x00, 0x00, 0x41,
+    0x00, 0xE2, 0x00, 0x10, 0x00, 0x6A, 0x0B, 0x16, 0x00, 0x02, 0x05, 0x20, 0x00, 0xD2, 0x01, 0xE0,
+    0x02, 0xE3, 0x02, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x0F, 0x0B, 0x24, 0x00, 0x1A, 0x0B, 0x09, 0x00,
+    0x20, 0x00, 0x23, 0x00, 0xE3, 0x02, 0x00, 0x0B, 0x14, 0x00, 0x03, 0x40, 0x20, 0x00, 0xFB, 0x00,
+    0x00, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B, 0x21, 0x00, 0x03,
+    0x40, 0x02, 0x05, 0x20, 0x00, 0xD2, 0x01, 0xE0, 0x02, 0xE3, 0x02, 0x01, 0x00, 0x00, 0x00, 0x1A,
+    0x00, 0x0B, 0x1A, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B,
+};
+TEST(test_gc_traces_references_only_suspended_frames_hold) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    uint32_t i;
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_sections(&rt, wasm_test_gc_suspended_sections, sizeof(wasm_test_gc_suspended_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(10);
+    WASM_CHECK_OK(t, wasm_call(m, "start", &arg, 1, NULL, 0));
+    for (i = 0; i < 3; i++) {
+        uint8_t* heap;
+
+        arg = wasm_i32(200);
+        WASM_CHECK_OK(t, wasm_call(m, "garbage", &arg, 1, NULL, 0));
+        heap = rt.gc_heap;
+        wasm_gc_collect(&rt);
+        CHECK_MSG(t, rt.gc_heap != heap, "%s", "expected the collection to move the suspended frames' objects");
+    }
+    arg = wasm_i32(5);
+    WASM_CHECK_OK(t, wasm_call(m, "finish", &arg, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 35);
+    CHECK(t, rt.num_cont_stacks == 0 && rt.conts.live == 0);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+TEST(test_gc_frees_abandoned_continuations_with_their_stacks) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    uint32_t count;
+
+    wasm_init(&rt);
+    m = wasm_test_load_sections(&rt, wasm_test_gc_suspended_sections, sizeof(wasm_test_gc_suspended_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(50);
+    WASM_CHECK_OK(t, wasm_call(m, "abandon", &arg, 1, NULL, 0));
+#ifndef WASM_GC_STRESS
+    CHECK_MSG(t, rt.num_cont_stacks == 50 && rt.conts.live == 50, "%u stacks, %u continuations",
+              (unsigned)rt.num_cont_stacks, (unsigned)rt.conts.live);
+#endif
+    count = rt.conts.count;
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.num_cont_stacks == 0 && rt.conts.live == 0 && rt.gc_heap_offset == 0,
+              "%u stacks, %u continuations, %zu heap bytes left", (unsigned)rt.num_cont_stacks,
+              (unsigned)rt.conts.live, rt.gc_heap_offset);
+#ifndef WASM_GC_STRESS
+    CHECK(t, rt.num_pooled_cont_stacks == 16);
+#endif
+    WASM_CHECK_OK(t, wasm_call(m, "abandon", &arg, 1, NULL, 0));
+    CHECK_MSG(t, rt.conts.count == count, "expected freed entries to be reused, %u after %u", (unsigned)rt.conts.count,
+              (unsigned)count);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&cfg);
+    cfg.cont_stack_values = 65536;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_sections(&rt, wasm_test_gc_suspended_sections, sizeof(wasm_test_gc_suspended_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(100);
+    WASM_CHECK_OK(t, wasm_call(m, "abandon", &arg, 1, NULL, 0));
+    CHECK_MSG(t, rt.num_cont_stacks <= 8 && rt.conts.count <= 16, "%u stacks, %u entries",
+              (unsigned)rt.num_cont_stacks, (unsigned)rt.conts.count);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 static const test_case gc_cases[] = {
     { "wasmgc: runtime init allocates a tracked GC heap arena", test_gc_runtime_initializes_heap_arena },
     { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
@@ -1815,5 +1949,7 @@ static const test_case gc_cases[] = {
     { "gc: host values of bottom reference types must be null", test_gc_host_values_of_bottom_types_must_be_null },
     { "gc: fields and elements of every kind survive collections after their module is freed",
       test_gc_objects_of_every_field_kind_survive_their_module },
+    { "gc: references only suspended continuation frames hold survive collections and move", test_gc_traces_references_only_suspended_frames_hold },
+    { "gc: collections free abandoned continuations with their stacks and reuse their entries", test_gc_frees_abandoned_continuations_with_their_stacks },
 };
 const test_suite gc_suite = { "gc", gc_cases, COUNTOF(gc_cases) };

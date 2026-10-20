@@ -10,6 +10,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `struct.get`, `struct.set`, `array.get`, `array.set`, `array.len`, the i31 instructions, `ref.func`, and saturating truncations run inside the interpreter loop.
 - References stored through `wasm_module_global` or `wasm_global_import_t.value` must have the global's type.
 - `ref.test`, `ref.cast`, `br_on_cast`, `br_on_cast_fail`, and the custom descriptor casts run inside the interpreter loop, and casts to struct and array types take constant time.
+- `suspend`, `resume`, `cont.bind`, and `switch` run without allocating, and only unconsumed continuations count toward collections.
+- The continuation stack pool keeps as many released stacks as are in use, and at least 16.
+- The host may pass a consumed continuation as any continuation type.
+- A runtime holds up to 134,217,728 unconsumed continuations, or 262,144 on 32-bit hosts.
 
 ### Fixed
 
@@ -18,6 +22,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `wasm_table_set` and `wasm_table_grow` on an imported table checked values against the exporting module's types and could store an object of the wrong type.
 - Active element segments, `table.init`, and `table.copy` on imported tables of concrete reference types rejected some valid modules and accepted some invalid ones.
 - `wasm_table_type` and `wasm_table_reftype` described an imported table with the exporting module's type indices.
+- Suspensions could each run a full collection, so generators slowed as the live GC heap grew.
 
 ## [2.0.0] - 2026-10-19
 

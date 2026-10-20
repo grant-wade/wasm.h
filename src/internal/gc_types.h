@@ -44,20 +44,70 @@ struct wasm__exception_object_t {
     int marked;
 };
 
-/* A continuation: the stacks from top through its parent links to bottom, a function and its bound arguments
- * until it first runs, or neither once consumed. */
+/* A continuation reference has bit 0 set, the index of its entry in the runtime's continuation table in the next
+ * WASM__CONT_INDEX_BITS bits, the entry's generation in the next WASM__CONT_GEN_BITS, and the runtime's tag in
+ * the rest. Runtimes alive at once have distinct tags, except that runtimes with tag WASM__CONT_TAG_MAX each own
+ * a distinct slice of its indices. */
+#if UINTPTR_MAX > 0xFFFFFFFFu
+#define WASM__CONT_INDEX_BITS 27u
+#define WASM__CONT_GEN_BITS 24u
+#define WASM__CONT_SLICE_BITS 17u
+#else
+#define WASM__CONT_INDEX_BITS 18u
+#define WASM__CONT_GEN_BITS 8u
+#define WASM__CONT_SLICE_BITS 10u
+#endif
+#define WASM__CONT_GEN_SHIFT (1u + WASM__CONT_INDEX_BITS)
+#define WASM__CONT_TAG_SHIFT (WASM__CONT_GEN_SHIFT + WASM__CONT_GEN_BITS)
+#define WASM__CONT_MAX_ENTRIES ((uint32_t)1u << WASM__CONT_INDEX_BITS)
+#define WASM__CONT_GEN_MAX (((uint32_t)1u << WASM__CONT_GEN_BITS) - 1u)
+#define WASM__CONT_TAG_MAX ((uint32_t)(UINTPTR_MAX >> WASM__CONT_TAG_SHIFT))
+#define WASM__CONT_SLICE_ENTRIES ((uint32_t)1u << WASM__CONT_SLICE_BITS)
+#define WASM__CONT_SLICES ((uint32_t)1u << (WASM__CONT_INDEX_BITS - WASM__CONT_SLICE_BITS))
+#define WASM__CONT_BLOCK_ENTRIES 256u
+
+/* An entry of the continuation table. In use, it is a continuation: the stacks from top through their parent
+ * links to bottom, or a function and its bound arguments until it first runs. */
 struct wasm__cont_object_t {
     struct wasm__exec_stack_t* top;    /* innermost stack, where execution resumes */
     struct wasm__exec_stack_t* bottom; /* outermost stack, linked under the resumer */
     wasm_module_t* start_module;       /* owner of start_func until the continuation first runs */
-    uint32_t start_func;
-    union wasm__slot_t* args; /* slots of the arguments bound before it first runs */
-    uint32_t num_args;
+    union wasm__slot_t* args;          /* slots of the arguments bound before it first runs */
     wasm_module_t* module;             /* owner of type_index, or NULL if the type is unknown */
+    uint32_t start_func;
+    uint32_t num_args;
     uint32_t type_index;
-    int stale; /* nonzero if its stacks were dropped when a module they run was freed */
-    int marked;
+    uint32_t index;        /* the index its references hold */
+    uint32_t gen;          /* generation of its reference in use or next; above WASM__CONT_GEN_MAX once retired */
+    uint32_t swept_gen;    /* gen when the last collection finished */
+    uint32_t stale_low;    /* lowest generation of a consumed reference the last collection marked */
+    uint32_t stale_high;   /* highest such generation, or below stale_low if it marked none */
+    uint32_t marking_low;  /* stale_low of the collection marking now */
+    uint32_t marking_high; /* stale_high of the collection marking now */
+    uint32_t next_free;    /* 1 + the next free entry while this one is free, or 0 */
+    uint8_t in_use;
+    uint8_t stale; /* nonzero if its stacks were dropped when a module they run was freed */
+    uint8_t marked;
 };
+
+/* A runtime's continuations, in blocks of WASM__CONT_BLOCK_ENTRIES entries that never move. */
+typedef struct wasm__cont_table_t {
+    struct wasm__cont_object_t** blocks;
+    uint32_t num_blocks;
+    uint32_t cap_blocks;
+    uint32_t count;         /* entries ever used, the first count of the blocks */
+    uint32_t limit;         /* most entries it may use, or 0 until it has a tag */
+    uint32_t base;          /* index the references of its first entry hold */
+    uint32_t free_head;     /* 1 + the first free entry, or 0 */
+    uint32_t live;          /* entries in use */
+    uint32_t retired;       /* entries out of generations */
+    uint32_t retired_swept; /* retired when the last collection finished */
+    uintptr_t tag;          /* nonzero once the first entry is used */
+} wasm__cont_table_t;
+
+WASM_INLINE struct wasm__cont_object_t* wasm__cont_at(const wasm__cont_table_t* table, uint32_t index) {
+    return &table->blocks[index / WASM__CONT_BLOCK_ENTRIES][index % WASM__CONT_BLOCK_ENTRIES];
+}
 
 /* An externref wrapping an anyref, or an anyref wrapping a host externref; value is what it wraps. */
 struct wasm__externref_box_t {

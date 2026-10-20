@@ -94,7 +94,7 @@ struct wasm_runtime_t {
     int32_t exit_code;
     wasm__exception_state_t pending_exception;
     wasm__handle_set_t exception_objects;
-    wasm__handle_set_t cont_objects;
+    wasm__cont_table_t conts;
     wasm__exec_stack_t* cont_stacks;     /* continuation stacks in use */
     wasm__exec_stack_t* cont_stack_pool; /* released continuation stacks kept for reuse */
     uint32_t num_cont_stacks;
@@ -121,7 +121,7 @@ struct wasm_runtime_t {
     wasm__held_block_t* held_values;
     wasm__gc_root_t* gc_roots; /* innermost root pushed by wasm__gc_push_root */
     wasm__linked_func_t* linked_funcs;
-    uint32_t handle_gc_threshold; /* boxes plus exception and continuation objects that trigger a collection */
+    uint32_t handle_gc_threshold; /* boxes, exception objects, and continuations in use that trigger a collection */
     wasm__exec_stack_t main_stack;
     wasm__arena_chunk_t* frame_arena_spare; /* last dropped block, kept for reuse */
     wasm_error_t suspended;               /* the code a suspended call stopped with, or WASM_OK */
@@ -194,9 +194,13 @@ WASM_PRIVATE void wasm__gc_push_root(wasm_runtime_t* rt, wasm__gc_root_t* root, 
 
 WASM_PRIVATE void wasm__gc_pop_root(wasm_runtime_t* rt, wasm__gc_root_t* root);
 
-/* Collects garbage once enough externref boxes, exception objects, and continuations have accumulated. Call it
- * only where every live reference is reachable from the runtime's roots. */
+/* Collects garbage once enough externref boxes, exception objects, and continuations in use have accumulated, or
+ * when the continuation table needs one. Call it only where every live reference is reachable from the runtime's
+ * roots. */
 WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt);
+
+/* Collects garbage as wasm__gc_collect_handles_if_needed does, or when the continuation table is full. */
+WASM_PRIVATE void wasm__gc_collect_handles_before_cont(wasm_runtime_t* rt);
 
 /* Consumes a pending wasm_runtime_interrupt; returns nonzero, with the error set, if there was one. */
 WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt);

@@ -163,9 +163,61 @@ TEST(test_runtime_grows_frame_arena_for_execution) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $f (func)) (type $c (cont $f))
+     (tag $e)
+     (func $f3 (unreachable))
+     (func $f2 (try_table (catch $e 0) (call $f3)))
+     (func $f1 (call $f2))
+     (elem declare func $f1)
+     (func (export "run") (resume $c (cont.new $c (ref.func $f1))))) */
+static const uint8_t wasm_test_stack_frames_sections[] = {
+    0x01, 0x06, 0x02, 0x60, 0x00, 0x00, 0x5D, 0x00, 0x03, 0x05, 0x04, 0x00, 0x00, 0x00, 0x00, 0x0D,
+    0x03, 0x01, 0x00, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6E, 0x00, 0x03, 0x09, 0x05, 0x01,
+    0x03, 0x00, 0x01, 0x02, 0x0A, 0x20, 0x04, 0x03, 0x00, 0x00, 0x0B, 0x0B, 0x00, 0x1F, 0x40, 0x01,
+    0x00, 0x00, 0x00, 0x10, 0x00, 0x0B, 0x0B, 0x04, 0x00, 0x10, 0x01, 0x0B, 0x09, 0x00, 0xD2, 0x02,
+    0xE0, 0x01, 0xE3, 0x01, 0x00, 0x0B,
+};
+
+TEST(test_new_stacks_write_each_call_frame_they_push) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t run;
+
+    wasm_config_default(&cfg);
+    cfg.cont_call_depth = 4;
+    wasm_init_config(&rt, &cfg);
+    m = wasm_test_load_sections(&rt, wasm_test_stack_frames_sections, sizeof(wasm_test_stack_frames_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (m == NULL) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (run = 0; run < 2; run++) {
+        uint32_t depth;
+
+        CHECK(t, wasm_call(m, "run", NULL, 0, NULL, 0) == WASM_ERR_UNREACHABLE);
+        for (depth = 0; depth < 4; depth++) {
+            wasm_module_t* frame_mod = NULL;
+            uint32_t func_idx = UINT32_MAX;
+            uint32_t offset = 0;
+
+            WASM_CHECK_OK(t, wasm_runtime_call_frame(&rt, depth, &frame_mod, &func_idx, &offset));
+            CHECK_MSG(t, frame_mod == m && func_idx == depth, "run %u frame %u: function %u", (unsigned)run,
+                      (unsigned)depth, (unsigned)func_idx);
+        }
+        CHECK(t, wasm_runtime_call_frame(&rt, 4, NULL, NULL, NULL) != WASM_OK);
+        CHECK(t, rt.num_cont_stacks == 0 && rt.num_pooled_cont_stacks == 1);
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 static const test_case exec_stack_cases[] = {
     { "runtime: operand stack overflow traps at the call that needs the space", test_runtime_operand_stack_overflow_traps_at_call },
     { "runtime: frame arena alloc/reset/destroy are well-formed", test_frame_arena_allocator },
     { "runtime: top-level execution grows the frame arena for validated modules", test_runtime_grows_frame_arena_for_execution },
+    { "runtime: a new stack writes each call frame it pushes before reading it", test_new_stacks_write_each_call_frame_they_push },
 };
 const test_suite exec_stack_suite = { "exec.stack", exec_stack_cases, COUNTOF(exec_stack_cases) };

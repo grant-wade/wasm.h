@@ -483,20 +483,20 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             err = wasm__cont_new_func(rt, mod, imm[0], rt->func_refs[ref_id].module, rt->func_refs[ref_id].func_idx,
                                       &k);
             if (err != WASM_OK) return err;
-            wasm__slot_set_ref(top - 1, (uintptr_t)k);
+            wasm__slot_set_ref(top - 1, wasm__cont_ref(rt, k));
             cf->pc = imm + 1;
             return WASM_OK;
         }
         case 0xE1: {
             wasm__cont_object_t* bound;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
             if (!k) return err;
             err = wasm__cont_bind(rt, k, mod, imm[1], top - 1 - imm[2], imm[2], &bound);
             if (err != WASM_OK) return err;
             exec->sp -= imm[2];
-            wasm__slot_set_ref(&exec->stack[exec->sp - 1u], (uintptr_t)bound);
+            wasm__slot_set_ref(&exec->stack[exec->sp - 1u], wasm__cont_ref(rt, bound));
             cf->pc = imm + 3;
             return WASM_OK;
         }
@@ -504,7 +504,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             const uint32_t* handler;
             wasm__exec_stack_t* outer;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[0]].identity, 0, &handler);
             if (!outer) return WASM_ERR_TRAP;
             cf->pc = imm + 3;
@@ -558,7 +558,7 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
             const uint32_t* handler;
             wasm__exec_stack_t* outer;
 
-            wasm__gc_collect_handles_if_needed(rt);
+            wasm__gc_collect_handles_before_cont(rt);
             k = wasm__cont_check(rt, wasm__slot_ref(top - 1), &err);
             if (!k) return err;
             outer = wasm__cont_find_handler(rt, rt->loop_stack, mod->tags[imm[1]].identity, 1, &handler);

@@ -84,8 +84,7 @@ static void wasm__check_ref_slot(const wasm_runtime_t* rt, const wasm__call_fram
         valid = (bits & WASM__GC_I31_TAG) != 0 || wasm__gc_ptr_in_heap(rt, (const void*)bits) ||
                 wasm__handle_set_contains(&rt->externref_boxes, (const void*)bits);
     else if (kind == WASM__SLOT_KIND_HANDLE)
-        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) ||
-                wasm__handle_set_contains(&rt->cont_objects, (const void*)bits);
+        valid = wasm__handle_set_contains(&rt->exception_objects, (const void*)bits) || wasm__cont_issued(rt, bits);
     if (valid) return;
     if (cf)
         fprintf(stderr, "stack map mismatch in function %u at offset %u: %s slot %u of kind %u holds %p\n",
@@ -101,9 +100,9 @@ WASM_PRIVATE void wasm__check_stack_maps(const wasm_runtime_t* rt) {
     const wasm__exec_stack_t* s;
     uint32_t i;
 
-    for (i = 0; i < rt->cont_objects.capacity; i++) {
-        const wasm__cont_object_t* k = (const wasm__cont_object_t*)rt->cont_objects.slots[i];
-        const wasm_functype_t* start_type = k ? wasm__cont_start_type(k) : NULL;
+    for (i = 0; i < rt->conts.count; i++) {
+        const wasm__cont_object_t* k = wasm__cont_at(&rt->conts, i);
+        const wasm_functype_t* start_type = k->in_use ? wasm__cont_start_type(k) : NULL;
         uint32_t j;
 
         for (j = 0; start_type && j < start_type->num_params; j++) {

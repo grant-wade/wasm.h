@@ -21,6 +21,7 @@
   (elem declare func $leaf $producer)
   (tag $exn (param i32))
   (tag $yield (param i32))
+  (global $live (mut (ref null $cons)) (ref.null $cons))
   (func $add (type $binop) (i32.add (local.get 0) (local.get 1)))
   (func $sub (type $binop) (i32.sub (local.get 0) (local.get 1)))
   (func $mul (type $binop) (i32.mul (local.get 0) (local.get 1)))
@@ -255,6 +256,16 @@
       end
     end
     (local.get $acc))
+
+  (func (export "live_heap") (param $n i32) (result i32) (local $i i32) (local $l (ref null $cons))
+    (block $done
+      (loop $build
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $l (struct.new $cons (local.get $i) (local.get $l)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $build)))
+    (global.set $live (local.get $l))
+    (local.get $i))
 
   (func $leaf)
   (func (export "cont_new") (param $n i32) (result i32) (local $i i32)

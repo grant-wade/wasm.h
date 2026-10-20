@@ -197,19 +197,29 @@ WASM_PRIVATE int wasm__runtime_take_interrupt(wasm_runtime_t* rt) {
 
 #define WASM__HANDLE_GC_MIN_THRESHOLD 1024u
 
-WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+static void wasm__gc_collect_handles_when_due(wasm_runtime_t* rt, int creating_cont) {
     uint32_t threshold;
     uint32_t live;
 
     if (!rt) return;
     threshold = rt->handle_gc_threshold ? rt->handle_gc_threshold : WASM__HANDLE_GC_MIN_THRESHOLD;
-    if (rt->externref_boxes.count + rt->exception_objects.count + rt->cont_objects.count < threshold) return;
+    if (rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live < threshold &&
+        !wasm__cont_collection_due(rt, creating_cont))
+        return;
 
     wasm_gc_collect(rt);
-    live = rt->externref_boxes.count + rt->exception_objects.count + rt->cont_objects.count;
+    live = rt->externref_boxes.count + rt->exception_objects.count + rt->conts.live;
     rt->handle_gc_threshold = live > UINT32_MAX / 2u ? UINT32_MAX : live * 2u;
     if (rt->handle_gc_threshold < WASM__HANDLE_GC_MIN_THRESHOLD)
         rt->handle_gc_threshold = WASM__HANDLE_GC_MIN_THRESHOLD;
+}
+
+WASM_PRIVATE void wasm__gc_collect_handles_if_needed(wasm_runtime_t* rt) {
+    wasm__gc_collect_handles_when_due(rt, 0);
+}
+
+WASM_PRIVATE void wasm__gc_collect_handles_before_cont(wasm_runtime_t* rt) {
+    wasm__gc_collect_handles_when_due(rt, 1);
 }
 
 static void* wasm__gc_bump_alloc(wasm_runtime_t* rt, size_t size, size_t alignment) {

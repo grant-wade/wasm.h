@@ -33,9 +33,11 @@ static wasm__waiter_t* wasm__waiters_tail;
 #if defined(WASM__THREADS_POSIX)
 static pthread_mutex_t wasm__waiters_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t wasm__grow_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t wasm__cont_tags_mutex = PTHREAD_MUTEX_INITIALIZER;
 #else
 static SRWLOCK wasm__waiters_lock = SRWLOCK_INIT;
 static SRWLOCK wasm__grow_lock = SRWLOCK_INIT;
+static SRWLOCK wasm__cont_tags_mutex = SRWLOCK_INIT;
 #endif
 
 static void wasm__waiters_remove(wasm__waiter_t* waiter) {
@@ -214,6 +216,22 @@ WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
 #endif
 }
 
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_lock(&wasm__cont_tags_mutex);
+#else
+    AcquireSRWLockExclusive(&wasm__cont_tags_mutex);
+#endif
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void) {
+#if defined(WASM__THREADS_POSIX)
+    pthread_mutex_unlock(&wasm__cont_tags_mutex);
+#else
+    ReleaseSRWLockExclusive(&wasm__cont_tags_mutex);
+#endif
+}
+
 #else
 
 WASM_PRIVATE int wasm__platform_atomic_wait(uint8_t* p, uint32_t size, uint64_t expected, int64_t timeout_ns,
@@ -236,6 +254,12 @@ WASM_PRIVATE void wasm__platform_shared_grow_lock(void) {
 }
 
 WASM_PRIVATE void wasm__platform_shared_grow_unlock(void) {
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_lock(void) {
+}
+
+WASM_PRIVATE void wasm__platform_cont_tags_unlock(void) {
 }
 
 #endif

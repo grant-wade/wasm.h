@@ -5,9 +5,35 @@
 #include "../internal/slot.h"
 #include "stack.h"
 
-/* Returns the continuation ref points to, or NULL with rt's error set if ref is null, not a
- * continuation, already consumed, or stale. */
+/* Returns the reference that names k while it is in use. */
+WASM_PRIVATE uintptr_t wasm__cont_ref(const wasm_runtime_t* rt, const wasm__cont_object_t* k);
+
+/* Returns the continuation ref names, or NULL with rt's error set if ref is null, not a continuation
+ * reference of rt, already consumed, or stale. */
 WASM_PRIVATE wasm__cont_object_t* wasm__cont_check(wasm_runtime_t* rt, uintptr_t ref, wasm_error_t* out_err);
+
+/* Returns the continuation ref names if it is in use, else NULL. */
+WASM_PRIVATE const wasm__cont_object_t* wasm__cont_live(const wasm_runtime_t* rt, uintptr_t ref);
+
+/* Returns nonzero if ref names a consumed continuation of rt that the host may still pass back. */
+WASM_PRIVATE int wasm__cont_consumed(const wasm_runtime_t* rt, uintptr_t ref);
+
+#ifndef NDEBUG
+/* Returns nonzero if rt handed out ref. */
+WASM_PRIVATE int wasm__cont_issued(const wasm_runtime_t* rt, uintptr_t ref);
+#endif
+
+/* Marks the continuation ref names and returns it, or returns NULL if it is consumed or already marked. */
+WASM_PRIVATE wasm__cont_object_t* wasm__cont_mark(wasm_runtime_t* rt, uintptr_t ref);
+
+WASM_PRIVATE void wasm__cont_clear_marks(wasm_runtime_t* rt);
+
+/* Every live reference must be marked. */
+WASM_PRIVATE void wasm__cont_sweep(wasm_runtime_t* rt);
+
+/* Returns nonzero when entries retired since the last collection call for one, or, if creating is nonzero,
+ * when the table is full. */
+WASM_PRIVATE int wasm__cont_collection_due(const wasm_runtime_t* rt, int creating);
 
 /* Returns in *out a continuation of type type_index of mod calling function func_idx of func_mod.
  * Every live reference must be reachable from rt's roots. */
@@ -58,7 +84,7 @@ WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_
 /* Releases the running stacks above base and makes base current. */
 WASM_PRIVATE void wasm__cont_unwind(wasm_runtime_t* rt, wasm__exec_stack_t* base);
 
-/* Consumes k, releasing its stacks or bound arguments. */
+/* Consumes k, releasing its stacks or bound arguments and its entry. */
 WASM_PRIVATE void wasm__cont_drop_stacks(wasm_runtime_t* rt, wasm__cont_object_t* k);
 
 /* Drops the stacks of continuations that run code of mod. */
