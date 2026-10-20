@@ -6,6 +6,7 @@
 #include "../reader.h"
 #include "../runtime.h"
 #include "../types/canonical.h"
+#include "../types/references.h"
 #include "../values.h"
 #include "state.h"
 #include <string.h>
@@ -479,6 +480,76 @@ static wasm_error_t wasm__x_cont(wasm__translator_t* t, const wasm_module_t* mod
     }
 }
 
+/* Emits the cast target and type index of a reference to the heap type at r, nullable if nullable, with flags
+ * added to the target; returns 0 if the heap type is malformed. */
+static int wasm__x_cast_target(wasm__translator_t* t, const wasm_module_t* mod, wasm__reader_t* r, int nullable,
+                               uint32_t flags) {
+    wasm_reftype_t ref;
+    uint32_t kind;
+
+    memset(&ref, 0, sizeof(ref));
+    if (wasm__read_heaptype(NULL, r, &ref) != WASM_OK || r->malformed) return 0;
+    if (ref.has_type_index) {
+        if (ref.type_index >= mod->num_types) return 0;
+        switch (mod->types[ref.type_index].kind) {
+            case WASM_COMP_FUNC:
+                ref.type = WASM_TYPE_FUNCREF;
+                break;
+            case WASM_COMP_STRUCT:
+                ref.type = WASM_TYPE_STRUCTREF;
+                break;
+            case WASM_COMP_ARRAY:
+                ref.type = WASM_TYPE_ARRAYREF;
+                break;
+            case WASM_COMP_CONT:
+                ref.type = WASM_TYPE_CONTREF;
+                break;
+            default:
+                return 0;
+        }
+        if (ref.type == WASM_TYPE_STRUCTREF || ref.type == WASM_TYPE_ARRAYREF)
+            kind = ref.exact ? WASM__CAST_EXACT_TYPE : WASM__CAST_SUBTYPE;
+        else
+            kind = WASM__CAST_GENERAL;
+        flags |= WASM__CAST_INDEXED | (ref.exact ? WASM__CAST_EXACT : 0u);
+    } else {
+        switch (ref.type) {
+            case WASM_TYPE_ANYREF:
+            case WASM_TYPE_FUNCREF:
+            case WASM_TYPE_EXTERNREF:
+            case WASM_TYPE_EXNREF:
+                kind = WASM__CAST_TOP;
+                break;
+            case WASM_TYPE_NONE:
+            case WASM_TYPE_NOFUNC:
+            case WASM_TYPE_NOEXTERN:
+            case WASM_TYPE_NOEXN:
+            case WASM_TYPE_NOCONT:
+                kind = WASM__CAST_BOTTOM;
+                break;
+            case WASM_TYPE_EQREF:
+                kind = WASM__CAST_EQ;
+                break;
+            case WASM_TYPE_I31REF:
+                kind = WASM__CAST_I31;
+                break;
+            case WASM_TYPE_STRUCTREF:
+                kind = WASM__CAST_STRUCT;
+                break;
+            case WASM_TYPE_ARRAYREF:
+                kind = WASM__CAST_ARRAY;
+                break;
+            default:
+                kind = WASM__CAST_GENERAL;
+                break;
+        }
+    }
+    if (nullable) flags |= WASM__CAST_NULLABLE;
+    wasm__x_emit(t, ((uint32_t)ref.type & 0xFFu) | (kind << WASM__CAST_KIND_SHIFT) | flags);
+    wasm__x_emit(t, ref.has_type_index ? ref.type_index : 0u);
+    return 1;
+}
+
 /* Emits the translated op of GC instruction subop, whose immediates follow at r; returns 1 if it has one,
  * 0 if wasm__exec_gc runs the instruction, and -1 if its immediates are malformed. */
 static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t subop, wasm__reader_t* r) {
@@ -553,6 +624,32 @@ static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t 
         case 0x1E:
             wasm__x_emit(t, WASM__OP_I31_GET_U);
             return 1;
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        case 0x23:
+        case 0x24:
+            wasm__x_emit(t, subop <= 0x15   ? WASM__OP_REF_TEST
+                            : subop <= 0x17 ? WASM__OP_REF_CAST
+                                            : WASM__OP_REF_CAST_DESC);
+            return wasm__x_cast_target(t, mod, r, subop == 0x15 || subop == 0x17 || subop == 0x24, 0u) ? 1 : -1;
+        case 0x18:
+        case 0x19:
+        case 0x25:
+        case 0x26: {
+            uint8_t flags = wasm__read_u8(r);
+            uint32_t depth = wasm__read_leb128_u32(r);
+
+            if (depth >= t->fp || r->malformed) return -1;
+            wasm__x_emit(t, subop <= 0x19 ? WASM__OP_BR_ON_CAST : WASM__OP_BR_ON_CAST_DESC);
+            wasm__skip_heaptype(r);
+            if (!wasm__x_cast_target(t, mod, r, (flags & 0x02u) != 0,
+                                     subop == 0x19 || subop == 0x26 ? WASM__CAST_ON_FAIL : 0u))
+                return -1;
+            wasm__x_descriptor(t, depth);
+            return 1;
+        }
         default:
             return 0;
     }
@@ -868,27 +965,6 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 if (op == 0xFC && subop <= 0x07) {
                     wasm__x_emit(t, WASM__OP_TRUNC_SAT);
                     wasm__x_emit(t, subop);
-                } else if (op == 0xFB && (subop == 0x18 || subop == 0x19)) {
-                    uint32_t flags_offset = (uint32_t)(r.ptr - func->code);
-                    uint32_t depth;
-
-                    (void)wasm__read_u8(&r);
-                    depth = wasm__read_leb128_u32(&r);
-                    if (depth >= t->fp || r.malformed) return WASM_ERR_MALFORMED;
-                    wasm__x_emit(t, WASM__OP_BR_ON_CAST);
-                    wasm__x_emit(t, subop);
-                    wasm__x_emit(t, flags_offset);
-                    wasm__x_descriptor(t, depth);
-                } else if (op == 0xFB && (subop == 0x25 || subop == 0x26)) {
-                    uint32_t depth;
-
-                    (void)wasm__read_u8(&r);
-                    depth = wasm__read_leb128_u32(&r);
-                    if (depth >= t->fp || r.malformed) return WASM_ERR_MALFORMED;
-                    /* wasm__exec_gc replaces the descriptor operand by whether to branch. */
-                    wasm__x_emit(t, op);
-                    wasm__x_emit(t, (uint32_t)(immediates - func->code));
-                    wasm__x_branch(t, WASM__OP_BR_IF, WASM__OP_BR_IF_LOOP, WASM__OP_BR_IF_X, depth, height - 1u);
                 } else if (!handled) {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, (uint32_t)(immediates - func->code));

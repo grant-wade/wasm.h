@@ -380,6 +380,106 @@ TEST(test_canonicalization_distinguishes_descriptor_clauses_and_exactness) {
     wasm_destroy(&rt);
 }
 
+/* Writes a module of count struct types, each but the first extending the one before, and a final struct type
+ * extending type 2, to out, which has room for 32 + 8 * count bytes; returns its length. */
+static size_t wasm_test_type_chain_module(uint8_t* out, uint32_t count) {
+    static const uint8_t header[] = { 0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 };
+    uint8_t* body = out + 32;
+    size_t body_len = wasm_test_put_leb128_u32(body, count + 1u);
+    size_t len;
+    uint32_t k;
+
+    for (k = 0; k < count; k++) {
+        body[body_len++] = 0x50;
+        body[body_len++] = k ? 1u : 0u;
+        if (k) body_len += wasm_test_put_leb128_u32(body + body_len, k - 1u);
+        body[body_len++] = 0x5F;
+        body[body_len++] = 0x00;
+    }
+    body[body_len++] = 0x4F;
+    body[body_len++] = 0x01;
+    body[body_len++] = 0x02;
+    body[body_len++] = 0x5F;
+    body[body_len++] = 0x00;
+    memcpy(out, header, sizeof(header));
+    len = sizeof(header);
+    out[len++] = 1;
+    len += wasm_test_put_leb128_u32(out + len, (uint32_t)body_len);
+    memmove(out + len, body, body_len);
+    return len + body_len;
+}
+
+TEST(test_type_displays_list_supertypes_by_depth) {
+    enum { COUNT = 80 };
+    uint8_t* bytes = (uint8_t*)malloc(32u + 8u * COUNT);
+    size_t len;
+    size_t fail_at;
+    int completed = 0;
+    wasm_runtime_t rt;
+    wasm_module_t* mods[2];
+    uint32_t i;
+    uint32_t k;
+    uint32_t j;
+
+    CHECK_MSG(t, bytes != NULL, "%s", "allocation failed");
+    if (!bytes) return;
+    len = wasm_test_type_chain_module(bytes, COUNT);
+    wasm_init(&rt);
+    for (i = 0; i < 2; i++) {
+        mods[i] = wasm_load(&rt, bytes, len);
+        CHECK_MSG(t, mods[i] != NULL, "%s", rt.error_msg);
+    }
+    for (k = 0; mods[0] && mods[1] && k < COUNT; k++) {
+        const wasm_comptype_t* type = &mods[0]->types[k];
+        const wasm_comptype_t* twin = &mods[1]->types[k];
+
+        if (k > WASM__MAX_DISPLAY_DEPTH) {
+            CHECK_MSG(t, type->display == NULL && twin->display == NULL, "type %u at depth %u has a display",
+                      (unsigned)k, (unsigned)k);
+            continue;
+        }
+        CHECK_MSG(t, type->display != NULL && twin->display != NULL && type->depth == k && twin->depth == k,
+                  "type %u has no display of depth %u", (unsigned)k, (unsigned)k);
+        if (!type->display || !twin->display || type->depth != k) continue;
+        for (j = 0; j <= k; j++) {
+            CHECK(t, type->display[j] == mods[0]->types[j].canonical_id);
+            CHECK(t, twin->display[j] == type->display[j]);
+        }
+    }
+    if (mods[0] && mods[1]) {
+        const wasm_comptype_t* leaf = &mods[0]->types[COUNT];
+
+        CHECK(t, leaf->display != NULL && leaf->depth == 3);
+        if (leaf->display && leaf->depth == 3) {
+            for (j = 0; j < 3; j++) CHECK(t, leaf->display[j] == mods[0]->types[j].canonical_id);
+            CHECK(t, leaf->display[3] == leaf->canonical_id && leaf->canonical_id != mods[0]->types[3].canonical_id);
+        }
+    }
+    for (i = 0; i < 2; i++) wasm_module_free(mods[i]);
+    wasm_destroy(&rt);
+
+    for (fail_at = 1; fail_at < 100000u && !completed; fail_at++) {
+        wasm_runtime_t* failing;
+        wasm_module_t* m = NULL;
+
+        g_wasm_test_alloc_fail_countdown = fail_at;
+        failing = wasm_runtime_new(&wasm_test_allocator, NULL);
+        if (failing) m = wasm_load(failing, bytes, len);
+        if (g_wasm_test_alloc_fail_countdown != 0) {
+            completed = 1;
+            CHECK(t, m != NULL && m->types[WASM__MAX_DISPLAY_DEPTH].display != NULL);
+        }
+        g_wasm_test_alloc_fail_countdown = 0;
+        wasm_module_free(m);
+        wasm_runtime_free(failing);
+        CHECK_MSG(t, g_wasm_test_alloc_stats.live_blocks == 0, "%zu blocks leaked when allocation %zu failed",
+                  g_wasm_test_alloc_stats.live_blocks, fail_at);
+        if (g_wasm_test_alloc_stats.live_blocks != 0) break;
+    }
+    CHECK(t, completed);
+    free(bytes);
+}
+
 static const test_case types_canonical_cases[] = {
     { "custom descriptors: descriptor clauses and exactness are part of type identity", test_canonicalization_distinguishes_descriptor_clauses_and_exactness },
     { "indirect call: structurally equal signatures are accepted", test_call_indirect_uses_structural_type_equality },
@@ -388,5 +488,7 @@ static const test_case types_canonical_cases[] = {
     { "wasmgc: invalid function variance is rejected", test_gc_type_validation_rejects_invalid_function_subtype },
     { "wasmgc: final supertypes cannot be extended", test_gc_type_validation_rejects_final_supertype },
     { "types: canonicalization dedupes thousands of types", test_canonicalization_dedupes_many_types },
+    { "wasmgc: type displays list canonical supertypes by depth, up to the display depth limit",
+      test_type_displays_list_supertypes_by_depth },
 };
 const test_suite types_canonical_suite = { "types.canonical", types_canonical_cases, COUNTOF(types_canonical_cases) };

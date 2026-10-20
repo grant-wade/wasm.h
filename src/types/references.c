@@ -687,32 +687,6 @@ WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
-                                                    wasm__reader_t* r,
-                                                    int nullable,
-                                                    wasm_reftype_t* out_reftype) {
-    wasm_error_t err;
-
-    if (!out_reftype) return WASM_ERR_MALFORMED;
-    wasm__clear_reftype(out_reftype);
-    out_reftype->nullable = nullable;
-    err = wasm__read_heaptype(mod, r, out_reftype);
-    if (err != WASM_OK) return err;
-    if (out_reftype->type == WASM_TYPE_VOID) out_reftype->type = WASM_TYPE_ANYREF;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
-                                                     wasm_value_t value) {
-    value.type = target && target->type ? target->type : WASM_TYPE_ANYREF;
-    return value;
-}
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source, wasm_value_t value) {
-    value.type = source && source->type ? source->type : WASM_TYPE_ANYREF;
-    return value;
-}
-
 WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
                                        wasm__reader_t* r,
                                        wasm_valtype_t* out_type,

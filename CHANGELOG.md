@@ -9,10 +9,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Struct and array layouts are computed once per type, and collections trace only fields and elements that can hold references.
 - `struct.get`, `struct.set`, `array.get`, `array.set`, `array.len`, the i31 instructions, `ref.func`, and saturating truncations run inside the interpreter loop.
 - References stored through `wasm_module_global` or `wasm_global_import_t.value` must have the global's type.
+- `ref.test`, `ref.cast`, `br_on_cast`, `br_on_cast_fail`, and the custom descriptor casts run inside the interpreter loop, and casts to struct and array types take constant time.
 
 ### Fixed
 
 - Freeing a module after an allocation failure left its GC objects without types, and collections stopped tracing their fields.
+- `br_on_cast_desc_eq` and `br_on_cast_desc_eq_fail` cost two units of fuel and could stop between their cast and their branch.
 
 ## [2.0.0] - 2026-10-19
 

@@ -109,16 +109,6 @@ WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
                                                        int nullable,
                                                        wasm_reftype_t* out_reftype);
 
-WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
-                                                    wasm__reader_t* r,
-                                                    int nullable,
-                                                    wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
-                                                     wasm_value_t value);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source, wasm_value_t value);
-
 WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
                                        wasm__reader_t* r,
                                        wasm_valtype_t* out_type,

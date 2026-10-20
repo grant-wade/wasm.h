@@ -44,6 +44,45 @@ WASM_INLINE int wasm__interrupt_pending(wasm_runtime_t* rt) {
     return wasm__runtime_take_interrupt(rt);
 }
 
+/* Returns whether the reference in slot matches cast target with type index type_idx of mod. */
+WASM_INLINE int wasm__cast_matches(const wasm_runtime_t* rt, const wasm_module_t* mod, uint32_t target,
+                                   uint32_t type_idx, const wasm__slot_t* slot) {
+    uintptr_t bits = wasm__slot_ref(slot);
+    const wasm_gc_header_t* object = (const wasm_gc_header_t*)bits;
+    const wasm_comptype_t* actual;
+    const wasm_comptype_t* expected;
+    int in_heap;
+
+    if (wasm__slot_u64(slot) == 0) return (target & WASM__CAST_NULLABLE) != 0;
+    in_heap = (bits & WASM__GC_I31_TAG) == 0 && bits - (uintptr_t)rt->gc_heap < (uintptr_t)rt->gc_heap_size;
+    switch (WASM__CAST_KIND(target)) {
+        case WASM__CAST_SUBTYPE:
+        case WASM__CAST_EXACT_TYPE:
+            if (!in_heap) return 0;
+            if (!object->module || object->type_index >= object->module->num_types) break;
+            actual = &object->module->types[object->type_index];
+            expected = &mod->types[type_idx];
+            if (!actual->display || !expected->display) break;
+            if (WASM__CAST_KIND(target) == WASM__CAST_EXACT_TYPE) return actual->canonical_id == expected->canonical_id;
+            return actual->depth >= expected->depth && actual->display[expected->depth] == expected->canonical_id;
+        case WASM__CAST_STRUCT:
+            return in_heap && object->kind != WASM_GC_OBJ_ARRAY;
+        case WASM__CAST_ARRAY:
+            return in_heap && object->kind == WASM_GC_OBJ_ARRAY;
+        case WASM__CAST_EQ:
+            return in_heap || (bits & WASM__GC_I31_TAG) != 0;
+        case WASM__CAST_I31:
+            return (bits & WASM__GC_I31_TAG) != 0;
+        case WASM__CAST_TOP:
+            return 1;
+        case WASM__CAST_BOTTOM:
+            return 0;
+        default:
+            break;
+    }
+    return wasm__exec_cast_matches(mod, target, type_idx, slot);
+}
+
 /* Calls a host import of type ft, whose type indices belong to mod. Results start as typed
  * defaults, so a host may set only the payload, and must match ft when it returns. */
 static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
@@ -834,7 +873,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
-        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST,
+        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_REF_TEST] = &&wasm__op_WASM__OP_REF_TEST,
+        [WASM__OP_REF_CAST] = &&wasm__op_WASM__OP_REF_CAST,
+        [WASM__OP_REF_CAST_DESC] = &&wasm__op_WASM__OP_REF_CAST_DESC,
+        [WASM__OP_BR_ON_CAST_DESC] = &&wasm__op_WASM__OP_BR_ON_CAST_DESC,
         [WASM__OP_STRUCT_GET] = &&wasm__op_WASM__OP_STRUCT_GET, [WASM__OP_STRUCT_SET] = &&wasm__op_WASM__OP_STRUCT_SET,
         [WASM__OP_ARRAY_GET] = &&wasm__op_WASM__OP_ARRAY_GET, [WASM__OP_ARRAY_SET] = &&wasm__op_WASM__OP_ARRAY_SET,
         [WASM__OP_ARRAY_LEN] = &&wasm__op_WASM__OP_ARRAY_LEN, [WASM__OP_REF_I31] = &&wasm__op_WASM__OP_REF_I31,
@@ -1228,13 +1270,50 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                         break;
                 }
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_REF_TEST):
+            WASM__CASE(WASM__OP_REF_CAST):
             WASM__CASE(WASM__OP_BR_ON_CAST): {
-                int taken = 0;
+                int matches = wasm__cast_matches(rt, mod, pc[0], pc[1], sp - 1);
 
-                err = wasm__exec_br_on_cast(mod, pc[0], func->code + pc[1], func->code + func->code_len, sp - 1,
-                                            &taken);
-                if (err != WASM_OK) goto cleanup;
-                if (taken) {
+                if (op == WASM__OP_BR_ON_CAST) {
+                    if (matches != ((pc[0] & WASM__CAST_ON_FAIL) != 0)) {
+                        desc = pc + 2;
+                        goto do_branch;
+                    }
+                    pc += 6;
+                    WASM__NEXT();
+                }
+                if (op == WASM__OP_REF_TEST) {
+                    wasm__slot_set_i32(sp - 1, matches);
+                } else if (WASM__UNLIKELY(!matches)) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "cast failure");
+                    WASM__TRAP(WASM_ERR_TRAP);
+                }
+                pc += 2;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_REF_CAST_DESC):
+            WASM__CASE(WASM__OP_BR_ON_CAST_DESC): {
+                const wasm_gc_header_t* descriptor = (const wasm_gc_header_t*)wasm__slot_ref(--sp);
+                int matches;
+
+                if (WASM__UNLIKELY(!descriptor)) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null descriptor reference");
+                    WASM__TRAP(WASM_ERR_TRAP);
+                }
+                if (wasm__slot_u64(sp - 1) == 0 && (pc[0] & WASM__CAST_NULLABLE))
+                    matches = 1;
+                else
+                    matches = wasm__gc_slot_descriptor(rt, sp - 1) == descriptor;
+                if (op == WASM__OP_REF_CAST_DESC) {
+                    if (WASM__UNLIKELY(!matches)) {
+                        WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "descriptor cast failure");
+                        WASM__TRAP(WASM_ERR_TRAP);
+                    }
+                    pc += 2;
+                    WASM__NEXT();
+                }
+                if (matches != ((pc[0] & WASM__CAST_ON_FAIL) != 0)) {
                     desc = pc + 2;
                     goto do_branch;
                 }

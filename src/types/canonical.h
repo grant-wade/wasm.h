@@ -3,6 +3,8 @@
 
 #include "../internal/config.h"
 
+#define WASM__MAX_DISPLAY_DEPTH 63u
+
 WASM_PRIVATE void wasm__free_functype(const wasm_allocator_t* a, wasm_functype_t* ft);
 
 WASM_PRIVATE int wasm__functype_is_unspecified(const wasm_functype_t* ft);

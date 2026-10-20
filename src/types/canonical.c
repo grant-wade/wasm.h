@@ -46,6 +46,9 @@ WASM_PRIVATE void wasm__free_comptype(const wasm_allocator_t* a, wasm_comptype_t
     wasm__free(a, type->supertypes);
     type->supertypes = NULL;
     type->num_supertypes = 0;
+    wasm__free(a, type->display);
+    type->display = NULL;
+    type->depth = 0;
 
     switch (type->kind) {
         case WASM_COMP_FUNC:
@@ -387,6 +390,30 @@ WASM_PRIVATE void wasm__free_type_groups(wasm_runtime_t* rt) {
     rt->num_type_groups = 0;
 }
 
+static wasm_error_t wasm__init_displays(wasm_module_t* mod) {
+    uint32_t i;
+
+    for (i = 0; i < mod->num_types; i++) {
+        wasm_comptype_t* type = &mod->types[i];
+        const wasm_comptype_t* parent = NULL;
+        uint32_t depth = 0;
+
+        if (type->display || type->canonical_id == 0 || type->num_supertypes > 1) continue;
+        if (type->num_supertypes == 1) {
+            if (type->supertypes[0] >= i) continue;
+            parent = &mod->types[type->supertypes[0]];
+            if (!parent->display || parent->depth >= WASM__MAX_DISPLAY_DEPTH) continue;
+            depth = parent->depth + 1u;
+        }
+        type->display = (uint32_t*)wasm__malloc_array(&mod->rt->allocator, (size_t)depth + 1u, sizeof(uint32_t));
+        if (!type->display) return WASM_ERR_OOM;
+        if (parent) memcpy(type->display, parent->display, (size_t)depth * sizeof(uint32_t));
+        type->display[depth] = type->canonical_id;
+        type->depth = depth;
+    }
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
     wasm__type_words_t words;
     wasm_error_t err = WASM_OK;
@@ -412,7 +439,8 @@ WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
             mod->types[group->first_type + k].canonical_id = group->canonical->first_id + k;
     }
     wasm__free(words.allocator, words.words);
-    return err;
+    if (err != WASM_OK) return err;
+    return wasm__init_displays(mod);
 }
 
 WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {

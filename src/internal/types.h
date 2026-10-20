@@ -42,6 +42,8 @@ typedef struct wasm_comptype_t {
     uint32_t* supertypes;
     uint32_t rec_group;
     uint32_t canonical_id; /* the same for equal types of a runtime's modules, or 0 */
+    uint32_t depth;        /* supertypes above the type, if display is not NULL */
+    uint32_t* display;     /* canonical ids of the type's supertypes by depth, ending with its own, or NULL */
     int is_final;
     uint32_t descriptor; /* index of the type describing this one, or UINT32_MAX */
     uint32_t describes;  /* index of the type this one describes, or UINT32_MAX */

@@ -94,7 +94,11 @@ enum {
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
-    WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+    WASM__OP_BR_ON_CAST,          /* cast target, type index, branch descriptor */
+    WASM__OP_REF_TEST,            /* cast target, type index */
+    WASM__OP_REF_CAST,            /* cast target, type index */
+    WASM__OP_REF_CAST_DESC,       /* cast target, type index */
+    WASM__OP_BR_ON_CAST_DESC,     /* cast target, type index, branch descriptor */
     WASM__OP_STRUCT_GET,          /* field byte offset, storage code, type index */
     WASM__OP_STRUCT_SET,          /* field byte offset, storage code, type index */
     WASM__OP_ARRAY_GET,           /* data byte offset, element size, storage code, type index */
@@ -119,6 +123,27 @@ enum {
 #define WASM__BRANCH_LOOP 0x1u
 #define WASM__BRANCH_RETURN 0x2u
 #define WASM__BRANCH_POPS_SHIFT 8u
+
+/* What decides whether a reference that is not null matches a cast target: a word with its heap type in bits 0-7,
+ * one of these in bits 8-11, and WASM__CAST_* flags, then a type index, 0 for an abstract heap type. */
+enum {
+    WASM__CAST_SUBTYPE,     /* the display of its struct or array type holds the target type */
+    WASM__CAST_EXACT_TYPE,  /* its struct or array type is the target type */
+    WASM__CAST_STRUCT,      /* it is a struct */
+    WASM__CAST_ARRAY,       /* it is an array */
+    WASM__CAST_EQ,          /* it is an i31, a struct, or an array */
+    WASM__CAST_I31,         /* it is an i31 */
+    WASM__CAST_TOP,         /* every reference matches */
+    WASM__CAST_BOTTOM,      /* no reference matches */
+    WASM__CAST_GENERAL      /* wasm__exec_cast_matches decides */
+};
+#define WASM__CAST_KIND_SHIFT 8u
+#define WASM__CAST_HEAP(word) ((wasm_valtype_t)((word) & 0xFFu))
+#define WASM__CAST_KIND(word) (((word) >> WASM__CAST_KIND_SHIFT) & 0xFu)
+#define WASM__CAST_NULLABLE 0x1000u
+#define WASM__CAST_EXACT 0x2000u
+#define WASM__CAST_INDEXED 0x4000u
+#define WASM__CAST_ON_FAIL 0x8000u
 
 /* WASM__OP_TRY table: count, then kind, tag or delegate skip count, and body index per clause. */
 #define WASM__CLAUSE_CATCH 0u

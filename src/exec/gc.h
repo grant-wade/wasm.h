@@ -10,13 +10,12 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
  * on the operand stack of mod's runtime; count is the element count of array.new_fixed. */
 WASM_PRIVATE wasm_error_t wasm__exec_gc_new(wasm_module_t* mod, uint32_t subop, uint32_t type_idx, uint32_t count);
 
-/* subop is 0x18 (br_on_cast) or 0x19 (br_on_cast_fail); slot is replaced by the cast result. */
-WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
-                                          uint32_t subop,
-                                          const uint8_t* flags_at,
-                                          const uint8_t* code_end,
-                                          wasm__slot_t* slot,
-                                          int* out_branch);
+/* Returns whether the reference in slot matches a cast target and type index as WASM__OP_REF_TEST takes them. */
+WASM_PRIVATE int wasm__exec_cast_matches(const wasm_module_t* mod, uint32_t target, uint32_t type_idx,
+                                         const wasm__slot_t* slot);
+
+/* Returns the descriptor of the struct slot holds, or NULL if it holds no struct with one. */
+WASM_PRIVATE wasm_gc_header_t* wasm__gc_slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot);
 
 #ifndef NDEBUG
 /* Aborts unless slot holds null or a reference to an object of type type_idx of mod or a subtype. */

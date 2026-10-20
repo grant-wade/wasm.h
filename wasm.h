@@ -857,6 +857,8 @@ typedef struct wasm_comptype_t {
     uint32_t* supertypes;
     uint32_t rec_group;
     uint32_t canonical_id; /* the same for equal types of a runtime's modules, or 0 */
+    uint32_t depth;        /* supertypes above the type, if display is not NULL */
+    uint32_t* display;     /* canonical ids of the type's supertypes by depth, ending with its own, or NULL */
     int is_final;
     uint32_t descriptor; /* index of the type describing this one, or UINT32_MAX */
     uint32_t describes;  /* index of the type this one describes, or UINT32_MAX */
@@ -4175,16 +4177,6 @@ WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
                                                        int nullable,
                                                        wasm_reftype_t* out_reftype);
 
-WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
-                                                    wasm__reader_t* r,
-                                                    int nullable,
-                                                    wasm_reftype_t* out_reftype);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
-                                                     wasm_value_t value);
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source, wasm_value_t value);
-
 WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
                                        wasm__reader_t* r,
                                        wasm_valtype_t* out_type,
@@ -4215,6 +4207,8 @@ WASM_PRIVATE int wasm__is_valtype_byte(uint8_t byte);
 #ifndef WASM_SRC_TYPES_CANONICAL_H
 #define WASM_SRC_TYPES_CANONICAL_H
 
+
+#define WASM__MAX_DISPLAY_DEPTH 63u
 
 WASM_PRIVATE void wasm__free_functype(const wasm_allocator_t* a, wasm_functype_t* ft);
 
@@ -5950,32 +5944,6 @@ WASM_PRIVATE wasm_error_t wasm__runtime_make_typeidx_reftype(wasm_module_t* mod,
     return WASM_OK;
 }
 
-WASM_PRIVATE wasm_error_t wasm__runtime_read_heap_reftype(wasm_module_t* mod,
-                                                    wasm__reader_t* r,
-                                                    int nullable,
-                                                    wasm_reftype_t* out_reftype) {
-    wasm_error_t err;
-
-    if (!out_reftype) return WASM_ERR_MALFORMED;
-    wasm__clear_reftype(out_reftype);
-    out_reftype->nullable = nullable;
-    err = wasm__read_heaptype(mod, r, out_reftype);
-    if (err != WASM_OK) return err;
-    if (out_reftype->type == WASM_TYPE_VOID) out_reftype->type = WASM_TYPE_ANYREF;
-    return WASM_OK;
-}
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_success_value(const wasm_reftype_t* target,
-                                                     wasm_value_t value) {
-    value.type = target && target->type ? target->type : WASM_TYPE_ANYREF;
-    return value;
-}
-
-WASM_PRIVATE wasm_value_t wasm__runtime_cast_difference_value(const wasm_reftype_t* source, wasm_value_t value) {
-    value.type = source && source->type ? source->type : WASM_TYPE_ANYREF;
-    return value;
-}
-
 WASM_PRIVATE wasm_error_t wasm__read_reftype(wasm_module_t* mod,
                                        wasm__reader_t* r,
                                        wasm_valtype_t* out_type,
@@ -6157,6 +6125,9 @@ WASM_PRIVATE void wasm__free_comptype(const wasm_allocator_t* a, wasm_comptype_t
     wasm__free(a, type->supertypes);
     type->supertypes = NULL;
     type->num_supertypes = 0;
+    wasm__free(a, type->display);
+    type->display = NULL;
+    type->depth = 0;
 
     switch (type->kind) {
         case WASM_COMP_FUNC:
@@ -6498,6 +6469,30 @@ WASM_PRIVATE void wasm__free_type_groups(wasm_runtime_t* rt) {
     rt->num_type_groups = 0;
 }
 
+static wasm_error_t wasm__init_displays(wasm_module_t* mod) {
+    uint32_t i;
+
+    for (i = 0; i < mod->num_types; i++) {
+        wasm_comptype_t* type = &mod->types[i];
+        const wasm_comptype_t* parent = NULL;
+        uint32_t depth = 0;
+
+        if (type->display || type->canonical_id == 0 || type->num_supertypes > 1) continue;
+        if (type->num_supertypes == 1) {
+            if (type->supertypes[0] >= i) continue;
+            parent = &mod->types[type->supertypes[0]];
+            if (!parent->display || parent->depth >= WASM__MAX_DISPLAY_DEPTH) continue;
+            depth = parent->depth + 1u;
+        }
+        type->display = (uint32_t*)wasm__malloc_array(&mod->rt->allocator, (size_t)depth + 1u, sizeof(uint32_t));
+        if (!type->display) return WASM_ERR_OOM;
+        if (parent) memcpy(type->display, parent->display, (size_t)depth * sizeof(uint32_t));
+        type->display[depth] = type->canonical_id;
+        type->depth = depth;
+    }
+    return WASM_OK;
+}
+
 WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
     wasm__type_words_t words;
     wasm_error_t err = WASM_OK;
@@ -6523,7 +6518,8 @@ WASM_PRIVATE wasm_error_t wasm__canonicalize_types(wasm_module_t* mod) {
             mod->types[group->first_type + k].canonical_id = group->canonical->first_id + k;
     }
     wasm__free(words.allocator, words.words);
-    return err;
+    if (err != WASM_OK) return err;
+    return wasm__init_displays(mod);
 }
 
 WASM_PRIVATE int wasm__type_equal(const wasm_module_t* mod, uint32_t lhs_idx, uint32_t rhs_idx) {
@@ -17886,7 +17882,11 @@ enum {
     WASM__OP_TRY,                 /* clause table index, stack height */
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
-    WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+    WASM__OP_BR_ON_CAST,          /* cast target, type index, branch descriptor */
+    WASM__OP_REF_TEST,            /* cast target, type index */
+    WASM__OP_REF_CAST,            /* cast target, type index */
+    WASM__OP_REF_CAST_DESC,       /* cast target, type index */
+    WASM__OP_BR_ON_CAST_DESC,     /* cast target, type index, branch descriptor */
     WASM__OP_STRUCT_GET,          /* field byte offset, storage code, type index */
     WASM__OP_STRUCT_SET,          /* field byte offset, storage code, type index */
     WASM__OP_ARRAY_GET,           /* data byte offset, element size, storage code, type index */
@@ -17911,6 +17911,27 @@ enum {
 #define WASM__BRANCH_LOOP 0x1u
 #define WASM__BRANCH_RETURN 0x2u
 #define WASM__BRANCH_POPS_SHIFT 8u
+
+/* What decides whether a reference that is not null matches a cast target: a word with its heap type in bits 0-7,
+ * one of these in bits 8-11, and WASM__CAST_* flags, then a type index, 0 for an abstract heap type. */
+enum {
+    WASM__CAST_SUBTYPE,     /* the display of its struct or array type holds the target type */
+    WASM__CAST_EXACT_TYPE,  /* its struct or array type is the target type */
+    WASM__CAST_STRUCT,      /* it is a struct */
+    WASM__CAST_ARRAY,       /* it is an array */
+    WASM__CAST_EQ,          /* it is an i31, a struct, or an array */
+    WASM__CAST_I31,         /* it is an i31 */
+    WASM__CAST_TOP,         /* every reference matches */
+    WASM__CAST_BOTTOM,      /* no reference matches */
+    WASM__CAST_GENERAL      /* wasm__exec_cast_matches decides */
+};
+#define WASM__CAST_KIND_SHIFT 8u
+#define WASM__CAST_HEAP(word) ((wasm_valtype_t)((word) & 0xFFu))
+#define WASM__CAST_KIND(word) (((word) >> WASM__CAST_KIND_SHIFT) & 0xFu)
+#define WASM__CAST_NULLABLE 0x1000u
+#define WASM__CAST_EXACT 0x2000u
+#define WASM__CAST_INDEXED 0x4000u
+#define WASM__CAST_ON_FAIL 0x8000u
 
 /* WASM__OP_TRY table: count, then kind, tag or delegate skip count, and body index per clause. */
 #define WASM__CLAUSE_CATCH 0u
@@ -21801,6 +21822,7 @@ WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt) {
 
 
 
+
 #include <string.h>
 
 /* A block being translated; fixups chains unresolved target words as index + 1, 0 ending it. */
@@ -22272,6 +22294,76 @@ static wasm_error_t wasm__x_cont(wasm__translator_t* t, const wasm_module_t* mod
     }
 }
 
+/* Emits the cast target and type index of a reference to the heap type at r, nullable if nullable, with flags
+ * added to the target; returns 0 if the heap type is malformed. */
+static int wasm__x_cast_target(wasm__translator_t* t, const wasm_module_t* mod, wasm__reader_t* r, int nullable,
+                               uint32_t flags) {
+    wasm_reftype_t ref;
+    uint32_t kind;
+
+    memset(&ref, 0, sizeof(ref));
+    if (wasm__read_heaptype(NULL, r, &ref) != WASM_OK || r->malformed) return 0;
+    if (ref.has_type_index) {
+        if (ref.type_index >= mod->num_types) return 0;
+        switch (mod->types[ref.type_index].kind) {
+            case WASM_COMP_FUNC:
+                ref.type = WASM_TYPE_FUNCREF;
+                break;
+            case WASM_COMP_STRUCT:
+                ref.type = WASM_TYPE_STRUCTREF;
+                break;
+            case WASM_COMP_ARRAY:
+                ref.type = WASM_TYPE_ARRAYREF;
+                break;
+            case WASM_COMP_CONT:
+                ref.type = WASM_TYPE_CONTREF;
+                break;
+            default:
+                return 0;
+        }
+        if (ref.type == WASM_TYPE_STRUCTREF || ref.type == WASM_TYPE_ARRAYREF)
+            kind = ref.exact ? WASM__CAST_EXACT_TYPE : WASM__CAST_SUBTYPE;
+        else
+            kind = WASM__CAST_GENERAL;
+        flags |= WASM__CAST_INDEXED | (ref.exact ? WASM__CAST_EXACT : 0u);
+    } else {
+        switch (ref.type) {
+            case WASM_TYPE_ANYREF:
+            case WASM_TYPE_FUNCREF:
+            case WASM_TYPE_EXTERNREF:
+            case WASM_TYPE_EXNREF:
+                kind = WASM__CAST_TOP;
+                break;
+            case WASM_TYPE_NONE:
+            case WASM_TYPE_NOFUNC:
+            case WASM_TYPE_NOEXTERN:
+            case WASM_TYPE_NOEXN:
+            case WASM_TYPE_NOCONT:
+                kind = WASM__CAST_BOTTOM;
+                break;
+            case WASM_TYPE_EQREF:
+                kind = WASM__CAST_EQ;
+                break;
+            case WASM_TYPE_I31REF:
+                kind = WASM__CAST_I31;
+                break;
+            case WASM_TYPE_STRUCTREF:
+                kind = WASM__CAST_STRUCT;
+                break;
+            case WASM_TYPE_ARRAYREF:
+                kind = WASM__CAST_ARRAY;
+                break;
+            default:
+                kind = WASM__CAST_GENERAL;
+                break;
+        }
+    }
+    if (nullable) flags |= WASM__CAST_NULLABLE;
+    wasm__x_emit(t, ((uint32_t)ref.type & 0xFFu) | (kind << WASM__CAST_KIND_SHIFT) | flags);
+    wasm__x_emit(t, ref.has_type_index ? ref.type_index : 0u);
+    return 1;
+}
+
 /* Emits the translated op of GC instruction subop, whose immediates follow at r; returns 1 if it has one,
  * 0 if wasm__exec_gc runs the instruction, and -1 if its immediates are malformed. */
 static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t subop, wasm__reader_t* r) {
@@ -22346,6 +22438,32 @@ static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t 
         case 0x1E:
             wasm__x_emit(t, WASM__OP_I31_GET_U);
             return 1;
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        case 0x23:
+        case 0x24:
+            wasm__x_emit(t, subop <= 0x15   ? WASM__OP_REF_TEST
+                            : subop <= 0x17 ? WASM__OP_REF_CAST
+                                            : WASM__OP_REF_CAST_DESC);
+            return wasm__x_cast_target(t, mod, r, subop == 0x15 || subop == 0x17 || subop == 0x24, 0u) ? 1 : -1;
+        case 0x18:
+        case 0x19:
+        case 0x25:
+        case 0x26: {
+            uint8_t flags = wasm__read_u8(r);
+            uint32_t depth = wasm__read_leb128_u32(r);
+
+            if (depth >= t->fp || r->malformed) return -1;
+            wasm__x_emit(t, subop <= 0x19 ? WASM__OP_BR_ON_CAST : WASM__OP_BR_ON_CAST_DESC);
+            wasm__skip_heaptype(r);
+            if (!wasm__x_cast_target(t, mod, r, (flags & 0x02u) != 0,
+                                     subop == 0x19 || subop == 0x26 ? WASM__CAST_ON_FAIL : 0u))
+                return -1;
+            wasm__x_descriptor(t, depth);
+            return 1;
+        }
         default:
             return 0;
     }
@@ -22661,27 +22779,6 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                 if (op == 0xFC && subop <= 0x07) {
                     wasm__x_emit(t, WASM__OP_TRUNC_SAT);
                     wasm__x_emit(t, subop);
-                } else if (op == 0xFB && (subop == 0x18 || subop == 0x19)) {
-                    uint32_t flags_offset = (uint32_t)(r.ptr - func->code);
-                    uint32_t depth;
-
-                    (void)wasm__read_u8(&r);
-                    depth = wasm__read_leb128_u32(&r);
-                    if (depth >= t->fp || r.malformed) return WASM_ERR_MALFORMED;
-                    wasm__x_emit(t, WASM__OP_BR_ON_CAST);
-                    wasm__x_emit(t, subop);
-                    wasm__x_emit(t, flags_offset);
-                    wasm__x_descriptor(t, depth);
-                } else if (op == 0xFB && (subop == 0x25 || subop == 0x26)) {
-                    uint32_t depth;
-
-                    (void)wasm__read_u8(&r);
-                    depth = wasm__read_leb128_u32(&r);
-                    if (depth >= t->fp || r.malformed) return WASM_ERR_MALFORMED;
-                    /* wasm__exec_gc replaces the descriptor operand by whether to branch. */
-                    wasm__x_emit(t, op);
-                    wasm__x_emit(t, (uint32_t)(immediates - func->code));
-                    wasm__x_branch(t, WASM__OP_BR_IF, WASM__OP_BR_IF_LOOP, WASM__OP_BR_IF_X, depth, height - 1u);
                 } else if (!handled) {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, (uint32_t)(immediates - func->code));
@@ -23092,13 +23189,12 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
  * on the operand stack of mod's runtime; count is the element count of array.new_fixed. */
 WASM_PRIVATE wasm_error_t wasm__exec_gc_new(wasm_module_t* mod, uint32_t subop, uint32_t type_idx, uint32_t count);
 
-/* subop is 0x18 (br_on_cast) or 0x19 (br_on_cast_fail); slot is replaced by the cast result. */
-WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
-                                          uint32_t subop,
-                                          const uint8_t* flags_at,
-                                          const uint8_t* code_end,
-                                          wasm__slot_t* slot,
-                                          int* out_branch);
+/* Returns whether the reference in slot matches a cast target and type index as WASM__OP_REF_TEST takes them. */
+WASM_PRIVATE int wasm__exec_cast_matches(const wasm_module_t* mod, uint32_t target, uint32_t type_idx,
+                                         const wasm__slot_t* slot);
+
+/* Returns the descriptor of the struct slot holds, or NULL if it holds no struct with one. */
+WASM_PRIVATE wasm_gc_header_t* wasm__gc_slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot);
 
 #ifndef NDEBUG
 /* Aborts unless slot holds null or a reference to an object of type type_idx of mod or a subtype. */
@@ -23122,6 +23218,7 @@ WASM_PRIVATE void wasm__gc_check_operand(wasm_module_t* mod, uint32_t type_idx, 
 
 
 
+
 #define WASM__PUSH_REF(rt, value)                    \
     do {                                             \
         wasm_value_t wasm__pushed = (value);         \
@@ -23133,8 +23230,7 @@ static wasm_error_t wasm__exec_gc_trap(wasm_runtime_t* rt, const char* message) 
     return WASM_ERR_TRAP;
 }
 
-/* Returns the descriptor of the struct slot holds, or NULL if it holds no struct with one. */
-static wasm_gc_header_t* wasm__slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
+WASM_PRIVATE wasm_gc_header_t* wasm__gc_slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
     uintptr_t bits = wasm__slot_ref(slot);
     wasm_gc_header_t* object = (wasm_gc_header_t*)bits;
     wasm_gc_header_t** descriptor;
@@ -23145,7 +23241,7 @@ static wasm_gc_header_t* wasm__slot_descriptor(const wasm_runtime_t* rt, const w
     return descriptor ? *descriptor : NULL;
 }
 
-/* Executes the custom descriptors instruction subop, 0x20 through 0x26, reading its immediates from cf. */
+/* Executes the custom descriptors instruction subop, 0x20 through 0x22, reading its immediates from cf. */
 static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, wasm__call_frame_t* cf,
                                                            uint32_t subop) {
     wasm_runtime_t* rt = mod->rt;
@@ -23176,32 +23272,11 @@ static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, 
             WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
             return WASM_OK;
         }
-        case 0x22:
+        default:
             if (wasm__slot_u64(WASM__PEEK(rt)) == 0) return wasm__exec_gc_trap(rt, "null reference");
             descriptor = *wasm__gc_descriptor_slot((wasm_gc_header_t*)wasm__slot_ref(WASM__PEEK(rt)));
             wasm__slot_set_ref(WASM__PEEK(rt), (uintptr_t)descriptor);
             return WASM_OK;
-        case 0x23:
-        case 0x24:
-            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
-            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
-            if (subop == 0x24 && wasm__slot_u64(WASM__PEEK(rt)) == 0) return WASM_OK;
-            if (wasm__slot_descriptor(rt, WASM__PEEK(rt)) != descriptor)
-                return wasm__exec_gc_trap(rt, "descriptor cast failure");
-            return WASM_OK;
-        default: {
-            uint8_t flags = wasm__read_u8(&cf->r);
-            int matches;
-
-            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
-            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
-            if (wasm__slot_u64(WASM__PEEK(rt)) == 0)
-                matches = (flags & 0x02u) != 0;
-            else
-                matches = wasm__slot_descriptor(rt, WASM__PEEK(rt)) == descriptor;
-            wasm__slot_set_i32(WASM__PUSH(rt), matches == (subop == 0x25));
-            return WASM_OK;
-        }
     }
 }
 
@@ -23476,33 +23551,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 break;
             }
         }
-        case 0x14:
-        case 0x15:
-        case 0x16:
-        case 0x17: {
-            wasm_reftype_t target_ref;
-            wasm_value_t value;
-            int matches;
-
-            err = wasm__runtime_read_heap_reftype(mod,
-                                                  &cf->r,
-                                                  subop == 0x15 || subop == 0x17,
-                                                  &target_ref);
-            if (err != WASM_OK) goto cleanup;
-            value = wasm__pop_value(rt, wasm__ref_top_type(target_ref.type), NULL);
-            matches = wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref);
-            if (subop == 0x14 || subop == 0x15) {
-                wasm__slot_set_i32(WASM__PUSH(rt), matches);
-                break;
-            }
-            if (!matches) {
-                WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "cast failure");
-                err = WASM_ERR_TRAP;
-                goto cleanup;
-            }
-            WASM__PUSH_REF(rt, wasm__runtime_cast_success_value(&target_ref, value));
-            break;
-        }
         case 0x1A:
         case 0x1B: {
             wasm_value_t value;
@@ -23523,10 +23571,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
         case 0x20:
         case 0x21:
         case 0x22:
-        case 0x23:
-        case 0x24:
-        case 0x25:
-        case 0x26:
             err = wasm__exec_descriptor_op(mod, cf, subop);
             goto cleanup;
         default:
@@ -23637,40 +23681,19 @@ WASM_PRIVATE void wasm__gc_check_operand(wasm_module_t* mod, uint32_t type_idx, 
 }
 #endif
 
-WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
-                                          uint32_t subop,
-                                          const uint8_t* flags_at,
-                                          const uint8_t* code_end,
-                                          wasm__slot_t* slot,
-                                          int* out_branch) {
-    wasm__reader_t r;
-    wasm_reftype_t source_ref;
-    wasm_reftype_t target_ref;
+WASM_PRIVATE int wasm__exec_cast_matches(const wasm_module_t* mod, uint32_t target, uint32_t type_idx,
+                                         const wasm__slot_t* slot) {
+    wasm_reftype_t ref;
     wasm_value_t value;
-    wasm_error_t err;
-    uint8_t flags;
 
-    r.ptr = flags_at;
-    r.end = code_end;
-    r.malformed = 0;
-    flags = wasm__read_u8(&r);
-    (void)wasm__read_leb128_u32(&r);
-    if ((flags & ~0x03u) != 0 || r.malformed) return WASM_ERR_MALFORMED;
-    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x01u) != 0, &source_ref);
-    if (err != WASM_OK) return err;
-    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x02u) != 0, &target_ref);
-    if (err != WASM_OK) return err;
-
-    value = wasm__value_from_slot(mod->rt, wasm__ref_top_type(source_ref.type), NULL, slot);
-    if (wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref)) {
-        value = wasm__runtime_cast_success_value(&target_ref, value);
-        *out_branch = subop == 0x18;
-    } else {
-        value = wasm__runtime_cast_difference_value(&source_ref, value);
-        *out_branch = subop == 0x19;
-    }
-    wasm__slot_from_value(slot, &value);
-    return WASM_OK;
+    memset(&ref, 0, sizeof(ref));
+    ref.type = WASM__CAST_HEAP(target);
+    ref.type_index = type_idx;
+    ref.has_type_index = (target & WASM__CAST_INDEXED) != 0;
+    ref.nullable = (target & WASM__CAST_NULLABLE) != 0;
+    ref.exact = (target & WASM__CAST_EXACT) != 0;
+    value = wasm__value_from_slot(mod->rt, wasm__ref_top_type(ref.type), NULL, slot);
+    return wasm__runtime_value_matches_type(mod, &value, ref.type, &ref);
 }
 /* END src/exec/gc.c */
 
@@ -25091,6 +25114,45 @@ WASM_INLINE int wasm__interrupt_pending(wasm_runtime_t* rt) {
     return wasm__runtime_take_interrupt(rt);
 }
 
+/* Returns whether the reference in slot matches cast target with type index type_idx of mod. */
+WASM_INLINE int wasm__cast_matches(const wasm_runtime_t* rt, const wasm_module_t* mod, uint32_t target,
+                                   uint32_t type_idx, const wasm__slot_t* slot) {
+    uintptr_t bits = wasm__slot_ref(slot);
+    const wasm_gc_header_t* object = (const wasm_gc_header_t*)bits;
+    const wasm_comptype_t* actual;
+    const wasm_comptype_t* expected;
+    int in_heap;
+
+    if (wasm__slot_u64(slot) == 0) return (target & WASM__CAST_NULLABLE) != 0;
+    in_heap = (bits & WASM__GC_I31_TAG) == 0 && bits - (uintptr_t)rt->gc_heap < (uintptr_t)rt->gc_heap_size;
+    switch (WASM__CAST_KIND(target)) {
+        case WASM__CAST_SUBTYPE:
+        case WASM__CAST_EXACT_TYPE:
+            if (!in_heap) return 0;
+            if (!object->module || object->type_index >= object->module->num_types) break;
+            actual = &object->module->types[object->type_index];
+            expected = &mod->types[type_idx];
+            if (!actual->display || !expected->display) break;
+            if (WASM__CAST_KIND(target) == WASM__CAST_EXACT_TYPE) return actual->canonical_id == expected->canonical_id;
+            return actual->depth >= expected->depth && actual->display[expected->depth] == expected->canonical_id;
+        case WASM__CAST_STRUCT:
+            return in_heap && object->kind != WASM_GC_OBJ_ARRAY;
+        case WASM__CAST_ARRAY:
+            return in_heap && object->kind == WASM_GC_OBJ_ARRAY;
+        case WASM__CAST_EQ:
+            return in_heap || (bits & WASM__GC_I31_TAG) != 0;
+        case WASM__CAST_I31:
+            return (bits & WASM__GC_I31_TAG) != 0;
+        case WASM__CAST_TOP:
+            return 1;
+        case WASM__CAST_BOTTOM:
+            return 0;
+        default:
+            break;
+    }
+    return wasm__exec_cast_matches(mod, target, type_idx, slot);
+}
+
 /* Calls a host import of type ft, whose type indices belong to mod. Results start as typed
  * defaults, so a host may set only the payload, and must match ft when it returns. */
 static wasm_error_t wasm__invoke_host_func(wasm_module_t* mod,
@@ -25881,7 +25943,10 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         [WASM__OP_DROP_N] = &&wasm__op_WASM__OP_DROP_N, [WASM__OP_SELECT_N] = &&wasm__op_WASM__OP_SELECT_N,
         [WASM__OP_MEMORY_X] = &&wasm__op_WASM__OP_MEMORY_X, [WASM__OP_TRY] = &&wasm__op_WASM__OP_TRY,
         [WASM__OP_TRY_TABLE] = &&wasm__op_WASM__OP_TRY_TABLE, [WASM__OP_TRY_LEAVE] = &&wasm__op_WASM__OP_TRY_LEAVE,
-        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST,
+        [WASM__OP_BR_ON_CAST] = &&wasm__op_WASM__OP_BR_ON_CAST, [WASM__OP_REF_TEST] = &&wasm__op_WASM__OP_REF_TEST,
+        [WASM__OP_REF_CAST] = &&wasm__op_WASM__OP_REF_CAST,
+        [WASM__OP_REF_CAST_DESC] = &&wasm__op_WASM__OP_REF_CAST_DESC,
+        [WASM__OP_BR_ON_CAST_DESC] = &&wasm__op_WASM__OP_BR_ON_CAST_DESC,
         [WASM__OP_STRUCT_GET] = &&wasm__op_WASM__OP_STRUCT_GET, [WASM__OP_STRUCT_SET] = &&wasm__op_WASM__OP_STRUCT_SET,
         [WASM__OP_ARRAY_GET] = &&wasm__op_WASM__OP_ARRAY_GET, [WASM__OP_ARRAY_SET] = &&wasm__op_WASM__OP_ARRAY_SET,
         [WASM__OP_ARRAY_LEN] = &&wasm__op_WASM__OP_ARRAY_LEN, [WASM__OP_REF_I31] = &&wasm__op_WASM__OP_REF_I31,
@@ -26275,13 +26340,50 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
                         break;
                 }
                 WASM__NEXT();
+            WASM__CASE(WASM__OP_REF_TEST):
+            WASM__CASE(WASM__OP_REF_CAST):
             WASM__CASE(WASM__OP_BR_ON_CAST): {
-                int taken = 0;
+                int matches = wasm__cast_matches(rt, mod, pc[0], pc[1], sp - 1);
 
-                err = wasm__exec_br_on_cast(mod, pc[0], func->code + pc[1], func->code + func->code_len, sp - 1,
-                                            &taken);
-                if (err != WASM_OK) goto cleanup;
-                if (taken) {
+                if (op == WASM__OP_BR_ON_CAST) {
+                    if (matches != ((pc[0] & WASM__CAST_ON_FAIL) != 0)) {
+                        desc = pc + 2;
+                        goto do_branch;
+                    }
+                    pc += 6;
+                    WASM__NEXT();
+                }
+                if (op == WASM__OP_REF_TEST) {
+                    wasm__slot_set_i32(sp - 1, matches);
+                } else if (WASM__UNLIKELY(!matches)) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "cast failure");
+                    WASM__TRAP(WASM_ERR_TRAP);
+                }
+                pc += 2;
+                WASM__NEXT();
+            }
+            WASM__CASE(WASM__OP_REF_CAST_DESC):
+            WASM__CASE(WASM__OP_BR_ON_CAST_DESC): {
+                const wasm_gc_header_t* descriptor = (const wasm_gc_header_t*)wasm__slot_ref(--sp);
+                int matches;
+
+                if (WASM__UNLIKELY(!descriptor)) {
+                    WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "null descriptor reference");
+                    WASM__TRAP(WASM_ERR_TRAP);
+                }
+                if (wasm__slot_u64(sp - 1) == 0 && (pc[0] & WASM__CAST_NULLABLE))
+                    matches = 1;
+                else
+                    matches = wasm__gc_slot_descriptor(rt, sp - 1) == descriptor;
+                if (op == WASM__OP_REF_CAST_DESC) {
+                    if (WASM__UNLIKELY(!matches)) {
+                        WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "descriptor cast failure");
+                        WASM__TRAP(WASM_ERR_TRAP);
+                    }
+                    pc += 2;
+                    WASM__NEXT();
+                }
+                if (matches != ((pc[0] & WASM__CAST_ON_FAIL) != 0)) {
                     desc = pc + 2;
                     goto do_branch;
                 }

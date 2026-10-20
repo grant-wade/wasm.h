@@ -6,6 +6,7 @@
 #include <string.h>
 #include "exceptions.h"
 #include "slots.h"
+#include "translate.h"
 #include "../internal/field.h"
 #include "../internal/gc_types.h"
 #include "../memory_internal.h"
@@ -26,8 +27,7 @@ static wasm_error_t wasm__exec_gc_trap(wasm_runtime_t* rt, const char* message) 
     return WASM_ERR_TRAP;
 }
 
-/* Returns the descriptor of the struct slot holds, or NULL if it holds no struct with one. */
-static wasm_gc_header_t* wasm__slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
+WASM_PRIVATE wasm_gc_header_t* wasm__gc_slot_descriptor(const wasm_runtime_t* rt, const wasm__slot_t* slot) {
     uintptr_t bits = wasm__slot_ref(slot);
     wasm_gc_header_t* object = (wasm_gc_header_t*)bits;
     wasm_gc_header_t** descriptor;
@@ -38,7 +38,7 @@ static wasm_gc_header_t* wasm__slot_descriptor(const wasm_runtime_t* rt, const w
     return descriptor ? *descriptor : NULL;
 }
 
-/* Executes the custom descriptors instruction subop, 0x20 through 0x26, reading its immediates from cf. */
+/* Executes the custom descriptors instruction subop, 0x20 through 0x22, reading its immediates from cf. */
 static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, wasm__call_frame_t* cf,
                                                            uint32_t subop) {
     wasm_runtime_t* rt = mod->rt;
@@ -69,32 +69,11 @@ static WASM__NOINLINE wasm_error_t wasm__exec_descriptor_op(wasm_module_t* mod, 
             WASM__PUSH_REF(rt, wasm__gc_type_ref_value(mod, type_idx, &object->header));
             return WASM_OK;
         }
-        case 0x22:
+        default:
             if (wasm__slot_u64(WASM__PEEK(rt)) == 0) return wasm__exec_gc_trap(rt, "null reference");
             descriptor = *wasm__gc_descriptor_slot((wasm_gc_header_t*)wasm__slot_ref(WASM__PEEK(rt)));
             wasm__slot_set_ref(WASM__PEEK(rt), (uintptr_t)descriptor);
             return WASM_OK;
-        case 0x23:
-        case 0x24:
-            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
-            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
-            if (subop == 0x24 && wasm__slot_u64(WASM__PEEK(rt)) == 0) return WASM_OK;
-            if (wasm__slot_descriptor(rt, WASM__PEEK(rt)) != descriptor)
-                return wasm__exec_gc_trap(rt, "descriptor cast failure");
-            return WASM_OK;
-        default: {
-            uint8_t flags = wasm__read_u8(&cf->r);
-            int matches;
-
-            descriptor = (wasm_gc_header_t*)wasm__slot_ref(WASM__POP(rt));
-            if (!descriptor) return wasm__exec_gc_trap(rt, "null descriptor reference");
-            if (wasm__slot_u64(WASM__PEEK(rt)) == 0)
-                matches = (flags & 0x02u) != 0;
-            else
-                matches = wasm__slot_descriptor(rt, WASM__PEEK(rt)) == descriptor;
-            wasm__slot_set_i32(WASM__PUSH(rt), matches == (subop == 0x25));
-            return WASM_OK;
-        }
     }
 }
 
@@ -369,33 +348,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
                 break;
             }
         }
-        case 0x14:
-        case 0x15:
-        case 0x16:
-        case 0x17: {
-            wasm_reftype_t target_ref;
-            wasm_value_t value;
-            int matches;
-
-            err = wasm__runtime_read_heap_reftype(mod,
-                                                  &cf->r,
-                                                  subop == 0x15 || subop == 0x17,
-                                                  &target_ref);
-            if (err != WASM_OK) goto cleanup;
-            value = wasm__pop_value(rt, wasm__ref_top_type(target_ref.type), NULL);
-            matches = wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref);
-            if (subop == 0x14 || subop == 0x15) {
-                wasm__slot_set_i32(WASM__PUSH(rt), matches);
-                break;
-            }
-            if (!matches) {
-                WASM__SET_ERR(rt, WASM_ERR_TRAP, "%s", "cast failure");
-                err = WASM_ERR_TRAP;
-                goto cleanup;
-            }
-            WASM__PUSH_REF(rt, wasm__runtime_cast_success_value(&target_ref, value));
-            break;
-        }
         case 0x1A:
         case 0x1B: {
             wasm_value_t value;
@@ -416,10 +368,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_gc(wasm_module_t* mod, wasm__call_frame_t* 
         case 0x20:
         case 0x21:
         case 0x22:
-        case 0x23:
-        case 0x24:
-        case 0x25:
-        case 0x26:
             err = wasm__exec_descriptor_op(mod, cf, subop);
             goto cleanup;
         default:
@@ -530,38 +478,17 @@ WASM_PRIVATE void wasm__gc_check_operand(wasm_module_t* mod, uint32_t type_idx, 
 }
 #endif
 
-WASM_PRIVATE wasm_error_t wasm__exec_br_on_cast(wasm_module_t* mod,
-                                          uint32_t subop,
-                                          const uint8_t* flags_at,
-                                          const uint8_t* code_end,
-                                          wasm__slot_t* slot,
-                                          int* out_branch) {
-    wasm__reader_t r;
-    wasm_reftype_t source_ref;
-    wasm_reftype_t target_ref;
+WASM_PRIVATE int wasm__exec_cast_matches(const wasm_module_t* mod, uint32_t target, uint32_t type_idx,
+                                         const wasm__slot_t* slot) {
+    wasm_reftype_t ref;
     wasm_value_t value;
-    wasm_error_t err;
-    uint8_t flags;
 
-    r.ptr = flags_at;
-    r.end = code_end;
-    r.malformed = 0;
-    flags = wasm__read_u8(&r);
-    (void)wasm__read_leb128_u32(&r);
-    if ((flags & ~0x03u) != 0 || r.malformed) return WASM_ERR_MALFORMED;
-    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x01u) != 0, &source_ref);
-    if (err != WASM_OK) return err;
-    err = wasm__runtime_read_heap_reftype(mod, &r, (flags & 0x02u) != 0, &target_ref);
-    if (err != WASM_OK) return err;
-
-    value = wasm__value_from_slot(mod->rt, wasm__ref_top_type(source_ref.type), NULL, slot);
-    if (wasm__runtime_value_matches_type(mod, &value, target_ref.type, &target_ref)) {
-        value = wasm__runtime_cast_success_value(&target_ref, value);
-        *out_branch = subop == 0x18;
-    } else {
-        value = wasm__runtime_cast_difference_value(&source_ref, value);
-        *out_branch = subop == 0x19;
-    }
-    wasm__slot_from_value(slot, &value);
-    return WASM_OK;
+    memset(&ref, 0, sizeof(ref));
+    ref.type = WASM__CAST_HEAP(target);
+    ref.type_index = type_idx;
+    ref.has_type_index = (target & WASM__CAST_INDEXED) != 0;
+    ref.nullable = (target & WASM__CAST_NULLABLE) != 0;
+    ref.exact = (target & WASM__CAST_EXACT) != 0;
+    value = wasm__value_from_slot(mod->rt, wasm__ref_top_type(ref.type), NULL, slot);
+    return wasm__runtime_value_matches_type(mod, &value, ref.type, &ref);
 }
