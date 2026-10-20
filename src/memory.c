@@ -643,6 +643,7 @@ wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t e
     table = (wasm_table_t*)wasm__alloc_zeroed_sized(allocator, sizeof(*table), WASM__ALIGNOF(wasm_table_t));
     if (!table) return NULL;
     table->allocator = *allocator;
+    table->is_host = 1;
     table->reftype = elem_type;
     table->reftype_info.type = elem_type;
     table->reftype_info.nullable = 1;

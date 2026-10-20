@@ -1930,6 +1930,110 @@ TEST(test_gc_frees_abandoned_continuations_with_their_stacks) {
     wasm_destroy(&rt);
 }
 
+/* (module
+     (type $s (struct (field i32)))
+     (type $f (func)) (type $c (cont $f))
+     (import "host" "t" (table $t 1 anyref))
+     (import "host" "k" (table $k 2 contref))
+     (func $nop (type $f)) (elem declare func $nop)
+     (func (export "store") (param $v i32)
+       (table.set $t (i32.const 0) (struct.new $s (local.get $v)))
+       (table.set $k (i32.const 0) (cont.new $c (ref.func $nop))))
+     (func (export "consume") (local $x (ref null $c))
+       (local.set $x (cont.new $c (ref.func $nop)))
+       (table.set $k (i32.const 1) (local.get $x))
+       (resume $c (local.get $x)))
+     (func (export "garbage") (param $n i32)
+       (loop $l (drop (struct.new $s (local.get $n)))
+         (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1))))))
+     (func (export "load") (result i32) (struct.get $s 0 (ref.cast (ref $s) (table.get $t (i32.const 0)))))
+     (func (export "get") (result contref) (table.get $k (i32.const 0)))
+     (func (export "run") (param $k (ref null $c)) (resume $c (local.get $k)))) */
+static const uint8_t wasm_test_gc_host_table_sections[] = {
+    0x01, 0x1B, 0x07, 0x5F, 0x01, 0x7F, 0x00, 0x60, 0x00, 0x00, 0x5D, 0x01, 0x60, 0x01, 0x7F, 0x00,
+    0x60, 0x00, 0x01, 0x7F, 0x60, 0x00, 0x01, 0x68, 0x60, 0x01, 0x63, 0x02, 0x00, 0x02, 0x17, 0x02,
+    0x04, 0x68, 0x6F, 0x73, 0x74, 0x01, 0x74, 0x01, 0x6E, 0x00, 0x01, 0x04, 0x68, 0x6F, 0x73, 0x74,
+    0x01, 0x6B, 0x01, 0x68, 0x00, 0x02, 0x03, 0x08, 0x07, 0x01, 0x03, 0x01, 0x03, 0x04, 0x05, 0x06,
+    0x07, 0x30, 0x06, 0x05, 0x73, 0x74, 0x6F, 0x72, 0x65, 0x00, 0x01, 0x07, 0x63, 0x6F, 0x6E, 0x73,
+    0x75, 0x6D, 0x65, 0x00, 0x02, 0x07, 0x67, 0x61, 0x72, 0x62, 0x61, 0x67, 0x65, 0x00, 0x03, 0x04,
+    0x6C, 0x6F, 0x61, 0x64, 0x00, 0x04, 0x03, 0x67, 0x65, 0x74, 0x00, 0x05, 0x03, 0x72, 0x75, 0x6E,
+    0x00, 0x06, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x61, 0x07, 0x02, 0x00, 0x0B, 0x13,
+    0x00, 0x41, 0x00, 0x20, 0x00, 0xFB, 0x00, 0x00, 0x26, 0x00, 0x41, 0x00, 0xD2, 0x00, 0xE0, 0x02,
+    0x26, 0x01, 0x0B, 0x16, 0x01, 0x01, 0x63, 0x02, 0xD2, 0x00, 0xE0, 0x02, 0x21, 0x00, 0x41, 0x01,
+    0x20, 0x00, 0x26, 0x01, 0x20, 0x00, 0xE3, 0x02, 0x00, 0x0B, 0x14, 0x00, 0x03, 0x40, 0x20, 0x00,
+    0xFB, 0x00, 0x00, 0x1A, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x22, 0x00, 0x0D, 0x00, 0x0B, 0x0B, 0x0D,
+    0x00, 0x41, 0x00, 0x25, 0x00, 0xFB, 0x16, 0x00, 0xFB, 0x02, 0x00, 0x00, 0x0B, 0x06, 0x00, 0x41,
+    0x00, 0x25, 0x01, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xE3, 0x02, 0x00, 0x0B,
+};
+
+TEST(test_gc_registered_host_tables_are_roots) {
+    wasm_config_t cfg;
+    wasm_runtime_t rt;
+    wasm_table_t* refs;
+    wasm_table_t* conts;
+    wasm_table_import_t imp;
+    wasm_module_t* m;
+    wasm_value_t arg;
+    wasm_value_t result;
+    wasm_value_t k;
+    wasm_error_t err;
+    uint8_t* heap;
+    uint32_t i;
+
+    wasm_config_default(&cfg);
+    cfg.initial_gc_heap_size = 4096;
+    wasm_init_config(&rt, &cfg);
+    refs = wasm_table_new(&wasm_test_allocator, WASM_TYPE_ANYREF, 1, UINT32_MAX);
+    conts = wasm_table_new(&wasm_test_allocator, WASM_TYPE_CONTREF, 2, UINT32_MAX);
+    CHECK(t, refs != NULL && conts != NULL);
+    if (!refs || !conts) goto done;
+    memset(&imp, 0, sizeof(imp));
+    imp.module = "host";
+    imp.name = "t";
+    imp.table = refs;
+    WASM_CHECK_OK(t, wasm_register_table_import(&rt, &imp));
+    imp.name = "k";
+    imp.table = conts;
+    WASM_CHECK_OK(t, wasm_register_table_import(&rt, &imp));
+
+    m = wasm_test_load_sections(&rt, wasm_test_gc_host_table_sections, sizeof(wasm_test_gc_host_table_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) goto done;
+    arg = wasm_i32(42);
+    WASM_CHECK_OK(t, wasm_call(m, "store", &arg, 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_call(m, "consume", NULL, 0, NULL, 0));
+    for (i = rt.conts.free_head; i; i = wasm__cont_at(&rt.conts, i - 1u)->next_free)
+        wasm__cont_at(&rt.conts, i - 1u)->gen = WASM__CONT_GEN_MAX;
+    WASM_CHECK_OK(t, wasm_call(m, "consume", NULL, 0, NULL, 0));
+    CHECK(t, rt.conts.live == 1 && rt.conts.retired == 1);
+    wasm_module_free(m);
+
+    heap = rt.gc_heap;
+    wasm_gc_collect(&rt);
+    CHECK_MSG(t, rt.gc_heap != heap && rt.gc_heap_offset != 0, "%s", "expected the collection to move the struct");
+    CHECK_MSG(t, rt.conts.live == 1 && rt.conts.retired == 1, "expected the tables to keep their continuations, %u live, %u retired",
+              (unsigned)rt.conts.live, (unsigned)rt.conts.retired);
+
+    m = wasm_test_load_sections(&rt, wasm_test_gc_host_table_sections, sizeof(wasm_test_gc_host_table_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) goto done;
+    arg = wasm_i32(500);
+    WASM_CHECK_OK(t, wasm_call(m, "garbage", &arg, 1, NULL, 0));
+    wasm_gc_collect(&rt);
+    WASM_CHECK_OK(t, wasm_call(m, "load", NULL, 0, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 42);
+    WASM_CHECK_OK(t, wasm_call(m, "get", NULL, 0, &k, 1));
+    err = wasm_call(m, "run", &k, 1, NULL, 0);
+    CHECK_MSG(t, err == WASM_ERR_TRAP && strstr(rt.error_msg, "freed module") != NULL,
+              "expected the kept continuation to need its freed module, got %d (%s)", (int)err, rt.error_msg);
+    wasm_module_free(m);
+
+done:
+    wasm__runtime_destroy(&rt);
+    wasm_table_free(conts);
+    wasm_table_free(refs);
+}
+
 static const test_case gc_cases[] = {
     { "wasmgc: runtime init allocates a tracked GC heap arena", test_gc_runtime_initializes_heap_arena },
     { "wasmgc: GC allocator tracks struct and array objects", test_gc_allocator_tracks_struct_and_array_objects },
@@ -1951,5 +2055,6 @@ static const test_case gc_cases[] = {
       test_gc_objects_of_every_field_kind_survive_their_module },
     { "gc: references only suspended continuation frames hold survive collections and move", test_gc_traces_references_only_suspended_frames_hold },
     { "gc: collections free abandoned continuations with their stacks and reuse their entries", test_gc_frees_abandoned_continuations_with_their_stacks },
+    { "gc: registered host tables keep and move what they hold while no module imports them", test_gc_registered_host_tables_are_roots },
 };
 const test_suite gc_suite = { "gc", gc_cases, COUNTOF(gc_cases) };

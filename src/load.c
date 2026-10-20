@@ -334,6 +334,10 @@ wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compile
     return wasm__load_module(rt, compiled->module_bytes, compiled->module_size, 0, compiled, userdata);
 }
 
+static int wasm__points_into(const void* p, const void* base, size_t bytes) {
+    return p && base && (uintptr_t)p - (uintptr_t)base < bytes;
+}
+
 void wasm_module_free(wasm_module_t* mod) {
     wasm__linked_func_t* linked;
     const wasm_allocator_t* a;
@@ -357,7 +361,17 @@ void wasm_module_free(wasm_module_t* mod) {
             if (mod->rt->tag_imports[i].type_module == mod) mod->rt->tag_imports[i].type_module = NULL;
         }
         for (i = 0; i < mod->rt->num_global_imports; i++) {
-            if (mod->rt->global_imports[i].type_module == mod) mod->rt->global_imports[i].type_module = NULL;
+            wasm_global_import_t* imp = &mod->rt->global_imports[i];
+
+            if (imp->type_module == mod) imp->type_module = NULL;
+            if (wasm__points_into(imp->value, mod->globals, (size_t)mod->num_globals * sizeof(*mod->globals)))
+                imp->value = NULL;
+        }
+        for (i = 0; i < mod->rt->num_table_imports; i++) {
+            wasm_table_import_t* imp = &mod->rt->table_imports[i];
+
+            if (wasm__points_into(imp->table, mod->tables, (size_t)mod->num_tables * sizeof(*mod->tables)))
+                imp->table = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }

@@ -264,6 +264,13 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
     }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        wasm_table_t* table = rt->table_imports[i].table;
+
+        if (!table || !table->is_host) continue;
+        wasm__gc_mark_value(stack, &table->default_value);
+        if (table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
+    }
     for (held = rt->held_values; held; held = held->next) {
         for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
             if (held->slots[i].in_use) wasm__gc_mark_value(stack, &held->slots[i].value);
@@ -368,6 +375,13 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
+    }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        wasm_table_t* table = rt->table_imports[i].table;
+
+        if (!table || !table->is_host) continue;
+        wasm__gc_forward_value(rt, &table->default_value);
+        if (table->elems) wasm__gc_forward_values(rt, table->elems, table->size);
     }
     for (i = 0; i < rt->externref_boxes.capacity; i++) {
         wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];

@@ -700,6 +700,52 @@ TEST(test_function_references_carry_their_dynamic_types) {
     }
 }
 
+/* lib: (module (type $s (struct (field i32))) (global (export "g") (mut anyref) (ref.null any))
+     (table (export "t") 1 anyref)
+     (func (export "fill") (param $v i32)
+       (global.set 0 (struct.new $s (local.get $v))) (table.set 0 (i32.const 0) (struct.new $s (local.get $v)))))
+   user: (module (import "lib" "g" (global (mut anyref))) (import "lib" "t" (table 1 anyref))) */
+static const uint8_t wasm_test_link_freed_lib_sections[] = {
+    0x01, 0x09, 0x02, 0x5F, 0x01, 0x7F, 0x00, 0x60, 0x01, 0x7F, 0x00, 0x03, 0x02, 0x01, 0x01, 0x04,
+    0x04, 0x01, 0x6E, 0x00, 0x01, 0x06, 0x06, 0x01, 0x6E, 0x01, 0xD0, 0x6E, 0x0B, 0x07, 0x10, 0x03,
+    0x01, 0x67, 0x03, 0x00, 0x01, 0x74, 0x01, 0x00, 0x04, 0x66, 0x69, 0x6C, 0x6C, 0x00, 0x00, 0x0A,
+    0x14, 0x01, 0x12, 0x00, 0x20, 0x00, 0xFB, 0x00, 0x00, 0x24, 0x00, 0x41, 0x00, 0x20, 0x00, 0xFB,
+    0x00, 0x00, 0x26, 0x00, 0x0B,
+};
+static const uint8_t wasm_test_link_freed_lib_user_sections[] = {
+    0x02, 0x14, 0x02, 0x03, 0x6C, 0x69, 0x62, 0x01, 0x67, 0x03, 0x6E, 0x01, 0x03, 0x6C, 0x69, 0x62,
+    0x01, 0x74, 0x01, 0x6E, 0x00, 0x01,
+};
+
+TEST(test_exports_of_a_freed_registered_module_unbind) {
+    wasm_runtime_t rt;
+    wasm_module_t* lib;
+    wasm_module_t* user;
+    wasm_value_t arg;
+
+    wasm_init(&rt);
+    lib = wasm_test_load_sections(&rt, wasm_test_link_freed_lib_sections, sizeof(wasm_test_link_freed_lib_sections));
+    CHECK_MSG(t, lib != NULL, "%s", rt.error_msg);
+    if (!lib) {
+        wasm_destroy(&rt);
+        return;
+    }
+    arg = wasm_i32(7);
+    WASM_CHECK_OK(t, wasm_call(lib, "fill", &arg, 1, NULL, 0));
+    WASM_CHECK_OK(t, wasm_register_module(&rt, "lib", lib));
+    user = wasm_test_load_sections(&rt, wasm_test_link_freed_lib_user_sections,
+                                   sizeof(wasm_test_link_freed_lib_user_sections));
+    CHECK_MSG(t, user != NULL, "%s", rt.error_msg);
+    wasm_module_free(user);
+    wasm_module_free(lib);
+    wasm_gc_collect(&rt);
+    user = wasm_test_load_sections(&rt, wasm_test_link_freed_lib_user_sections,
+                                   sizeof(wasm_test_link_freed_lib_user_sections));
+    CHECK_MSG(t, user == NULL, "%s", "expected the freed module's global and table not to bind");
+    wasm_module_free(user);
+    wasm_destroy(&rt);
+}
+
 static const test_case link_cases[] = {
     { "host import: env.print(42)", test_host_import },
     { "global import: mutable env.counter is read and updated by reference", test_imported_mutable_global },
@@ -707,5 +753,6 @@ static const test_case link_cases[] = {
     { "imports: function imports of a freed module do not match", test_function_imports_of_a_freed_module_do_not_match },
     { "public api: register_module links instances; table, global, funcref, and host object APIs", test_register_module_links_instances_and_host_objects },
     { "custom descriptors: function references and exact imports use the dynamic type of the function", test_function_references_carry_their_dynamic_types },
+    { "imports: a freed registered module's globals and tables no longer bind and are not roots", test_exports_of_a_freed_registered_module_unbind },
 };
 const test_suite link_suite = { "link", link_cases, COUNTOF(link_cases) };

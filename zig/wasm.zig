@@ -2197,7 +2197,7 @@ pub const HostMemory = struct {
 };
 
 /// A table of null references the host creates for `Runtime.bindTable`. It must outlive every
-/// module that imports it.
+/// runtime it is bound to.
 pub const HostTable = struct {
     table: *c.wasm_table_t,
     allocator: std.mem.Allocator,

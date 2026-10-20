@@ -170,7 +170,7 @@ wasm_error_t err = wasm_bind_host_func(rt, "env", "log", "i(v)",
 
 Each result starts as the zero or null value of its declared type, so a callback may set only the payload, such as `results[0].of.i32`. Results whose type does not match the import's signature fail the call with `WASM_ERR_TYPE_MISMATCH`.
 
-Lower-level registration supports functions, globals, tables, memories, and tags. A function or tag type registered without a type context has no type indices and is a final type in a rec group of its own, matching only imports of that type; with `has_type_context`, the type is type `type_index` of `type_module`, a module of the same runtime. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, which take an allocator, and free them with `wasm_memory_free` and `wasm_table_free` after every module that imports them. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
+Lower-level registration supports functions, globals, tables, memories, and tags. A function or tag type registered without a type context has no type indices and is a final type in a rec group of its own, matching only imports of that type; with `has_type_context`, the type is type `type_index` of `type_module`, a module of the same runtime. Create host memories and tables to register with `wasm_memory_new` and `wasm_table_new`, which take an allocator. Free a memory with `wasm_memory_free` after every module that imports it, and a table with `wasm_table_free` after every runtime it is registered with. Use `wasm_module_set_userdata` and `wasm_module_userdata` for per-module host state.
 
 ### Linking modules
 

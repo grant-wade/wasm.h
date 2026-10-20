@@ -86,6 +86,7 @@ struct wasm_table_t {
     uint64_t max_size;
     int is_64;
     int is_import;
+    int is_host; /* made by wasm_table_new */
     struct wasm_table_t* import_table;
     const wasm_module_t* type_module; /* module whose type indices reftype_info has, or NULL */
     wasm_allocator_t allocator; /* source of elems */

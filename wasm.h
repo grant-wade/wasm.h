@@ -688,8 +688,8 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
 /* Adds delta elements set to init and returns the previous size, or -1 if the table cannot grow. */
 int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
 /* Creates a table of size null references for hosts to register with wasm_register_table_import, allocated
-   from allocator as for wasm_memory_new; max_size UINT32_MAX means no maximum. It must outlive every module
-   that imports it. */
+   from allocator as for wasm_memory_new; max_size UINT32_MAX means no maximum. It must outlive every runtime
+   it is registered with. */
 wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
                              uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);
@@ -901,6 +901,7 @@ struct wasm_table_t {
     uint64_t max_size;
     int is_64;
     int is_import;
+    int is_host; /* made by wasm_table_new */
     struct wasm_table_t* import_table;
     const wasm_module_t* type_module; /* module whose type indices reftype_info has, or NULL */
     wasm_allocator_t allocator; /* source of elems */
@@ -20009,6 +20010,10 @@ wasm_module_t* wasm_instantiate(wasm_runtime_t* rt, const wasm_module_t* compile
     return wasm__load_module(rt, compiled->module_bytes, compiled->module_size, 0, compiled, userdata);
 }
 
+static int wasm__points_into(const void* p, const void* base, size_t bytes) {
+    return p && base && (uintptr_t)p - (uintptr_t)base < bytes;
+}
+
 void wasm_module_free(wasm_module_t* mod) {
     wasm__linked_func_t* linked;
     const wasm_allocator_t* a;
@@ -20032,7 +20037,17 @@ void wasm_module_free(wasm_module_t* mod) {
             if (mod->rt->tag_imports[i].type_module == mod) mod->rt->tag_imports[i].type_module = NULL;
         }
         for (i = 0; i < mod->rt->num_global_imports; i++) {
-            if (mod->rt->global_imports[i].type_module == mod) mod->rt->global_imports[i].type_module = NULL;
+            wasm_global_import_t* imp = &mod->rt->global_imports[i];
+
+            if (imp->type_module == mod) imp->type_module = NULL;
+            if (wasm__points_into(imp->value, mod->globals, (size_t)mod->num_globals * sizeof(*mod->globals)))
+                imp->value = NULL;
+        }
+        for (i = 0; i < mod->rt->num_table_imports; i++) {
+            wasm_table_import_t* imp = &mod->rt->table_imports[i];
+
+            if (wasm__points_into(imp->table, mod->tables, (size_t)mod->num_tables * sizeof(*mod->tables)))
+                imp->table = NULL;
         }
         wasm__gc_unregister_module(mod->rt, mod);
     }
@@ -20779,6 +20794,13 @@ static void wasm__gc_mark_runtime_roots(wasm__gc_mark_stack_t* stack, wasm_runti
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_mark_value(stack, rt->global_imports[i].value);
     }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        wasm_table_t* table = rt->table_imports[i].table;
+
+        if (!table || !table->is_host) continue;
+        wasm__gc_mark_value(stack, &table->default_value);
+        if (table->elems) wasm__gc_mark_values(stack, table->elems, table->size);
+    }
     for (held = rt->held_values; held; held = held->next) {
         for (i = 0; i < WASM__HELD_BLOCK_SLOTS; i++) {
             if (held->slots[i].in_use) wasm__gc_mark_value(stack, &held->slots[i].value);
@@ -20883,6 +20905,13 @@ static void wasm__gc_forward_runtime_roots(wasm_runtime_t* rt) {
     wasm__gc_forward_values(rt, rt->pending_exception.values, rt->pending_exception.num_values);
     for (i = 0; i < rt->num_global_imports; i++) {
         if (rt->global_imports[i].value) wasm__gc_forward_value(rt, rt->global_imports[i].value);
+    }
+    for (i = 0; i < rt->num_table_imports; i++) {
+        wasm_table_t* table = rt->table_imports[i].table;
+
+        if (!table || !table->is_host) continue;
+        wasm__gc_forward_value(rt, &table->default_value);
+        if (table->elems) wasm__gc_forward_values(rt, table->elems, table->size);
     }
     for (i = 0; i < rt->externref_boxes.capacity; i++) {
         wasm__externref_box_t* box = (wasm__externref_box_t*)rt->externref_boxes.slots[i];
@@ -34219,6 +34248,7 @@ wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t e
     table = (wasm_table_t*)wasm__alloc_zeroed_sized(allocator, sizeof(*table), WASM__ALIGNOF(wasm_table_t));
     if (!table) return NULL;
     table->allocator = *allocator;
+    table->is_host = 1;
     table->reftype = elem_type;
     table->reftype_info.type = elem_type;
     table->reftype_info.nullable = 1;

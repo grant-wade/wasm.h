@@ -679,8 +679,8 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
 /* Adds delta elements set to init and returns the previous size, or -1 if the table cannot grow. */
 int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, wasm_value_t init);
 /* Creates a table of size null references for hosts to register with wasm_register_table_import, allocated
-   from allocator as for wasm_memory_new; max_size UINT32_MAX means no maximum. It must outlive every module
-   that imports it. */
+   from allocator as for wasm_memory_new; max_size UINT32_MAX means no maximum. It must outlive every runtime
+   it is registered with. */
 wasm_table_t* wasm_table_new(const wasm_allocator_t* allocator, wasm_valtype_t elem_type, uint32_t size,
                              uint32_t max_size);
 void wasm_table_free(wasm_table_t* table);

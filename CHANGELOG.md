@@ -14,6 +14,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The continuation stack pool keeps as many released stacks as are in use, and at least 16.
 - The host may pass a consumed continuation as any continuation type.
 - A runtime holds up to 134,217,728 unconsumed continuations, or 262,144 on 32-bit hosts.
+- A host table from `wasm_table_new` must outlive every runtime it is registered with.
 
 ### Fixed
 
@@ -23,6 +24,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Active element segments, `table.init`, and `table.copy` on imported tables of concrete reference types rejected some valid modules and accepted some invalid ones.
 - `wasm_table_type` and `wasm_table_reftype` described an imported table with the exporting module's type indices.
 - Suspensions could each run a full collection, so generators slowed as the live GC heap grew.
+- Collections left GC references in a registered host table dangling while no module imported it.
+- Collections, and modules importing its exports, read freed memory after a module registered with `wasm_register_module` was freed.
 
 ## [2.0.0] - 2026-10-19
 
