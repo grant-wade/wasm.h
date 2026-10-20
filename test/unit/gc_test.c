@@ -86,7 +86,7 @@ TEST(test_gc_allocator_tracks_struct_and_array_objects) {
 
     struct_field0_offset = struct_type.field_offsets[0];
     struct_field1_offset = struct_type.field_offsets[1];
-    CHECK_MSG(t, struct_field0_offset == wasm__align_up_size(WASM__GC_STRUCT_HEADER_SIZE, (size_t)WASM__ALIGNOF(wasm_value_t)),
+    CHECK_MSG(t, struct_field0_offset == wasm__align_up_size(WASM__GC_STRUCT_HEADER_SIZE, sizeof(int32_t)),
               "unexpected first struct field offset %zu",
               struct_field0_offset);
     CHECK_MSG(t, struct_field1_offset > struct_field0_offset,

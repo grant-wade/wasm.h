@@ -185,13 +185,13 @@ WASM_INLINE wasm_value_t wasm__field_load_value(const uint8_t* p, uint32_t code,
 
 /* Stores value, which must have the field's type or be an i32 for a packed field, in the field at p. */
 WASM_INLINE void wasm__field_store_value(uint8_t* p, uint32_t code, wasm_value_t value) {
-    wasm__slot_t s;
+    wasm__slot_t s[WASM__V128_SLOTS];
 
     switch (WASM__FIELD_KIND(code)) {
         case WASM__FIELD_I8:
         case WASM__FIELD_I16:
-            wasm__slot_set_i32(&s, value.of.i32);
-            wasm__field_store(p, code, &s);
+            wasm__slot_set_i32(s, value.of.i32);
+            wasm__field_store(p, code, s);
             return;
         case WASM__FIELD_BITS32:
             memcpy(p, &value.of, 4);
@@ -203,12 +203,12 @@ WASM_INLINE void wasm__field_store_value(uint8_t* p, uint32_t code, wasm_value_t
             memcpy(p, value.of.v128, 16);
             return;
         case WASM__FIELD_FUNCREF:
-            wasm__slot_set_funcref(&s, value.of.funcref);
-            wasm__field_store(p, code, &s);
+            wasm__slot_set_funcref(s, value.of.funcref);
+            wasm__field_store(p, code, s);
             return;
         default:
-            wasm__slot_set_ref(&s, value.of.gc_ref);
-            wasm__field_store(p, code, &s);
+            wasm__slot_set_ref(s, value.of.gc_ref);
+            wasm__field_store(p, code, s);
             return;
     }
 }

@@ -2507,6 +2507,7 @@ TEST(test_stack_switching_pinned_retired_entries_stop_calling_for_collections) {
     wasm_module_t* m;
     wasm_value_t arg;
     const wasm__cont_object_t* entry;
+    uint32_t uses;
     uint32_t i;
 
     wasm_config_default(&cfg);
@@ -2530,12 +2531,12 @@ TEST(test_stack_switching_pinned_retired_entries_stop_calling_for_collections) {
 
     arg = wasm_i32(2000);
     WASM_CHECK_OK(t, wasm_call(m, "churn", &arg, 1, NULL, 0));
-    CHECK(t, rt.conts.free_head != 0);
-    if (rt.conts.free_head != 0) {
-        entry = wasm__cont_at(&rt.conts, rt.conts.free_head - 1u);
-        CHECK_MSG(t, entry->gen - entry->swept_gen >= 1990u, "expected no collection during the run, %u uses since one",
-                  (unsigned)(entry->gen - entry->swept_gen));
+    uses = 0;
+    for (i = 0; i < rt.conts.count; i++) {
+        entry = wasm__cont_at(&rt.conts, i);
+        uses += entry->gen - entry->swept_gen;
     }
+    CHECK_MSG(t, uses == 2000u, "expected no collection during the run, %u uses since one", (unsigned)uses);
 
     WASM_CHECK_OK(t, wasm_call(m, "unpin", NULL, 0, NULL, 0));
     wasm_gc_collect(&rt);

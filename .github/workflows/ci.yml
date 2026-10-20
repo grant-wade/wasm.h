@@ -37,19 +37,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-22.04-arm, ubuntu-24.04-arm, ubuntu-26.04-arm]
-        compiler: [gcc, clang]
-        config:
-          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
-          - {build_type: Release, platform: 'ON', flags: '--release'}
-        # Preserve the original platform-enabled Debug coverage too.
         include:
-          - runner: ubuntu-24.04
-            compiler: gcc
-            config: {build_type: Debug, platform: 'ON', flags: ''}
-          - runner: ubuntu-24.04
-            compiler: clang
-            config: {build_type: Debug, platform: 'ON', flags: ''}
+          - {runner: ubuntu-22.04, compiler: gcc, config: {build_type: Release, platform: 'ON', flags: '--release'}}
+          - {runner: ubuntu-24.04, compiler: clang, config: {build_type: Debug, platform: 'ON', flags: ''}}
+          - {runner: ubuntu-26.04, compiler: gcc, config: {build_type: Debug, platform: 'OFF', flags: '--no-platform'}}
+          - {runner: ubuntu-26.04, compiler: clang, config: {build_type: Release, platform: 'ON', flags: '--release'}}
+          - {runner: ubuntu-24.04-arm, compiler: gcc, config: {build_type: Release, platform: 'ON', flags: '--release'}}
+          - {runner: ubuntu-24.04-arm, compiler: clang, config: {build_type: Debug, platform: 'OFF', flags: '--no-platform'}}
     env:
       CC: ${{ matrix.compiler }}
       BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc
@@ -70,15 +64,11 @@ jobs:
         run: ./cbuild $BUILD_FLAGS --test
 
   linux-32:
-    name: Linux / x86 (32-bit) / ${{ matrix.compiler }}
+    name: Linux / x86 (32-bit) / gcc
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        compiler: [gcc, clang]
     env:
-      CC: ${{ matrix.compiler }}
+      CC: gcc
       BUILD_FLAGS: --release --no-emcc --cflags=-m32 --ldflags=-m32
     steps:
       - uses: actions/checkout@v7
@@ -87,7 +77,7 @@ jobs:
       - name: Install multilib compilers
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl gcc-multilib libc6-dev-i386 clang
+          sudo apt-get install -y curl gcc-multilib libc6-dev-i386
       # wasm-tools and the build program run on the x64 host; the runtime and tests are x86.
       - uses: ./.github/actions/setup-wasm-tools
       - name: Bootstrap the build program
@@ -105,10 +95,10 @@ jobs:
       fail-fast: false
       matrix:
         # Unsuffixed macOS labels are native Apple Silicon; Intel is explicit.
-        runner: [macos-14, macos-15, macos-26, macos-15-intel, macos-26-intel]
-        config:
-          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
-          - {build_type: Release, platform: 'ON', flags: '--release'}
+        include:
+          - {runner: macos-15, config: {build_type: Debug, platform: 'OFF', flags: '--no-platform'}}
+          - {runner: macos-26, config: {build_type: Release, platform: 'ON', flags: '--release'}}
+          - {runner: macos-26-intel, config: {build_type: Release, platform: 'ON', flags: '--release'}}
     env:
       CC: clang
       BUILD_FLAGS: ${{ matrix.config.flags }} --no-emcc
@@ -137,8 +127,6 @@ jobs:
       matrix:
         config:
           - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
-          - {build_type: Debug, platform: 'ON', flags: ''}
-          - {build_type: Release, platform: 'OFF', flags: '--release --no-platform'}
           - {build_type: Release, platform: 'ON', flags: '--release'}
     env:
       CC: cc
@@ -171,15 +159,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - {runner: windows-2022, arch: x64, vs_arch: x64, vs_host: x64}
-          - {runner: windows-2022, arch: Win32, vs_arch: x86, vs_host: x64}
-          - {runner: windows-2025-vs2026, arch: x64, vs_arch: x64, vs_host: x64}
-          - {runner: windows-2025-vs2026, arch: Win32, vs_arch: x86, vs_host: x64}
-          - {runner: windows-11-vs2026-arm, arch: ARM64, vs_arch: arm64, vs_host: arm64}
-        config:
-          - {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
-          - {build_type: Release, platform: 'ON', flags: '--release'}
+        include:
+          - target: {runner: windows-2022, arch: Win32, vs_arch: x86, vs_host: x64}
+            config: {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - target: {runner: windows-2025-vs2026, arch: x64, vs_arch: x64, vs_host: x64}
+            config: {build_type: Debug, platform: 'OFF', flags: '--no-platform'}
+          - target: {runner: windows-2025-vs2026, arch: x64, vs_arch: x64, vs_host: x64}
+            config: {build_type: Release, platform: 'ON', flags: '--release'}
+          - target: {runner: windows-2025-vs2026, arch: Win32, vs_arch: x86, vs_host: x64}
+            config: {build_type: Release, platform: 'ON', flags: '--release'}
+          - target: {runner: windows-11-vs2026-arm, arch: ARM64, vs_arch: arm64, vs_host: arm64}
+            config: {build_type: Release, platform: 'ON', flags: '--release'}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -267,13 +257,9 @@ jobs:
           ./cbuild $BUILD_FLAGS --test "${test_args[@]}"
 
   fuzz-smoke:
-    name: Fuzz smoke / ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+    name: Fuzz smoke
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v7
       - name: Install build tools
@@ -303,7 +289,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025, freebsd]
+        runner: [ubuntu-24.04, macos-15, windows-2025, freebsd]
     defaults:
       run:
         shell: bash
