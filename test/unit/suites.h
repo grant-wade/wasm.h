@@ -39,5 +39,6 @@ extern const test_suite types_references_suite;
 extern const test_suite validate_cont_suite;
 extern const test_suite validate_function_suite;
 extern const test_suite validate_gc_suite;
+extern const test_suite validate_module_suite;
 extern const test_suite validate_stack_suite;
 #endif

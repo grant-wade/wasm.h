@@ -11419,7 +11419,8 @@ WASM_PRIVATE wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
         if (segment->table_index >= mod->num_tables) return WASM_ERR_MALFORMED;
         table = wasm__table_at(mod, segment->table_index);
         if (!table) return WASM_ERR_MALFORMED;
-        if (!wasm__elem_segment_matches_type(mod, segment, table->reftype, &table->reftype_info))
+        if (!wasm__elem_segment_matches_type(mod, segment, mod->tables[segment->table_index].reftype,
+                                             &mod->tables[segment->table_index].reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
         if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, table->size))
             return WASM_ERR_OUT_OF_BOUNDS;
@@ -14755,8 +14756,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                                   (unsigned)i,
                                                   (unsigned)segment->table_index);
             }
-            table = wasm__table_at(mod, segment->table_index);
-            if (!table) return WASM_ERR_MALFORMED;
+            table = &mod->tables[segment->table_index];
             if (!wasm__elem_segment_matches_type(mod,
                                                       segment,
                                                       table->reftype,
@@ -23878,8 +23878,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__typed_valtype_is_subtype(mod,
                                                 segment->elem_type,
                                                 &segment->elem_ref_type,
-                                                table->reftype,
-                                                &table->reftype_info))
+                                                mod->tables[table_idx].reftype,
+                                                &mod->tables[table_idx].reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, table->size))
@@ -23926,10 +23926,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             src_offset = wasm__slot_index(src, src_table->is_64);
             len = wasm__slot_index(count, wasm__table_copy_size_type(dst_table, src_table) == WASM_TYPE_I64);
             if (!wasm__typed_valtype_is_subtype(mod,
-                                                src_table->reftype,
-                                                &src_table->reftype_info,
-                                                dst_table->reftype,
-                                                &dst_table->reftype_info))
+                                                mod->tables[src_table_idx].reftype,
+                                                &mod->tables[src_table_idx].reftype_info,
+                                                mod->tables[dst_table_idx].reftype,
+                                                &mod->tables[dst_table_idx].reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))
@@ -33432,13 +33432,11 @@ wasm_table_t* wasm_module_table(wasm_module_t* mod, uint32_t table_idx) {
 }
 
 wasm_valtype_t wasm_table_type(const wasm_module_t* mod, uint32_t table_idx) {
-    wasm_table_t* table = wasm__table_at(mod, table_idx);
-    return table ? table->reftype : WASM_TYPE_VOID;
+    return mod && table_idx < mod->num_tables ? mod->tables[table_idx].reftype : WASM_TYPE_VOID;
 }
 
 const wasm_reftype_t* wasm_table_reftype(const wasm_module_t* mod, uint32_t table_idx) {
-    wasm_table_t* table = wasm__table_at(mod, table_idx);
-    return table ? &table->reftype_info : NULL;
+    return mod && table_idx < mod->num_tables ? &mod->tables[table_idx].reftype_info : NULL;
 }
 
 static wasm_table_t* wasm__api_table(const wasm_module_t* mod, uint32_t table_idx) {
@@ -33474,7 +33472,8 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
         WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
         return WASM_ERR_OUT_OF_BOUNDS;
     }
-    if (!wasm__runtime_value_matches_type(mod, &val, table->reftype, &table->reftype_info)) {
+    if (!wasm__runtime_value_matches_type(mod, &val, wasm_table_type(mod, table_idx),
+                                          wasm_table_reftype(mod, table_idx))) {
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
         return WASM_ERR_TYPE_MISMATCH;
     }
@@ -33487,7 +33486,9 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     wasm_table_t* table = wasm__api_table(mod, table_idx);
     uint64_t old_size;
 
-    if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    if (!table || !wasm__runtime_value_matches_type(mod, &init, wasm_table_type(mod, table_idx),
+                                                    wasm_table_reftype(mod, table_idx)))
+        return -1;
     if (wasm__anyref_from_host(mod->rt, &init) != WASM_OK) return -1;
     old_size = wasm__table_grow(mod->rt, table, delta, init);
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;

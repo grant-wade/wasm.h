@@ -1088,12 +1088,129 @@ TEST(test_bulk_fuel_and_array_new_rooting) {
     wasm_destroy(&rt);
 }
 
+/* (type $x (struct (field i64))) (type $s (struct (field i32))) (table (export "t") 2 (ref null $s)) */
+static const uint8_t wasm_test_bulk_c1_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x5F, 0x01, 0x7E, 0x00, 0x5F,
+    0x01, 0x7F, 0x00, 0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x02, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01,
+    0x00,
+};
+
+/* (type $y (array i8)) (type $z (struct (field f32))) (type $s (struct (field i32)))
+   (table (export "u") 3 (ref null $s)) */
+static const uint8_t wasm_test_bulk_c2_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x03, 0x5E, 0x78, 0x00, 0x5F, 0x01,
+    0x7D, 0x00, 0x5F, 0x01, 0x7F, 0x00, 0x04, 0x05, 0x01, 0x63, 0x02, 0x00, 0x03, 0x07, 0x05, 0x01,
+    0x01, 0x75, 0x01, 0x00,
+};
+
+/* (type $s (struct (field i32)))
+   (import "c1" "t" (table $t 2 (ref null $s))) (import "c2" "u" (table $u 3 (ref null $s)))
+   (elem $e (ref null $s) (struct.new $s (i32.const 7)) (ref.null $s))
+   init(d, s, n) is (table.init $t $e), copy(d, s, n) is (table.copy $u $t), and get(i) is
+   (struct.get $s 0 (table.get $u i)). */
+static const uint8_t wasm_test_bulk_imported_tables_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x5F, 0x01, 0x7F, 0x00, 0x60,
+    0x03, 0x7F, 0x7F, 0x7F, 0x00, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x02, 0x15, 0x02, 0x02, 0x63, 0x31,
+    0x01, 0x74, 0x01, 0x63, 0x00, 0x00, 0x02, 0x02, 0x63, 0x32, 0x01, 0x75, 0x01, 0x63, 0x00, 0x00,
+    0x03, 0x03, 0x04, 0x03, 0x01, 0x01, 0x02, 0x07, 0x15, 0x03, 0x04, 0x69, 0x6E, 0x69, 0x74, 0x00,
+    0x00, 0x04, 0x63, 0x6F, 0x70, 0x79, 0x00, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x02, 0x09, 0x0E,
+    0x01, 0x05, 0x63, 0x00, 0x02, 0x41, 0x07, 0xFB, 0x00, 0x00, 0x0B, 0xD0, 0x00, 0x0B, 0x0A, 0x26,
+    0x03, 0x0C, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0xFC, 0x0C, 0x00, 0x00, 0x0B, 0x0C, 0x00,
+    0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0xFC, 0x0E, 0x01, 0x00, 0x0B, 0x0A, 0x00, 0x20, 0x00, 0x25,
+    0x01, 0xFB, 0x02, 0x00, 0x00, 0x0B,
+};
+
+/* (type $s (struct (field i32))) (type $x (struct (field i64))) (import "c1" "t" (table $t 2 (ref null $s)))
+   (elem $e (ref null $x) (ref.null $x)) (func (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1))) */
+static const uint8_t wasm_test_bulk_bad_init_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x03, 0x5F, 0x01, 0x7F, 0x00, 0x5F,
+    0x01, 0x7E, 0x00, 0x60, 0x00, 0x00, 0x02, 0x0B, 0x01, 0x02, 0x63, 0x31, 0x01, 0x74, 0x01, 0x63,
+    0x00, 0x00, 0x02, 0x03, 0x02, 0x01, 0x02, 0x09, 0x08, 0x01, 0x05, 0x63, 0x01, 0x01, 0xD0, 0x01,
+    0x0B, 0x0A, 0x0E, 0x01, 0x0C, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x0C, 0x00, 0x00,
+    0x0B,
+};
+
+/* (type $s (struct (field i32))) (type $x (struct (field i64))) (import "c1" "t" (table $t 2 (ref null $s)))
+   (table $v 1 (ref null $x)) (func (table.copy $v $t (i32.const 0) (i32.const 0) (i32.const 1))) */
+static const uint8_t wasm_test_bulk_bad_copy_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x03, 0x5F, 0x01, 0x7F, 0x00, 0x5F,
+    0x01, 0x7E, 0x00, 0x60, 0x00, 0x00, 0x02, 0x0B, 0x01, 0x02, 0x63, 0x31, 0x01, 0x74, 0x01, 0x63,
+    0x00, 0x00, 0x02, 0x03, 0x02, 0x01, 0x02, 0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x01, 0x0A, 0x0E,
+    0x01, 0x0C, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x0E, 0x01, 0x00, 0x0B,
+};
+
+static wasm_error_t wasm_test_bulk_call3(wasm_module_t* m, const char* name, int32_t a, int32_t b, int32_t c) {
+    wasm_value_t args[3];
+
+    args[0] = wasm_i32(a);
+    args[1] = wasm_i32(b);
+    args[2] = wasm_i32(c);
+    return wasm_call(m, name, args, 3, NULL, 0);
+}
+
+static void wasm_test_bulk_imported_tables(test_ctx* t, wasm_runtime_t* rt, wasm_module_t* c1, wasm_module_t* c2) {
+    wasm_module_t* d =
+        wasm_load(rt, wasm_test_bulk_imported_tables_bytes, sizeof(wasm_test_bulk_imported_tables_bytes));
+    wasm_module_t* bad;
+    wasm_value_t value;
+    wasm_value_t arg;
+    wasm_value_t result = wasm_i32(-1);
+
+    CHECK_MSG(t, d != NULL, "%s", rt->error_msg);
+    if (d) {
+        WASM_CHECK_OK(t, wasm_test_bulk_call3(d, "init", 0, 0, 2));
+        WASM_CHECK_OK(t, wasm_table_get(c1, 0, 0, &value));
+        WASM_CHECK_OK(t, wasm_struct_get_field(c1, value, 0, &value));
+        WASM_CHECK_I32(t, value.of.i32, 7);
+        WASM_CHECK_OK(t, wasm_table_get(c1, 0, 1, &value));
+        CHECK(t, value.of.gc_ref == 0);
+        CHECK(t, wasm_test_bulk_call3(d, "init", 1, 0, 2) == WASM_ERR_OUT_OF_BOUNDS);
+
+        WASM_CHECK_OK(t, wasm_test_bulk_call3(d, "copy", 1, 0, 2));
+        arg = wasm_i32(1);
+        WASM_CHECK_OK(t, wasm_call(d, "get", &arg, 1, &result, 1));
+        WASM_CHECK_I32(t, result.of.i32, 7);
+        WASM_CHECK_OK(t, wasm_table_get(c2, 0, 2, &value));
+        CHECK(t, value.of.gc_ref == 0);
+        CHECK(t, wasm_test_bulk_call3(d, "copy", 2, 0, 2) == WASM_ERR_OUT_OF_BOUNDS);
+        wasm_module_free(d);
+    }
+
+    bad = wasm_load(rt, wasm_test_bulk_bad_init_bytes, sizeof(wasm_test_bulk_bad_init_bytes));
+    CHECK_MSG(t, bad == NULL, "%s", "expected table.init of a mismatched segment into an imported table to be invalid");
+    if (bad) wasm_module_free(bad);
+    bad = wasm_load(rt, wasm_test_bulk_bad_copy_bytes, sizeof(wasm_test_bulk_bad_copy_bytes));
+    CHECK_MSG(t, bad == NULL, "%s", "expected table.copy from an imported table into a mismatched table to be invalid");
+    if (bad) wasm_module_free(bad);
+}
+
+TEST(test_bulk_table_ops_on_imported_tables) {
+    wasm_runtime_t rt;
+    wasm_module_t* c1;
+    wasm_module_t* c2;
+
+    wasm_init(&rt);
+    c1 = wasm_load(&rt, wasm_test_bulk_c1_bytes, sizeof(wasm_test_bulk_c1_bytes));
+    c2 = wasm_load(&rt, wasm_test_bulk_c2_bytes, sizeof(wasm_test_bulk_c2_bytes));
+    CHECK_MSG(t, c1 != NULL && c2 != NULL, "%s", rt.error_msg);
+    if (c1 && c2) {
+        WASM_CHECK_OK(t, wasm_register_module(&rt, "c1", c1));
+        WASM_CHECK_OK(t, wasm_register_module(&rt, "c2", c2));
+        wasm_test_bulk_imported_tables(t, &rt, c1, c2);
+    }
+    if (c2) wasm_module_free(c2);
+    if (c1) wasm_module_free(c1);
+    wasm_destroy(&rt);
+}
+
 static const test_case exec_bulk_cases[] = {
     { "bulk memory: passive data, copy/fill/drop semantics", test_bulk_memory_ops },
     { "bulk memory: table init/copy/drop and element segment forms", test_bulk_memory_table_ops },
     { "bulk memory: memory.init/copy out-of-bounds traps", test_bulk_memory_oob_traps },
     { "bulk memory: table.init/copy out-of-bounds traps", test_bulk_memory_table_oob_traps },
     { "reference types: ref ops plus typed table get/set/grow/fill", test_reference_types_table_ops },
+    { "gc: table.init and table.copy into and between imported tables use the importer's type indices",
+      test_bulk_table_ops_on_imported_tables },
     { "gc: bulk instructions pay fuel for their size; array.new and held values stay rooted", test_bulk_fuel_and_array_new_rooting },
 };
 const test_suite exec_bulk_suite = { "exec.bulk", exec_bulk_cases, COUNTOF(exec_bulk_cases) };

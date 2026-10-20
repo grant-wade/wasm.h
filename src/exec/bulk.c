@@ -170,8 +170,8 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             if (!wasm__typed_valtype_is_subtype(mod,
                                                 segment->elem_type,
                                                 &segment->elem_ref_type,
-                                                table->reftype,
-                                                &table->reftype_info))
+                                                mod->tables[table_idx].reftype,
+                                                &mod->tables[table_idx].reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(src_offset, len, segment->num_elems) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, table->size))
@@ -218,10 +218,10 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
             src_offset = wasm__slot_index(src, src_table->is_64);
             len = wasm__slot_index(count, wasm__table_copy_size_type(dst_table, src_table) == WASM_TYPE_I64);
             if (!wasm__typed_valtype_is_subtype(mod,
-                                                src_table->reftype,
-                                                &src_table->reftype_info,
-                                                dst_table->reftype,
-                                                &dst_table->reftype_info))
+                                                mod->tables[src_table_idx].reftype,
+                                                &mod->tables[src_table_idx].reftype_info,
+                                                mod->tables[dst_table_idx].reftype,
+                                                &mod->tables[dst_table_idx].reftype_info))
                 WASM__TRAP(WASM_ERR_TYPE_MISMATCH);
             if (!wasm__range_in_bounds_u64(src_offset, len, src_table->size) ||
                 !wasm__range_in_bounds_u64(dst_offset, len, dst_table->size))

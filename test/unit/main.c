@@ -37,6 +37,7 @@ static const test_suite* const suites[] = {
     &validate_cont_suite,
     &validate_function_suite,
     &validate_gc_suite,
+    &validate_module_suite,
     &validate_stack_suite,
 };
 

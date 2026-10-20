@@ -215,13 +215,11 @@ wasm_table_t* wasm_module_table(wasm_module_t* mod, uint32_t table_idx) {
 }
 
 wasm_valtype_t wasm_table_type(const wasm_module_t* mod, uint32_t table_idx) {
-    wasm_table_t* table = wasm__table_at(mod, table_idx);
-    return table ? table->reftype : WASM_TYPE_VOID;
+    return mod && table_idx < mod->num_tables ? mod->tables[table_idx].reftype : WASM_TYPE_VOID;
 }
 
 const wasm_reftype_t* wasm_table_reftype(const wasm_module_t* mod, uint32_t table_idx) {
-    wasm_table_t* table = wasm__table_at(mod, table_idx);
-    return table ? &table->reftype_info : NULL;
+    return mod && table_idx < mod->num_tables ? &mod->tables[table_idx].reftype_info : NULL;
 }
 
 static wasm_table_t* wasm__api_table(const wasm_module_t* mod, uint32_t table_idx) {
@@ -257,7 +255,8 @@ wasm_error_t wasm_table_set(wasm_module_t* mod, uint32_t table_idx, uint64_t ind
         WASM__SET_ERR(mod->rt, WASM_ERR_OUT_OF_BOUNDS, "table index %llu out of bounds", (unsigned long long)index);
         return WASM_ERR_OUT_OF_BOUNDS;
     }
-    if (!wasm__runtime_value_matches_type(mod, &val, table->reftype, &table->reftype_info)) {
+    if (!wasm__runtime_value_matches_type(mod, &val, wasm_table_type(mod, table_idx),
+                                          wasm_table_reftype(mod, table_idx))) {
         WASM__SET_ERR(mod->rt, WASM_ERR_TYPE_MISMATCH, "%s", "value does not match the table's element type");
         return WASM_ERR_TYPE_MISMATCH;
     }
@@ -270,7 +269,9 @@ int64_t wasm_table_grow(wasm_module_t* mod, uint32_t table_idx, uint64_t delta, 
     wasm_table_t* table = wasm__api_table(mod, table_idx);
     uint64_t old_size;
 
-    if (!table || !wasm__runtime_value_matches_type(mod, &init, table->reftype, &table->reftype_info)) return -1;
+    if (!table || !wasm__runtime_value_matches_type(mod, &init, wasm_table_type(mod, table_idx),
+                                                    wasm_table_reftype(mod, table_idx)))
+        return -1;
     if (wasm__anyref_from_host(mod->rt, &init) != WASM_OK) return -1;
     old_size = wasm__table_grow(mod->rt, table, delta, init);
     return old_size == UINT64_MAX ? -1 : (int64_t)old_size;

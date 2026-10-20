@@ -39,5 +39,6 @@
 #include "validate/cont_test.c"
 #include "validate/function_test.c"
 #include "validate/gc_test.c"
+#include "validate/module_test.c"
 #include "validate/stack_test.c"
 #include "main.c"

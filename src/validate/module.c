@@ -512,8 +512,7 @@ WASM_PRIVATE wasm_error_t wasm__validate_structural(wasm_module_t* mod) {
                                                   (unsigned)i,
                                                   (unsigned)segment->table_index);
             }
-            table = wasm__table_at(mod, segment->table_index);
-            if (!table) return WASM_ERR_MALFORMED;
+            table = &mod->tables[segment->table_index];
             if (!wasm__elem_segment_matches_type(mod,
                                                       segment,
                                                       table->reftype,

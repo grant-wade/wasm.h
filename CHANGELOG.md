@@ -15,6 +15,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Freeing a module after an allocation failure left its GC objects without types, and collections stopped tracing their fields.
 - `br_on_cast_desc_eq` and `br_on_cast_desc_eq_fail` cost two units of fuel and could stop between their cast and their branch.
+- `wasm_table_set` and `wasm_table_grow` on an imported table checked values against the exporting module's types and could store an object of the wrong type.
+- Active element segments, `table.init`, and `table.copy` on imported tables of concrete reference types rejected some valid modules and accepted some invalid ones.
+- `wasm_table_type` and `wasm_table_reftype` described an imported table with the exporting module's type indices.
 
 ## [2.0.0] - 2026-10-19
 

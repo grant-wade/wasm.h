@@ -1364,6 +1364,47 @@ TEST(test_const_expr_struct_new_desc) {
     wasm_destroy(&rt);
 }
 
+/* (type $x (struct (field i64))) (type $s (struct (field i32))) (table (export "t") 2 (ref null $s)) */
+static const uint8_t wasm_test_init_expr_c1_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x5F, 0x01, 0x7E, 0x00, 0x5F,
+    0x01, 0x7F, 0x00, 0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x02, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01,
+    0x00,
+};
+
+/* (type $s (struct (field i32))) (import "c1" "t" (table 2 (ref null $s)))
+   (elem (table 0) (i32.const 1) (ref null $s) (struct.new $s (i32.const 9))) */
+static const uint8_t wasm_test_init_expr_imported_elem_bytes[] = {
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x5F, 0x01, 0x7F, 0x00, 0x02,
+    0x0B, 0x01, 0x02, 0x63, 0x31, 0x01, 0x74, 0x01, 0x63, 0x00, 0x00, 0x02, 0x09, 0x0F, 0x01, 0x06,
+    0x00, 0x41, 0x01, 0x0B, 0x63, 0x00, 0x01, 0x41, 0x09, 0xFB, 0x00, 0x00, 0x0B,
+};
+
+TEST(test_active_elem_segment_into_imported_table) {
+    wasm_runtime_t rt;
+    wasm_module_t* c1;
+    wasm_module_t* m = NULL;
+    wasm_value_t value;
+
+    wasm_init(&rt);
+    c1 = wasm_load(&rt, wasm_test_init_expr_c1_bytes, sizeof(wasm_test_init_expr_c1_bytes));
+    CHECK_MSG(t, c1 != NULL, "%s", rt.error_msg);
+    if (c1) {
+        WASM_CHECK_OK(t, wasm_register_module(&rt, "c1", c1));
+        m = wasm_load(&rt, wasm_test_init_expr_imported_elem_bytes, sizeof(wasm_test_init_expr_imported_elem_bytes));
+        CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    }
+    if (m) {
+        WASM_CHECK_OK(t, wasm_table_get(c1, 0, 0, &value));
+        CHECK(t, value.of.gc_ref == 0);
+        WASM_CHECK_OK(t, wasm_table_get(m, 0, 1, &value));
+        WASM_CHECK_OK(t, wasm_struct_get_field(c1, value, 0, &value));
+        WASM_CHECK_I32(t, value.of.i32, 9);
+        wasm_module_free(m);
+    }
+    if (c1) wasm_module_free(c1);
+    wasm_destroy(&rt);
+}
+
 static const test_case init_expr_cases[] = {
     { "global init expr: global.get can read imported globals", test_global_init_expr_global_get_import },
     { "global init expr: i32 add/mul runs in initializer", test_global_init_expr_extended_i32_arithmetic },
@@ -1377,5 +1418,7 @@ static const test_case init_expr_cases[] = {
     { "reference types: active expr element segments with implicit funcref load", test_reference_types_active_expr_element_segment },
     { "wasmgc: const expressions support GC allocation ops", test_gc_const_expr_supports_gc_alloc_ops },
     { "custom descriptors: const expressions allocate described structs", test_const_expr_struct_new_desc },
+    { "wasmgc: active element segments fill imported tables of concrete reference types",
+      test_active_elem_segment_into_imported_table },
 };
 const test_suite init_expr_suite = { "init_expr", init_expr_cases, COUNTOF(init_expr_cases) };

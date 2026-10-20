@@ -409,7 +409,8 @@ WASM_PRIVATE wasm_error_t wasm__apply_active_elem_segments(wasm_module_t* mod) {
         if (segment->table_index >= mod->num_tables) return WASM_ERR_MALFORMED;
         table = wasm__table_at(mod, segment->table_index);
         if (!table) return WASM_ERR_MALFORMED;
-        if (!wasm__elem_segment_matches_type(mod, segment, table->reftype, &table->reftype_info))
+        if (!wasm__elem_segment_matches_type(mod, segment, mod->tables[segment->table_index].reftype,
+                                             &mod->tables[segment->table_index].reftype_info))
             return WASM_ERR_TYPE_MISMATCH;
         if (!wasm__range_in_bounds_u64(segment->offset, segment->num_elems, table->size))
             return WASM_ERR_OUT_OF_BOUNDS;

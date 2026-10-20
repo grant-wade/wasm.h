@@ -1,0 +1,78 @@
+(module $C1
+  (type $x (struct (field i64)))
+  (type $s (struct (field i32)))
+  (type $big (struct (field (mut i64)) (field (mut i64)) (field (mut i64)) (field (mut i64))))
+  (table (export "t") 2 (ref null $s))
+  (table (export "big") 1 (ref null $big))
+  (func (export "get") (param i32) (result i32) (struct.get $s 0 (table.get 0 (local.get 0))))
+  (func (export "get-big") (result i64) (struct.get $big 3 (table.get 1 (i32.const 0))))
+)
+(register "C1")
+
+(module $C2
+  (type $y (array i8))
+  (type $z (struct (field f32)))
+  (type $s (struct (field i32)))
+  (table (export "u") 3 (ref null $s))
+  (func (export "get") (param i32) (result i32) (struct.get $s 0 (table.get 0 (local.get 0))))
+)
+(register "C2")
+
+(module $D
+  (type $small (struct (field (mut i32))))
+  (type $s (struct (field i32)))
+  (type $big (struct (field (mut i64)) (field (mut i64)) (field (mut i64)) (field (mut i64))))
+  (import "C1" "t" (table $t 2 (ref null $s)))
+  (import "C2" "u" (table $u 3 (ref null $s)))
+  (import "C1" "big" (table $b 1 (ref null $big)))
+  (elem (table $t) (i32.const 1) (ref null $s) (struct.new $s (i32.const 9)))
+  (elem $e (ref null $s) (struct.new $s (i32.const 7)))
+  (func (export "init") (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1)))
+  (func (export "copy") (table.copy $u $t (i32.const 1) (i32.const 0) (i32.const 2)))
+  (func (export "set") (param i32 i32) (table.set $u (local.get 0) (struct.new $s (local.get 1))))
+  (func (export "set-big") (param i64)
+    (table.set $b (i32.const 0)
+      (struct.new $big (i64.const 1) (i64.const 2) (i64.const 3) (local.get 0))))
+  (func (export "test-small") (result i32) (ref.test (ref $small) (table.get $b (i32.const 0))))
+)
+(assert_return (invoke $C1 "get" (i32.const 1)) (i32.const 9))
+(assert_return (invoke $D "init"))
+(assert_return (invoke $C1 "get" (i32.const 0)) (i32.const 7))
+(assert_return (invoke $D "copy"))
+(assert_return (invoke $C2 "get" (i32.const 1)) (i32.const 7))
+(assert_return (invoke $C2 "get" (i32.const 2)) (i32.const 9))
+(assert_return (invoke $D "set" (i32.const 0) (i32.const 3)))
+(assert_return (invoke $C2 "get" (i32.const 0)) (i32.const 3))
+(assert_return (invoke $D "set-big" (i64.const 4)))
+(assert_return (invoke $C1 "get-big") (i64.const 4))
+(assert_return (invoke $D "test-small") (i32.const 0))
+
+(assert_invalid
+  (module
+    (type $s (struct (field i32)))
+    (type $x (struct (field i64)))
+    (import "C1" "t" (table 2 (ref null $s)))
+    (elem (table 0) (i32.const 0) (ref null $x) (ref.null $x)))
+  "type mismatch")
+(assert_invalid
+  (module
+    (type $s (struct (field i32)))
+    (type $x (struct (field i64)))
+    (import "C1" "t" (table $t 2 (ref null $s)))
+    (elem $e (ref null $x) (ref.null $x))
+    (func (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1))))
+  "type mismatch")
+(assert_invalid
+  (module
+    (type $s (struct (field i32)))
+    (type $x (struct (field i64)))
+    (import "C1" "t" (table $t 2 (ref null $s)))
+    (table $v 1 (ref null $x))
+    (func (table.copy $v $t (i32.const 0) (i32.const 0) (i32.const 1))))
+  "type mismatch")
+(assert_unlinkable
+  (module
+    (type $s (struct (field i32)))
+    (type $x (struct (field i64)))
+    (import "C1" "t" (table 2 (ref null $x))))
+  "incompatible import type")
