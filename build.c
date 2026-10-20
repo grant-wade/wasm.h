@@ -107,6 +107,7 @@ typedef struct {
     int fuzzer;
     int spec_proposals; /* also run proposal suites the runtime does not implement */
     int gc_stress;      /* collect garbage before every GC allocation */
+    int stack_stress;   /* move an execution stack's arrays on every push that could grow them */
     int regenerate_examples; /* rebuild the committed example module and its wrappers with emcc */
     int announce; /* report missing optional tools */
     int msvc;
@@ -317,6 +318,7 @@ static void project_options(target_t* t) {
     cbuild_add_define(ctx, t, "_POSIX_C_SOURCE=200809L");
     cbuild_add_define(ctx, t, opt.platform ? "WASM_ENABLE_PLATFORM=1" : "WASM_ENABLE_PLATFORM=0");
     if (opt.gc_stress) cbuild_add_define(ctx, t, "WASM_GC_STRESS");
+    if (opt.stack_stress) cbuild_add_define(ctx, t, "WASM_STACK_STRESS");
 #ifndef _WIN32
     if (opt.platform) {
         cbuild_add_cflags(ctx, t, "-pthread");
@@ -939,6 +941,7 @@ static void read_options(int argc, char** argv) {
     opt.fuzzer = cbuild_has_flag(argc, argv, "fuzzer", 0);
     opt.spec_proposals = cbuild_has_flag(argc, argv, "spec-proposals", 0);
     opt.gc_stress = cbuild_has_flag(argc, argv, "gc-stress", 0);
+    opt.stack_stress = cbuild_has_flag(argc, argv, "stack-stress", 0);
     opt.regenerate_examples = cbuild_has_flag(argc, argv, "regenerate-examples", 0);
     opt.announce = cbuild_has_flag(argc, argv, "test", 0) || cbuild_has_flag(argc, argv, "list-tests", 0);
 
@@ -953,7 +956,10 @@ static void read_options(int argc, char** argv) {
 
     opt.build_dir = cbuild_get_flag_value(argc, argv, "build-dir", 0);
     if (!opt.build_dir || !*opt.build_dir)
-        opt.build_dir = opt.gc_stress ? "build/gc-stress" : opt.release ? "build/release" : "build/debug";
+        opt.build_dir = opt.gc_stress      ? (opt.stack_stress ? "build/gc-stack-stress" : "build/gc-stress")
+                        : opt.stack_stress ? "build/stack-stress"
+                        : opt.release      ? "build/release"
+                                           : "build/debug";
     opt.cflags = join_flags(getenv("CFLAGS"), cbuild_get_flag_value(argc, argv, "cflags", 0));
     opt.ldflags = join_flags(getenv("LDFLAGS"), cbuild_get_flag_value(argc, argv, "ldflags", 0));
 
@@ -963,7 +969,7 @@ static void read_options(int argc, char** argv) {
     cbuild_register_flag_bool(ctx, "release", 0, CBUILD_FLAG_PRE,
                               "Optimized build (-O3 -DNDEBUG, or /O2) in build/release", &bound_bool);
     cbuild_register_flag_str(ctx, "build-dir", 0, CBUILD_FLAG_PRE,
-                             "Output directory (default build/debug, build/release, or build/gc-stress)", &bound_str);
+                             "Output directory (default build/debug, build/release, build/gc-stress, or build/stack-stress)", &bound_str);
     cbuild_register_flag_str(ctx, "cc", 0, CBUILD_FLAG_PRE, "C compiler (default $CC, else cc or cl)", &bound_str);
     cbuild_register_flag_str(ctx, "cflags", 0, CBUILD_FLAG_PRE,
                              "Extra compile flags, after $CFLAGS and all built-in flags", &bound_str);
@@ -979,6 +985,10 @@ static void read_options(int argc, char** argv) {
                               "Also build the libFuzzer harnesses wasm_load_fuzzer and wasm_exec_fuzzer (Clang)", &bound_bool);
     cbuild_register_flag_bool(ctx, "gc-stress", 0, CBUILD_FLAG_PRE,
                               "Collect garbage before every GC allocation (WASM_GC_STRESS) in build/gc-stress",
+                              &bound_bool);
+    cbuild_register_flag_bool(ctx, "stack-stress", 0, CBUILD_FLAG_PRE,
+                              "Move execution stacks on every push that could grow them (WASM_STACK_STRESS) in "
+                              "build/stack-stress",
                               &bound_bool);
     cbuild_register_flag_bool(ctx, "regenerate-examples", 0, CBUILD_FLAG_PRE,
                               "Rebuild examples/session_math.wasm with emcc and rewrite its committed wrappers",

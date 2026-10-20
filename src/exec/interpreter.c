@@ -386,8 +386,7 @@ static WASM__NOINLINE wasm_error_t wasm__call_host_from_stack(wasm_module_t* mod
         err = wasm__invoke_host_func(mod, ft, func->host_func, host_args, call_results, func->host_userdata);
         if (func->traces_params) wasm__gc_pop_root(rt, &root);
         if (err == WASM_OK) err = wasm__values_from_host(rt, call_results, ft->num_results);
-        if (err == WASM_OK && wasm__valtypes_slots(ft->results, ft->num_results) > exec->max_stack - exec->sp)
-            err = WASM_ERR_STACK_OVERFLOW;
+        if (err == WASM_OK) err = wasm__exec_stack_reserve(rt, exec, wasm__valtypes_slots(ft->results, ft->num_results));
         if (err == WASM_OK) exec->sp += wasm__slots_from_values(&exec->stack[exec->sp], call_results, ft->num_results);
     }
     if (call_args != args_buf) wasm__free(&mod->rt->allocator, call_args);
@@ -560,6 +559,11 @@ static WASM__NOINLINE wasm_error_t wasm__exec_stack_switching(wasm_runtime_t* rt
                     WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded",
                                   (unsigned)exec->max_stack);
                     return WASM_ERR_STACK_OVERFLOW;
+                }
+                if (bound > 1u) {
+                    err = wasm__exec_stack_reserve(rt, exec, bound - 1u);
+                    if (err != WASM_OK) return err;
+                    top = &exec->stack[exec->sp - 1u - slots];
                 }
                 memmove(top + bound, top, slots * sizeof(*top));
                 if (bound > 0) memcpy(top, k->args, bound * sizeof(*top));
@@ -2576,6 +2580,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         sp -= call_slots;
         WASM__SAVE_STATE();
         err = wasm__call_host_from_stack(call_mod, call_type, callee, sp);
+        WASM__LOAD_STACK();
+        cf = &rt->exec->call_frames[rt->exec->call_frame_sp - 1u];
         sp = stack + rt->exec->sp;
         mem0_size = 0;
         WASM__LOAD_FUEL();
@@ -2606,13 +2612,15 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
         wasm__arena_chunk_t* chunk = exec->frame_arena;
         wasm__call_frame_t* next;
 
-        if (WASM__UNLIKELY(!callee->ops || exec->call_frame_sp >= exec->max_call_frames ||
-                           callee->max_stack > exec->max_stack - (uint32_t)(sp - stack) || !chunk ||
+        if (WASM__UNLIKELY(WASM__STACK_STRESS || !callee->ops || exec->call_frame_sp >= exec->cap_call_frames ||
+                           callee->max_stack > exec->cap_stack - (uint32_t)(sp - stack) || !chunk ||
                            callee->frame_bytes > chunk->size - chunk->used)) {
             exec->sp = (uint32_t)(sp - stack);
-            err = wasm__push_call_frame(call_mod, call_idx, sp, call_results_dst);
+            err = wasm__push_call_frame(call_mod, call_idx, 1, call_results_dst);
             if (err != WASM_OK) {
                 if (WASM__IS_TAIL_CALL(op)) return err;
+                WASM__LOAD_STACK();
+                sp = stack + exec->sp;
                 goto cleanup;
             }
             WASM__ENTER_FRAME();
@@ -2707,7 +2715,8 @@ static wasm_error_t wasm__interp_loop(wasm_runtime_t* rt, int resumable) {
 
         if (lsp > 0) wasm__drop_labels(rt, labels, lsp, lsp);
         cf->lsp = lsp = 0;
-        if (n > parent->max_stack - parent->sp) WASM__TRAP(WASM_ERR_STACK_OVERFLOW);
+        err = wasm__exec_stack_reserve(rt, parent, n);
+        if (err != WASM_OK) goto cleanup;
         if (n > 0) memcpy(&parent->stack[parent->sp], sp - n, n * sizeof(*sp));
         parent->sp += n;
         wasm__cont_stack_release(rt, exec);
@@ -2796,12 +2805,15 @@ static wasm_error_t wasm__return_after_yield(wasm_runtime_t* rt) {
     wasm__exec_stack_t* parent = exec->parent;
     wasm__call_frame_t* cf = &exec->call_frames[exec->call_frame_sp - 1u];
     uint32_t n = cf->func->result_slots;
+    wasm_error_t err;
 
     wasm__clear_call_frame(rt, cf);
     if (!parent || exec->call_frame_sp > exec->frame_floor) return wasm__finish_call_frame(rt, 0);
-    if (n > parent->max_stack - parent->sp) {
-        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)parent->max_stack);
-        return WASM_ERR_STACK_OVERFLOW;
+    err = wasm__exec_stack_reserve(rt, parent, n);
+    if (err != WASM_OK) {
+        if (err == WASM_ERR_STACK_OVERFLOW)
+            WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "operand stack limit %u exceeded", (unsigned)parent->max_stack);
+        return err;
     }
     if (n > 0) memcpy(&parent->stack[parent->sp], &exec->stack[exec->sp - n], n * sizeof(wasm__slot_t));
     parent->sp += n;
@@ -2894,10 +2906,15 @@ WASM_PRIVATE wasm_error_t wasm__interp_resume(wasm_runtime_t* rt,
             return WASM_ERR_TYPE_MISMATCH;
         }
     }
-    if (expected > 0 && wasm__valtypes_slots(rt->yield_type->results, expected) > exec->max_stack - exec->sp) {
-        wasm__interp_cancel(rt);
-        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
-        return WASM_ERR_STACK_OVERFLOW;
+    if (expected > 0) {
+        wasm_error_t err = wasm__exec_stack_reserve(rt, exec, wasm__valtypes_slots(rt->yield_type->results, expected));
+
+        if (err != WASM_OK) {
+            wasm__interp_cancel(rt);
+            if (err == WASM_ERR_STACK_OVERFLOW)
+                WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "%s", "no stack space for the host function's results");
+            return err;
+        }
     }
     for (i = 0, slots = 0; i < expected; i++) {
         wasm_value_t value = host_results[i];

@@ -68,11 +68,15 @@ wasm_runtime_t* rt;
 wasm_config_default(&config);
 config.max_stack_values = 65536;
 config.max_call_depth = 1024;
+config.initial_stack_values = 256;
+config.initial_call_depth = 32;
 config.max_labels = 4096;
 config.initial_gc_heap_size = 2u * 1024u * 1024u;
 config.frame_arena_size = 256u * 1024u;
 config.cont_stack_values = 1024;
 config.cont_call_depth = 128;
+config.cont_initial_stack_values = 64;
+config.cont_initial_call_depth = 8;
 config.cont_frame_arena_size = 8u * 1024u;
 config.lazy_validation = 0;
 config.max_function_locals = 50000;
@@ -86,7 +90,7 @@ config.features = WASM_FEATURES_ALL & ~WASM_FEATURE_THREADS;
 rt = wasm_runtime_new(wasm_libc_allocator(), &config);
 ```
 
-`max_stack_values` sizes the operand stack in 8-byte slots, and a `v128` takes two. With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. Call frames live in blocks of `frame_arena_size` bytes, added as calls nest deeper and released as they return. A continuation gets its own stack when it first runs: `cont_stack_values` slots (default 1,024) and `cont_call_depth` call frames (default 128), with frames in blocks of `cont_frame_arena_size` bytes (default 8 KiB).
+`max_stack_values` limits the operand stack in 8-byte slots, and a `v128` takes two. With `lazy_validation` disabled, `wasm_load` validates all function bodies. Enabling it defers individual body validation until first execution. The main stack starts with `initial_stack_values` slots (default 256) and `initial_call_depth` call frames (default 32), and doubles each as needed up to `max_stack_values` and `max_call_depth`. Frame locals live in blocks added as calls nest deeper and released as they return; a stack's first block is at most 1 KiB, and each later one doubles up to `frame_arena_size` bytes, or holds one larger frame. A continuation gets its own stack when it first runs: it starts with `cont_initial_stack_values` slots (default 64) and `cont_initial_call_depth` call frames (default 8) and grows up to `cont_stack_values` slots (default 1,024) and `cont_call_depth` call frames (default 128), with blocks up to `cont_frame_arena_size` bytes (default 8 KiB). A finished continuation's stack is kept for reuse at its initial size. An initial size of 0, or one above its limit, starts at the limit. Calls past a limit trap with `WASM_ERR_STACK_OVERFLOW` or `WASM_ERR_CALL_STACK_EXHAUSTED`.
 
 The remaining fields bound what a module can make the host allocate; 0 removes a limit:
 

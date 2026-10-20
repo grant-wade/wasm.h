@@ -422,9 +422,11 @@ static int wasm__catch_legacy(wasm__call_frame_t* cf, uint32_t idx, int* delegat
         }
         label->active_catch = 1;
         if (clause[0] == WASM__CLAUSE_CATCH) {
-            if (ex->num_slots > exec->max_stack - exec->sp) {
+            wasm_error_t err = wasm__exec_stack_reserve(rt, exec, ex->num_slots);
+
+            if (err != WASM_OK) {
                 wasm__exn_clear_pending(rt);
-                *out_err = WASM_ERR_STACK_OVERFLOW;
+                *out_err = err;
                 return 1;
             }
             if (ex->num_slots > 0) memcpy(&exec->stack[exec->sp], ex->slots, ex->num_slots * sizeof(wasm__slot_t));
@@ -476,6 +478,11 @@ static int wasm__catch_try_table(wasm__call_frame_t* cf, uint32_t idx, wasm_erro
             return 1;
         }
         exec->sp = (clause[5] & WASM__BRANCH_RETURN) ? label->sp_base : cf->sp_base + clause[4];
+        *out_err = wasm__exec_stack_reserve(rt, exec, slots + (kind & 1u));
+        if (*out_err != WASM_OK) {
+            wasm__exn_clear_pending(rt);
+            return 1;
+        }
         for (j = 0; j < slots; j++) exec->stack[exec->sp + j] = ex->slots[j];
         exec->sp += slots;
         if (kind & 1u) {

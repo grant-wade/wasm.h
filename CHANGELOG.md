@@ -9,7 +9,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Struct and array layouts are computed once per type, and collections trace only fields and elements that can hold references.
 - `struct.get`, `struct.set`, `array.get`, `array.set`, `array.len`, the i31 instructions, `ref.func`, and saturating truncations run inside the interpreter loop.
 - References stored through `wasm_module_global` or `wasm_global_import_t.value` must have the global's type.
-- `ref.test`, `ref.cast`, `br_on_cast`, `br_on_cast_fail`, and the custom descriptor casts run inside the interpreter loop, and casts to struct and array types take constant time.
+- `ref.test`, `ref.cast`, `br_on_cast`, `br_on_cast_fail`, and the custom descriptor casts run inside the interpreter loop, and casts to struct and array types up to 63 levels deep take constant time.
 - `suspend`, `resume`, `cont.bind`, and `switch` run without allocating, and only unconsumed continuations count toward collections.
 - The continuation stack pool keeps as many released stacks as are in use, and at least 16.
 - The host may pass a consumed continuation as any continuation type.
@@ -20,6 +20,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `array.copy`, `array.fill`, `array.new_data`, and `array.init_data` copy element bytes in bulk.
 - Throwing and catching exceptions, including `resume_throw`, run without allocating.
 - `catch_ref`, `catch_all_ref`, and `throw_ref` reuse pooled exception objects that the collector reclaims, and `exnref` values trigger collections by memory use.
+- Continuation stacks start at `cont_initial_stack_values` slots and `cont_initial_call_depth` frames (64 and 8 by default) and grow up to `cont_stack_values` and `cont_call_depth`.
+- The main stack starts at `initial_stack_values` slots and `initial_call_depth` frames and grows up to `max_stack_values` and `max_call_depth`.
+- Frame arena blocks start at 1 KiB and double up to `frame_arena_size` or `cont_frame_arena_size`, and pooled continuation stacks shrink to their initial size.
+
+### Added
+
+- `./cbuild --stack-stress` builds with stacks that move on every push that could grow them.
 
 ### Fixed
 
@@ -32,6 +39,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Collections left GC references in a registered host table dangling while no module imported it.
 - Collections, and modules importing its exports, read freed memory after a module registered with `wasm_register_module` was freed.
 - Call arguments, host results, and global and table setters accepted forged, collected, and foreign `exnref` handles.
+- A host function that called back into Wasm could leave its caller running on a stack that had moved.
 
 ## [2.0.0] - 2026-10-19
 

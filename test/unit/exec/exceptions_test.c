@@ -1360,7 +1360,7 @@ TEST(test_exception_steady_state_allocates_nothing) {
         alloc_calls = wasm_test_alloc_snapshot().alloc_calls;
         arg = wasm_i32(20000);
         WASM_CHECK_OK(t, wasm_call(m, names[i], &arg, 1, &result, 1));
-#ifndef WASM_GC_STRESS
+#if !defined(WASM_GC_STRESS) && !defined(WASM_STACK_STRESS)
         CHECK_MSG(t, wasm_test_alloc_snapshot().alloc_calls == alloc_calls, "%s: %u allocations in steady state",
                   names[i], (unsigned)(wasm_test_alloc_snapshot().alloc_calls - alloc_calls));
 #else

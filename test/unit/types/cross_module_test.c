@@ -111,8 +111,12 @@ TEST(test_stack_switching_cross_module_stores_do_not_allocate) {
     args[1] = wasm_i32(100000);
     WASM_CHECK_OK(t, wasm_call(store, "store", args, 2, NULL, 0));
     WASM_CHECK_OK(t, wasm_call(store, "take", args, 1, NULL, 0));
+#ifndef WASM_STACK_STRESS
     CHECK_MSG(t, wasm_test_alloc_snapshot().alloc_calls == alloc_calls, "%zu allocations",
               wasm_test_alloc_snapshot().alloc_calls - alloc_calls);
+#else
+    (void)alloc_calls;
+#endif
     WASM_CHECK_OK(t, wasm_call(store, "run", NULL, 0, &result, 1));
     WASM_CHECK_I32(t, result.of.i32, 15);
     wasm_module_free(store);
@@ -300,8 +304,12 @@ TEST(test_cross_module_exact_casts_compare_canonical_ids) {
         WASM_CHECK_OK(t, wasm_call(caster, "cast", &object, 1, &result, 1));
         WASM_CHECK_I32(t, result.of.i32, 1);
     }
+#ifndef WASM_STACK_STRESS
     CHECK_MSG(t, wasm_test_alloc_snapshot().alloc_calls == alloc_calls, "%zu allocations",
               wasm_test_alloc_snapshot().alloc_calls - alloc_calls);
+#else
+    (void)alloc_calls;
+#endif
     wasm_module_free(caster);
     CHECK(t, rt.num_type_groups == WASM_TEST_CHAIN_TYPES + 2u);
     wasm_module_free(maker);

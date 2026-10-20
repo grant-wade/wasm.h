@@ -62,7 +62,8 @@ static wasm__exec_stack_t* wasm__cont_stack_new(wasm_runtime_t* rt) {
         rt->num_pooled_cont_stacks--;
     } else {
         s = (wasm__exec_stack_t*)wasm__calloc(&rt->allocator, 1u, sizeof(*s));
-        if (!s || wasm__exec_stack_init(rt, s, rt->cont_stack_values, rt->cont_call_depth,
+        if (!s || wasm__exec_stack_init(rt, s, rt->cont_initial_stack_values, rt->cont_stack_values,
+                                        rt->cont_initial_call_depth, rt->cont_call_depth,
                                         rt->cont_frame_arena_size) != WASM_OK) {
             wasm__free(&rt->allocator, s);
             WASM__SET_ERR(rt, WASM_ERR_OOM, "%s", "out of memory for a continuation stack");
@@ -75,6 +76,7 @@ static wasm__exec_stack_t* wasm__cont_stack_new(wasm_runtime_t* rt) {
     if (rt->cont_stacks) rt->cont_stacks->prev = s;
     rt->cont_stacks = s;
     rt->num_cont_stacks++;
+    rt->cont_stack_bytes += wasm__exec_stack_bytes(s);
     return s;
 }
 
@@ -85,11 +87,13 @@ WASM_PRIVATE void wasm__cont_stack_release(wasm_runtime_t* rt, wasm__exec_stack_
         rt->cont_stacks = s->next;
     if (s->next) s->next->prev = s->prev;
     rt->num_cont_stacks--;
+    rt->cont_stack_bytes -= wasm__exec_stack_bytes(s);
     if (rt->num_pooled_cont_stacks >= WASM__CONT_STACK_POOL_MIN && rt->num_pooled_cont_stacks >= rt->num_cont_stacks) {
         wasm__cont_stack_free(rt, s);
         return;
     }
     wasm__cont_stack_clear(rt, s);
+    wasm__exec_stack_trim(rt, s, rt->cont_initial_stack_values, rt->cont_initial_call_depth);
     s->prev = NULL;
     s->next = rt->cont_stack_pool;
     rt->cont_stack_pool = s;
@@ -419,28 +423,31 @@ WASM_PRIVATE const wasm_functype_t* wasm__cont_start_type(const wasm__cont_objec
 }
 
 static void wasm__cont_collect_if_needed(wasm_runtime_t* rt) {
-    size_t stack_bytes = (size_t)rt->cont_stack_values * sizeof(wasm__slot_t) +
-                         (size_t)rt->cont_call_depth * sizeof(wasm__call_frame_t) + rt->cont_frame_arena_size;
-    uint32_t min_stacks = stack_bytes < WASM__CONT_GC_MIN_BYTES ? (uint32_t)(WASM__CONT_GC_MIN_BYTES / stack_bytes) : 1u;
-    uint32_t threshold = rt->cont_gc_threshold ? rt->cont_gc_threshold : min_stacks;
+    size_t threshold = rt->cont_gc_threshold ? rt->cont_gc_threshold : WASM__CONT_GC_MIN_BYTES;
 
-    if (rt->num_cont_stacks < threshold && (rt->max_cont_stacks == 0 || rt->num_cont_stacks < rt->max_cont_stacks))
+    if (rt->cont_stack_bytes < threshold && (rt->max_cont_stacks == 0 || rt->num_cont_stacks < rt->max_cont_stacks))
         return;
     (void)wasm__gc_collect(rt, 0);
-    rt->cont_gc_threshold = rt->num_cont_stacks > min_stacks / 2u ? rt->num_cont_stacks * 2u : min_stacks;
+    if (rt->cont_stack_bytes <= WASM__CONT_GC_MIN_BYTES / 2u)
+        rt->cont_gc_threshold = WASM__CONT_GC_MIN_BYTES;
+    else
+        rt->cont_gc_threshold = rt->cont_stack_bytes > SIZE_MAX / 2u ? SIZE_MAX : rt->cont_stack_bytes * 2u;
 }
 
 WASM_PRIVATE wasm_error_t wasm__cont_start(wasm_runtime_t* rt, wasm__cont_object_t* k) {
     wasm__exec_stack_t* s;
+    wasm_error_t err;
 
     wasm__cont_collect_if_needed(rt);
     s = wasm__cont_stack_new(rt);
     if (!s) return WASM_ERR_OOM;
-    if (k->num_args > s->max_stack) {
+    err = wasm__exec_stack_reserve(rt, s, k->num_args);
+    if (err != WASM_OK) {
         wasm__cont_stack_release(rt, s);
-        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "continuation operand stack limit %u exceeded",
-                      (unsigned)rt->cont_stack_values);
-        return WASM_ERR_STACK_OVERFLOW;
+        if (err == WASM_ERR_STACK_OVERFLOW)
+            WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "continuation operand stack limit %u exceeded",
+                          (unsigned)rt->cont_stack_values);
+        return err;
     }
     if (k->num_args > 0) memcpy(s->stack, k->args, k->num_args * sizeof(*s->stack));
     s->sp = k->num_args;
@@ -455,15 +462,20 @@ WASM_PRIVATE wasm_error_t wasm__cont_start(wasm_runtime_t* rt, wasm__cont_object
     return WASM_OK;
 }
 
-static int wasm__cont_push(wasm_runtime_t* rt, wasm__exec_stack_t* s, const wasm__slot_t* args, uint32_t slots) {
-    if (slots > s->max_stack - s->sp) {
-        WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "continuation operand stack limit %u exceeded",
-                      (unsigned)s->max_stack);
-        return 0;
+/* Returns WASM_ERR_STACK_OVERFLOW or WASM_ERR_OOM, with rt's error set, if s cannot hold the slots. */
+static wasm_error_t wasm__cont_push(wasm_runtime_t* rt, wasm__exec_stack_t* s, const wasm__slot_t* args,
+                                    uint32_t slots) {
+    wasm_error_t err = wasm__exec_stack_reserve(rt, s, slots);
+
+    if (err != WASM_OK) {
+        if (err == WASM_ERR_STACK_OVERFLOW)
+            WASM__SET_ERR(rt, WASM_ERR_STACK_OVERFLOW, "continuation operand stack limit %u exceeded",
+                          (unsigned)s->max_stack);
+        return err;
     }
     if (slots > 0) memcpy(&s->stack[s->sp], args, slots * sizeof(*args));
     s->sp += slots;
-    return 1;
+    return WASM_OK;
 }
 
 WASM_PRIVATE wasm_error_t wasm__cont_bind(wasm_runtime_t* rt, wasm__cont_object_t* k, wasm_module_t* mod,
@@ -473,7 +485,9 @@ WASM_PRIVATE wasm_error_t wasm__cont_bind(wasm_runtime_t* rt, wasm__cont_object_
     wasm__slot_t* bound = k->args;
 
     if (top) {
-        if (!wasm__cont_push(rt, top, args, slots)) return WASM_ERR_STACK_OVERFLOW;
+        wasm_error_t err = wasm__cont_push(rt, top, args, slots);
+
+        if (err != WASM_OK) return err;
     } else if (slots > 0) {
         bound = (wasm__slot_t*)wasm__realloc_array(&rt->allocator, k->args, k->num_args + slots, sizeof(*bound));
         if (!bound) {
@@ -502,15 +516,15 @@ WASM_PRIVATE wasm_error_t wasm__cont_resume(wasm_runtime_t* rt, wasm__cont_objec
                                             uint32_t slots, const uint32_t* handlers) {
     wasm__exec_stack_t* top = k->top;
     wasm__exec_stack_t* parent = rt->exec;
+    wasm_error_t err = wasm__cont_push(rt, top, args, slots);
 
-    if (!wasm__cont_push(rt, top, args, slots)) return WASM_ERR_STACK_OVERFLOW;
+    if (err != WASM_OK) return err;
     if (top->call_frame_sp == 0) {
         uint32_t bound = top->sp - slots;
-        wasm_error_t err;
 
         rt->exec = top;
         top->sp = 0;
-        err = wasm__push_call_frame(top->start_module, top->start_func, top->stack, NULL);
+        err = wasm__push_call_frame(top->start_module, top->start_func, 1, NULL);
         if (err != WASM_OK) {
             rt->exec = parent;
             top->sp = bound;
@@ -560,7 +574,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_suspend(wasm_runtime_t* rt, wasm__exec_stac
     uint32_t dst = resumer->sp_base + desc[2];
     wasm__cont_object_t* k;
 
-    if (desc[1] != payload_slots + 1u || dst > parent->max_stack || desc[1] > parent->max_stack - dst)
+    if (desc[1] != payload_slots + 1u || dst > parent->cap_stack || desc[1] > parent->cap_stack - dst)
         return WASM_ERR_MALFORMED;
     k = wasm__cont_new(rt, inner, outer, resumer->module, handler[2]);
     if (!k) return WASM_ERR_OOM;
@@ -597,6 +611,9 @@ WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_objec
                           (unsigned)parent->max_stack);
             err = WASM_ERR_STACK_OVERFLOW;
         } else {
+            err = wasm__exec_stack_reserve(rt, parent, bound + slots + 1u);
+        }
+        if (err == WASM_OK) {
             if (bound > 0) memcpy(&parent->stack[parent->sp], k->args, bound * sizeof(*args));
             memcpy(&parent->stack[parent->sp + bound], args, (slots + 1u) * sizeof(*args));
             parent->sp += bound + slots + 1u;
@@ -605,6 +622,7 @@ WASM_PRIVATE wasm_error_t wasm__cont_switch(wasm_runtime_t* rt, wasm__cont_objec
             *out_slots = bound + slots + 1u;
             wasm__cont_drop_stacks(rt, k);
             rt->exec = parent;
+            err = WASM__ERR_CALL_FRAME;
         }
     } else {
         rt->exec = parent;
@@ -696,5 +714,6 @@ WASM_PRIVATE void wasm__cont_free_all(wasm_runtime_t* rt) {
     }
     rt->num_cont_stacks = 0;
     rt->num_pooled_cont_stacks = 0;
+    rt->cont_stack_bytes = 0;
     rt->exec = &rt->main_stack;
 }

@@ -311,6 +311,10 @@ void wasm_config_default(wasm_config_t* config) {
     config->max_gc_heap_bytes = (uint64_t)WASM_MAX_GC_HEAP_BYTES;
     config->max_cont_stacks = WASM_MAX_CONT_STACKS;
     config->features = WASM_FEATURES_ALL;
+    config->initial_stack_values = WASM_INITIAL_STACK;
+    config->initial_call_depth = WASM_INITIAL_CALL_DEPTH;
+    config->cont_initial_stack_values = WASM_CONT_INITIAL_STACK_VALUES;
+    config->cont_initial_call_depth = WASM_CONT_INITIAL_CALL_DEPTH;
 }
 
 static wasm_error_t wasm__backtrace_init(wasm_runtime_t* rt, uint32_t max_depth) {
@@ -373,6 +377,11 @@ const wasm_allocator_t* wasm_runtime_allocator(const wasm_runtime_t* rt) {
     return rt ? &rt->allocator : NULL;
 }
 
+/* Returns the size a stack of limit max starts with for a configured initial size. */
+static uint32_t wasm__initial_size(uint32_t initial, uint32_t max) {
+    return initial == 0 || initial > max ? max : initial;
+}
+
 WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_allocator_t* allocator,
                                              const wasm_config_t* config) {
     wasm_config_t cfg;
@@ -410,9 +419,12 @@ WASM_PRIVATE wasm_error_t wasm__runtime_init(wasm_runtime_t* rt, const wasm_allo
     rt->max_cont_stacks = cfg.max_cont_stacks;
     rt->cont_stack_values = cfg.cont_stack_values;
     rt->cont_call_depth = cfg.cont_call_depth;
+    rt->cont_initial_stack_values = wasm__initial_size(cfg.cont_initial_stack_values, cfg.cont_stack_values);
+    rt->cont_initial_call_depth = wasm__initial_size(cfg.cont_initial_call_depth, cfg.cont_call_depth);
     rt->cont_frame_arena_size = cfg.cont_frame_arena_size;
 
-    err = wasm__exec_stack_init(rt, &rt->main_stack, cfg.max_stack_values, cfg.max_call_depth, cfg.frame_arena_size);
+    err = wasm__exec_stack_init(rt, &rt->main_stack, cfg.initial_stack_values, cfg.max_stack_values,
+                                cfg.initial_call_depth, cfg.max_call_depth, cfg.frame_arena_size);
     if (err != WASM_OK) {
         WASM__SET_ERR(rt, err, "%s", err == WASM_ERR_OOM ? "failed to allocate execution stack" : "invalid runtime config");
         return err;

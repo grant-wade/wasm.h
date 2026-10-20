@@ -516,11 +516,23 @@ typedef struct wasm_tag_import_t {
 #ifndef WASM_FRAME_ARENA_SIZE
 #define WASM_FRAME_ARENA_SIZE (256u * 1024u)
 #endif
+#ifndef WASM_INITIAL_STACK
+#define WASM_INITIAL_STACK 256
+#endif
+#ifndef WASM_INITIAL_CALL_DEPTH
+#define WASM_INITIAL_CALL_DEPTH 32
+#endif
 #ifndef WASM_CONT_STACK_VALUES
 #define WASM_CONT_STACK_VALUES 1024
 #endif
 #ifndef WASM_CONT_CALL_DEPTH
 #define WASM_CONT_CALL_DEPTH 128
+#endif
+#ifndef WASM_CONT_INITIAL_STACK_VALUES
+#define WASM_CONT_INITIAL_STACK_VALUES 64
+#endif
+#ifndef WASM_CONT_INITIAL_CALL_DEPTH
+#define WASM_CONT_INITIAL_CALL_DEPTH 8
 #endif
 #ifndef WASM_CONT_FRAME_ARENA_SIZE
 #define WASM_CONT_FRAME_ARENA_SIZE (8u * 1024u)
@@ -534,10 +546,10 @@ typedef struct wasm_config_t {
     uint32_t max_call_depth;
     uint32_t max_labels;
     size_t initial_gc_heap_size;
-    size_t frame_arena_size; /* bytes per block of call frame storage; blocks are added as calls nest */
-    uint32_t cont_stack_values;   /* operand stack size of each continuation, in slots */
-    uint32_t cont_call_depth;     /* call frames each continuation holds */
-    size_t cont_frame_arena_size; /* bytes per block of a continuation's call frame storage */
+    size_t frame_arena_size; /* largest block of call frame storage; blocks are added as calls nest */
+    uint32_t cont_stack_values;   /* operand stack size each continuation may grow to, in slots */
+    uint32_t cont_call_depth;     /* call frames each continuation may grow to */
+    size_t cont_frame_arena_size; /* largest block of a continuation's call frame storage */
     int lazy_validation;
     /* Limits for untrusted modules; 0 means unlimited. */
     uint32_t max_function_locals; /* locals per function, parameters included */
@@ -547,6 +559,11 @@ typedef struct wasm_config_t {
     uint64_t max_gc_heap_bytes;   /* bytes the GC heap may grow to; caps initial_gc_heap_size */
     uint32_t max_cont_stacks;     /* continuation stacks alive at once */
     uint64_t features;            /* WASM_FEATURE_* bits enabled for loaded modules */
+    /* Sizes stacks start with before growing to the limits above; 0 starts at the limit. */
+    uint32_t initial_stack_values;      /* operand slots of the main stack */
+    uint32_t initial_call_depth;        /* call frames of the main stack */
+    uint32_t cont_initial_stack_values; /* operand slots of each continuation stack */
+    uint32_t cont_initial_call_depth;   /* call frames of each continuation stack */
 } wasm_config_t;
 
 /* Memory source for a runtime and for standalone memories and tables. size and new_size are never

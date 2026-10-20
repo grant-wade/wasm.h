@@ -101,8 +101,11 @@ struct wasm_runtime_t {
     uint32_t num_cont_stacks;
     uint32_t num_pooled_cont_stacks;
     uint32_t max_cont_stacks;
-    uint32_t cont_gc_threshold; /* continuation stacks in use at which starting another collects first */
+    size_t cont_stack_bytes;  /* bytes of the continuation stacks in use, by wasm__exec_stack_bytes */
+    size_t cont_gc_threshold; /* cont_stack_bytes at which starting another continuation collects first */
+    uint32_t cont_initial_stack_values;
     uint32_t cont_stack_values;
+    uint32_t cont_initial_call_depth;
     uint32_t cont_call_depth;
     size_t cont_frame_arena_size;
     wasm_module_t* type_owners; /* types of freed modules that GC objects or continuations have, linked by gc_next */

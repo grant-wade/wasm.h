@@ -1199,8 +1199,12 @@ const cont_wasm = [_]u8{
 test "continuation references" {
     try expectError(error.Malformed, wasm.Runtime.init(std.testing.allocator, .{ .cont_call_depth = 0 }));
     const rt = try wasm.Runtime.init(std.testing.allocator, .{
+        .initial_stack_values = 16,
+        .initial_call_depth = 2,
         .cont_stack_values = 64,
         .cont_call_depth = 8,
+        .cont_initial_stack_values = 4,
+        .cont_initial_call_depth = 1,
         .cont_frame_arena_size = 1024,
         .max_cont_stacks = 1,
     });

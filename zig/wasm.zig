@@ -472,15 +472,23 @@ fn Signature(comptime Fn: type) type {
 pub const Config = struct {
     max_stack_values: ?u32 = null,
     max_call_depth: ?u32 = null,
+    /// Operand slots the main stack starts with; it grows to `max_stack_values`. 0 starts at the limit.
+    initial_stack_values: ?u32 = null,
+    /// Call frames the main stack starts with; it grows to `max_call_depth`. 0 starts at the limit.
+    initial_call_depth: ?u32 = null,
     max_labels: ?u32 = null,
     initial_gc_heap_size: ?usize = null,
-    /// Bytes per block of call frame storage; blocks are added as calls nest.
+    /// Largest block of call frame storage; blocks are added as calls nest.
     frame_arena_size: ?usize = null,
-    /// Operand stack size of each continuation, in slots.
+    /// Operand slots each continuation's stack may grow to.
     cont_stack_values: ?u32 = null,
-    /// Call frames each continuation holds.
+    /// Call frames each continuation's stack may grow to.
     cont_call_depth: ?u32 = null,
-    /// Bytes per block of a continuation's call frame storage.
+    /// Operand slots each continuation's stack starts with. 0 starts at `cont_stack_values`.
+    cont_initial_stack_values: ?u32 = null,
+    /// Call frames each continuation's stack starts with. 0 starts at `cont_call_depth`.
+    cont_initial_call_depth: ?u32 = null,
+    /// Largest block of a continuation's call frame storage.
     cont_frame_arena_size: ?usize = null,
     /// Defer validating each function body until its first call.
     lazy_validation: ?bool = null,
@@ -723,11 +731,15 @@ pub const Runtime = opaque {
         c.wasm_config_default(&cfg);
         if (config.max_stack_values) |v| cfg.max_stack_values = v;
         if (config.max_call_depth) |v| cfg.max_call_depth = v;
+        if (config.initial_stack_values) |v| cfg.initial_stack_values = v;
+        if (config.initial_call_depth) |v| cfg.initial_call_depth = v;
         if (config.max_labels) |v| cfg.max_labels = v;
         if (config.initial_gc_heap_size) |v| cfg.initial_gc_heap_size = v;
         if (config.frame_arena_size) |v| cfg.frame_arena_size = v;
         if (config.cont_stack_values) |v| cfg.cont_stack_values = v;
         if (config.cont_call_depth) |v| cfg.cont_call_depth = v;
+        if (config.cont_initial_stack_values) |v| cfg.cont_initial_stack_values = v;
+        if (config.cont_initial_call_depth) |v| cfg.cont_initial_call_depth = v;
         if (config.cont_frame_arena_size) |v| cfg.cont_frame_arena_size = v;
         if (config.lazy_validation) |v| cfg.lazy_validation = @intFromBool(v);
         if (config.max_function_locals) |v| cfg.max_function_locals = v;

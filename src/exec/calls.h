@@ -14,10 +14,10 @@ WASM_INLINE const wasm_functype_t* wasm__frame_functype(const wasm__call_frame_t
     return wasm__module_functype(cf->module, cf->func->type_idx);
 }
 
-/* args holds the slots of the parameters, or is NULL to start them at their defaults. */
+/* If with_args is nonzero the parameters' slots start at rt->exec->sp; otherwise they start at their defaults. */
 WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           uint32_t func_idx,
-                                          const wasm__slot_t* args,
+                                          int with_args,
                                           wasm_value_t* results_dst);
 
 WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,

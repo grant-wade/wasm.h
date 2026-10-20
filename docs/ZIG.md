@@ -60,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
 
 `Runtime.init` takes the allocator the runtime uses for everything, which must outlive it, and a `Config` whose non-null fields override `wasm_config_default`. `load` compiles and instantiates in one step; it copies its input. Free instances and compiled modules before their runtime.
 
+Stack sizes follow the C fields described in the [embedding guide](EMBEDDING.md#configuration): `initial_stack_values`, `initial_call_depth`, `cont_initial_stack_values`, and `cont_initial_call_depth` set the sizes stacks start with, and `max_stack_values`, `max_call_depth`, `cont_stack_values`, and `cont_call_depth` the limits they grow to.
+
 `Config.features` is a `Features` packed struct, bit-compatible with `WASM_FEATURE_*`, whose fields all default to true: `.features = .{ .threads = false }` turns off just threads. `Features.all` and `Features.standard` mirror `WASM_FEATURES_ALL` and `WASM_FEATURES_STANDARD`, and `Runtime.features` returns a runtime's features. `Config.fuel` sets an initial fuel budget. For untrusted modules, these fields set limits, where 0 is unlimited:
 
 | Field | Limit |

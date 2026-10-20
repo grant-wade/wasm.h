@@ -36,7 +36,7 @@ The build has no cache: options that shape it are read on every run, so pass the
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--release` | off | Optimized build (`-O3 -DNDEBUG`, or `/O2`) in `build/release` instead of a debug build in `build/debug`. |
-| `--build-dir=DIR` | `build/debug`, `build/release`, or `build/gc-stress` | Output directory. |
+| `--build-dir=DIR` | `build/debug`, `build/release`, `build/gc-stress`, or `build/stack-stress` | Output directory. |
 | `--cc=COMPILER` | `$CC`, else `cc` or `cl` | C compiler; GCC, Clang, and MSVC are supported. |
 | `--cflags=FLAGS`, `--ldflags=FLAGS` | `$CFLAGS`, `$LDFLAGS` | Extra flags, applied after all built-in ones. |
 | `--no-platform` | off | Build without platform-backed runtime and test helpers. |
@@ -44,6 +44,7 @@ The build has no cache: options that shape it are read on every run, so pass the
 | `--no-emcc` | off | Skip the Emscripten fixture tests even when `emcc` is available. |
 | `--no-zig` | off | Skip the Zig package tests even when `zig` 0.17 is available. |
 | `--gc-stress` | off | Collect garbage before every GC allocation (`-DWASM_GC_STRESS`) in `build/gc-stress`. |
+| `--stack-stress` | off | Start execution stacks at one slot and one call frame, and move them to new, poisoned memory on every push that could grow them (`-DWASM_STACK_STRESS`), in `build/stack-stress` (`build/gc-stack-stress` with `--gc-stress`). |
 | `--fuzzer` | off | Also build the Clang/libFuzzer loader and execution harnesses. |
 | `--regenerate-examples` | off | Add `session_math_regenerate`, which rewrites the committed example module and wrappers with `emcc`. |
 | `--spec-proposals` | off | Run specification proposal suites the runtime does not implement instead of skipping them. |

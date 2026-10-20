@@ -426,12 +426,60 @@ TEST(test_runtime_collections_count_unconsumed_continuations) {
     wasm_destroy(&rt);
 }
 
+TEST(test_runtime_config_initial_stack_sizes) {
+    wasm_runtime_t rt;
+    wasm_config_t cfg;
+    wasm_runtime_t* bad;
+
+    wasm_config_default(&cfg);
+    CHECK(t, cfg.initial_stack_values == WASM_INITIAL_STACK && cfg.initial_call_depth == WASM_INITIAL_CALL_DEPTH);
+    CHECK(t, cfg.cont_initial_stack_values == WASM_CONT_INITIAL_STACK_VALUES &&
+                 cfg.cont_initial_call_depth == WASM_CONT_INITIAL_CALL_DEPTH);
+    wasm_init_config(&rt, &cfg);
+#ifndef WASM_STACK_STRESS
+    CHECK_MSG(t, rt.main_stack.cap_stack == WASM_INITIAL_STACK && rt.main_stack.cap_call_frames == WASM_INITIAL_CALL_DEPTH,
+              "main stack starts with %u slots and %u frames", (unsigned)rt.main_stack.cap_stack,
+              (unsigned)rt.main_stack.cap_call_frames);
+#endif
+    CHECK(t, rt.cont_initial_stack_values == WASM_CONT_INITIAL_STACK_VALUES &&
+                 rt.cont_initial_call_depth == WASM_CONT_INITIAL_CALL_DEPTH);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&cfg);
+    cfg.initial_stack_values = 0;
+    cfg.initial_call_depth = 1000;
+    cfg.cont_initial_stack_values = 0;
+    cfg.cont_initial_call_depth = 1000;
+    wasm_init_config(&rt, &cfg);
+#ifndef WASM_STACK_STRESS
+    CHECK(t, rt.main_stack.cap_stack == cfg.max_stack_values && rt.main_stack.cap_call_frames == cfg.max_call_depth);
+#endif
+    CHECK(t, rt.cont_initial_stack_values == cfg.cont_stack_values && rt.cont_initial_call_depth == cfg.cont_call_depth);
+    wasm_destroy(&rt);
+
+    wasm_config_default(&cfg);
+    cfg.cont_stack_values = 0;
+    cfg.cont_initial_stack_values = 16;
+    bad = wasm_runtime_new(&wasm_test_allocator, &cfg);
+    CHECK(t, bad == NULL);
+    wasm_config_default(&cfg);
+    cfg.cont_call_depth = 0;
+    bad = wasm_runtime_new(&wasm_test_allocator, &cfg);
+    CHECK(t, bad == NULL);
+    wasm_config_default(&cfg);
+    cfg.max_call_depth = 0;
+    cfg.initial_call_depth = 4;
+    bad = wasm_runtime_new(&wasm_test_allocator, &cfg);
+    CHECK(t, bad == NULL);
+}
+
 static const test_case runtime_cases[] = {
     { "runtime config: defaults initialize dynamic runtime capacities", test_runtime_config_defaults },
     { "runtime config: custom sizes allocate stack, frames, and buffers", test_runtime_config_custom_allocations },
     { "allocator: libc alignment and invalid allocators", test_allocator_contract },
     { "allocator: every failing allocation unwinds without leaks", test_allocation_failures_unwind_without_leaks },
     { "runtime config: zero limits are rejected", test_runtime_config_rejects_zero_limits },
+    { "runtime config: stacks start at their initial sizes, clamped to their limits", test_runtime_config_initial_stack_sizes },
     { "runtime config: memory and table sizes are limited", test_runtime_limits_memory_and_tables },
     { "interrupt: stops loops, calls, and atomic waits from another thread", test_runtime_interrupt_stops_loops_calls_and_waits },
     { "runtime: consumed continuations never trigger collections, unconsumed ones do", test_runtime_collections_count_unconsumed_continuations },

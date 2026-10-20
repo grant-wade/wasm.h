@@ -628,6 +628,7 @@ TEST(test_stack_switching_stacks_are_allocated_on_first_run) {
 
     wasm_config_default(&cfg);
     cfg.cont_stack_values = 65536;
+    cfg.cont_initial_stack_values = 65536;
     wasm_init_config(&rt, &cfg);
     m = wasm_test_load_cont(&rt, wasm_test_cont_lazy_sections, sizeof(wasm_test_cont_lazy_sections));
     CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
@@ -651,8 +652,10 @@ TEST(test_stack_switching_stacks_are_allocated_on_first_run) {
     CHECK(t, rt.num_cont_stacks == 0 && rt.num_pooled_cont_stacks == pooled);
     arg = wasm_i32(100);
     WASM_CHECK_OK(t, wasm_call(m, "churn", &arg, 1, NULL, 0));
+#ifndef WASM_STACK_STRESS
     CHECK_MSG(t, rt.num_cont_stacks <= 16, "%u continuation stacks of dropped continuations",
               (unsigned)rt.num_cont_stacks);
+#endif
     wasm_module_free(m);
     wasm_destroy(&rt);
 }

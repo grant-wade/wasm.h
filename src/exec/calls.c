@@ -32,7 +32,7 @@ WASM_PRIVATE void wasm__clear_call_frame(wasm_runtime_t* rt, wasm__call_frame_t*
 
 WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
                                           uint32_t func_idx,
-                                          const wasm__slot_t* args,
+                                          int with_args,
                                           wasm_value_t* results_dst) {
     wasm_runtime_t* rt = mod->rt;
     wasm__exec_stack_t* exec = rt->exec;
@@ -79,6 +79,17 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
             return WASM_ERR_OOM;
         }
     }
+    i = 0;
+    if (with_args) {
+        for (; i < func->param_slots; i++) locals[i] = exec->stack[exec->sp + i];
+    }
+    if (i < func->num_local_slots) memset(locals + i, 0, (func->num_local_slots - i) * sizeof(*locals));
+    err = wasm__exec_stack_reserve(rt, exec, func->max_stack);
+    if (err == WASM_OK) err = wasm__exec_stack_reserve_frame(rt, exec);
+    if (err != WASM_OK) {
+        wasm__arena_reset(rt, exec, arena_saved);
+        return err;
+    }
 
     cf = &exec->call_frames[exec->call_frame_sp++];
     cf->module = mod;
@@ -92,12 +103,6 @@ WASM_PRIVATE wasm_error_t wasm__push_call_frame(wasm_module_t* mod,
     cf->func = func;
     cf->results_dst = results_dst;
     cf->arena_saved = arena_saved;
-
-    i = 0;
-    if (args) {
-        for (; i < func->param_slots; i++) locals[i] = args[i];
-    }
-    if (i < func->num_local_slots) memset(locals + i, 0, (func->num_local_slots - i) * sizeof(*locals));
     return WASM_OK;
 }
 
@@ -109,7 +114,7 @@ WASM_PRIVATE wasm_error_t wasm__push_root_call_frame(wasm_module_t* mod,
     wasm_runtime_t* rt = mod->rt;
     wasm__call_frame_t* cf;
     const wasm_functype_t* ft;
-    wasm_error_t err = wasm__push_call_frame(mod, func_idx, NULL, results_dst);
+    wasm_error_t err = wasm__push_call_frame(mod, func_idx, 0, results_dst);
     uint32_t i;
 
     if (err != WASM_OK) return err;
