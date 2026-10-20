@@ -449,7 +449,7 @@ typedef struct wasm_global_import_t {
     wasm_reftype_t ref_type;
     wasm_module_t* type_module; /* module whose type index ref_type has, if it has one */
     int is_mutable;
-    wasm_value_t* value; /* must not hold a host anyref; see wasm_global_set */
+    wasm_value_t* value; /* must hold a value of the global's type and no host anyref; see wasm_global_set */
 } wasm_global_import_t;
 
 /* ── Export entry ──────────────────────────────────────────────────── */
@@ -688,7 +688,8 @@ uint32_t wasm_global_count(const wasm_module_t* mod);
 wasm_valtype_t wasm_global_type(const wasm_module_t* mod, uint32_t global_idx);
 const wasm_reftype_t* wasm_global_reftype(const wasm_module_t* mod, uint32_t global_idx);
 int wasm_global_is_mutable(const wasm_module_t* mod, uint32_t global_idx);
-/* Do not store a host anyref through the returned pointer; use wasm_global_set_index. */
+/* Store only values of the global's type, and no host anyref, through the returned pointer;
+   wasm_global_set_index checks both. */
 wasm_value_t* wasm_module_global(wasm_module_t* mod, uint32_t global_idx);
 wasm_error_t wasm_global_get_index(const wasm_module_t* mod, uint32_t global_idx, wasm_value_t* out_val);
 /* Fails with WASM_ERR_TYPE_MISMATCH for immutable globals and values of the wrong type. */

@@ -1,6 +1,7 @@
 #include "translate.h"
 #include "../instructions.h"
 #include "../internal/alloc.h"
+#include "../internal/field.h"
 #include "../portable.h"
 #include "../reader.h"
 #include "../runtime.h"
@@ -310,6 +311,7 @@ static uint32_t wasm__x_fusion(const uint32_t* o, uint32_t len) {
         if (o[0] == 0x21 && o[1] == 0x20) return WASM__OP_S_L;
         if (o[0] == 0x22 && o[1] == 0x20) return WASM__OP_T_L;
         if (o[0] == 0x22 && loop) return WASM__OP_T_BRIF_LOOP;
+        if (o[0] == 0x20 && o[1] == WASM__OP_STRUCT_GET) return WASM__OP_L_STRUCT_GET;
         return 0;
     }
     if (len == 3) {
@@ -474,6 +476,85 @@ static wasm_error_t wasm__x_cont(wasm__translator_t* t, const wasm_module_t* mod
             return WASM_OK;
         default:
             return WASM_OK;
+    }
+}
+
+/* Emits the translated op of GC instruction subop, whose immediates follow at r; returns 1 if it has one,
+ * 0 if wasm__exec_gc runs the instruction, and -1 if its immediates are malformed. */
+static int wasm__x_gc(wasm__translator_t* t, const wasm_module_t* mod, uint32_t subop, wasm__reader_t* r) {
+    switch (subop) {
+        case 0x00:
+        case 0x01:
+        case 0x06:
+        case 0x07:
+        case 0x08: {
+            uint32_t type_idx = wasm__read_leb128_u32(r);
+            uint32_t count = subop == 0x08 ? wasm__read_leb128_u32(r) : 0u;
+            int is_struct = subop <= 0x01;
+
+            if (r->malformed || (is_struct ? !wasm__module_const_structtype(mod, type_idx)
+                                           : !wasm__module_const_arraytype(mod, type_idx)))
+                return -1;
+            wasm__x_emit(t, WASM__OP_GC_NEW);
+            wasm__x_emit(t, subop);
+            wasm__x_emit(t, type_idx);
+            wasm__x_emit(t, count);
+            return 1;
+        }
+        case 0x02:
+        case 0x03:
+        case 0x04:
+        case 0x05: {
+            uint32_t type_idx = wasm__read_leb128_u32(r);
+            uint32_t field_idx = wasm__read_leb128_u32(r);
+            const wasm_structtype_t* st = wasm__module_const_structtype(mod, type_idx);
+            uint32_t code;
+
+            if (r->malformed || !st || field_idx >= st->num_fields) return -1;
+            code = wasm__field_code(&st->fields[field_idx]);
+            if ((subop == 0x03 || subop == 0x04) != (WASM__FIELD_KIND(code) <= WASM__FIELD_I16) && subop != 0x05)
+                return -1;
+            if (subop == 0x03) code |= WASM__FIELD_SIGNED;
+            wasm__x_emit(t, subop == 0x05 ? WASM__OP_STRUCT_SET : WASM__OP_STRUCT_GET);
+            wasm__x_emit(t, st->field_offsets ? st->field_offsets[field_idx] : 0u);
+            wasm__x_emit(t, code);
+            wasm__x_emit(t, type_idx);
+            return 1;
+        }
+        case 0x0B:
+        case 0x0C:
+        case 0x0D:
+        case 0x0E: {
+            uint32_t type_idx = wasm__read_leb128_u32(r);
+            const wasm_arraytype_t* at = wasm__module_const_arraytype(mod, type_idx);
+            uint32_t code;
+
+            if (r->malformed || !at) return -1;
+            code = wasm__field_code(&at->field);
+            if ((subop == 0x0C || subop == 0x0D) != (WASM__FIELD_KIND(code) <= WASM__FIELD_I16) && subop != 0x0E)
+                return -1;
+            if (subop == 0x0C) code |= WASM__FIELD_SIGNED;
+            wasm__x_emit(t, subop == 0x0E ? WASM__OP_ARRAY_SET : WASM__OP_ARRAY_GET);
+            wasm__x_emit(t, at->data_offset);
+            wasm__x_emit(t, at->elem_size);
+            wasm__x_emit(t, code);
+            wasm__x_emit(t, type_idx);
+            return 1;
+        }
+        case 0x0F:
+            wasm__x_emit(t, WASM__OP_ARRAY_LEN);
+            return 1;
+        case 0x1C:
+            wasm__x_emit(t, WASM__OP_REF_I31);
+            return 1;
+        case 0x1D:
+            wasm__x_emit(t, WASM__OP_I31_GET_S);
+            return 1;
+        case 0x1E:
+            wasm__x_emit(t, WASM__OP_I31_GET_U);
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -781,8 +862,13 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
             case 0xFE: {
                 const uint8_t* immediates = r.ptr;
                 uint32_t subop = wasm__read_leb128_u32(&r);
+                int handled = op == 0xFB ? wasm__x_gc(t, mod, subop, &r) : 0;
 
-                if (op == 0xFB && (subop == 0x18 || subop == 0x19)) {
+                if (handled < 0) return WASM_ERR_MALFORMED;
+                if (op == 0xFC && subop <= 0x07) {
+                    wasm__x_emit(t, WASM__OP_TRUNC_SAT);
+                    wasm__x_emit(t, subop);
+                } else if (op == 0xFB && (subop == 0x18 || subop == 0x19)) {
                     uint32_t flags_offset = (uint32_t)(r.ptr - func->code);
                     uint32_t depth;
 
@@ -803,7 +889,7 @@ static wasm_error_t wasm__x_body(wasm__translator_t* t, wasm_module_t* mod, wasm
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, (uint32_t)(immediates - func->code));
                     wasm__x_branch(t, WASM__OP_BR_IF, WASM__OP_BR_IF_LOOP, WASM__OP_BR_IF_X, depth, height - 1u);
-                } else {
+                } else if (!handled) {
                     wasm__x_emit(t, op);
                     wasm__x_emit(t, (uint32_t)(immediates - func->code));
                 }

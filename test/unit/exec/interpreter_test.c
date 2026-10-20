@@ -1328,6 +1328,177 @@ TEST(test_host_results_must_match_the_import_type) {
     wasm_destroy(&rt);
 }
 
+/* Exports i32_f32_s, i32_f32_u, i32_f64_s, i32_f64_u, i64_f32_s, i64_f32_u, i64_f64_s, and i64_f64_u, which run
+ * each saturating truncation on the float whose bits they take. */
+static const uint8_t wasm_test_trunc_sat_sections[] = {
+    0x01, 0x15, 0x04, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x60, 0x01, 0x7E, 0x01, 0x7F, 0x60, 0x01, 0x7F,
+    0x01, 0x7E, 0x60, 0x01, 0x7E, 0x01, 0x7E, 0x03, 0x09, 0x08, 0x00, 0x00, 0x01, 0x01, 0x02, 0x02,
+    0x03, 0x03, 0x07, 0x61, 0x08, 0x09, 0x69, 0x33, 0x32, 0x5F, 0x66, 0x33, 0x32, 0x5F, 0x73, 0x00,
+    0x00, 0x09, 0x69, 0x33, 0x32, 0x5F, 0x66, 0x33, 0x32, 0x5F, 0x75, 0x00, 0x01, 0x09, 0x69, 0x33,
+    0x32, 0x5F, 0x66, 0x36, 0x34, 0x5F, 0x73, 0x00, 0x02, 0x09, 0x69, 0x33, 0x32, 0x5F, 0x66, 0x36,
+    0x34, 0x5F, 0x75, 0x00, 0x03, 0x09, 0x69, 0x36, 0x34, 0x5F, 0x66, 0x33, 0x32, 0x5F, 0x73, 0x00,
+    0x04, 0x09, 0x69, 0x36, 0x34, 0x5F, 0x66, 0x33, 0x32, 0x5F, 0x75, 0x00, 0x05, 0x09, 0x69, 0x36,
+    0x34, 0x5F, 0x66, 0x36, 0x34, 0x5F, 0x73, 0x00, 0x06, 0x09, 0x69, 0x36, 0x34, 0x5F, 0x66, 0x36,
+    0x34, 0x5F, 0x75, 0x00, 0x07, 0x0A, 0x41, 0x08, 0x07, 0x00, 0x20, 0x00, 0xBE, 0xFC, 0x00, 0x0B,
+    0x07, 0x00, 0x20, 0x00, 0xBE, 0xFC, 0x01, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xBF, 0xFC, 0x02, 0x0B,
+    0x07, 0x00, 0x20, 0x00, 0xBF, 0xFC, 0x03, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xBE, 0xFC, 0x04, 0x0B,
+    0x07, 0x00, 0x20, 0x00, 0xBE, 0xFC, 0x05, 0x0B, 0x07, 0x00, 0x20, 0x00, 0xBF, 0xFC, 0x06, 0x0B,
+    0x07, 0x00, 0x20, 0x00, 0xBF, 0xFC, 0x07, 0x0B,
+};
+
+/* Returns the saturating truncation of value to a 32- or 64-bit integer, as bits zero-extended from its width. */
+static uint64_t wasm_test_trunc_sat(double value, int is_signed, int is_64) {
+    double t;
+
+    if (value != value) return 0;
+    t = trunc(value);
+    if (is_signed) {
+        if (t < (is_64 ? -9223372036854775808.0 : -2147483648.0))
+            return is_64 ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+        if (t >= (is_64 ? 9223372036854775808.0 : 2147483648.0))
+            return is_64 ? UINT64_C(0x7FFFFFFFFFFFFFFF) : UINT64_C(0x7FFFFFFF);
+        return is_64 ? (uint64_t)(int64_t)t : (uint64_t)(uint32_t)(int32_t)t;
+    }
+    if (t < 0.0) return 0;
+    if (t >= (is_64 ? 18446744073709551616.0 : 4294967296.0)) return is_64 ? UINT64_MAX : UINT64_C(0xFFFFFFFF);
+    return (uint64_t)t;
+}
+
+TEST(test_trunc_sat_saturates_every_edge_value) {
+    static const uint32_t f32_bits[] = {
+        0x7FC00000u, 0xFFC00001u, 0x7FA00000u, 0x7F800000u, 0xFF800000u, 0x00000000u,
+        0x80000000u, 0x00000001u, 0x3F000000u, 0xBF000000u, 0xBF7FFFFFu, 0x3FC00000u,
+        0xC2F70000u, 0x4EFFFFFFu, 0x4F000000u, 0xCF000000u, 0xCF000001u, 0x4F7FFFFFu,
+        0x4F800000u, 0x5EFFFFFFu, 0x5F000000u, 0xDF000000u, 0xDF000001u, 0x5F7FFFFFu,
+        0x5F800000u, 0x7F7FFFFFu, 0xFF7FFFFFu,
+    };
+    static const uint64_t f64_bits[] = {
+        UINT64_C(0x7FF8000000000000), UINT64_C(0xFFF0000000000001), UINT64_C(0x7FF0000000000000),
+        UINT64_C(0xFFF0000000000000), UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000),
+        UINT64_C(0x41DFFFFFFFC00000), UINT64_C(0x41DFFFFFFFE00000), UINT64_C(0x41E0000000000000),
+        UINT64_C(0xC1E0000000000000), UINT64_C(0xC1E0000000100000), UINT64_C(0xC1E0000000200000),
+        UINT64_C(0x41EFFFFFFFE00000), UINT64_C(0x41EFFFFFFFF00000), UINT64_C(0x41F0000000000000),
+        UINT64_C(0x43DFFFFFFFFFFFFF), UINT64_C(0x43E0000000000000), UINT64_C(0xC3E0000000000000),
+        UINT64_C(0xC3E0000000000001), UINT64_C(0x43EFFFFFFFFFFFFF), UINT64_C(0x43F0000000000000),
+        UINT64_C(0x7E37E43C8800759C), UINT64_C(0xFE37E43C8800759C), UINT64_C(0x0000000000000001),
+        UINT64_C(0xBFE0000000000000), UINT64_C(0xBFEFFFFFFFF24190), UINT64_C(0x3FE0000000000000),
+        UINT64_C(0xC05EF00000000000),
+    };
+    static const char* const names[] = { "i32_f32_s", "i32_f32_u", "i32_f64_s", "i32_f64_u",
+                                         "i64_f32_s", "i64_f32_u", "i64_f64_s", "i64_f64_u" };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    uint32_t op;
+    uint32_t i;
+
+    wasm_init(&rt);
+    m = wasm_test_load_sections(&rt, wasm_test_trunc_sat_sections, sizeof(wasm_test_trunc_sat_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (op = 0; op < COUNTOF(names); op++) {
+        int is_64 = op >= 4;
+        int is_signed = (op & 1u) == 0;
+        int from_f64 = (op & 2u) != 0;
+        uint32_t count = from_f64 ? (uint32_t)COUNTOF(f64_bits) : (uint32_t)COUNTOF(f32_bits);
+
+        for (i = 0; i < count; i++) {
+            wasm_value_t arg;
+            wasm_value_t result;
+            uint64_t expected;
+            uint64_t actual;
+            double value;
+
+            if (from_f64) {
+                memcpy(&value, &f64_bits[i], sizeof(value));
+                arg = wasm_i64((int64_t)f64_bits[i]);
+            } else {
+                float narrow;
+
+                memcpy(&narrow, &f32_bits[i], sizeof(narrow));
+                value = (double)narrow;
+                arg = wasm_i32((int32_t)f32_bits[i]);
+            }
+            expected = wasm_test_trunc_sat(value, is_signed, is_64);
+            memset(&result, 0, sizeof(result));
+            WASM_CHECK_OK(t, wasm_call(m, names[op], &arg, 1, &result, 1));
+            actual = is_64 ? (uint64_t)result.of.i64 : (uint64_t)(uint32_t)result.of.i32;
+            CHECK_MSG(t, actual == expected, "%s(%u) returned 0x%llx, not 0x%llx", names[op], (unsigned)i,
+                      (unsigned long long)actual, (unsigned long long)expected);
+        }
+    }
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
+/* Exports inc, twice, and table, which return ref.func of a function in a table, ref.func of the import
+ * host.twice, and the table's element, and loop(n), which calls through both references n times. */
+static const uint8_t wasm_test_ref_func_sections[] = {
+    0x01, 0x0A, 0x02, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x60, 0x00, 0x01, 0x70, 0x02, 0x0E, 0x01, 0x04,
+    0x68, 0x6F, 0x73, 0x74, 0x05, 0x74, 0x77, 0x69, 0x63, 0x65, 0x00, 0x00, 0x03, 0x06, 0x05, 0x00,
+    0x01, 0x01, 0x01, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07, 0x1E, 0x04, 0x03, 0x69, 0x6E,
+    0x63, 0x00, 0x02, 0x05, 0x74, 0x77, 0x69, 0x63, 0x65, 0x00, 0x03, 0x05, 0x74, 0x61, 0x62, 0x6C,
+    0x65, 0x00, 0x04, 0x04, 0x6C, 0x6F, 0x6F, 0x70, 0x00, 0x05, 0x09, 0x0D, 0x02, 0x02, 0x00, 0x41,
+    0x00, 0x0B, 0x00, 0x01, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x40, 0x05, 0x07, 0x00, 0x20, 0x00,
+    0x41, 0x01, 0x6A, 0x0B, 0x04, 0x00, 0xD2, 0x01, 0x0B, 0x04, 0x00, 0xD2, 0x00, 0x0B, 0x06, 0x00,
+    0x41, 0x00, 0x25, 0x00, 0x0B, 0x25, 0x01, 0x02, 0x7F, 0x03, 0x40, 0x20, 0x02, 0xD2, 0x01, 0x14,
+    0x00, 0x21, 0x02, 0x20, 0x02, 0xD2, 0x00, 0x14, 0x00, 0x21, 0x02, 0x20, 0x01, 0x41, 0x01, 0x6A,
+    0x22, 0x01, 0x20, 0x00, 0x49, 0x0D, 0x00, 0x0B, 0x20, 0x02, 0x0B,
+};
+
+static wasm_error_t wasm_test_twice(wasm_module_t* mod, const wasm_value_t* args, uint32_t num_args,
+                                    wasm_value_t* results, uint32_t num_results, void* userdata) {
+    (void)mod;
+    (void)num_args;
+    (void)num_results;
+    (void)userdata;
+    results[0] = wasm_i32((int32_t)((uint32_t)args[0].of.i32 * 2u));
+    return WASM_OK;
+}
+
+TEST(test_ref_func_returns_one_reference_per_function) {
+    static const char* const names[] = { "inc", "twice", "table" };
+    wasm_runtime_t rt;
+    wasm_module_t* m;
+    wasm_module_t* target = NULL;
+    wasm_value_t refs[3];
+    wasm_value_t again;
+    wasm_value_t arg;
+    wasm_value_t result;
+    uint32_t func_idx = UINT32_MAX;
+    uint32_t i;
+
+    wasm_init(&rt);
+    WASM_CHECK_OK(t, wasm_bind_host_func(&rt, "host", "twice", "i(i)", wasm_test_twice, NULL));
+    m = wasm_test_load_sections(&rt, wasm_test_ref_func_sections, sizeof(wasm_test_ref_func_sections));
+    CHECK_MSG(t, m != NULL, "%s", rt.error_msg);
+    if (!m) {
+        wasm_destroy(&rt);
+        return;
+    }
+    for (i = 0; i < COUNTOF(names); i++) {
+        WASM_CHECK_OK(t, wasm_call(m, names[i], NULL, 0, &refs[i], 1));
+        WASM_CHECK_OK(t, wasm_call(m, names[i], NULL, 0, &again, 1));
+        CHECK_MSG(t, refs[i].of.funcref != UINT32_MAX && again.of.funcref == refs[i].of.funcref,
+                  "%s returned references %u and %u", names[i], (unsigned)refs[i].of.funcref, (unsigned)again.of.funcref);
+    }
+    CHECK(t, refs[0].of.funcref == refs[2].of.funcref && refs[0].of.funcref != refs[1].of.funcref);
+    WASM_CHECK_OK(t, wasm_func_ref_target(&rt, refs[0], &target, &func_idx));
+    CHECK(t, target == m && func_idx == 1);
+    WASM_CHECK_OK(t, wasm_func_ref_target(&rt, refs[1], &target, &func_idx));
+    CHECK(t, target == m && func_idx == 0);
+    arg = wasm_i32(5);
+    WASM_CHECK_OK(t, wasm_call(m, "loop", &arg, 1, &result, 1));
+    WASM_CHECK_I32(t, result.of.i32, 62);
+    result = wasm_i32(0);
+    wasm_test_run_in_fuel_steps(t, m, "loop", &arg, 1, 1, 0, &result);
+    WASM_CHECK_I32(t, result.of.i32, 62);
+    wasm_module_free(m);
+    wasm_destroy(&rt);
+}
+
 static const test_case exec_interpreter_cases[] = {
     { "i32.add(3, 7) == 10", test_add },
     { "factorial(10) == 3628800", test_factorial },
@@ -1343,5 +1514,7 @@ static const test_case exec_interpreter_cases[] = {
     { "host import: results must match the declared type", test_host_results_must_match_the_import_type },
     { "f64 arithmetic: a NaN result takes the first NaN operand's payload", test_f64_arithmetic_propagates_the_first_nan_operand },
     { "trap on i32.div_s by zero", test_div_by_zero },
+    { "saturating truncations: NaNs, infinities, and out-of-range values saturate", test_trunc_sat_saturates_every_edge_value },
+    { "ref.func: returns one reference per function, cached or not", test_ref_func_returns_one_reference_per_function },
 };
 const test_suite exec_interpreter_suite = { "exec.interpreter", exec_interpreter_cases, COUNTOF(exec_interpreter_cases) };

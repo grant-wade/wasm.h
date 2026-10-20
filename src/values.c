@@ -7,6 +7,7 @@
 #include "module.h"
 #include "internal/gc_types.h"
 #include "internal/config.h"
+#include "internal/field.h"
 #include "internal/alloc.h"
 #include <string.h>
 #include <math.h>
@@ -173,35 +174,12 @@ static wasm_error_t wasm__gc_load_field_bytes(const wasm_fieldtype_t* field,
                                               int sign_extend,
                                               wasm_value_t* out_value) {
     if (!field || !src || !out_value) return WASM_ERR_MALFORMED;
-
-    if (field->storage.kind == WASM_STORAGE_PACKED) {
-        if (field->storage.of.packed_type == WASM_PACKED_I8) {
-            uint8_t raw = *(const uint8_t*)src;
-
-            *out_value = wasm_i32(sign_extend ? (int32_t)(int8_t)raw : (int32_t)raw);
-        } else {
-            uint16_t raw = wasm__load_le16(src);
-
-            *out_value = wasm_i32(sign_extend ? (int32_t)(int16_t)raw : (int32_t)raw);
-        }
-        return WASM_OK;
-    }
-
-    *out_value = *(const wasm_value_t*)src;
+    *out_value = wasm__field_load_value((const uint8_t*)src, wasm__field_code(field), sign_extend);
     return WASM_OK;
 }
 
 static void wasm__gc_write_field_bytes(const wasm_fieldtype_t* field, void* dst, wasm_value_t value) {
-    if (field->storage.kind == WASM_STORAGE_PACKED) {
-        if (field->storage.of.packed_type == WASM_PACKED_I8) {
-            *(uint8_t*)dst = (uint8_t)value.of.i32;
-        } else {
-            wasm__store_le16(dst, (uint16_t)value.of.i32);
-        }
-        return;
-    }
-    value.type = field->storage.of.valtype;
-    *(wasm_value_t*)dst = value;
+    wasm__field_store_value((uint8_t*)dst, wasm__field_code(field), value);
 }
 
 static wasm_error_t wasm__gc_store_field_bytes(const wasm_module_t* mod,

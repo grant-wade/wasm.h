@@ -7,6 +7,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Changed
 
 - Struct and array layouts are computed once per type, and collections trace only fields and elements that can hold references.
+- `struct.get`, `struct.set`, `array.get`, `array.set`, `array.len`, the i31 instructions, `ref.func`, and saturating truncations run inside the interpreter loop.
+- References stored through `wasm_module_global` or `wasm_global_import_t.value` must have the global's type.
 
 ### Fixed
 

@@ -27,30 +27,6 @@ WASM_PRIVATE wasm_error_t wasm__exec_bulk(wasm_module_t* mod, wasm__call_frame_t
     wasm_error_t err = WASM_OK;
     uint32_t subop = wasm__read_leb128_u32(&cf->r);
     switch (subop) {
-        case 0x00:
-            wasm__slot_set_i32(WASM__PEEK(rt), wasm__trunc_sat_i32_s((double)wasm__slot_f32(WASM__PEEK(rt))));
-            break;
-        case 0x01:
-            wasm__slot_set_u32(WASM__PEEK(rt), wasm__trunc_sat_i32_u((double)wasm__slot_f32(WASM__PEEK(rt))));
-            break;
-        case 0x02:
-            wasm__slot_set_i32(WASM__PEEK(rt), wasm__trunc_sat_i32_s(wasm__slot_f64(WASM__PEEK(rt))));
-            break;
-        case 0x03:
-            wasm__slot_set_u32(WASM__PEEK(rt), wasm__trunc_sat_i32_u(wasm__slot_f64(WASM__PEEK(rt))));
-            break;
-        case 0x04:
-            wasm__slot_set_i64(WASM__PEEK(rt), wasm__trunc_sat_i64_s((double)wasm__slot_f32(WASM__PEEK(rt))));
-            break;
-        case 0x05:
-            wasm__slot_set_u64(WASM__PEEK(rt), wasm__trunc_sat_i64_u((double)wasm__slot_f32(WASM__PEEK(rt))));
-            break;
-        case 0x06:
-            wasm__slot_set_i64(WASM__PEEK(rt), wasm__trunc_sat_i64_s(wasm__slot_f64(WASM__PEEK(rt))));
-            break;
-        case 0x07:
-            wasm__slot_set_u64(WASM__PEEK(rt), wasm__trunc_sat_i64_u(wasm__slot_f64(WASM__PEEK(rt))));
-            break;
         case 0x08: {
             uint32_t data_idx = wasm__read_leb128_u32(&cf->r);
             uint32_t mem_idx = wasm__read_leb128_u32(&cf->r);

@@ -11,7 +11,7 @@
  * f64 add, sub, mul, or div, BRIF br_if, LOAD32 a 4-byte zero-extending load, LOAD64 an 8-byte
  * load, STORE32 a 4-byte store, and STORE64 an 8-byte store; LC_LOADn runs an i32.add between
  * the constant and the load. ADD, AND, XOR, SHL, SHR_U, ROTL, and MUL are those instructions on
- * i64 after J and on i32 otherwise. */
+ * i64 after J and on i32 otherwise, and STRUCT_GET is struct.get, struct.get_s, or struct.get_u. */
 #define WASM__FUSED_OPS(X)          \
     X(LC_ADD, 0x20, 3, 4)           \
     X(LC_AND, 0x20, 3, 4)           \
@@ -72,7 +72,8 @@
     X(L_S_L_S, 0x20, 4, 6)          \
     X(C_S, 0x41, 2, 2)              \
     X(T_S, 0x22, 2, 2)              \
-    X(L_T, 0x20, 2, 2)
+    X(L_T, 0x20, 2, 2)              \
+    X(L_STRUCT_GET, 0x20, 2, 2)
 
 /* Translated opcodes beyond the core set. A branch descriptor is four words: target, arity,
  * stack height, and WASM__BRANCH_* flags with the handler labels to pop in the upper bits. */
@@ -94,6 +95,16 @@ enum {
     WASM__OP_TRY_TABLE,           /* stack height, clause count, then six words per clause */
     WASM__OP_TRY_LEAVE,           /* target; ends a try body or catch body that runs into the next clause */
     WASM__OP_BR_ON_CAST,          /* subopcode, bytecode offset of its flags, branch descriptor */
+    WASM__OP_STRUCT_GET,          /* field byte offset, storage code, type index */
+    WASM__OP_STRUCT_SET,          /* field byte offset, storage code, type index */
+    WASM__OP_ARRAY_GET,           /* data byte offset, element size, storage code, type index */
+    WASM__OP_ARRAY_SET,           /* data byte offset, element size, storage code, type index */
+    WASM__OP_ARRAY_LEN,
+    WASM__OP_REF_I31,
+    WASM__OP_I31_GET_S,
+    WASM__OP_I31_GET_U,
+    WASM__OP_TRUNC_SAT,           /* 0xFC subopcode */
+    WASM__OP_GC_NEW,              /* 0xFB subopcode, type index, element count of array.new_fixed */
     WASM__OP_TRY_END,             /* ends a try or try_table */
     WASM__OP_END,                 /* ends the function body */
 #define WASM__FUSED_ENUM(name, first, units, last) WASM__OP_##name,
